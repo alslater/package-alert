@@ -8,7 +8,17 @@ import pytest
 from unittest.mock import patch, MagicMock
 from rich.console import Console
 from packagealert.cli.status import _format_uptime, _severity_label, gather_status, render_status, StatusData, AlertRow
+from packagealert.config import AppConfig
 from packagealert.storage.db import open_db
+
+_FIXED_CONFIG = AppConfig()  # default thresholds: warning=40, critical=70
+
+
+@pytest.fixture(autouse=True)
+def fixed_config():
+    """Pin load_config to a deterministic AppConfig so tests don't read ~/.config."""
+    with patch("packagealert.cli.status.load_config", return_value=_FIXED_CONFIG):
+        yield
 
 
 @pytest.fixture
@@ -86,6 +96,7 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
 async def test_gather_status_daemon_stopped(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -94,6 +105,28 @@ async def test_gather_status_daemon_stopped(mem_db, tmp_path):
     assert data.daemon_running is False
     assert data.daemon_pid is None
     assert data.daemon_uptime_seconds is None
+
+
+@pytest.mark.asyncio
+async def test_gather_status_daemon_running_via_process_scan(mem_db, tmp_path):
+    """Daemon detected via process scan when PID file is absent."""
+    mock_proc = MagicMock()
+    mock_proc.info = {"pid": 9999, "cmdline": ["/usr/bin/python", "package-alert", "daemon"]}
+    create_time = time.time() - 120
+
+    with (
+        patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[mock_proc]),
+        patch("packagealert.cli.status.psutil.Process") as mock_process_cls,
+        patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
+        patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
+    ):
+        mock_process_cls.return_value.create_time.return_value = create_time
+        data = await gather_status(None, _db=mem_db)
+
+    assert data.daemon_running is True
+    assert data.daemon_pid == 9999
+    assert data.daemon_uptime_seconds == pytest.approx(120, abs=5)
 
 
 @pytest.mark.asyncio
@@ -125,6 +158,7 @@ async def test_gather_status_alerts_and_count(mem_db, tmp_path):
 
     with (
         patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -200,6 +234,7 @@ async def test_gather_status_no_db(tmp_path):
     missing_db = tmp_path / "nonexistent.db"
     with (
         patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", missing_db),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):

@@ -153,10 +153,11 @@ def render_status(
     else:
         console.print("  Status:   [red]stopped[/red]")
     console.print(f"  Config:   {escape(data.config_path)}")
-    cache = "[green]✓[/green]" if data.cache_monitoring else "[red]✗[/red]"
-    proc = "[green]✓[/green]" if data.process_monitoring else "[red]✗[/red]"
-    sched = "[green]✓[/green]" if data.scheduler_enabled else "[red]✗[/red]"
-    console.print(f"  Monitors: cache {cache}  process {proc}  scheduler {sched}")
+    if data.daemon_running:
+        cache = "[green]✓[/green]" if data.cache_monitoring else "[red]✗[/red]"
+        proc = "[green]✓[/green]" if data.process_monitoring else "[red]✗[/red]"
+        sched = "[green]✓[/green]" if data.scheduler_enabled else "[red]✗[/red]"
+        console.print(f"  Monitors: cache {cache}  process {proc}  scheduler {sched}")
 
     console.print()
 
@@ -209,6 +210,19 @@ async def gather_status(
 
     # ── Daemon ────────────────────────────────────────────────────────────────
     pid = check_already_running()
+
+    # Fallback: PID file may be absent (e.g. older install, crash before write).
+    # Scan running processes for a `package-alert daemon` invocation.
+    if pid is None:
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = proc.info["cmdline"] or []
+                if "daemon" in cmdline and any("package-alert" in c for c in cmdline):
+                    pid = proc.info["pid"]
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+
     uptime: float | None = None
     if pid is not None:
         try:
