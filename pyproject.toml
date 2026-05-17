@@ -6,10 +6,6 @@ build-backend = "hatchling.build"
 name = "package-alert"
 version = "0.1.0"
 requires-python = ">=3.12"
-
-[project.urls]
-Homepage = "https://github.com/alslater/package-alert"
-Repository = "https://github.com/alslater/package-alert"
 dependencies = [
     "typer>=0.12",
     "pydantic>=2.7",
@@ -20,6 +16,10 @@ dependencies = [
     "psutil>=6",
     "Levenshtein>=0.25",
 ]
+
+[project.urls]
+Homepage = "https://github.com/alslater/package-alert"
+Repository = "https://github.com/alslater/package-alert"
 
 [project.scripts]
 package-alert = "packagealert.cli.app:main"
