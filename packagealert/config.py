@@ -10,13 +10,14 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 def _expand(v: object) -> object:
     if isinstance(v, str):
-        return Path(v).expanduser()
+        return None if v == "" else Path(v).expanduser()
     if isinstance(v, Path):
         return v.expanduser()
     return v
 
 
 ExpandedPath = Annotated[Path, BeforeValidator(_expand)]
+NullableExpandedPath = Annotated[Path | None, BeforeValidator(_expand)]
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +51,17 @@ class AlertsConfig(BaseModel):
 
 class LogConfig(BaseModel):
     level: str = "INFO"
-    file: ExpandedPath | None = None
+    file: NullableExpandedPath = None
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 3
+
+
+class DaemonLogConfig(LogConfig):
+    file: NullableExpandedPath = _SHARE_DIR / "daemon.log"
+
+
+class CliLogConfig(LogConfig):
+    file: NullableExpandedPath = _SHARE_DIR / "cli.log"
 
 
 class HeuristicsConfig(BaseModel):
@@ -63,6 +72,7 @@ class HeuristicsConfig(BaseModel):
 
 class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
+    extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
 
 
 class SchedulerConfig(BaseModel):
@@ -77,12 +87,8 @@ class AppConfig(BaseModel):
     osv: OsvConfig = OsvConfig()
     watch: WatchConfig = WatchConfig()
     alerts: AlertsConfig = AlertsConfig()
-    log: LogConfig = Field(
-        default_factory=lambda: LogConfig(file=_SHARE_DIR / "daemon.log")
-    )
-    cli_log: LogConfig = Field(
-        default_factory=lambda: LogConfig(file=_SHARE_DIR / "cli.log")
-    )
+    log: DaemonLogConfig = Field(default_factory=DaemonLogConfig)
+    cli_log: CliLogConfig = Field(default_factory=CliLogConfig)
     heuristics: HeuristicsConfig = HeuristicsConfig()
     sandbox: SandboxConfig = SandboxConfig()
     scheduler: SchedulerConfig = SchedulerConfig()

@@ -14,6 +14,7 @@ class ParsedInstall:
     packages: list[str] = field(default_factory=list)
     ecosystem: str = "pypi"
     venv_exe: str | None = None  # path used to derive site-packages
+    req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -151,24 +152,27 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         return ParsedInstall(manager="pip", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     if subcmd != "install":
         return None
-    packages = []
-    skip_next = False
+    packages: list[str] = []
+    req_files: list[str] = []
+    skip_value_for: str | None = None
     for arg in args[1:]:
-        if skip_next:
-            skip_next = False
+        if skip_value_for is not None:
+            if skip_value_for in ("-r", "--requirement"):
+                req_files.append(arg)
+            skip_value_for = None
             continue
-        if arg in ("-r", "--requirement", "-c", "--constraint", "-e", "--editable",
+        if arg in ("-r", "--requirement"):
+            skip_value_for = arg
+            continue
+        if arg in ("-c", "--constraint", "-e", "--editable",
                    "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
                    "--target", "-t", "--prefix", "--root"):
-            skip_next = True
+            skip_value_for = arg
             continue
         if arg.startswith("-"):
             continue
         packages.append(arg)
-    # If -r flag was present skip file-based installs
-    if "-r" in args or "--requirement" in args:
-        return None
-    return ParsedInstall(manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+    return ParsedInstall(manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
 
 
 def parse_uv_args(argv: list[str]) -> ParsedInstall | None:

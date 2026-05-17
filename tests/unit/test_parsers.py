@@ -36,8 +36,12 @@ def test_pip_non_install_recognised():
     assert result.packages == []
 
 
-def test_pip_install_from_requirements_ignored():
-    assert parse_pip_args(["pip", "install", "-r", "requirements.txt"]) is None
+def test_pip_install_from_requirements_parses_req_files():
+    result = parse_pip_args(["pip", "install", "-r", "requirements.txt"])
+    assert result is not None
+    assert result.manager == "pip"
+    assert result.packages == []
+    assert result.req_files == ["requirements.txt"]
 
 
 def test_uv_add():

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -110,7 +111,7 @@ class SandboxRunner:
         cwd = Path.cwd()
 
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys)
 
         parsed = _try_parse(argv)
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -188,7 +189,7 @@ class SandboxRunner:
             # some systemd setups) and use only the user's ~/.ssh/config.
             ssh_config = ssh_dir / "config"
             if ssh_config.exists():
-                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {ssh_config}"
+                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
             else:
                 sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
@@ -197,6 +198,7 @@ class SandboxRunner:
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
+            extra_tmpfs=list(self._cfg.sandbox.extra_tmpfs),
         ))
         print()
 
@@ -257,6 +259,7 @@ class SandboxRunner:
         cwd: Path,
         allow_network: bool,
         extra_env: list[str] | None,
+        expose_ssh_keys: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
 
@@ -353,12 +356,22 @@ class SandboxRunner:
             p for p in _home_ro_dirs() + rc_paths
             if not p.is_relative_to(cwd)
         ]
+        if expose_ssh_keys:
+            ssh_dir = Path.home() / ".ssh"
+            if ssh_dir.exists():
+                home_ro.append(ssh_dir)
+            ssh_config = ssh_dir / "config"
+            if ssh_config.exists():
+                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
+            else:
+                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
         result = subprocess.run(build_cmd(
             argv, write_dirs,
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
+            extra_tmpfs=list(self._cfg.sandbox.extra_tmpfs),
         ))
         print()
 
@@ -547,27 +560,49 @@ class SandboxRunner:
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
 
+def _is_ssh_vcs_url(s: str) -> bool:
+    """Return True if *s* contains any SSH-based Git URL pattern.
+
+    Covers:
+    - git+ssh://  (pip/uv requirements, explicit packages)
+    - ssh://      (Pipfile.lock "git" field)
+    - git+git@    (pip requirements scp-style, e.g. git+git@github.com:org/repo.git)
+    - git@        (Pipfile.lock scp-style, bare requirements scp-style)
+    """
+    return (
+        "git+ssh://" in s
+        or "ssh://" in s
+        or "git+git@" in s
+        or "git@" in s
+    )
+
+
 def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
-    """Return True if the install involves git+ssh:// VCS dependencies.
+    """Return True if the install involves SSH-authenticated Git VCS dependencies.
 
     Checks explicit packages on the command line, and for lock-file installs
     scans Pipfile.lock (pipenv) or requirements*.txt (pip) for SSH VCS URLs.
-    Pipfile.lock stores them as {"git": "ssh://..."} while pip requirements
-    files use the git+ssh:// scheme — both are checked.
+    Both URL-style (git+ssh://, ssh://) and scp-style (git@host:org/repo)
+    patterns are detected.
     """
     if parsed is None:
         return False
-    if any("git+ssh://" in p for p in parsed.packages):
+    if any(_is_ssh_vcs_url(p) for p in parsed.packages):
         return True
     candidates: list[Path] = []
     if parsed.manager == "pipenv":
         candidates.append(cwd / "Pipfile.lock")
     elif parsed.manager == "pip":
-        candidates.extend(sorted(cwd.glob("requirements*.txt")))
+        # Explicit -r files take precedence; fall back to requirements*.txt glob
+        # for bare lock-file installs (pip install with no packages or -r flags).
+        if parsed.req_files:
+            candidates.extend(cwd / f for f in parsed.req_files)
+        else:
+            candidates.extend(sorted(cwd.glob("requirements*.txt")))
     for path in candidates:
         try:
             text = path.read_text(errors="replace")
-            if "git+ssh://" in text or "ssh://" in text:
+            if _is_ssh_vcs_url(text):
                 return True
         except OSError:
             pass

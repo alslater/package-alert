@@ -41,7 +41,12 @@ warning_threshold = 40
 critical_threshold = 70
 
 [sandbox]
-# extra_env = []   # additional environment variable names to pass into the bubblewrap sandbox
+# extra_env = []      # additional environment variable names to pass into the bubblewrap sandbox
+# extra_tmpfs = []    # paths to mount as empty tmpfs inside the sandbox, in addition to the
+                      # built-in ones (/tmp, $HOME, /etc/ssh/ssh_config.d).  Useful on systems
+                      # where other root-owned paths cause SSH or tool failures inside bwrap's
+                      # user namespace.  Example:
+                      #   extra_tmpfs = ["/etc/ssh/other_config.d"]
 
 [scheduler]
 enabled = true

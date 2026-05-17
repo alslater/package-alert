@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from packagealert.config import AppConfig, OsvConfig, HeuristicsConfig, AlertsConfig, WatchConfig, LogConfig
+from packagealert.config import AppConfig, OsvConfig, HeuristicsConfig, AlertsConfig, WatchConfig, DaemonLogConfig
 from packagealert.daemon import Daemon, check_already_running, _PID_FILE
 from packagealert.models.events import PackageEvent
 from packagealert.models.advisories import OsvAdvisory, OsvResult
@@ -63,7 +63,7 @@ def _make_cfg(tmp_path: Path) -> AppConfig:
         heuristics=HeuristicsConfig(enabled=False),
         alerts=AlertsConfig(desktop_notifications=False, terminal_notifications=False),
         watch=WatchConfig(enable_process_monitoring=False, enable_cache_monitoring=False),
-        log=LogConfig(file=None),
+        log=DaemonLogConfig(file=None),
     )
 
 

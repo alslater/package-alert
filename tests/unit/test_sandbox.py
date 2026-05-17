@@ -17,6 +17,7 @@ from packagealert.sandbox.runner import (
     _find_site_packages,
     _find_venv_root,
     _has_ssh_vcs_deps,
+    _is_ssh_vcs_url,
     _home_ro_dirs,
     _new_composer_packages,
     _new_npm_packages,
@@ -285,6 +286,18 @@ class TestTryParse:
         assert result is not None
         assert result.manager == "pipenv"
         assert result.packages == []
+
+    def test_pip_install_r_collects_req_files(self):
+        result = _try_parse(["pip", "install", "-r", "requirements.txt", "-r", "dev.txt"])
+        assert result is not None
+        assert result.manager == "pip"
+        assert result.packages == []
+        assert result.req_files == ["requirements.txt", "dev.txt"]
+
+    def test_pip_install_r_long_flag_collects_req_files(self):
+        result = _try_parse(["pip", "install", "--requirement", "reqs/base.txt"])
+        assert result is not None
+        assert result.req_files == ["reqs/base.txt"]
 
     def test_unknown_command_returns_none(self):
         assert _try_parse(["make", "build"]) is None
@@ -608,11 +621,59 @@ class TestHasSshVcsDeps:
     def test_none_parsed_returns_false(self, tmp_path):
         assert _has_ssh_vcs_deps(None, tmp_path) is False
 
+    def test_detects_ssh_in_explicit_req_file(self, tmp_path):
+        (tmp_path / "custom.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["custom.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_explicit_req_file_supersedes_glob(self, tmp_path):
+        # requirements.txt has SSH dep but the explicitly named file does not —
+        # only the -r file should be scanned, not the glob.
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        (tmp_path / "clean.txt").write_text("requests==2.31.0\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["clean.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
     def test_uv_lock_not_scanned(self, tmp_path):
         # uv uses git+https, not git+ssh; uv.lock is not scanned
         (tmp_path / "uv.lock").write_text("git+ssh://git@github.com/org/repo.git\n")
         parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_detects_scp_style_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+git@github.com:org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
+
+    def test_detects_bare_scp_style_in_requirements_txt(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+git@github.com:org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_detects_scp_style_in_pipfile_lock(self, tmp_path):
+        # Pipfile.lock scp-style: {"git": "git@github.com:org/repo.git"}
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"mylib": {"git": "git@github.com:org/repo.git", "ref": "main"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+
+class TestIsSshVcsUrl:
+    @pytest.mark.parametrize("url", [
+        "git+ssh://git@github.com/org/repo.git",
+        "ssh://git@github.com/org/repo.git",
+        "git+git@github.com:org/repo.git",
+        "git@github.com:org/repo.git",
+    ])
+    def test_ssh_patterns_detected(self, url):
+        assert _is_ssh_vcs_url(url) is True
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/org/repo.git",
+        "git+https://github.com/org/repo.git",
+        "requests==2.31.0",
+        "",
+    ])
+    def test_non_ssh_patterns_not_detected(self, url):
+        assert _is_ssh_vcs_url(url) is False
 
 
 class TestCheckVenvScope:
