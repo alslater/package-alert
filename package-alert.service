@@ -1,0 +1,15 @@
+[Unit]
+Description=package-alert developer security monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/package-alert daemon --config %h/.config/package-alert/config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=package-alert
+
+[Install]
+WantedBy=default.target

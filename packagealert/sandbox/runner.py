@@ -1,0 +1,766 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from rich.console import Console
+
+from packagealert.parsers.process_args import (
+    ParsedInstall,
+    derive_site_packages,
+    parse_composer_args,
+    parse_npm_args,
+    parse_package_spec,
+    parse_pip_args,
+    parse_pipenv_args,
+    parse_uv_args,
+)
+from packagealert.sandbox.bwrap import available as bwrap_available
+from packagealert.sandbox.bwrap import build_cmd
+
+if TYPE_CHECKING:
+    from packagealert.config import AppConfig
+
+log = logging.getLogger(__name__)
+
+_PARSERS = [parse_pip_args, parse_uv_args, parse_pipenv_args, parse_npm_args, parse_composer_args]
+_DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+
+_SHELL_NAMES: frozenset[str] = frozenset({
+    "bash", "zsh", "sh", "fish", "dash", "ksh", "csh", "tcsh",
+})
+
+# RC files to re-expose inside the home tmpfs so the shell initialises properly.
+_SHELL_RC_FILES: dict[str, list[str]] = {
+    "bash": [".bashrc", ".bash_profile", ".profile", ".bash_aliases"],
+    "sh":   [".profile"],
+    "zsh":  [".zshenv", ".zprofile", ".zshrc", ".zlogin"],
+    "fish": [".config/fish/config.fish", ".config/fish"],
+    "ksh":  [".kshrc", ".profile"],
+    "csh":  [".cshrc", ".login"],
+    "tcsh": [".tcshrc", ".cshrc", ".login"],
+    "dash": [".profile"],
+}
+
+# Minimal environment allowlist: names always forwarded into the sandbox when present.
+_SANDBOX_ENV: frozenset[str] = frozenset({
+    # Core POSIX
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+    # Locale / terminal
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
+    "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY", "LC_PAPER",
+    "TERM", "COLORTERM",
+    # Python / pip / uv / pyenv
+    "VIRTUAL_ENV", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE",
+    "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_CERT",
+    "UV_INDEX_URL", "UV_INDEX", "UV_CACHE_DIR", "UV_PYTHON",
+    "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
+    "PYENV_ROOT", "PYENV_VERSION", "PYENV_VERSION_FILE",
+    # npm / Node / nvm
+    "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CACHE", "NODE_PATH", "NODE_ENV",
+    "NVM_DIR", "NVM_BIN",
+    # pipenv behaviour flags
+    "PIPENV_VENV_IN_PROJECT", "PIPENV_IGNORE_VIRTUALENVS", "PIPENV_VERBOSITY",
+    "WORKON_HOME",
+    # pip behaviour flags
+    "PIP_REQUIRE_VIRTUALENV",
+    # Composer / PHP
+    "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "COMPOSER_MIRROR",
+    # Network proxies (package managers respect these)
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "no_proxy",
+    # SSL / TLS
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    # Git (uv may invoke git for VCS deps)
+    "GIT_CONFIG_GLOBAL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+})
+
+
+@dataclass
+class _Context:
+    argv: list[str]
+    parsed: ParsedInstall | None
+    cwd: Path
+    # Directories that must be writable inside the sandbox (superset of scan_targets)
+    write_dirs: list[Path] = field(default_factory=list)
+    # Directories to snapshot before and diff after to detect new packages
+    scan_targets: list[Path] = field(default_factory=list)
+
+
+class SandboxRunner:
+    def __init__(self, cfg: AppConfig) -> None:
+        self._cfg = cfg
+        self._console = Console()
+
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None) -> int:
+        if not bwrap_available():
+            self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
+            self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
+            self._console.print("[dim]  Fedora/RHEL:   sudo dnf install bubblewrap[/dim]")
+            self._console.print("[dim]  Arch:          sudo pacman -S bubblewrap[/dim]")
+            return 1
+
+        cwd = Path.cwd()
+
+        if argv and Path(argv[0]).name in _SHELL_NAMES:
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env)
+
+        parsed = _try_parse(argv)
+        ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
+
+        self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
+
+        if not self._check_venv_scope(parsed, cwd):
+            return 1
+
+        if not await self._preflight(ctx):
+            return 1
+
+        _resolve_targets(ctx)
+
+        targets_label = ", ".join(str(t) for t in ctx.scan_targets) or "none detected"
+        self._console.print(f"[dim]Scan targets: {targets_label}[/dim]")
+        network_label = "allowed" if allow_network else "blocked"
+        self._console.print(f"[dim]Running in sandbox (network: {network_label})...[/dim]\n")
+
+        # Snapshot scan targets before execution
+        snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
+
+        combined_extra = list(self._cfg.sandbox.extra_env)
+        if extra_env:
+            combined_extra.extend(extra_env)
+        sandbox_env = _build_sandbox_env(combined_extra)
+
+        # For pip/pipenv: resolve which venv to use and give it an explicit
+        # writable bind mount.  The cwd write bind alone is not reliable for
+        # deep nested paths inside the home tmpfs; an explicit --bind for the
+        # venv root ensures pip can write to both site-packages AND venv/bin/
+        # (needed for console scripts like entry points).
+        if parsed and parsed.manager in ("pip", "pipenv"):
+            if "VIRTUAL_ENV" in sandbox_env:
+                venv_path: Path | None = Path(sandbox_env["VIRTUAL_ENV"])
+            else:
+                venv_path = _find_venv_root(ctx.scan_targets)
+                if venv_path:
+                    sandbox_env["VIRTUAL_ENV"] = str(venv_path)
+                    self._console.print(f"[dim]No active virtualenv — using detected project venv: {venv_path}[/dim]")
+                else:
+                    self._console.print("[bold red]✗ Blocked — no virtualenv found for this project.[/bold red]")
+                    self._console.print("[dim]Create one first:  python -m venv .venv  &&  source .venv/bin/activate[/dim]")
+                    self._console.print("[dim]Or use uv:         package-alert run uv sync[/dim]")
+                    return 1
+            if venv_path and venv_path.exists():
+                # Prepend venv/bin to PATH so the sandbox resolves `pip` to the
+                # venv's own pip.  System pip runs under system Python where
+                # sys.prefix == sys.base_prefix, causing it to ignore VIRTUAL_ENV
+                # and fall back to a user install even when VIRTUAL_ENV is set.
+                venv_bin = str(venv_path / "bin")
+                sandbox_env["PATH"] = f"{venv_bin}:{sandbox_env.get('PATH', '')}"
+                if venv_path not in ctx.write_dirs:
+                    ctx.write_dirs.append(venv_path)
+
+        # home_ro: paths under cwd are already covered by the cwd write bind —
+        # a more-specific ro-bind on any of them would silently shadow it.
+        home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
+
+        result = subprocess.run(build_cmd(
+            argv, ctx.write_dirs,
+            allow_network=allow_network,
+            env=sandbox_env,
+            home_ro_dirs=home_ro,
+        ))
+        print()
+
+        if result.returncode != 0:
+            self._console.print(f"[yellow]Command exited with code {result.returncode}[/yellow]")
+            return result.returncode
+
+        # Re-detect scan targets that may have been created by the install
+        # (e.g. uv sync creating .venv from scratch)
+        if parsed and parsed.ecosystem == "pypi" and not ctx.scan_targets:
+            site_pkgs = _find_site_packages(parsed, cwd)
+            if site_pkgs and site_pkgs.exists():
+                ctx.scan_targets.append(site_pkgs)
+
+        ecosystem = parsed.ecosystem if parsed else None
+        new_pkgs = _collect_new_packages(ctx.scan_targets, snapshots, ecosystem)
+
+        if new_pkgs:
+            self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
+            if not await self._post_scan(new_pkgs):
+                return 1
+        else:
+            self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
+
+        return 0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _check_venv_scope(self, parsed: ParsedInstall | None, cwd: Path) -> bool:
+        """Return False (and print an error) if VIRTUAL_ENV belongs to a different project."""
+        if parsed is None or parsed.manager not in ("pip", "pipenv"):
+            return True
+        virtual_env = os.environ.get("VIRTUAL_ENV")
+        if not virtual_env:
+            return True
+        venv_path = Path(virtual_env)
+        # Inside the project tree — always fine.
+        if venv_path.is_relative_to(cwd):
+            return True
+        # pipenv stores managed venvs outside the project by default; allow any
+        # path under its venvs directory unless PIPENV_VENV_IN_PROJECT forces
+        # them in-project (in which case an outside path would be foreign).
+        if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            if venv_path.is_relative_to(_pipenv_venv_dir()):
+                return True
+        self._console.print("[bold red]✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:[/bold red]")
+        self._console.print(f"  [red]VIRTUAL_ENV = {virtual_env}[/red]")
+        self._console.print(f"  [dim]Project     = {cwd}[/dim]")
+        self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
+        return False
+
+    async def _run_shell(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        allow_network: bool,
+        extra_env: list[str] | None,
+    ) -> int:
+        """Run an interactive shell inside the sandbox with the project environment set up.
+
+        Performs a pre-flight check against all project lock files before opening
+        the shell, and a post-exit scan to catch any packages installed during
+        the session.
+        """
+        shell_name = Path(argv[0]).name
+        self._console.print(f"\n[bold]Sandbox shell:[/bold] {' '.join(argv)}")
+
+        combined_extra = list(self._cfg.sandbox.extra_env)
+        if extra_env:
+            combined_extra.extend(extra_env)
+        sandbox_env = _build_sandbox_env(combined_extra)
+
+        write_dirs: list[Path] = [cwd]
+        scan_targets: list[Path] = []
+        notes: list[str] = []
+
+        # Python venv — prefer .venv over venv
+        venv_path: Path | None = None
+        for name in (".venv", "venv"):
+            candidate = cwd / name
+            if (candidate / "pyvenv.cfg").exists():
+                venv_path = candidate
+                break
+
+        if venv_path:
+            sandbox_env["VIRTUAL_ENV"] = str(venv_path)
+            sandbox_env["PATH"] = f"{venv_path / 'bin'}:{sandbox_env.get('PATH', '')}"
+            write_dirs.append(venv_path)
+            notes.append(f"venv: {venv_path.name}")
+            lib_dir = venv_path / "lib"
+            if lib_dir.exists():
+                sp_candidates = sorted(lib_dir.glob("python*/site-packages"))
+                if sp_candidates:
+                    scan_targets.append(sp_candidates[0])
+
+        # Node.js — prepend node_modules/.bin if present, scan node_modules
+        nm_bin = cwd / "node_modules" / ".bin"
+        if nm_bin.is_dir():
+            sandbox_env["PATH"] = f"{nm_bin}:{sandbox_env.get('PATH', '')}"
+            notes.append("node_modules/.bin in PATH")
+        if (cwd / "package.json").exists():
+            scan_targets.append(cwd / "node_modules")
+
+        # Composer/PHP
+        if (cwd / "composer.json").exists():
+            scan_targets.append(cwd / "vendor")
+
+        # pipenv-managed virtualenvs dir (outside the project unless PIPENV_VENV_IN_PROJECT)
+        if (cwd / "Pipfile").exists() and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            pipenv_dir = _pipenv_venv_dir()
+            if pipenv_dir.exists():
+                write_dirs.append(pipenv_dir)
+                notes.append(f"pipenv venvs: {pipenv_dir}")
+
+        # Writable package-manager caches so installs work from within the shell
+        for cache_path in [
+            Path.home() / ".cache" / "pip",
+            Path.home() / ".cache" / "uv",
+            Path.home() / ".npm",
+            Path.home() / ".config" / "composer",
+        ]:
+            if cache_path.exists():
+                write_dirs.append(cache_path)
+
+        if notes:
+            self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
+
+        # Pre-flight: scan all project lock files for known-malicious packages
+        if not await self._preflight_shell(cwd):
+            return 1
+
+        # Snapshot install targets before the shell session opens
+        snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
+
+        network_label = "allowed" if allow_network else "blocked"
+        self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
+        self._console.print("[dim]Type 'exit' or press Ctrl-D to leave the sandbox.[/dim]\n")
+
+        # RC files so the shell initialises properly (aliases, prompt, etc.)
+        home = Path.home()
+        rc_paths = [
+            home / rc
+            for rc in _SHELL_RC_FILES.get(shell_name, [])
+            if (home / rc).exists()
+        ]
+        git_cfg = home / ".gitconfig"
+        if git_cfg.exists():
+            rc_paths.append(git_cfg)
+
+        home_ro = [
+            p for p in _home_ro_dirs() + rc_paths
+            if not p.is_relative_to(cwd)
+        ]
+
+        result = subprocess.run(build_cmd(
+            argv, write_dirs,
+            allow_network=allow_network,
+            env=sandbox_env,
+            home_ro_dirs=home_ro,
+        ))
+        print()
+
+        # Post-exit: scan for any packages installed during the shell session
+        new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
+        if new_pkgs:
+            self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
+            await self._post_scan(new_pkgs)
+        else:
+            self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
+
+        return result.returncode
+
+    async def _preflight_shell(self, cwd: Path) -> bool:
+        """Pre-flight OSV check for shell sessions: scans all project lock files."""
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.parsers.lockfiles import scan_project
+        from packagealert.storage.db import open_db
+
+        scan = scan_project(cwd)
+        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
+
+        if not queries:
+            self._console.print("[dim]Pre-flight: no lock files found[/dim]")
+            return True
+
+        sources = ", ".join(scan.sources) if scan.sources else "no lock file"
+        self._console.print(f"[dim]Pre-flight check: {len(queries)} packages ({sources})...[/dim]")
+
+        db = await open_db()
+        client = OsvClient(self._cfg.osv)
+        cache = OsvCache(db, self._cfg.osv)
+        malicious: list[tuple[str, str]] = []
+
+        try:
+            for i in range(0, len(queries), 50):
+                batch = queries[i:i + 50]
+                cached_results, uncached = [], []
+                for q in batch:
+                    r = await cache.get(*q)
+                    if r is not None:
+                        cached_results.append(r)
+                    else:
+                        uncached.append(q)
+                fresh = []
+                if uncached:
+                    fresh = await client.batch_query(uncached)
+                    for q, r in zip(uncached, fresh):
+                        if r:
+                            await cache.set(*q, r)
+                for r in cached_results + fresh:
+                    if r and r.has_malicious:
+                        adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
+                        malicious.append((r.package_name, adv_id))
+        finally:
+            await client.aclose()
+            await db.close()
+
+        if malicious:
+            self._console.print(f"[bold red]✗ Blocked — {len(malicious)} malicious package(s) in lock files:[/bold red]")
+            for name, adv_id in malicious:
+                self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
+            return False
+
+        self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        return True
+
+    async def _preflight(self, ctx: _Context) -> bool:
+        """Query OSV for what's about to be installed. Return False to block."""
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.parsers.lockfiles import scan_project
+        from packagealert.storage.db import open_db
+
+        parsed = ctx.parsed
+
+        if parsed is None:
+            self._console.print("[dim]Pre-flight: unrecognised command, skipping OSV check[/dim]")
+            return True
+
+        queries: list[tuple[str, str, str | None]] = []
+
+        if parsed.packages:
+            # Explicit packages on the command line — normalise specs first
+            for raw in parsed.packages:
+                name, version = parse_package_spec(raw, parsed.ecosystem)
+                if name:
+                    queries.append((parsed.ecosystem, name, version))
+            source = f"{len(queries)} explicit package(s)"
+        else:
+            # Lock-file install — read lockfile for exact versions
+            scan = scan_project(ctx.cwd)
+            queries = [
+                (p.ecosystem, p.name, p.version)
+                for p in scan.pinned
+                if p.ecosystem == parsed.ecosystem
+            ]
+            sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
+            source = f"{len(queries)} packages ({sources})"
+
+        if not queries:
+            self._console.print("[dim]Pre-flight: nothing to check[/dim]")
+            return True
+
+        self._console.print(f"[dim]Pre-flight check: {source}...[/dim]")
+
+        db = await open_db()
+        client = OsvClient(self._cfg.osv)
+        cache = OsvCache(db, self._cfg.osv)
+        malicious: list[tuple[str, str]] = []
+
+        try:
+            for i in range(0, len(queries), 50):
+                batch = queries[i : i + 50]
+                cached_results, uncached = [], []
+                for q in batch:
+                    r = await cache.get(*q)
+                    if r is not None:
+                        cached_results.append(r)
+                    else:
+                        uncached.append(q)
+                fresh = []
+                if uncached:
+                    fresh = await client.batch_query(uncached)
+                    for q, r in zip(uncached, fresh):
+                        if r:
+                            await cache.set(*q, r)
+                for r in cached_results + fresh:
+                    if r and r.has_malicious:
+                        adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
+                        malicious.append((r.package_name, adv_id))
+        finally:
+            await client.aclose()
+            await db.close()
+
+        if malicious:
+            self._console.print(f"[bold red]✗ Blocked — {len(malicious)} malicious package(s):[/bold red]")
+            for name, adv_id in malicious:
+                self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
+            return False
+
+        self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        return True
+
+    async def _post_scan(self, packages: list[tuple[str, str, str | None]]) -> bool:
+        """OSV-check newly installed packages. Return False if anything is malicious."""
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.storage.db import open_db
+
+        db = await open_db()
+        client = OsvClient(self._cfg.osv)
+        cache = OsvCache(db, self._cfg.osv)
+        malicious: list[tuple[str, str]] = []
+
+        try:
+            for i in range(0, len(packages), 50):
+                batch = packages[i : i + 50]
+                results = await client.batch_query(batch)
+                for q, r in zip(batch, results):
+                    if r:
+                        await cache.set(*q, r)
+                    if r and r.has_malicious:
+                        adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
+                        malicious.append((r.package_name, adv_id))
+        finally:
+            await client.aclose()
+            await db.close()
+
+        if malicious:
+            self._console.print(f"[bold red]✗ Post-install: {len(malicious)} malicious package(s) detected:[/bold red]")
+            for name, adv_id in malicious:
+                self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
+            self._console.print(
+                "[yellow]Packages were written to disk inside the sandbox write targets. "
+                "Remove them manually to clean up.[/yellow]"
+            )
+            return False
+
+        self._console.print("[green]✓ Post-install: clean[/green]")
+        return True
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (kept outside the class for testability)
+# ---------------------------------------------------------------------------
+
+def _find_venv_root(scan_targets: list[Path]) -> Path | None:
+    """Return the virtualenv root inferred from the first pypi scan target.
+
+    site-packages sits at <venv>/lib/pythonX.Y/site-packages, so the venv
+    root is three levels up.  We confirm with pyvenv.cfg before returning.
+    """
+    for target in scan_targets:
+        candidate = target.parent.parent.parent
+        if (candidate / "pyvenv.cfg").exists():
+            return candidate
+    return None
+
+
+def _home_ro_dirs() -> list[Path]:
+    """Return home-directory paths that package managers need read-only access to.
+
+    The home directory is hidden with a tmpfs; only these paths are re-exposed
+    so that SSH keys, cloud credentials, and secrets in other directories are
+    not readable by install-time scripts.
+    """
+    home = Path.home()
+    candidates: list[Path] = [
+        # pyenv-managed Python installations (respects PYENV_ROOT override)
+        Path(os.environ.get("PYENV_ROOT", home / ".pyenv")),
+        # nvm-managed Node installations (respects NVM_DIR override)
+        Path(os.environ.get("NVM_DIR", home / ".nvm")),
+        # uv-managed Python installations and tool environments
+        home / ".local" / "share" / "uv",
+        # User-local binaries: uv, pip-installed scripts, etc.
+        home / ".local" / "bin",
+        # pipx-managed tool environments — shebangs in ~/.local/bin/* may point here
+        home / ".local" / "pipx",
+        # pip configuration (index URLs, proxy, trusted hosts)
+        home / ".config" / "pip",
+        home / ".pip",                          # legacy pip config location
+        # uv configuration
+        home / ".config" / "uv",
+        # npm registry / auth config
+        home / ".npmrc",
+    ]
+    return [p for p in candidates if p.exists()]
+
+
+def _build_sandbox_env(extra: list[str]) -> dict[str, str]:
+    """Return a filtered copy of os.environ containing only the sandbox allowlist plus *extra*."""
+    allowed = _SANDBOX_ENV | set(extra)
+    return {k: v for k, v in os.environ.items() if k in allowed}
+
+
+def _try_parse(argv: list[str]) -> ParsedInstall | None:
+    for parser in _PARSERS:
+        result = parser(argv)
+        if result is not None:
+            return result
+    return None
+
+
+def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:
+    """Return the site-packages directory that will be written by this install."""
+    if parsed is None:
+        return None
+
+    # 1. Derived from the executable path (e.g. /path/to/venv/bin/pip)
+    if parsed.venv_exe:
+        sp = derive_site_packages(parsed.venv_exe)
+        if sp and sp.exists():
+            return sp
+
+    # 2. Active virtualenv — only reliable for pip/pipenv; uv ignores VIRTUAL_ENV
+    #    and always writes to the project-local .venv regardless of activation state.
+    if parsed.manager in ("pip", "pipenv"):
+        venv_env = os.environ.get("VIRTUAL_ENV")
+        if venv_env:
+            candidates = sorted(Path(venv_env).glob("lib/python*/site-packages"))
+            if candidates:
+                return candidates[0]
+
+    # 3. .venv / venv inside the project (uv default)
+    for name in (".venv", "venv"):
+        candidates = sorted((cwd / name).glob("lib/python*/site-packages"))
+        if candidates:
+            return candidates[0]
+
+    return None
+
+
+def _pipenv_venv_dir() -> Path:
+    """Return the directory where pipenv stores its managed virtualenvs.
+
+    Respects WORKON_HOME; falls back to ~/.local/share/virtualenvs (the pipenv
+    default on Linux).  When PIPENV_VENV_IN_PROJECT is set the venv lives
+    inside the project directory instead and this directory is not needed.
+    """
+    workon = os.environ.get("WORKON_HOME")
+    return Path(workon) if workon else Path.home() / ".local" / "share" / "virtualenvs"
+
+
+def _resolve_targets(ctx: _Context) -> None:
+    """Populate ctx.write_dirs and ctx.scan_targets from the parsed command."""
+    parsed = ctx.parsed
+    cwd = ctx.cwd
+
+    # The project directory is always writable (lock-file updates, project files)
+    ctx.write_dirs.append(cwd)
+
+    if parsed is None:
+        return
+
+    eco = parsed.ecosystem
+
+    if eco == "pypi":
+        site_pkgs = _find_site_packages(parsed, cwd)
+        if site_pkgs:
+            ctx.scan_targets.append(site_pkgs)
+            # Only add as a separate write mount if site-packages is outside cwd
+            try:
+                site_pkgs.relative_to(cwd)
+            except ValueError:
+                ctx.write_dirs.append(site_pkgs)
+        else:
+            log.warning("Could not detect site-packages directory; Python packages will not be scanned")
+        # Cache dirs — writable so pip/uv can store wheels, but we don't scan them
+        for cache in [Path.home() / ".cache" / "pip", Path.home() / ".cache" / "uv"]:
+            if cache.exists():
+                ctx.write_dirs.append(cache)
+        # pipenv stores its managed venvs outside the project unless
+        # PIPENV_VENV_IN_PROJECT is set — make that directory writable.
+        if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            venv_dir = _pipenv_venv_dir()
+            if venv_dir.exists():
+                ctx.write_dirs.append(venv_dir)
+
+    elif eco == "npm":
+        # node_modules lives under cwd, so it's already covered by the cwd bind
+        ctx.scan_targets.append(cwd / "node_modules")
+        npm_cache = Path.home() / ".npm"
+        if npm_cache.exists():
+            ctx.write_dirs.append(npm_cache)
+
+    elif eco == "packagist":
+        # vendor lives under cwd
+        ctx.scan_targets.append(cwd / "vendor")
+        composer_home = Path.home() / ".config" / "composer"
+        if composer_home.exists():
+            ctx.write_dirs.append(composer_home)
+
+
+def _snapshot(path: Path) -> set[Path]:
+    """Return the set of all paths currently under *path*."""
+    try:
+        return set(path.rglob("*"))
+    except (PermissionError, FileNotFoundError):
+        return set()
+
+
+def _collect_new_packages(
+    scan_targets: list[Path],
+    snapshots: dict[Path, set[Path]],
+    ecosystem: str | None,
+) -> list[tuple[str, str, str | None]]:
+    """Return (ecosystem, name, version) tuples for packages that appeared since the snapshot."""
+    new: list[tuple[str, str, str | None]] = []
+    for target in scan_targets:
+        if not target.exists():
+            continue
+        before = snapshots.get(target, set())
+        new_paths = set(target.rglob("*")) - before
+        if ecosystem in ("pypi", None):
+            new.extend(_new_python_packages(new_paths))
+        if ecosystem in ("npm", None):
+            new.extend(_new_npm_packages(new_paths, target))
+        if ecosystem in ("packagist", None):
+            new.extend(_new_composer_packages(new_paths, target))
+    # Deduplicate preserving order
+    seen: set[tuple[str, str, str | None]] = set()
+    result = []
+    for pkg in new:
+        if pkg not in seen:
+            seen.add(pkg)
+            result.append(pkg)
+    return result
+
+
+def _new_python_packages(new_paths: set[Path]) -> list[tuple[str, str, str | None]]:
+    results = []
+    for p in new_paths:
+        if p.is_dir():
+            m = _DISTINFO_RE.match(p.name)
+            if m:
+                name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+                results.append(("pypi", name, m.group(2)))
+    return results
+
+
+def _new_npm_packages(new_paths: set[Path], node_modules: Path) -> list[tuple[str, str, str | None]]:
+    results = []
+    for p in new_paths:
+        if p.name != "package.json":
+            continue
+        try:
+            rel = p.relative_to(node_modules)
+        except ValueError:
+            continue
+        # Regular pkg: pkg/package.json (2 parts)
+        # Scoped pkg:  @scope/pkg/package.json (3 parts)
+        if len(rel.parts) not in (2, 3):
+            continue
+        try:
+            data = json.loads(p.read_text())
+            name = data.get("name")
+            version = data.get("version")
+            if name:
+                results.append(("npm", name, version))
+        except Exception:
+            pass
+    return results
+
+
+def _new_composer_packages(new_paths: set[Path], vendor: Path) -> list[tuple[str, str, str | None]]:
+    results = []
+    for p in new_paths:
+        if p.name != "composer.json":
+            continue
+        try:
+            rel = p.relative_to(vendor)
+        except ValueError:
+            continue
+        # vendor/vendor_name/package_name/composer.json = 3 parts
+        if len(rel.parts) != 3:
+            continue
+        try:
+            data = json.loads(p.read_text())
+            name = data.get("name", "")
+            version = data.get("version", "").lstrip("v") or None
+            if name and "/" in name:
+                results.append(("packagist", name, version))
+        except Exception:
+            pass
+    return results

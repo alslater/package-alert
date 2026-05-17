@@ -1,0 +1,24 @@
+[osv]
+cache_ttl_hours = 24
+base_url = "https://api.osv.dev/v1"
+timeout_seconds = 10.0
+max_retries = 3
+
+[watch]
+enable_cache_monitoring = true
+enable_process_monitoring = true
+process_poll_interval_seconds = 1.0
+
+[alerts]
+desktop_notifications = true
+terminal_notifications = true
+min_severity_for_desktop = "MEDIUM"
+
+[log]
+level = "INFO"
+# file = "~/.local/share/package-alert/package-alert.log"
+
+[heuristics]
+enabled = true
+warning_threshold = 40
+critical_threshold = 70

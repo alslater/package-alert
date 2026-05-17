@@ -1,0 +1,14 @@
+{
+  "results": [
+    {
+      "vulns": [
+        {
+          "id": "MAL-2025-1234",
+          "summary": "This package was found to contain malicious code that exfiltrates environment variables to a remote server.",
+          "database_specific": {"severity": "CRITICAL"},
+          "aliases": []
+        }
+      ]
+    }
+  ]
+}
