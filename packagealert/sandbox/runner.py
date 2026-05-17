@@ -490,26 +490,34 @@ class SandboxRunner:
 
         queries: list[tuple[str, str, str | None]] = []
 
+        source_parts: list[str] = []
+
         if parsed.packages:
             # Explicit packages on the command line — normalise specs first
             for raw in parsed.packages:
                 name, version = parse_package_spec(raw, parsed.ecosystem)
                 if name:
                     queries.append((parsed.ecosystem, name, version))
-            source = f"{len(queries)} explicit package(s)"
-        elif parsed.req_files:
+            source_parts.append(f"{len(queries)} explicit package(s)")
+
+        if parsed.req_files:
             # -r / --requirement files — parse each one recursively (follows includes)
             from packagealert.parsers.lockfiles import collect_requirements_packages
             visited: set[Path] = set()
             file_sources: list[str] = []
+            before = len(queries)
             for rf in parsed.req_files:
                 req_path = ctx.cwd / rf
                 if req_path.exists():
                     pinned, _ = collect_requirements_packages(req_path, visited)
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
                     file_sources.append(rf)
-            source = f"{len(queries)} packages ({', '.join(file_sources) or 'no packages found'})"
-        else:
+            added = len(queries) - before
+            source_parts.append(
+                f"{added} packages ({', '.join(file_sources) or 'no packages found'})"
+            )
+
+        if not parsed.packages and not parsed.req_files:
             # Lock-file install — read lockfile for exact versions
             scan = scan_project(ctx.cwd)
             queries = [
@@ -517,8 +525,10 @@ class SandboxRunner:
                 for p in scan.pinned
                 if p.ecosystem == parsed.ecosystem
             ]
-            sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
-            source = f"{len(queries)} packages ({sources})"
+            lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
+            source_parts.append(f"{len(queries)} packages ({lock_sources})")
+
+        source = "; ".join(source_parts)
 
         if not queries:
             self._console.print("[dim]Pre-flight: nothing to check[/dim]")
