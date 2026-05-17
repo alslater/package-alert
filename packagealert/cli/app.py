@@ -13,7 +13,7 @@ from packagealert.logging_setup import configure_logging
 
 app = typer.Typer(
     name="package-alert",
-    help="package-alert: Real-time developer security monitor for Python and Node.js packages.",
+    help="package-alert: Real-time developer security monitor for Python, Node.js, and PHP packages.",
 )
 console = Console()
 
