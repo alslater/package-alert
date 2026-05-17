@@ -32,7 +32,8 @@ async def _scheduler_loop(scanner: ScheduledScanner, interval: float = 3600.0) -
             log.exception("Unexpected error in scheduler loop")
         await asyncio.sleep(interval)
 
-_PID_FILE = Path.home() / ".local" / "share" / "package-alert" / "daemon.pid"
+PID_FILE = Path.home() / ".local" / "share" / "package-alert" / "daemon.pid"
+_PID_FILE = PID_FILE  # backward-compat alias
 
 
 def check_already_running() -> int | None:

@@ -14,7 +14,7 @@ from packagealert.storage.db import open_db
 
 @pytest.fixture
 async def mem_db(tmp_path):
-    """In-memory SQLite DB with schema applied."""
+    """File-backed SQLite DB at tmp_path/test.db with schema applied."""
     conn = await open_db(tmp_path / "test.db")
     yield conn
     await conn.close()

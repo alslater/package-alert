@@ -10,14 +10,8 @@ from pathlib import Path
 import psutil
 
 from packagealert.config import load_config, _DEFAULT_CONFIG
-from packagealert.daemon import check_already_running
+from packagealert.daemon import check_already_running, PID_FILE as _PID_FILE
 from packagealert.storage.db import _DEFAULT_DB_PATH as _DB_PATH
-
-
-# ── Paths (mirrors constants in daemon.py and storage/db.py) ──────────────────
-
-_DATA_DIR = Path.home() / ".local" / "share" / "package-alert"
-_PID_FILE = _DATA_DIR / "daemon.pid"  # mirrors daemon._PID_FILE
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -139,15 +133,13 @@ def render_status(
     console=None,
 ) -> None:
     """Print status to the terminal (rich) or stdout (JSON)."""
-    # Import here so rich is only required when rendering (not on --json path from a script)
-    from rich.console import Console as RichConsole
-
-    if console is None:
-        console = RichConsole()
-
     if as_json:
         print(json.dumps(data.to_dict(), indent=2))
         return
+
+    from rich.console import Console as RichConsole
+    if console is None:
+        console = RichConsole()
 
     # ── Daemon ────────────────────────────────────────────────────────────────
     console.print("[bold]Daemon[/bold]")
@@ -204,7 +196,12 @@ async def gather_status(
     from packagealert.storage.db import open_db
 
     cfg = load_config(config_path)
-    resolved_cfg_path = str(config_path or _DEFAULT_CONFIG)
+    if config_path is not None:
+        resolved_cfg_path = str(config_path)
+    elif _DEFAULT_CONFIG.exists():
+        resolved_cfg_path = str(_DEFAULT_CONFIG)
+    else:
+        resolved_cfg_path = "(defaults)"
 
     # ── Daemon ────────────────────────────────────────────────────────────────
     pid = check_already_running()
@@ -227,18 +224,21 @@ async def gather_status(
     recent_alerts: list[AlertRow] = []
     scheduled_count = 0
 
-    db_exists = _DB_PATH.exists()
-    db_path_str = str(_DB_PATH)
-
     if _db is not None:
         db = _db
         close_db = False
-    elif db_exists:
+        db_exists = True
+        db_path_str = str(_DB_PATH)
+    elif _DB_PATH.exists():
         db = await open_db(_DB_PATH)
         close_db = True
+        db_exists = True
+        db_path_str = str(_DB_PATH)
     else:
         db = None
         close_db = False
+        db_exists = False
+        db_path_str = str(_DB_PATH)
 
     if db is not None:
         try:
