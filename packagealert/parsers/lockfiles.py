@@ -267,7 +267,7 @@ def collect_requirements_packages(
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     try:
-        lines = path.read_text().splitlines()
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return pinned, unpinned
 

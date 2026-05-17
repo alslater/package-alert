@@ -1165,3 +1165,51 @@ class TestExposeSSHKeysConfirmation:
             runner = _make_runner()
             asyncio.run(runner.run(["bash"], expose_ssh_keys=False))
         mock_ask.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _preflight — unpinned requirements included in OSV queries
+# ---------------------------------------------------------------------------
+
+class TestPreflightUnpinnedRequirements:
+    """_preflight must query OSV for unpinned packages from -r files, not just pinned."""
+
+    def test_unpinned_req_included_in_osv_query(self, tmp_path):
+        import asyncio
+
+        req = tmp_path / "requirements.txt"
+        req.write_text("requests==2.31.0\nflask\n")  # flask is unpinned
+
+        seen_queries: list = []
+
+        async def fake_open_db():
+            return unittest.mock.AsyncMock()
+
+        class FakeCache:
+            def __init__(self, db, cfg): pass
+            async def get(self, ecosystem, name, version):
+                seen_queries.append((ecosystem, name, version))
+                return None
+            async def set(self, *a): pass
+
+        class FakeClient:
+            def __init__(self, cfg): pass
+            async def batch_query(self, queries):
+                return [None] * len(queries)
+            async def aclose(self): pass
+
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        ctx = _Context(argv=["pip", "install", "-r", "requirements.txt"], cwd=tmp_path, parsed=parsed)
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+        queried_names = {name for _, name, _ in seen_queries}
+        assert "requests" in queried_names
+        assert "flask" in queried_names  # was silently skipped before the fix

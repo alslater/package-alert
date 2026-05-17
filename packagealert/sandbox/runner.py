@@ -509,8 +509,9 @@ class SandboxRunner:
             for rf in parsed.req_files:
                 req_path = ctx.cwd / rf
                 if req_path.exists():
-                    pinned, _ = collect_requirements_packages(req_path, visited)
+                    pinned, unpinned = collect_requirements_packages(req_path, visited)
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
+                    queries.extend((p.ecosystem, p.name, None) for p in unpinned)
                     file_sources.append(rf)
             added = len(queries) - before
             source_parts.append(
