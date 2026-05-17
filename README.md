@@ -53,6 +53,9 @@ package-alert run npm install
 # Scan the current project's lock files for vulnerabilities
 package-alert scan-project
 
+# Scan an explicit requirements file (e.g. a pinned CI lockfile)
+package-alert scan-project -r requirements-lock.txt
+
 # Query a specific package
 package-alert query requests 2.31.0
 
@@ -61,6 +64,13 @@ package-alert alerts
 ```
 
 ## Commands
+
+### Global options
+
+| Option | Description |
+|--------|-------------|
+| `--verbose` / `-v` | Print log output to the console. Without this flag log output is written only to the configured log file. |
+| `--config` / `-c` | Path to a TOML config file (overrides the default `~/.config/package-alert/config.toml`). |
 
 ### `daemon`
 
@@ -187,6 +197,7 @@ package-alert scan-project [PATH] [OPTIONS]
 | `PATH` | `.` | Project directory |
 | `--scan-unpinned` | off | Also query OSV for unpinned/range-constrained dependencies |
 | `--scan-installed` | off | Scan `venv/.venv` site-packages or `node_modules` instead of lock files |
+| `--requirements` / `-r` | — | Explicit requirements file to scan instead of auto-detecting lock files (mutually exclusive with `--scan-installed`) |
 | `--details` / `-d` | off | Show full advisory details and URL |
 | `--format` / `-f` | `text` | Output format: `text`, `json`, `html`, `browser` |
 
@@ -196,6 +207,8 @@ package-alert scan-project [PATH] [OPTIONS]
 - `json` — machine-readable JSON with all findings, unpinned packages, and sources
 - `html` — self-contained HTML report printed to stdout
 - `browser` — writes HTML to `/tmp/package-alert-*.html` and opens it in the default browser
+
+`--requirements` accepts a path relative to `PATH` (the project directory) or an absolute path. Nested `-r`/`--requirement` includes within the file are followed recursively. `--requirements` and `--scan-installed` are mutually exclusive.
 
 **Auto-detected lock files (in order of precedence):**
 
