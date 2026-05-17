@@ -617,20 +617,26 @@ class SandboxRunner:
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
 
+# Matches scp-style git@host:path — colon (not slash) after hostname distinguishes
+# this from HTTPS URLs like git+https://git@host/path which are NOT SSH.
+_SCP_SSH_RE = re.compile(r"git@[^/:]+:[^/]")
+
+
 def _is_ssh_vcs_url(s: str) -> bool:
     """Return True if *s* contains any SSH-based Git URL pattern.
 
     Covers:
     - git+ssh://  (pip/uv requirements, explicit packages)
     - ssh://      (Pipfile.lock "git" field)
-    - git+git@    (pip requirements scp-style, e.g. git+git@github.com:org/repo.git)
-    - git@        (Pipfile.lock scp-style, bare requirements scp-style)
+    - git@host:path  (scp-style: pip, Pipfile.lock, bare requirements)
+
+    Note: git+https://git@host/path is NOT SSH — the slash after hostname
+    distinguishes it from scp-style which uses a colon.
     """
     return (
         "git+ssh://" in s
         or "ssh://" in s
-        or "git+git@" in s
-        or "git@" in s
+        or bool(_SCP_SSH_RE.search(s))
     )
 
 

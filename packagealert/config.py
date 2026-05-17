@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
 
 def _expand(v: object) -> object:
@@ -73,6 +73,17 @@ class HeuristicsConfig(BaseModel):
 class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
+
+    @field_validator("extra_tmpfs")
+    @classmethod
+    def _extra_tmpfs_must_be_absolute(cls, paths: list[Path]) -> list[Path]:
+        for p in paths:
+            if not p.is_absolute():
+                raise ValueError(
+                    f"sandbox.extra_tmpfs paths must be absolute (got '{p}'). "
+                    "bwrap --tmpfs requires an absolute mount target."
+                )
+        return paths
 
 
 class SchedulerConfig(BaseModel):

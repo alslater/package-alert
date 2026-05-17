@@ -828,6 +828,8 @@ class TestIsSshVcsUrl:
     @pytest.mark.parametrize("url", [
         "https://github.com/org/repo.git",
         "git+https://github.com/org/repo.git",
+        # HTTPS URL with git@ username — NOT SSH (slash after host, not colon)
+        "git+https://git@github.com/org/repo.git",
         "requests==2.31.0",
         "",
     ])

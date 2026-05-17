@@ -2,7 +2,7 @@ import textwrap
 from pathlib import Path
 import pytest
 from pydantic import ValidationError
-from packagealert.config import AppConfig, SchedulerConfig, load_config
+from packagealert.config import AppConfig, SandboxConfig, SchedulerConfig, load_config
 
 
 def test_defaults_load_without_file():
@@ -70,3 +70,26 @@ def test_scheduler_config_rejects_invalid_values():
         SchedulerConfig(weekly_day=7)
     with pytest.raises(ValidationError):
         SchedulerConfig(max_scan_history=0)
+
+
+def test_sandbox_extra_tmpfs_accepts_absolute_paths():
+    cfg = SandboxConfig(extra_tmpfs=["/tmp/custom", "/run/secrets"])
+    assert cfg.extra_tmpfs[0] == Path("/tmp/custom")
+    assert cfg.extra_tmpfs[1] == Path("/run/secrets")
+
+
+def test_sandbox_extra_tmpfs_rejects_relative_path():
+    with pytest.raises(ValidationError, match="must be absolute"):
+        SandboxConfig(extra_tmpfs=["relative/path"])
+
+
+def test_sandbox_extra_tmpfs_rejects_bare_name():
+    with pytest.raises(ValidationError, match="must be absolute"):
+        SandboxConfig(extra_tmpfs=["secrets"])
+
+
+def test_sandbox_extra_tmpfs_rejects_relative_via_toml(tmp_path):
+    toml = tmp_path / "config.toml"
+    toml.write_text('[sandbox]\nextra_tmpfs = ["relative/path"]\n')
+    with pytest.raises(ValidationError, match="must be absolute"):
+        load_config(toml)
