@@ -22,6 +22,8 @@ _WHEEL_RE = re.compile(r".*\.whl$")
 _NPM_RE = re.compile(r".*\.tgz$")
 # Matches: {name}-{version}.dist-info  (version always starts with a digit)
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+# PEP 508: distribution names must start with a letter or digit
+_VALID_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9]")
 
 
 class _Handler(FileSystemEventHandler):
@@ -45,6 +47,9 @@ def _classify_distinfo_dir(path: Path) -> PackageEvent | None:
         return None
     # Normalize name per PEP 503
     name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+    if not _VALID_PKG_NAME_RE.match(name):
+        log.debug("Ignoring dist-info with invalid package name: %s", path.name)
+        return None
     version = m.group(2)
     log.debug("dist-info created: %s %s", name, version)
     return PackageEvent(
@@ -62,7 +67,7 @@ def _classify_file(path: Path) -> PackageEvent | None:
     name = path.name
     if _WHEEL_RE.match(name):
         info = parse_wheel_filename(path)
-        if info:
+        if info and _VALID_PKG_NAME_RE.match(info.name):
             return PackageEvent(
                 ecosystem="pypi",
                 package_name=info.name,
