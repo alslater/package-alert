@@ -7,7 +7,7 @@ import time
 import pytest
 from unittest.mock import patch, MagicMock
 from rich.console import Console
-from packagealert.cli.status import _format_uptime, _severity_label, gather_status, render_status, StatusData, AlertRow
+from packagealert.cli.status import _format_uptime, _severity_label, _started_by_systemd, gather_status, render_status, StatusData, AlertRow
 from packagealert.config import AppConfig
 from packagealert.storage.db import open_db
 
@@ -71,6 +71,23 @@ def test_format_uptime_zero():
     assert _format_uptime(0) == "0m"
 
 
+def test_started_by_systemd_true():
+    environ = b"PATH=/usr/bin\x00INVOCATION_ID=abc123\x00HOME=/root"
+    with patch("pathlib.Path.read_bytes", return_value=environ):
+        assert _started_by_systemd(1234) is True
+
+
+def test_started_by_systemd_false():
+    environ = b"PATH=/usr/bin\x00HOME=/root\x00TERM=xterm"
+    with patch("pathlib.Path.read_bytes", return_value=environ):
+        assert _started_by_systemd(1234) is False
+
+
+def test_started_by_systemd_oserror():
+    with patch("pathlib.Path.read_bytes", side_effect=OSError):
+        assert _started_by_systemd(1234) is False
+
+
 @pytest.mark.asyncio
 async def test_gather_status_daemon_running(mem_db, tmp_path):
     create_time = time.time() - 3600  # started 1 hour ago
@@ -80,6 +97,7 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
+        patch("packagealert.cli.status._started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -118,6 +136,7 @@ async def test_gather_status_daemon_running_via_process_scan(mem_db, tmp_path):
         patch("packagealert.cli.status.check_already_running", return_value=None),
         patch("packagealert.cli.status.psutil.process_iter", return_value=[mock_proc]),
         patch("packagealert.cli.status.psutil.Process") as mock_process_cls,
+        patch("packagealert.cli.status._started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -200,6 +219,7 @@ async def test_gather_status_psutil_access_denied(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
+        patch("packagealert.cli.status._started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -219,6 +239,7 @@ async def test_gather_status_psutil_zombie_process(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
+        patch("packagealert.cli.status._started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -302,6 +323,33 @@ def test_render_status_rich_running():
     assert "running" in output
     assert "99999" in output  # PID
     assert "2h 2m" in output  # uptime
+
+
+def test_render_status_rich_shows_systemd():
+    data = _make_status_data()
+    data.daemon_managed_by_systemd = True
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "via systemd" in output
+
+
+def test_render_status_rich_no_systemd_label_when_user_started():
+    data = _make_status_data()
+    data.daemon_managed_by_systemd = False
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "systemd" not in output
+
+
+def test_render_status_json_managed_by_systemd(capsys):
+    data = _make_status_data()
+    data.daemon_managed_by_systemd = True
+    render_status(data, as_json=True)
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["daemon"]["managed_by_systemd"] is True
 
 
 def test_render_status_rich_stopped():

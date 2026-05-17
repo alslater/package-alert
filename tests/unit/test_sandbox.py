@@ -16,6 +16,7 @@ from packagealert.sandbox.runner import (
     _collect_new_packages,
     _find_site_packages,
     _find_venv_root,
+    _has_ssh_vcs_deps,
     _home_ro_dirs,
     _new_composer_packages,
     _new_npm_packages,
@@ -267,6 +268,24 @@ class TestTryParse:
         assert result.manager == "pip"
         assert result.packages == []
 
+    def test_recognises_pipenv_sync(self):
+        result = _try_parse(["pipenv", "sync"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == []
+
+    def test_recognises_pipenv_install(self):
+        result = _try_parse(["pipenv", "install", "requests"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == ["requests"]
+
+    def test_recognises_pipenv_create(self):
+        result = _try_parse(["pipenv", "create"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == []
+
     def test_unknown_command_returns_none(self):
         assert _try_parse(["make", "build"]) is None
         assert _try_parse(["cargo", "build"]) is None
@@ -384,6 +403,37 @@ class TestResolveTargets:
         _resolve_targets(ctx)
         # site-packages is inside cwd, so it must NOT be added as a separate write_dir
         assert site_pkgs not in ctx.write_dirs
+
+    def test_pipenv_creates_venvs_dir_when_absent(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        assert not venvs_dir.exists()
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir.exists()
+        assert venvs_dir in ctx.write_dirs
+
+    def test_pipenv_adds_venvs_dir_when_already_exists(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        venvs_dir.mkdir()
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir in ctx.write_dirs
+
+    def test_pipenv_skips_venvs_dir_when_venv_in_project(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir not in ctx.write_dirs
+        assert not venvs_dir.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +574,45 @@ class TestFindVenvRoot:
         venv2 = tmp_path / "venv"
         site2 = self._make_venv(venv2)
         assert _find_venv_root([site1, site2]) == venv1
+
+
+class TestHasSshVcsDeps:
+    def test_detects_ssh_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+ssh://git@github.com/org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
+
+    def test_no_ssh_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["requests==2.31.0"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is False
+
+    def test_detects_ssh_in_pipfile_lock(self, tmp_path):
+        # Pipfile.lock stores VCS deps as {"git": "ssh://..."}, not "git+ssh://"
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"mylib": {"git": "ssh://git@bitbucket.org/org/repo", "ref": "abc123"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_no_ssh_in_pipfile_lock(self, tmp_path):
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"requests": {"version": "==2.31.0"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_detects_ssh_in_requirements_txt(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("requests==2.31.0\ngit+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_no_pipfile_lock_returns_false(self, tmp_path):
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_none_parsed_returns_false(self, tmp_path):
+        assert _has_ssh_vcs_deps(None, tmp_path) is False
+
+    def test_uv_lock_not_scanned(self, tmp_path):
+        # uv uses git+https, not git+ssh; uv.lock is not scanned
+        (tmp_path / "uv.lock").write_text("git+ssh://git@github.com/org/repo.git\n")
+        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
 
 
 class TestCheckVenvScope:

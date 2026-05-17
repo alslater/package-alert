@@ -241,7 +241,7 @@ def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     if subcmd in ("install", "sync"):
         packages = [a for a in args[1:] if not a.startswith("-")]
         return ParsedInstall(manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
-    if subcmd in ("graph", "check", "lock", "update", "upgrade", "requirements",
+    if subcmd in ("create", "graph", "check", "lock", "update", "upgrade", "requirements",
                   "verify", "run", "shell", "scripts", "open", "uninstall",
                   "clean", "envs"):
         return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=venv_exe)

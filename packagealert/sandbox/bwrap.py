@@ -35,13 +35,17 @@ def build_cmd(
     home = str(Path.home())
     cmd = [
         "bwrap",
-        "--ro-bind", "/", "/",   # entire fs read-only baseline
-        "--dev", "/dev",          # real device files
-        "--proc", "/proc",        # proc filesystem
-        "--tmpfs", "/tmp",        # fresh scratch space
-        "--tmpfs", home,          # hide home dir — blocks credential access
-        "--unshare-pid",          # isolated PID namespace
-        "--die-with-parent",      # clean up on parent exit
+        "--ro-bind", "/", "/",          # entire fs read-only baseline
+        "--dev", "/dev",                 # real device files
+        "--proc", "/proc",               # proc filesystem
+        "--tmpfs", "/tmp",               # fresh scratch space
+        "--tmpfs", home,                 # hide home dir — blocks credential access
+        "--tmpfs", "/etc/ssh/ssh_config.d",  # hide systemd SSH proxy entries whose
+                                             # root ownership appears as nobody inside
+                                             # bwrap's user namespace, causing SSH to
+                                             # reject them as insecure config files
+        "--unshare-pid",                 # isolated PID namespace
+        "--die-with-parent",             # clean up on parent exit
     ]
     for p in (home_ro_dirs or []):
         if p.exists():

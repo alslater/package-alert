@@ -26,9 +26,9 @@ app.add_typer(scans_app, name="scans")
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
 
-def _load(config: Optional[Path]):
+def _load(config: Optional[Path], *, daemon: bool = False):
     cfg = load_config(config)
-    configure_logging(cfg.log)
+    configure_logging(cfg.log if daemon else cfg.cli_log)
     return cfg
 
 
@@ -40,7 +40,7 @@ def daemon(config: Optional[Path] = _cfg_option):
     if existing_pid:
         console.print(f"[red]Daemon is already running (pid {existing_pid}). Exiting.[/red]")
         raise typer.Exit(1)
-    cfg = _load(config)
+    cfg = _load(config, daemon=True)
     d = Daemon(cfg)
     asyncio.run(d.run())
 
@@ -493,6 +493,10 @@ def run_cmd(
         help="Extra environment variable names to pass through into the sandbox. "
              "Repeatable: --env MY_TOKEN --env CUSTOM_REGISTRY_URL",
     ),
+    expose_ssh_keys: bool = typer.Option(
+        False, "--expose-ssh-keys",
+        help="Expose ~/.ssh read-only inside the sandbox (required for git+ssh:// VCS dependencies).",
+    ),
     config: Optional[Path] = _cfg_option,
 ):
     """Run a package manager command inside a bubblewrap sandbox.
@@ -528,7 +532,7 @@ def run_cmd(
     cfg = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
-    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env))
+    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys))
     raise typer.Exit(code)
 
 

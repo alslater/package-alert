@@ -20,6 +20,8 @@ ExpandedPath = Annotated[Path, BeforeValidator(_expand)]
 
 log = logging.getLogger(__name__)
 
+_SHARE_DIR = Path.home() / ".local" / "share" / "package-alert"
+
 
 
 
@@ -48,7 +50,7 @@ class AlertsConfig(BaseModel):
 
 class LogConfig(BaseModel):
     level: str = "INFO"
-    file: ExpandedPath | None = Path.home() / ".local" / "share" / "package-alert" / "package-alert.log"
+    file: ExpandedPath | None = None
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 3
 
@@ -75,7 +77,12 @@ class AppConfig(BaseModel):
     osv: OsvConfig = OsvConfig()
     watch: WatchConfig = WatchConfig()
     alerts: AlertsConfig = AlertsConfig()
-    log: LogConfig = LogConfig()
+    log: LogConfig = Field(
+        default_factory=lambda: LogConfig(file=_SHARE_DIR / "daemon.log")
+    )
+    cli_log: LogConfig = Field(
+        default_factory=lambda: LogConfig(file=_SHARE_DIR / "cli.log")
+    )
     heuristics: HeuristicsConfig = HeuristicsConfig()
     sandbox: SandboxConfig = SandboxConfig()
     scheduler: SchedulerConfig = SchedulerConfig()

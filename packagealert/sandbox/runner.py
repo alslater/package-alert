@@ -77,9 +77,9 @@ _SANDBOX_ENV: frozenset[str] = frozenset({
     "http_proxy", "https_proxy", "no_proxy",
     # SSL / TLS
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    # Git (uv may invoke git for VCS deps)
+    # Git (uv may invoke git for VCS deps; GIT_SSH_COMMAND set by --expose-ssh-keys)
     "GIT_CONFIG_GLOBAL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH_COMMAND",
 })
 
 
@@ -99,7 +99,7 @@ class SandboxRunner:
         self._cfg = cfg
         self._console = Console()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -118,6 +118,13 @@ class SandboxRunner:
         self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         if not self._check_venv_scope(parsed, cwd):
+            return 1
+
+        if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
+            self._console.print("[yellow]⚠ This install includes git+ssh:// VCS dependencies.[/yellow]")
+            self._console.print("[dim]SSH keys are not exposed in the sandbox by default.[/dim]")
+            self._console.print("[dim]Re-run with --expose-ssh-keys to allow SSH key access:[/dim]")
+            self._console.print(f"[dim]  package-alert run --expose-ssh-keys {' '.join(argv)}[/dim]")
             return 1
 
         if not await self._preflight(ctx):
@@ -146,7 +153,8 @@ class SandboxRunner:
         if parsed and parsed.manager in ("pip", "pipenv"):
             if "VIRTUAL_ENV" in sandbox_env:
                 venv_path: Path | None = Path(sandbox_env["VIRTUAL_ENV"])
-            else:
+            elif parsed.manager == "pip":
+                # Auto-detect project venv for bare pip, which cannot create its own.
                 venv_path = _find_venv_root(ctx.scan_targets)
                 if venv_path:
                     sandbox_env["VIRTUAL_ENV"] = str(venv_path)
@@ -156,6 +164,9 @@ class SandboxRunner:
                     self._console.print("[dim]Create one first:  python -m venv .venv  &&  source .venv/bin/activate[/dim]")
                     self._console.print("[dim]Or use uv:         package-alert run uv sync[/dim]")
                     return 1
+            else:
+                # pipenv manages its own virtualenv; don't inject VIRTUAL_ENV.
+                venv_path = None
             if venv_path and venv_path.exists():
                 # Prepend venv/bin to PATH so the sandbox resolves `pip` to the
                 # venv's own pip.  System pip runs under system Python where
@@ -169,6 +180,17 @@ class SandboxRunner:
         # home_ro: paths under cwd are already covered by the cwd write bind —
         # a more-specific ro-bind on any of them would silently shadow it.
         home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
+        if expose_ssh_keys:
+            ssh_dir = Path.home() / ".ssh"
+            if ssh_dir.exists():
+                home_ro.append(ssh_dir)
+            # Bypass system SSH config (which may have broken permissions on
+            # some systemd setups) and use only the user's ~/.ssh/config.
+            ssh_config = ssh_dir / "config"
+            if ssh_config.exists():
+                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {ssh_config}"
+            else:
+                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
@@ -288,9 +310,9 @@ class SandboxRunner:
         # pipenv-managed virtualenvs dir (outside the project unless PIPENV_VENV_IN_PROJECT)
         if (cwd / "Pipfile").exists() and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             pipenv_dir = _pipenv_venv_dir()
-            if pipenv_dir.exists():
-                write_dirs.append(pipenv_dir)
-                notes.append(f"pipenv venvs: {pipenv_dir}")
+            pipenv_dir.mkdir(parents=True, exist_ok=True)
+            write_dirs.append(pipenv_dir)
+            notes.append(f"pipenv venvs: {pipenv_dir}")
 
         # Writable package-manager caches so installs work from within the shell
         for cache_path in [
@@ -525,6 +547,33 @@ class SandboxRunner:
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
 
+def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
+    """Return True if the install involves git+ssh:// VCS dependencies.
+
+    Checks explicit packages on the command line, and for lock-file installs
+    scans Pipfile.lock (pipenv) or requirements*.txt (pip) for SSH VCS URLs.
+    Pipfile.lock stores them as {"git": "ssh://..."} while pip requirements
+    files use the git+ssh:// scheme — both are checked.
+    """
+    if parsed is None:
+        return False
+    if any("git+ssh://" in p for p in parsed.packages):
+        return True
+    candidates: list[Path] = []
+    if parsed.manager == "pipenv":
+        candidates.append(cwd / "Pipfile.lock")
+    elif parsed.manager == "pip":
+        candidates.extend(sorted(cwd.glob("requirements*.txt")))
+    for path in candidates:
+        try:
+            text = path.read_text(errors="replace")
+            if "git+ssh://" in text or "ssh://" in text:
+                return True
+        except OSError:
+            pass
+    return False
+
+
 def _find_venv_root(scan_targets: list[Path]) -> Path | None:
     """Return the virtualenv root inferred from the first pypi scan target.
 
@@ -651,11 +700,12 @@ def _resolve_targets(ctx: _Context) -> None:
             if cache.exists():
                 ctx.write_dirs.append(cache)
         # pipenv stores its managed venvs outside the project unless
-        # PIPENV_VENV_IN_PROJECT is set — make that directory writable.
+        # PIPENV_VENV_IN_PROJECT is set — make that directory writable, creating
+        # it if necessary so pipenv can write there on a fresh install.
         if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             venv_dir = _pipenv_venv_dir()
-            if venv_dir.exists():
-                ctx.write_dirs.append(venv_dir)
+            venv_dir.mkdir(parents=True, exist_ok=True)
+            ctx.write_dirs.append(venv_dir)
 
     elif eco == "npm":
         # node_modules lives under cwd, so it's already covered by the cwd bind
