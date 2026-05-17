@@ -70,11 +70,23 @@ def test_pip_install_editable_vcs_equals_form():
 
 
 def test_pip_install_editable_local_path_not_in_packages():
-    # Local paths are editable installs but not SSH VCS deps; they land in
-    # packages but _is_ssh_vcs_url will return False for them.
+    # Local path editables are dropped from packages so _preflight falls
+    # through to the lock-file scan rather than finding no OSV queries.
     result = parse_pip_args(["pip", "install", "-e", "."])
     assert result is not None
-    assert result.packages == ["."]
+    assert result.packages == []
+
+
+def test_pip_install_editable_absolute_path_not_in_packages():
+    result = parse_pip_args(["pip", "install", "-e", "/home/user/myproject"])
+    assert result is not None
+    assert result.packages == []
+
+
+def test_pip_install_editable_relative_path_not_in_packages():
+    result = parse_pip_args(["pip", "install", "--editable=../sibling"])
+    assert result is not None
+    assert result.packages == []
 
 
 def test_uv_add():
@@ -252,6 +264,31 @@ class TestCollectRequirementsPackages:
         # shared.txt is only processed once across both calls
         total = [p.name for p in pinned_a + pinned_b]
         assert total.count("requests") == 1
+
+    def test_scheme_vcs_url_not_recorded_as_package(self, tmp_path):
+        # git+https://... was matched by _UNPINNED_RE and recorded as name "git"
+        f = tmp_path / "reqs.txt"
+        f.write_text("git+https://github.com/org/repo.git\nrequests==2.31.0\n")
+        pinned, unpinned = collect_requirements_packages(f)
+        all_names = [p.name for p in pinned + unpinned]
+        assert "git" not in all_names
+        assert "requests" in [p.name for p in pinned]
+
+    def test_ssh_vcs_url_not_recorded_as_package(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("git+ssh://git@github.com/org/repo.git\nflask==3.0.0\n")
+        pinned, unpinned = collect_requirements_packages(f)
+        all_names = [p.name for p in pinned + unpinned]
+        assert "git" not in all_names
+        assert "flask" in [p.name for p in pinned]
+
+    def test_scp_style_vcs_not_recorded_as_package(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("git@github.com:org/repo.git\ndjango==4.2\n")
+        pinned, unpinned = collect_requirements_packages(f)
+        all_names = [p.name for p in pinned + unpinned]
+        assert "git" not in all_names
+        assert "django" in [p.name for p in pinned]
 
 
 # ---------------------------------------------------------------------------

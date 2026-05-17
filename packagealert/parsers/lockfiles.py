@@ -153,6 +153,8 @@ def _parse_composer_json(path: Path) -> tuple[list[LockedPackage], list[LockedPa
 
 _PINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
 _UNPINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)")
+# Scp-style VCS ref: git@host:path (colon not slash after hostname).
+_SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
 
 def scan_installed(root: Path) -> ProjectScan:
@@ -283,6 +285,10 @@ def collect_requirements_packages(
             unpinned.extend(u)
             continue
         if line.startswith("-"):
+            continue
+        # Skip VCS URLs — scheme-based (git+https://, git+ssh://, etc.) and scp-style
+        # (git@host:path). _UNPINNED_RE would otherwise extract "git" as a package name.
+        if "://" in line or line.startswith(("git+", "hg+", "svn+", "bzr+")) or _SCP_VCS_RE.match(line):
             continue
         m = _PINNED_RE.match(line)
         if m:

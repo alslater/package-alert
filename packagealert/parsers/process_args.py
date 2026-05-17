@@ -10,6 +10,20 @@ _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
 _SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
 
+def _is_vcs_editable(s: str) -> bool:
+    """Return True if an -e/--editable value is a VCS URL, not a local path.
+
+    Only VCS editables are relevant for SSH detection and OSV pre-flight.
+    Local paths (., .., /abs, relative/) keep packages[] empty so the
+    lock-file fallback in _preflight still runs.
+    """
+    return (
+        "://" in s
+        or s.startswith(("git+", "hg+", "svn+", "bzr+"))
+        or bool(_SCP_VCS_RE.match(s))
+    )
+
+
 @dataclass
 class ParsedInstall:
     manager: str
@@ -167,7 +181,8 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
             if skip_value_for in ("-r", "--requirement"):
                 req_files.append(arg)
             elif skip_value_for in ("-e", "--editable"):
-                packages.append(arg)
+                if _is_vcs_editable(arg):
+                    packages.append(arg)
             skip_value_for = None
             continue
         if arg in ("-r", "--requirement"):
@@ -183,7 +198,9 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
             skip_value_for = arg
             continue
         if arg.startswith("--editable="):
-            packages.append(arg[len("--editable="):])
+            val = arg[len("--editable="):]
+            if _is_vcs_editable(val):
+                packages.append(val)
             continue
         if arg in ("-c", "--constraint",
                    "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
