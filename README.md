@@ -1,6 +1,6 @@
 # package-alert
 
-**package-alert** monitors Python, Node.js, and PHP package installations in real time and alerts developers when a malicious or suspicious package is detected.
+**package-alert** monitors Python, Node.js, and PHP package installations in real time and alerts developers when a malicious or suspicious package is detected. It can also run package manager commands inside an isolated bubblewrap sandbox with pre-flight and post-install OSV checks, scan project lock files or installed environments on demand, and schedule automatic daily or weekly scans across multiple projects.
 
 ## Features
 
