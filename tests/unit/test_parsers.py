@@ -176,6 +176,31 @@ def test_uv_pip_install_editable_vcs_included():
     assert result.packages == ["git+ssh://git@github.com/org/repo.git"]
 
 
+def test_pip_config_settings_value_not_treated_as_package():
+    # --config-settings editable_mode=strict must not be parsed as a package spec
+    result = parse_pip_args([
+        "pip", "install", "-e", "../../libs/graph",
+        "--config-settings", "editable_mode=strict",
+    ])
+    assert result is not None
+    assert result.packages == []
+
+
+def test_pip_config_settings_short_flag_not_treated_as_package():
+    result = parse_pip_args(["pip", "install", "requests", "-C", "editable_mode=compat"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+
+def test_uv_pip_install_config_settings_value_not_treated_as_package():
+    result = parse_uv_args([
+        "uv", "pip", "install", "-e", "../../libs/graph",
+        "--config-settings", "editable_mode=strict",
+    ])
+    assert result is not None
+    assert result.packages == []
+
+
 def test_pip_full_path_recognized():
     result = parse_pip_args(["/home/user/.venv/bin/pip", "install", "requests"])
     assert result is not None

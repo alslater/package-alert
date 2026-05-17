@@ -75,3 +75,43 @@ async def test_returns_empty_on_persistent_failure(osv_client):
     results = await osv_client.batch_query([("pypi", "pkg", "1.0")])
     assert len(results) == 1
     assert results[0].has_malicious is False
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fixed_versions_populated_from_enrich(osv_client):
+    # The /querybatch response only includes id+modified; fixed_versions must be
+    # extracted from the full advisory fetched during _enrich.
+    batch_response = {
+        "results": [
+            {"vulns": [{"id": "GHSA-test-1234-abcd", "modified": "2025-01-01T00:00:00Z"}]}
+        ]
+    }
+    full_advisory = {
+        "id": "GHSA-test-1234-abcd",
+        "summary": "Test vuln",
+        "database_specific": {"severity": "HIGH"},
+        "aliases": [],
+        "affected": [
+            {
+                "package": {"name": "twisted", "ecosystem": "PyPI"},
+                "ranges": [
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [{"introduced": "0"}, {"fixed": "26.4.0rc2"}],
+                    }
+                ],
+            }
+        ],
+    }
+    respx.post("https://api.osv.dev/v1/querybatch").mock(
+        return_value=httpx.Response(200, json=batch_response)
+    )
+    respx.get("https://api.osv.dev/v1/vulns/GHSA-test-1234-abcd").mock(
+        return_value=httpx.Response(200, json=full_advisory)
+    )
+
+    results = await osv_client.batch_query([("pypi", "twisted", "25.5.0")])
+    assert len(results) == 1
+    adv = results[0].advisories[0]
+    assert adv.fixed_versions == ["26.4.0rc2"]

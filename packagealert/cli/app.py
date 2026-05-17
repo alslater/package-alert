@@ -229,6 +229,7 @@ def scan_project(
     path: Path = typer.Argument(Path("."), help="Project directory to scan."),
     scan_unpinned: bool = typer.Option(False, "--scan-unpinned", help="Query OSV for unpinned dependencies too."),
     scan_installed: bool = typer.Option(False, "--scan-installed", help="Scan venv/.venv or node_modules instead of lock files."),
+    requirements: Optional[Path] = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html."),
     config: Optional[Path] = _cfg_option,
@@ -237,18 +238,39 @@ def scan_project(
     if fmt not in ("text", "json", "html", "browser"):
         console.print("[red]--format must be one of: text, json, html, browser[/red]")
         raise typer.Exit(1)
+    if requirements is not None and not requirements.exists():
+        console.print(f"[red]Requirements file not found: {requirements}[/red]")
+        raise typer.Exit(1)
     cfg = _load(config)
-    asyncio.run(_run_scan_project(cfg, path.resolve(), scan_unpinned, scan_installed, details, fmt))
+    asyncio.run(_run_scan_project(cfg, path.resolve(), scan_unpinned, scan_installed, details, fmt, requirements=requirements))
 
 
-async def _run_scan_project(cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str):
+async def _run_scan_project(
+    cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str,
+    requirements: Optional[Path] = None,
+):
     import json as jsonlib
     from packagealert.osv.client import OsvClient
     from packagealert.osv.cache import OsvCache
     from packagealert.storage.db import open_db
-    from packagealert.parsers.lockfiles import scan_project as detect_project, scan_installed as detect_installed
+    from packagealert.parsers.lockfiles import (
+        scan_project as detect_project,
+        scan_installed as detect_installed,
+        collect_requirements_packages,
+        ProjectScan,
+    )
 
-    result = detect_installed(root) if installed else detect_project(root)
+    if requirements is not None:
+        pinned, unpinned = collect_requirements_packages(requirements.resolve())
+        result = ProjectScan(
+            sources=[f"pypi ({requirements.name})"],
+            pinned=pinned,
+            unpinned=unpinned,
+        )
+    elif installed:
+        result = detect_installed(root)
+    else:
+        result = detect_project(root)
 
     if not result.sources:
         console.print(f"[yellow]No supported lock files found in {root}[/yellow]")
