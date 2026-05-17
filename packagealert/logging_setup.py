@@ -9,16 +9,17 @@ from rich.logging import RichHandler
 from packagealert.config import LogConfig
 
 
-def configure_logging(cfg: LogConfig) -> None:
+def configure_logging(cfg: LogConfig, *, verbose: bool = True) -> None:
     handlers: list[logging.Handler] = []
 
-    rich_handler = RichHandler(
-        rich_tracebacks=True,
-        markup=True,
-        show_path=False,
-    )
-    rich_handler.setLevel(cfg.level)
-    handlers.append(rich_handler)
+    if verbose:
+        rich_handler = RichHandler(
+            rich_tracebacks=True,
+            markup=True,
+            show_path=False,
+        )
+        rich_handler.setLevel(cfg.level)
+        handlers.append(rich_handler)
 
     if cfg.file:
         cfg.file.parent.mkdir(parents=True, exist_ok=True)

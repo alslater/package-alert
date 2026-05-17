@@ -25,10 +25,18 @@ app.add_typer(scans_app, name="scans")
 
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
+_verbose: bool = False
+
+
+@app.callback()
+def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log output on the console.")):
+    global _verbose
+    _verbose = verbose
+
 
 def _load(config: Optional[Path], *, daemon: bool = False):
     cfg = load_config(config)
-    configure_logging(cfg.log if daemon else cfg.cli_log)
+    configure_logging(cfg.log if daemon else cfg.cli_log, verbose=_verbose)
     return cfg
 
 
