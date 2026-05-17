@@ -5,20 +5,23 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
 
 def _expand(v: object) -> object:
     if isinstance(v, str):
-        return Path(v).expanduser()
+        return None if v == "" else Path(v).expanduser()
     if isinstance(v, Path):
         return v.expanduser()
     return v
 
 
 ExpandedPath = Annotated[Path, BeforeValidator(_expand)]
+NullableExpandedPath = Annotated[Path | None, BeforeValidator(_expand)]
 
 log = logging.getLogger(__name__)
+
+_SHARE_DIR = Path.home() / ".local" / "share" / "package-alert"
 
 
 
@@ -48,9 +51,17 @@ class AlertsConfig(BaseModel):
 
 class LogConfig(BaseModel):
     level: str = "INFO"
-    file: ExpandedPath | None = Path.home() / ".local" / "share" / "package-alert" / "package-alert.log"
+    file: NullableExpandedPath = None
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 3
+
+
+class DaemonLogConfig(LogConfig):
+    file: NullableExpandedPath = _SHARE_DIR / "daemon.log"
+
+
+class CliLogConfig(LogConfig):
+    file: NullableExpandedPath = _SHARE_DIR / "cli.log"
 
 
 class HeuristicsConfig(BaseModel):
@@ -61,6 +72,18 @@ class HeuristicsConfig(BaseModel):
 
 class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
+    extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
+
+    @field_validator("extra_tmpfs")
+    @classmethod
+    def _extra_tmpfs_must_be_absolute(cls, paths: list[Path]) -> list[Path]:
+        for p in paths:
+            if not p.is_absolute():
+                raise ValueError(
+                    f"sandbox.extra_tmpfs paths must be absolute (got '{p}'). "
+                    "bwrap --tmpfs requires an absolute mount target."
+                )
+        return paths
 
 
 class SchedulerConfig(BaseModel):
@@ -75,7 +98,8 @@ class AppConfig(BaseModel):
     osv: OsvConfig = OsvConfig()
     watch: WatchConfig = WatchConfig()
     alerts: AlertsConfig = AlertsConfig()
-    log: LogConfig = LogConfig()
+    log: DaemonLogConfig = Field(default_factory=DaemonLogConfig)
+    cli_log: CliLogConfig = Field(default_factory=CliLogConfig)
     heuristics: HeuristicsConfig = HeuristicsConfig()
     sandbox: SandboxConfig = SandboxConfig()
     scheduler: SchedulerConfig = SchedulerConfig()

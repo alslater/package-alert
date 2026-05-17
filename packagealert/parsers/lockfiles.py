@@ -153,6 +153,8 @@ def _parse_composer_json(path: Path) -> tuple[list[LockedPackage], list[LockedPa
 
 _PINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
 _UNPINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)")
+# Scp-style VCS ref: git@host:path (colon not slash after hostname).
+_SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
 
 def scan_installed(root: Path) -> ProjectScan:
@@ -235,23 +237,68 @@ def _scan_node_modules(node_modules: Path) -> list[LockedPackage]:
     return results
 
 
-def _parse_requirements_txt(path: Path) -> tuple[list[LockedPackage], list[LockedPackage]]:
+def _req_include(line: str) -> str | None:
+    """Return the included path if *line* is a -r/--requirement directive, else None."""
+    if line.startswith("--requirement="):
+        return line[len("--requirement="):]
+    if line.startswith("--requirement "):
+        return line[len("--requirement "):].lstrip()
+    if line.startswith("-r") and len(line) > 2 and not line[2:].startswith("-"):
+        return line[2:].lstrip()
+    if line.startswith("-r "):
+        return line[3:].lstrip()
+    return None
+
+
+def collect_requirements_packages(
+    path: Path,
+    visited: set[Path] | None = None,
+) -> tuple[list[LockedPackage], list[LockedPackage]]:
+    """Parse *path* and all transitively included requirement files.
+
+    Returns ``(pinned, unpinned)`` combining results from all included files.
+    *visited* prevents re-processing files and breaks cycles.
+    """
+    if visited is None:
+        visited = set()
+    path = path.resolve()
+    if path in visited:
+        return [], []
+    visited.add(path)
+
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     try:
-        for raw in path.read_text().splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or line.startswith("-"):
-                continue
-            # strip inline comments
-            line = line.split("#")[0].strip()
-            m = _PINNED_RE.match(line)
-            if m:
-                pinned.append(LockedPackage(name=m.group(1), version=m.group(2), ecosystem="pypi"))
-                continue
-            m = _UNPINNED_RE.match(line)
-            if m:
-                unpinned.append(LockedPackage(name=m.group(1), version=None, ecosystem="pypi"))
-    except Exception:
-        pass
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return pinned, unpinned
+
+    base = path.parent
+    for raw in lines:
+        line = raw.split("#")[0].strip()
+        if not line:
+            continue
+        include = _req_include(line)
+        if include:
+            p, u = collect_requirements_packages(base / include, visited)
+            pinned.extend(p)
+            unpinned.extend(u)
+            continue
+        if line.startswith("-"):
+            continue
+        # Skip VCS URLs — scheme-based (git+https://, git+ssh://, etc.) and scp-style
+        # (git@host:path). _UNPINNED_RE would otherwise extract "git" as a package name.
+        if "://" in line or line.startswith(("git+", "hg+", "svn+", "bzr+")) or _SCP_VCS_RE.match(line):
+            continue
+        m = _PINNED_RE.match(line)
+        if m:
+            pinned.append(LockedPackage(name=m.group(1), version=m.group(2), ecosystem="pypi"))
+            continue
+        m = _UNPINNED_RE.match(line)
+        if m:
+            unpinned.append(LockedPackage(name=m.group(1), version=None, ecosystem="pypi"))
     return pinned, unpinned
+
+
+def _parse_requirements_txt(path: Path) -> tuple[list[LockedPackage], list[LockedPackage]]:
+    return collect_requirements_packages(path)

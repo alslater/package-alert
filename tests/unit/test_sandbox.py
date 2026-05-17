@@ -6,6 +6,7 @@ are pure functions (no I/O, no async, no OSV calls).
 from __future__ import annotations
 
 import json
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -14,8 +15,12 @@ from packagealert.sandbox.bwrap import build_cmd
 from packagealert.sandbox.runner import (
     SandboxRunner,
     _collect_new_packages,
+    _find_pipenv_venv,
     _find_site_packages,
     _find_venv_root,
+    _has_ssh_vcs_deps,
+    _is_ssh_vcs_url,
+    _req_file_has_ssh,
     _home_ro_dirs,
     _new_composer_packages,
     _new_npm_packages,
@@ -267,6 +272,46 @@ class TestTryParse:
         assert result.manager == "pip"
         assert result.packages == []
 
+    def test_recognises_pipenv_sync(self):
+        result = _try_parse(["pipenv", "sync"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == []
+
+    def test_recognises_pipenv_install(self):
+        result = _try_parse(["pipenv", "install", "requests"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == ["requests"]
+
+    def test_recognises_pipenv_create(self):
+        result = _try_parse(["pipenv", "create"])
+        assert result is not None
+        assert result.manager == "pipenv"
+        assert result.packages == []
+
+    def test_pip_install_r_collects_req_files(self):
+        result = _try_parse(["pip", "install", "-r", "requirements.txt", "-r", "dev.txt"])
+        assert result is not None
+        assert result.manager == "pip"
+        assert result.packages == []
+        assert result.req_files == ["requirements.txt", "dev.txt"]
+
+    def test_pip_install_r_long_flag_collects_req_files(self):
+        result = _try_parse(["pip", "install", "--requirement", "reqs/base.txt"])
+        assert result is not None
+        assert result.req_files == ["reqs/base.txt"]
+
+    def test_pip_install_r_inline_concatenated(self):
+        result = _try_parse(["pip", "install", "-rcustom.txt"])
+        assert result is not None
+        assert result.req_files == ["custom.txt"]
+
+    def test_pip_install_requirement_equals_form(self):
+        result = _try_parse(["pip", "install", "--requirement=custom.txt"])
+        assert result is not None
+        assert result.req_files == ["custom.txt"]
+
     def test_unknown_command_returns_none(self):
         assert _try_parse(["make", "build"]) is None
         assert _try_parse(["cargo", "build"]) is None
@@ -384,6 +429,92 @@ class TestResolveTargets:
         _resolve_targets(ctx)
         # site-packages is inside cwd, so it must NOT be added as a separate write_dir
         assert site_pkgs not in ctx.write_dirs
+
+    def test_pipenv_creates_venvs_dir_when_absent(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        assert not venvs_dir.exists()
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir.exists()
+        assert venvs_dir in ctx.write_dirs
+
+    def test_pipenv_adds_venvs_dir_when_already_exists(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        venvs_dir.mkdir()
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir in ctx.write_dirs
+
+    def test_pipenv_skips_venvs_dir_when_venv_in_project(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        _resolve_targets(ctx)
+        assert venvs_dir not in ctx.write_dirs
+        assert not venvs_dir.exists()
+
+    def test_pipenv_adds_existing_venv_site_packages_to_scan_targets(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        venv = venvs_dir / "myproject-abc123"
+        site_pkgs = venv / "lib" / "python3.12" / "site-packages"
+        site_pkgs.mkdir(parents=True)
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        with unittest.mock.patch(
+            "packagealert.sandbox.runner._find_pipenv_venv", return_value=venv
+        ):
+            _resolve_targets(ctx)
+        assert site_pkgs in ctx.scan_targets
+
+    def test_pipenv_no_scan_target_when_venv_not_yet_created(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        with unittest.mock.patch(
+            "packagealert.sandbox.runner._find_pipenv_venv", return_value=None
+        ):
+            _resolve_targets(ctx)
+        # No scan targets yet — the post-install fallback will find them after creation
+        assert ctx.scan_targets == []
+
+
+class TestFindPipenvVenv:
+    def test_returns_path_when_pipenv_succeeds(self, tmp_path):
+        venv = tmp_path / "myproject-abc123"
+        venv.mkdir()
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout=str(venv) + "\n")
+            result = _find_pipenv_venv(tmp_path)
+        assert result == venv
+
+    def test_returns_none_when_venv_does_not_exist(self, tmp_path):
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="/nonexistent/path\n")
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
+
+    def test_returns_none_when_pipenv_fails(self, tmp_path):
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=1, stdout="")
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
+
+    def test_returns_none_when_pipenv_not_installed(self, tmp_path):
+        with unittest.mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -524,6 +655,201 @@ class TestFindVenvRoot:
         venv2 = tmp_path / "venv"
         site2 = self._make_venv(venv2)
         assert _find_venv_root([site1, site2]) == venv1
+
+
+class TestReqFileHasSsh:
+    def test_direct_ssh_url(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("git+ssh://git@github.com/org/lib.git\n")
+        assert _req_file_has_ssh(f, set()) is True
+
+    def test_nested_include_detected(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("requests==2.31.0\n-r inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_long_flag(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git@github.com:org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("--requirement inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_equals_form(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("--requirement=inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_concatenated_form(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("-rinner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_no_ssh_in_any_file(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("flask==3.0.0\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("requests==2.31.0\n-r inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
+    def test_commented_out_ssh_url_is_not_a_false_positive(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("# git+ssh://git@github.com/org/lib.git\nrequests==2.31.0\n")
+        assert _req_file_has_ssh(f, set()) is False
+
+    def test_inline_comment_does_not_trigger(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("requests==2.31.0  # was: git+ssh://git@github.com/org/lib.git\n")
+        assert _req_file_has_ssh(f, set()) is False
+
+    def test_commented_include_not_followed(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("# -r inner.txt\nrequests==2.31.0\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
+    def test_cycle_protection(self, tmp_path):
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("-r b.txt\n")
+        b.write_text("-r a.txt\n")
+        assert _req_file_has_ssh(a, set()) is False
+
+    def test_missing_include_is_skipped(self, tmp_path):
+        outer = tmp_path / "outer.txt"
+        outer.write_text("-r nonexistent.txt\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
+    def test_subdirectory_relative_resolution(self, tmp_path):
+        subdir = tmp_path / "requirements"
+        subdir.mkdir()
+        base = subdir / "base.txt"
+        base.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "requirements.txt"
+        outer.write_text("-r requirements/base.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+
+class TestHasSshVcsDeps:
+    def test_detects_ssh_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+ssh://git@github.com/org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
+
+    def test_no_ssh_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["requests==2.31.0"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is False
+
+    def test_detects_ssh_in_pipfile_lock(self, tmp_path):
+        # Pipfile.lock stores VCS deps as {"git": "ssh://..."}, not "git+ssh://"
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"mylib": {"git": "ssh://git@bitbucket.org/org/repo", "ref": "abc123"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_no_ssh_in_pipfile_lock(self, tmp_path):
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"requests": {"version": "==2.31.0"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_detects_ssh_in_requirements_txt(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("requests==2.31.0\ngit+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_no_pipfile_lock_returns_false(self, tmp_path):
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_none_parsed_returns_false(self, tmp_path):
+        assert _has_ssh_vcs_deps(None, tmp_path) is False
+
+    def test_detects_ssh_in_explicit_req_file(self, tmp_path):
+        (tmp_path / "custom.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["custom.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_explicit_req_file_supersedes_glob(self, tmp_path):
+        # requirements.txt has SSH dep but the explicitly named file does not —
+        # only the -r file should be scanned, not the glob.
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        (tmp_path / "clean.txt").write_text("requests==2.31.0\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["clean.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_uv_lock_not_scanned(self, tmp_path):
+        # uv uses git+https, not git+ssh; uv.lock is not scanned
+        (tmp_path / "uv.lock").write_text("git+ssh://git@github.com/org/repo.git\n")
+        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_explicit_packages_do_not_trigger_glob_scan(self, tmp_path):
+        # `pip install requests` must not be blocked because an unrelated
+        # requirements.txt in the project happens to contain an SSH URL.
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=["requests"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_detects_scp_style_in_explicit_packages(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+git@github.com:org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
+
+    def test_detects_bare_scp_style_in_requirements_txt(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+git@github.com:org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_detects_scp_style_in_pipfile_lock(self, tmp_path):
+        # Pipfile.lock scp-style: {"git": "git@github.com:org/repo.git"}
+        (tmp_path / "Pipfile.lock").write_text('{"default": {"mylib": {"git": "git@github.com:org/repo.git", "ref": "main"}}}')
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_detects_ssh_in_editable_install(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+ssh://git@github.com/org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
+
+    def test_uv_pip_install_r_detects_ssh(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_uv_pip_install_r_no_ssh(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_uv_bare_install_scans_glob(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+
+class TestIsSshVcsUrl:
+    @pytest.mark.parametrize("url", [
+        "git+ssh://git@github.com/org/repo.git",
+        "ssh://git@github.com/org/repo.git",
+        "git+git@github.com:org/repo.git",
+        "git@github.com:org/repo.git",
+    ])
+    def test_ssh_patterns_detected(self, url):
+        assert _is_ssh_vcs_url(url) is True
+
+    @pytest.mark.parametrize("url", [
+        "https://github.com/org/repo.git",
+        "git+https://github.com/org/repo.git",
+        # HTTPS URL with git@ username — NOT SSH (slash after host, not colon)
+        "git+https://git@github.com/org/repo.git",
+        "requests==2.31.0",
+        "",
+    ])
+    def test_non_ssh_patterns_not_detected(self, url):
+        assert _is_ssh_vcs_url(url) is False
 
 
 class TestCheckVenvScope:
@@ -817,3 +1143,88 @@ class TestRunShell:
             if tok == "--setenv"
         }
         assert str(nm_bin) in setenv_pairs.get("PATH", "")
+
+
+class TestExposeSSHKeysConfirmation:
+    def _setup(self, monkeypatch):
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+
+    def test_confirms_before_proceeding(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=True) as mock_ask:
+            runner = _make_runner()
+            asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
+        mock_ask.assert_called_once()
+        assert "SSH" in mock_ask.call_args[0][0] or "ssh" in mock_ask.call_args[0][0].lower()
+
+    def test_aborts_when_user_declines(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=False):
+            runner = _make_runner()
+            rc = asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
+        assert rc == 1
+
+    def test_no_prompt_without_flag(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        with unittest.mock.patch("rich.prompt.Confirm.ask") as mock_ask:
+            runner = _make_runner()
+            asyncio.run(runner.run(["bash"], expose_ssh_keys=False))
+        mock_ask.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _preflight — unpinned requirements included in OSV queries
+# ---------------------------------------------------------------------------
+
+class TestPreflightUnpinnedRequirements:
+    """_preflight must query OSV for unpinned packages from -r files, not just pinned."""
+
+    def test_unpinned_req_included_in_osv_query(self, tmp_path):
+        import asyncio
+
+        req = tmp_path / "requirements.txt"
+        req.write_text("requests==2.31.0\nflask\n")  # flask is unpinned
+
+        seen_queries: list = []
+
+        async def fake_open_db():
+            return unittest.mock.AsyncMock()
+
+        class FakeCache:
+            def __init__(self, db, cfg): pass
+            async def get(self, ecosystem, name, version):
+                seen_queries.append((ecosystem, name, version))
+                return None
+            async def set(self, *a): pass
+
+        class FakeClient:
+            def __init__(self, cfg): pass
+            async def batch_query(self, queries):
+                return [None] * len(queries)
+            async def aclose(self): pass
+
+        parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        ctx = _Context(argv=["pip", "install", "-r", "requirements.txt"], cwd=tmp_path, parsed=parsed)
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+        queried_names = {name for _, name, _ in seen_queries}
+        assert "requests" in queried_names
+        assert "flask" in queried_names  # was silently skipped before the fix

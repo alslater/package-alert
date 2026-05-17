@@ -51,7 +51,7 @@ package-alert is an asyncio daemon with two independent detection pipelines feed
 |--------|---------------|
 | `monitors/process.py` | Poll `psutil` for new pip/uv/npm processes, parse args |
 | `monitors/cache.py` | Watch cache dirs with watchdog, classify new files |
-| `parsers/process_args.py` | Parse CLI args into package name/version |
+| `parsers/process_args.py` | Parse CLI args into package name/version; collects `-r` req file paths |
 | `parsers/wheel.py` | PEP 427 filename parsing, METADATA extraction |
 | `parsers/npm.py` | Static package.json + tarball inspection |
 | `osv/client.py` | Async OSV batch API with retries |
@@ -64,7 +64,11 @@ package-alert is an asyncio daemon with two independent detection pipelines feed
 | `alerts/desktop.py` | notify-send desktop notifications |
 | `storage/db.py` | aiosqlite schema and queries |
 | `daemon.py` | asyncio orchestrator, signal handling |
-| `cli/app.py` | Typer CLI commands |
+| `cli/app.py` | Typer CLI commands, log config routing (daemon vs. CLI log) |
+| `cli/status.py` | Daemon state gathering and rendering |
+| `sandbox/runner.py` | bubblewrap sandbox orchestration, SSH VCS detection |
+| `sandbox/bwrap.py` | bwrap command builder with layered mount strategy |
+| `config.py` | Pydantic config models; `DaemonLogConfig`/`CliLogConfig` with separate defaults |
 
 ## Data Flow
 

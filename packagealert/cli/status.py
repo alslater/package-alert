@@ -43,6 +43,7 @@ class StatusData:
     recent_alerts: list[AlertRow] = field(default_factory=list)
     # projects
     scheduled_projects_count: int = 0
+    daemon_managed_by_systemd: bool = False
     # paths
     pid_file_path: str = ""
     pid_file_exists: bool = False
@@ -50,6 +51,8 @@ class StatusData:
     db_exists: bool = False
     log_path: str = ""
     log_exists: bool = False
+    cli_log_path: str = ""
+    cli_log_exists: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +60,7 @@ class StatusData:
                 "running": self.daemon_running,
                 "pid": self.daemon_pid,
                 "uptime_seconds": self.daemon_uptime_seconds,
+                "managed_by_systemd": self.daemon_managed_by_systemd,
             },
             "config": {
                 "path": self.config_path,
@@ -85,7 +89,8 @@ class StatusData:
             "paths": {
                 "pid_file": {"path": self.pid_file_path, "exists": self.pid_file_exists},
                 "database": {"path": self.db_path, "exists": self.db_exists},
-                "log_file": {"path": self.log_path, "exists": self.log_exists},
+                "daemon_log": {"path": self.log_path, "exists": self.log_exists},
+                "cli_log": {"path": self.cli_log_path, "exists": self.cli_log_exists},
             },
         }
 
@@ -105,6 +110,15 @@ def _severity_label(
     if risk_score >= warning_threshold:
         return "MEDIUM"
     return "LOW"
+
+
+def _started_by_systemd(pid: int) -> bool:
+    """Return True if the process has INVOCATION_ID in its environment (set by systemd)."""
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+        return b"INVOCATION_ID=" in environ
+    except OSError:
+        return False
 
 
 def _format_uptime(seconds: float | None) -> str:
@@ -146,9 +160,10 @@ def render_status(
     console.print("[bold]Daemon[/bold]")
     if data.daemon_running:
         uptime_str = _format_uptime(data.daemon_uptime_seconds)
+        manager = ", via systemd" if data.daemon_managed_by_systemd else ""
         console.print(
             f"  Status:   [green]running[/green]"
-            f"  (PID {data.daemon_pid}, up {uptime_str})"
+            f"  (PID {data.daemon_pid}, up {uptime_str}{manager})"
         )
     else:
         console.print("  Status:   [red]stopped[/red]")
@@ -179,6 +194,21 @@ def render_status(
             )
     else:
         console.print("  [dim]No alerts in the last 7 days.[/dim]")
+
+    console.print()
+
+    # ── Logs ──────────────────────────────────────────────────────────────────
+    console.print("[bold]Logs[/bold]")
+
+    def _log_line(label: str, path: str, exists: bool) -> None:
+        if not path:
+            console.print(f"  {label}: [dim]disabled[/dim]")
+        else:
+            indicator = "[green]✓[/green]" if exists else "[dim]✗ not yet created[/dim]"
+            console.print(f"  {label}: {escape(path)}  {indicator}")
+
+    _log_line("Daemon", data.log_path, data.log_exists)
+    _log_line("CLI   ", data.cli_log_path, data.cli_log_exists)
 
     console.print()
 
@@ -223,6 +253,7 @@ async def gather_status(
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
+    managed_by_systemd = _started_by_systemd(pid) if pid is not None else False
     uptime: float | None = None
     if pid is not None:
         try:
@@ -236,6 +267,10 @@ async def gather_status(
     log_path = cfg.log.file
     log_path_str = str(log_path) if log_path else ""
     log_exists = log_path.exists() if log_path else False
+
+    cli_log_path = cfg.cli_log.file
+    cli_log_path_str = str(cli_log_path) if cli_log_path else ""
+    cli_log_exists = cli_log_path.exists() if cli_log_path else False
 
     # ── DB queries ────────────────────────────────────────────────────────────
     alerts_count = 0
@@ -303,6 +338,7 @@ async def gather_status(
         daemon_running=pid is not None,
         daemon_pid=pid,
         daemon_uptime_seconds=uptime,
+        daemon_managed_by_systemd=managed_by_systemd,
         config_path=resolved_cfg_path,
         cache_monitoring=cfg.watch.enable_cache_monitoring,
         process_monitoring=cfg.watch.enable_process_monitoring,
@@ -316,4 +352,6 @@ async def gather_status(
         db_exists=db_exists,
         log_path=log_path_str,
         log_exists=log_exists,
+        cli_log_path=cli_log_path_str,
+        cli_log_exists=cli_log_exists,
     )

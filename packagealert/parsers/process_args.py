@@ -6,6 +6,22 @@ from pathlib import Path
 
 # Matches the leading PEP 508 distribution name (letters, digits, hyphens, underscores, dots).
 _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
+# Matches scp-style VCS refs: git@host:path (colon, not slash, after hostname).
+_SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
+
+
+def _is_vcs_editable(s: str) -> bool:
+    """Return True if an -e/--editable value is a VCS URL, not a local path.
+
+    Only VCS editables are relevant for SSH detection and OSV pre-flight.
+    Local paths (., .., /abs, relative/) keep packages[] empty so the
+    lock-file fallback in _preflight still runs.
+    """
+    return (
+        "://" in s
+        or s.startswith(("git+", "hg+", "svn+", "bzr+"))
+        or bool(_SCP_VCS_RE.match(s))
+    )
 
 
 @dataclass
@@ -14,6 +30,7 @@ class ParsedInstall:
     packages: list[str] = field(default_factory=list)
     ecosystem: str = "pypi"
     venv_exe: str | None = None  # path used to derive site-packages
+    req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -53,8 +70,13 @@ def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
 def _parse_pip_spec(spec: str) -> tuple[str, str | None]:
     # Strip PEP 508 environment markers (everything after the first ';')
     spec = spec.partition(";")[0].strip()
-    # Reject local paths, VCS URLs, and direct URLs before touching the name
-    if spec.startswith((".", "/")) or "://" in spec or spec.startswith(("git+", "hg+", "svn+", "bzr+", "file:")):
+    # Reject local paths, VCS URLs (scheme-based and scp-style), and direct URLs
+    if (
+        spec.startswith((".", "/"))
+        or "://" in spec
+        or spec.startswith(("git+", "hg+", "svn+", "bzr+", "file:"))
+        or _SCP_VCS_RE.match(spec)
+    ):
         return "", None
     m = _PIP_NAME_RE.match(spec)
     if not m:
@@ -151,24 +173,44 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         return ParsedInstall(manager="pip", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     if subcmd != "install":
         return None
-    packages = []
-    skip_next = False
+    packages: list[str] = []
+    req_files: list[str] = []
+    skip_value_for: str | None = None
     for arg in args[1:]:
-        if skip_next:
-            skip_next = False
+        if skip_value_for is not None:
+            if skip_value_for in ("-r", "--requirement"):
+                req_files.append(arg)
+            elif skip_value_for in ("-e", "--editable"):
+                if _is_vcs_editable(arg):
+                    packages.append(arg)
+            skip_value_for = None
             continue
-        if arg in ("-r", "--requirement", "-c", "--constraint", "-e", "--editable",
+        if arg in ("-r", "--requirement"):
+            skip_value_for = arg
+            continue
+        if arg.startswith("--requirement="):
+            req_files.append(arg[len("--requirement="):])
+            continue
+        if arg.startswith("-r") and len(arg) > 2:
+            req_files.append(arg[2:])
+            continue
+        if arg in ("-e", "--editable"):
+            skip_value_for = arg
+            continue
+        if arg.startswith("--editable="):
+            val = arg[len("--editable="):]
+            if _is_vcs_editable(val):
+                packages.append(val)
+            continue
+        if arg in ("-c", "--constraint",
                    "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
                    "--target", "-t", "--prefix", "--root"):
-            skip_next = True
+            skip_value_for = arg
             continue
         if arg.startswith("-"):
             continue
         packages.append(arg)
-    # If -r flag was present skip file-based installs
-    if "-r" in args or "--requirement" in args:
-        return None
-    return ParsedInstall(manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+    return ParsedInstall(manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
 
 
 def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
@@ -186,8 +228,38 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
         return ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     if subcmd == "pip" and len(args) > 1 and args[1] == "install":
         rest = args[2:]
-        packages = [a for a in rest if not a.startswith("-")]
-        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+        packages: list[str] = []
+        req_files: list[str] = []
+        skip_value_for: str | None = None
+        for arg in rest:
+            if skip_value_for is not None:
+                if skip_value_for in ("-r", "--requirement"):
+                    req_files.append(arg)
+                elif skip_value_for in ("-e", "--editable"):
+                    if _is_vcs_editable(arg):
+                        packages.append(arg)
+                skip_value_for = None
+                continue
+            if arg in ("-r", "--requirement"):
+                skip_value_for = arg
+                continue
+            if arg.startswith("--requirement="):
+                req_files.append(arg[len("--requirement="):])
+                continue
+            if arg.startswith("-r") and len(arg) > 2:
+                req_files.append(arg[2:])
+                continue
+            if arg in ("-e", "--editable"):
+                skip_value_for = arg
+                continue
+            if arg.startswith("--editable="):
+                val = arg[len("--editable="):]
+                if _is_vcs_editable(val):
+                    packages.append(val)
+                continue
+            if not arg.startswith("-"):
+                packages.append(arg)
+        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
     if subcmd in ("run", "python", "tool", "init", "build", "publish", "export",
                   "cache", "version", "generate-shell-completion", "self",
                   "pip", "venv", "remove"):
@@ -241,7 +313,7 @@ def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     if subcmd in ("install", "sync"):
         packages = [a for a in args[1:] if not a.startswith("-")]
         return ParsedInstall(manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
-    if subcmd in ("graph", "check", "lock", "update", "upgrade", "requirements",
+    if subcmd in ("create", "graph", "check", "lock", "update", "upgrade", "requirements",
                   "verify", "run", "shell", "scripts", "open", "uninstall",
                   "clean", "envs"):
         return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=venv_exe)

@@ -16,6 +16,7 @@ def build_cmd(
     allow_network: bool = True,
     env: dict[str, str] | None = None,
     home_ro_dirs: list[Path] | None = None,
+    extra_tmpfs: list[Path] | None = None,
 ) -> list[str]:
     """Return a bwrap command list that runs *argv* with *write_dirs* writable.
 
@@ -35,14 +36,22 @@ def build_cmd(
     home = str(Path.home())
     cmd = [
         "bwrap",
-        "--ro-bind", "/", "/",   # entire fs read-only baseline
-        "--dev", "/dev",          # real device files
-        "--proc", "/proc",        # proc filesystem
-        "--tmpfs", "/tmp",        # fresh scratch space
-        "--tmpfs", home,          # hide home dir — blocks credential access
-        "--unshare-pid",          # isolated PID namespace
-        "--die-with-parent",      # clean up on parent exit
+        "--ro-bind", "/", "/",          # entire fs read-only baseline
+        "--dev", "/dev",                 # real device files
+        "--proc", "/proc",               # proc filesystem
+        "--tmpfs", "/tmp",               # fresh scratch space
+        "--tmpfs", home,                 # hide home dir — blocks credential access
+        "--unshare-pid",                 # isolated PID namespace
+        "--die-with-parent",             # clean up on parent exit
     ]
+    # Hide systemd SSH proxy config whose root ownership appears as nobody inside
+    # bwrap's user namespace, causing SSH to reject it as an insecure config file.
+    # Only added when the directory exists — bwrap cannot create a missing mount
+    # point under the read-only /etc bind.
+    if Path("/etc/ssh/ssh_config.d").exists():
+        cmd += ["--tmpfs", "/etc/ssh/ssh_config.d"]
+    for p in (extra_tmpfs or []):
+        cmd += ["--tmpfs", str(p)]
     for p in (home_ro_dirs or []):
         if p.exists():
             cmd += ["--ro-bind", str(p), str(p)]

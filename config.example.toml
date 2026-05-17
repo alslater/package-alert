@@ -18,11 +18,22 @@ desktop_notifications = true
 terminal_notifications = true
 min_severity_for_desktop = "MEDIUM"
 
+# Logging for the long-running daemon process.
+# Defaults to INFO level with a rotating file at ~/.local/share/package-alert/daemon.log.
 [log]
-level = "INFO"
-# file = "~/.local/share/package-alert/package-alert.log"
-max_bytes = 10485760   # 10 MB
-backup_count = 3
+# level = "INFO"              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+# file = "~/.local/share/package-alert/daemon.log"
+# max_bytes = 10485760        # 10 MB per file before rotation
+# backup_count = 3            # number of rotated files to keep
+
+# Logging for short-lived CLI commands (scan-project, query, alerts, etc.).
+# Defaults to INFO level with a rotating file at ~/.local/share/package-alert/cli.log.
+# Set file = "" to disable file logging for CLI commands.
+[cli_log]
+# level = "INFO"
+# file = "~/.local/share/package-alert/cli.log"
+# max_bytes = 10485760
+# backup_count = 3
 
 [heuristics]
 enabled = true
@@ -30,7 +41,12 @@ warning_threshold = 40
 critical_threshold = 70
 
 [sandbox]
-# extra_env = []   # additional environment variable names to pass into the bubblewrap sandbox
+# extra_env = []      # additional environment variable names to pass into the bubblewrap sandbox
+# extra_tmpfs = []    # paths to mount as empty tmpfs inside the sandbox, in addition to the
+                      # built-in ones (/tmp, $HOME, /etc/ssh/ssh_config.d).  Useful on systems
+                      # where other root-owned paths cause SSH or tool failures inside bwrap's
+                      # user namespace.  Example:
+                      #   extra_tmpfs = ["/etc/ssh/other_config.d"]
 
 [scheduler]
 enabled = true

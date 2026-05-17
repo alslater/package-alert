@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,9 +78,9 @@ _SANDBOX_ENV: frozenset[str] = frozenset({
     "http_proxy", "https_proxy", "no_proxy",
     # SSL / TLS
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    # Git (uv may invoke git for VCS deps)
+    # Git (uv may invoke git for VCS deps; GIT_SSH_COMMAND set by --expose-ssh-keys)
     "GIT_CONFIG_GLOBAL", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_SSH_COMMAND",
 })
 
 
@@ -99,7 +100,7 @@ class SandboxRunner:
         self._cfg = cfg
         self._console = Console()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -109,8 +110,21 @@ class SandboxRunner:
 
         cwd = Path.cwd()
 
+        if expose_ssh_keys:
+            from rich.prompt import Confirm
+            self._console.print(
+                "[yellow]⚠  --expose-ssh-keys: your ~/.ssh directory will be mounted "
+                "read-only inside the sandbox.[/yellow]"
+            )
+            self._console.print(
+                "[dim]Install-time scripts will be able to read your private keys "
+                "and SSH config. Only proceed if you trust the packages being installed.[/dim]"
+            )
+            if not Confirm.ask("Continue with SSH keys exposed?", default=False):
+                return 1
+
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys)
 
         parsed = _try_parse(argv)
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -118,6 +132,13 @@ class SandboxRunner:
         self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         if not self._check_venv_scope(parsed, cwd):
+            return 1
+
+        if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
+            self._console.print("[yellow]⚠ This install includes SSH VCS dependencies.[/yellow]")
+            self._console.print("[dim]SSH keys are not exposed in the sandbox by default.[/dim]")
+            self._console.print("[dim]Re-run with --expose-ssh-keys to allow SSH key access:[/dim]")
+            self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
         if not await self._preflight(ctx):
@@ -146,7 +167,8 @@ class SandboxRunner:
         if parsed and parsed.manager in ("pip", "pipenv"):
             if "VIRTUAL_ENV" in sandbox_env:
                 venv_path: Path | None = Path(sandbox_env["VIRTUAL_ENV"])
-            else:
+            elif parsed.manager == "pip":
+                # Auto-detect project venv for bare pip, which cannot create its own.
                 venv_path = _find_venv_root(ctx.scan_targets)
                 if venv_path:
                     sandbox_env["VIRTUAL_ENV"] = str(venv_path)
@@ -156,6 +178,9 @@ class SandboxRunner:
                     self._console.print("[dim]Create one first:  python -m venv .venv  &&  source .venv/bin/activate[/dim]")
                     self._console.print("[dim]Or use uv:         package-alert run uv sync[/dim]")
                     return 1
+            else:
+                # pipenv manages its own virtualenv; don't inject VIRTUAL_ENV.
+                venv_path = None
             if venv_path and venv_path.exists():
                 # Prepend venv/bin to PATH so the sandbox resolves `pip` to the
                 # venv's own pip.  System pip runs under system Python where
@@ -169,12 +194,28 @@ class SandboxRunner:
         # home_ro: paths under cwd are already covered by the cwd write bind —
         # a more-specific ro-bind on any of them would silently shadow it.
         home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
+        if expose_ssh_keys:
+            ssh_dir = Path.home() / ".ssh"
+            if ssh_dir.exists():
+                home_ro.append(ssh_dir)
+            # Bypass system SSH config (which may have broken permissions on
+            # some systemd setups) and use only the user's ~/.ssh/config.
+            ssh_config = ssh_dir / "config"
+            if ssh_config.exists():
+                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
+            else:
+                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
+
+        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+        if not self._check_extra_tmpfs(extra_tmpfs):
+            return 1
 
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
+            extra_tmpfs=extra_tmpfs,
         ))
         print()
 
@@ -228,6 +269,20 @@ class SandboxRunner:
         self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
         return False
 
+    def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
+        """Return False (and print an error) if any configured extra_tmpfs path does not exist.
+
+        bwrap cannot create a missing mount point under the read-only root bind,
+        so a non-existent path causes the entire sandbox to abort silently.
+        """
+        ok = True
+        for p in paths:
+            if not p.exists():
+                self._console.print(f"[bold red]✗ sandbox.extra_tmpfs path does not exist: {p}[/bold red]")
+                self._console.print("[dim]Remove or correct the path in your config file (sandbox.extra_tmpfs).[/dim]")
+                ok = False
+        return ok
+
     async def _run_shell(
         self,
         argv: list[str],
@@ -235,6 +290,7 @@ class SandboxRunner:
         cwd: Path,
         allow_network: bool,
         extra_env: list[str] | None,
+        expose_ssh_keys: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
 
@@ -288,9 +344,9 @@ class SandboxRunner:
         # pipenv-managed virtualenvs dir (outside the project unless PIPENV_VENV_IN_PROJECT)
         if (cwd / "Pipfile").exists() and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             pipenv_dir = _pipenv_venv_dir()
-            if pipenv_dir.exists():
-                write_dirs.append(pipenv_dir)
-                notes.append(f"pipenv venvs: {pipenv_dir}")
+            pipenv_dir.mkdir(parents=True, exist_ok=True)
+            write_dirs.append(pipenv_dir)
+            notes.append(f"pipenv venvs: {pipenv_dir}")
 
         # Writable package-manager caches so installs work from within the shell
         for cache_path in [
@@ -331,12 +387,26 @@ class SandboxRunner:
             p for p in _home_ro_dirs() + rc_paths
             if not p.is_relative_to(cwd)
         ]
+        if expose_ssh_keys:
+            ssh_dir = Path.home() / ".ssh"
+            if ssh_dir.exists():
+                home_ro.append(ssh_dir)
+            ssh_config = ssh_dir / "config"
+            if ssh_config.exists():
+                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
+            else:
+                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
+
+        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+        if not self._check_extra_tmpfs(extra_tmpfs):
+            return 1
 
         result = subprocess.run(build_cmd(
             argv, write_dirs,
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
+            extra_tmpfs=extra_tmpfs,
         ))
         print()
 
@@ -420,14 +490,35 @@ class SandboxRunner:
 
         queries: list[tuple[str, str, str | None]] = []
 
+        source_parts: list[str] = []
+
         if parsed.packages:
             # Explicit packages on the command line — normalise specs first
             for raw in parsed.packages:
                 name, version = parse_package_spec(raw, parsed.ecosystem)
                 if name:
                     queries.append((parsed.ecosystem, name, version))
-            source = f"{len(queries)} explicit package(s)"
-        else:
+            source_parts.append(f"{len(queries)} explicit package(s)")
+
+        if parsed.req_files:
+            # -r / --requirement files — parse each one recursively (follows includes)
+            from packagealert.parsers.lockfiles import collect_requirements_packages
+            visited: set[Path] = set()
+            file_sources: list[str] = []
+            before = len(queries)
+            for rf in parsed.req_files:
+                req_path = ctx.cwd / rf
+                if req_path.exists():
+                    pinned, unpinned = collect_requirements_packages(req_path, visited)
+                    queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
+                    queries.extend((p.ecosystem, p.name, None) for p in unpinned)
+                    file_sources.append(rf)
+            added = len(queries) - before
+            source_parts.append(
+                f"{added} packages ({', '.join(file_sources) or 'no packages found'})"
+            )
+
+        if not parsed.packages and not parsed.req_files:
             # Lock-file install — read lockfile for exact versions
             scan = scan_project(ctx.cwd)
             queries = [
@@ -435,8 +526,10 @@ class SandboxRunner:
                 for p in scan.pinned
                 if p.ecosystem == parsed.ecosystem
             ]
-            sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
-            source = f"{len(queries)} packages ({sources})"
+            lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
+            source_parts.append(f"{len(queries)} packages ({lock_sources})")
+
+        source = "; ".join(source_parts)
 
         if not queries:
             self._console.print("[dim]Pre-flight: nothing to check[/dim]")
@@ -525,6 +618,98 @@ class SandboxRunner:
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
 
+# Matches scp-style git@host:path — colon (not slash) after hostname distinguishes
+# this from HTTPS URLs like git+https://git@host/path which are NOT SSH.
+_SCP_SSH_RE = re.compile(r"git@[^/:]+:[^/]")
+
+
+def _is_ssh_vcs_url(s: str) -> bool:
+    """Return True if *s* contains any SSH-based Git URL pattern.
+
+    Covers:
+    - git+ssh://  (pip/uv requirements, explicit packages)
+    - ssh://      (Pipfile.lock "git" field)
+    - git@host:path  (scp-style: pip, Pipfile.lock, bare requirements)
+
+    Note: git+https://git@host/path is NOT SSH — the slash after hostname
+    distinguishes it from scp-style which uses a colon.
+    """
+    return (
+        "git+ssh://" in s
+        or "ssh://" in s
+        or bool(_SCP_SSH_RE.search(s))
+    )
+
+
+def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
+    """Recursively scan a requirements file for SSH VCS URLs.
+
+    Follows -r / --requirement include directives, resolving paths relative to
+    the directory of the including file.  *visited* prevents infinite loops.
+    """
+    path = path.resolve()
+    if path in visited:
+        return False
+    visited.add(path)
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    from packagealert.parsers.lockfiles import _req_include
+    base = path.parent
+    for line in lines:
+        # Strip inline comments: everything from the first unquoted # onward.
+        # Requirements files don't support quoting, so a simple split is correct.
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        # Check this line for an SSH VCS URL before inspecting it as an include.
+        if _is_ssh_vcs_url(line):
+            return True
+        include = _req_include(line)
+        if include:
+            if _req_file_has_ssh(base / include, visited):
+                return True
+    return False
+
+
+def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
+    """Return True if the install involves SSH-authenticated Git VCS dependencies.
+
+    Checks explicit packages on the command line, and for lock-file installs
+    scans Pipfile.lock (pipenv) or requirements*.txt (pip) for SSH VCS URLs.
+    Both URL-style (git+ssh://, ssh://) and scp-style (git@host:org/repo)
+    patterns are detected.  Nested pip -r includes are followed recursively.
+    """
+    if parsed is None:
+        return False
+    if any(_is_ssh_vcs_url(p) for p in parsed.packages):
+        return True
+    if parsed.manager == "pipenv":
+        candidates: list[Path] = [cwd / "Pipfile.lock"]
+        for path in candidates:
+            try:
+                if _is_ssh_vcs_url(path.read_text(errors="replace")):
+                    return True
+            except OSError:
+                pass
+    elif parsed.manager in ("pip", "uv"):
+        if parsed.req_files:
+            roots = [cwd / f for f in parsed.req_files]
+        elif not parsed.packages:
+            # Bare install with no explicit packages or -r flags — treat as
+            # a lock-file-style install and scan requirements*.txt in the project.
+            roots = sorted(cwd.glob("requirements*.txt"))
+        else:
+            # Explicit packages were given; their URLs were already checked above.
+            roots = []
+        visited: set[Path] = set()
+        for root in roots:
+            if _req_file_has_ssh(root, visited):
+                return True
+    return False
+
+
 def _find_venv_root(scan_targets: list[Path]) -> Path | None:
     """Return the virtualenv root inferred from the first pypi scan target.
 
@@ -602,12 +787,42 @@ def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:
             if candidates:
                 return candidates[0]
 
-    # 3. .venv / venv inside the project (uv default)
+    # 3. pipenv-managed venv under WORKON_HOME (outside the project by default)
+    if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+        pipenv_venv = _find_pipenv_venv(cwd)
+        if pipenv_venv:
+            candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
+            if candidates:
+                return candidates[0]
+
+    # 4. .venv / venv inside the project (uv default, pipenv with PIPENV_VENV_IN_PROJECT)
     for name in (".venv", "venv"):
         candidates = sorted((cwd / name).glob("lib/python*/site-packages"))
         if candidates:
             return candidates[0]
 
+    return None
+
+
+def _find_pipenv_venv(cwd: Path) -> Path | None:
+    """Return the pipenv-managed virtualenv root for the project at *cwd*, or None.
+
+    Runs `pipenv --venv` outside the sandbox to resolve the path, which works
+    for both pre-existing venvs (pre-install snapshot) and freshly-created ones
+    (post-install scan).  Returns None if pipenv is not installed or the venv
+    does not exist yet (e.g. before the first `pipenv sync`).
+    """
+    try:
+        result = subprocess.run(
+            ["pipenv", "--venv"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        if result.returncode == 0:
+            venv = Path(result.stdout.strip())
+            if venv.exists():
+                return venv
+    except FileNotFoundError:
+        pass
     return None
 
 
@@ -651,11 +866,22 @@ def _resolve_targets(ctx: _Context) -> None:
             if cache.exists():
                 ctx.write_dirs.append(cache)
         # pipenv stores its managed venvs outside the project unless
-        # PIPENV_VENV_IN_PROJECT is set — make that directory writable.
+        # PIPENV_VENV_IN_PROJECT is set — make that directory writable, creating
+        # it if necessary so pipenv can write there on a fresh install.
         if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             venv_dir = _pipenv_venv_dir()
-            if venv_dir.exists():
-                ctx.write_dirs.append(venv_dir)
+            venv_dir.mkdir(parents=True, exist_ok=True)
+            ctx.write_dirs.append(venv_dir)
+            # If the venv already exists, add its site-packages as a scan target
+            # so the pre-install snapshot captures current state.  Fresh installs
+            # produce an empty snapshot here; the post-install fallback below
+            # then finds the newly-created venv and diffs against empty.
+            if not ctx.scan_targets:
+                pipenv_venv = _find_pipenv_venv(cwd)
+                if pipenv_venv:
+                    sp_candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
+                    if sp_candidates:
+                        ctx.scan_targets.append(sp_candidates[0])
 
     elif eco == "npm":
         # node_modules lives under cwd, so it's already covered by the cwd bind

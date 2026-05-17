@@ -5,14 +5,17 @@
 - [x] Cache monitoring (pip, uv, npm cache dirs)
 - [x] OSV.dev advisory lookup with SQLite cache
 - [x] Terminal Rich alerts + desktop notify-send
-- [x] CLI (daemon, scan-cache, query, alerts, config-show)
-- [x] Structured logging (console + rotating file)
+- [x] CLI (daemon, scan-cache, query, alerts, config-show, status)
+- [x] Structured logging (separate daemon and CLI rotating log files)
+- [x] `status` command (daemon state, PID, uptime, systemd detection, log paths)
 
 ## Phase 2 (Complete)
 - [x] npm heuristics (install scripts, eval, child_process, credentials)
 - [x] Python heuristics (setup.py subprocess/socket/exec, embedded binaries)
 - [x] Typosquatting detection (Levenshtein distance vs. top packages)
 - [x] Composite risk scoring engine (0–100, info/warning/critical)
+- [x] Sandboxed installs (`package-alert run`) with bubblewrap, pre-flight + post-install OSV checks
+- [x] SSH VCS dependency support (`--expose-ssh-keys`, scp-style URL detection)
 
 ## Phase 3 (Planned)
 - [ ] pnpm + yarn + poetry + pdm support

@@ -43,6 +43,9 @@ pipx install -e .
 # Start the background daemon
 package-alert daemon
 
+# Check daemon status
+package-alert status
+
 # Run a package manager command in a sandbox
 package-alert run uv sync
 package-alert run npm install
@@ -104,6 +107,7 @@ package-alert run --no-network uv sync   # fully offline; uv cache must be warm
 |--------|-------------|
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already in the local cache. |
 | `--env VAR` | Pass an additional environment variable through into the sandbox. Repeatable: `--env MY_TOKEN --env CUSTOM_URL`. |
+| `--expose-ssh-keys` | Expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
 | `--config PATH` | Path to config TOML file. |
 
 **Filesystem isolation:**
@@ -132,7 +136,7 @@ Paths re-exposed inside the home tmpfs (read-only):
 | `~/.cache/pip`, `~/.cache/uv`, `~/.npm` | Package manager caches (writable) |
 | `~/.config/composer` | Composer home (writable, when present) |
 
-Paths that are **not** accessible inside the sandbox: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.netrc`, `~/.git-credentials`, and everything else in `$HOME` not listed above.
+Paths that are **not** accessible inside the sandbox by default: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.netrc`, `~/.git-credentials`, and everything else in `$HOME` not listed above. Pass `--expose-ssh-keys` to re-expose `~/.ssh` read-only when SSH-authenticated VCS dependencies are needed.
 
 **Environment isolation:**
 
@@ -152,6 +156,23 @@ sudo pacman -S bubblewrap
 ```
 
 **Virtual environment detection:** for Python commands, package-alert automatically detects the target site-packages directory by checking (in order) the executable path in the command, `VIRTUAL_ENV` (pip/pipenv only — uv always uses the project-local `.venv`), and `.venv`/`venv` directories in the current working directory.
+
+### `status`
+
+Show the current state of the daemon and related paths.
+
+```bash
+package-alert status [--json] [--config PATH]
+```
+
+Displays:
+
+- Daemon running/stopped, PID, uptime, and whether it was started by systemd
+- Config file path in use
+- Daemon log file path and whether it exists
+- CLI log file path and whether it exists
+
+Use `--json` for machine-readable output.
 
 ### `scan-project`
 
@@ -269,9 +290,17 @@ package-alert scans show 42 --details
 Config is loaded from `~/.config/package-alert/config.toml` automatically if it exists. Override with `--config PATH` on any command.
 
 ```toml
+# Logging for the long-running daemon process.
 [log]
-level = "INFO"                                      # DEBUG, INFO, WARNING, ERROR
-file = "~/.local/share/package-alert/package-alert.log"
+level = "INFO"                                      # DEBUG, INFO, WARNING, ERROR, CRITICAL
+file = "~/.local/share/package-alert/daemon.log"    # set file = "" to disable file logging
+# max_bytes = 10485760    # 10 MB per file before rotation
+# backup_count = 3
+
+# Logging for short-lived CLI commands (scan-project, query, alerts, etc.).
+[cli_log]
+level = "INFO"
+file = "~/.local/share/package-alert/cli.log"       # set file = "" to disable file logging
 
 [watch]
 enable_cache_monitoring = true
@@ -304,6 +333,12 @@ critical_threshold = 70
 extra_env = []
 # Example: extra_env = ["MY_PRIVATE_REGISTRY_TOKEN", "CUSTOM_CERT_PATH"]
 
+# Additional paths to mount as empty tmpfs inside the sandbox.
+# Use this on systems where other root-owned paths cause tool failures inside
+# bwrap's user namespace (e.g. SSH proxy config files owned by root).
+extra_tmpfs = []
+# Example: extra_tmpfs = ["/etc/ssh/other_config.d"]
+
 [scheduler]
 enabled = true
 daily_hour = 2          # hour of day (0–23) to run daily scans
@@ -324,7 +359,8 @@ All persistent data lives in `~/.local/share/package-alert/`:
 | File | Purpose |
 |------|---------|
 | `package-alert.db` | SQLite database: OSV cache, alert history, popularity cache |
-| `package-alert.log` | Rotating log file (10 MB × 3 backups) |
+| `daemon.log` | Rotating daemon log file (10 MB × 3 backups) |
+| `cli.log` | Rotating CLI command log file (10 MB × 3 backups) |
 | `daemon.pid` | PID file used to prevent duplicate daemon instances |
 
 ## systemd (Linux)
