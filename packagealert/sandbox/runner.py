@@ -498,13 +498,14 @@ class SandboxRunner:
                     queries.append((parsed.ecosystem, name, version))
             source = f"{len(queries)} explicit package(s)"
         elif parsed.req_files:
-            # -r / --requirement files — parse each one directly
-            from packagealert.parsers.lockfiles import _parse_requirements_txt
+            # -r / --requirement files — parse each one recursively (follows includes)
+            from packagealert.parsers.lockfiles import collect_requirements_packages
+            visited: set[Path] = set()
             file_sources: list[str] = []
             for rf in parsed.req_files:
                 req_path = ctx.cwd / rf
                 if req_path.exists():
-                    pinned, _ = _parse_requirements_txt(req_path)
+                    pinned, _ = collect_requirements_packages(req_path, visited)
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
                     file_sources.append(rf)
             source = f"{len(queries)} packages ({', '.join(file_sources) or 'no packages found'})"
@@ -637,6 +638,7 @@ def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
         lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return False
+    from packagealert.parsers.lockfiles import _req_include
     base = path.parent
     for line in lines:
         # Strip inline comments: everything from the first unquoted # onward.
@@ -647,17 +649,7 @@ def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
         # Check this line for an SSH VCS URL before inspecting it as an include.
         if _is_ssh_vcs_url(line):
             return True
-        # Follow nested includes: -r other.txt / --requirement other.txt /
-        # --requirement=other.txt / -rother.txt
-        include: str | None = None
-        if line.startswith("--requirement="):
-            include = line[len("--requirement="):]
-        elif line.startswith("-r") and len(line) > 2 and not line[2:].startswith("-"):
-            include = line[2:].lstrip()
-        elif line.startswith("--requirement "):
-            include = line[len("--requirement "):].lstrip()
-        elif line.startswith("-r "):
-            include = line[3:].lstrip()
+        include = _req_include(line)
         if include:
             if _req_file_has_ssh(base / include, visited):
                 return True

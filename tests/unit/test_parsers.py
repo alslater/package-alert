@@ -178,3 +178,76 @@ def test_python_script_pip_install():
     ])
     assert result is not None
     assert result.packages == ["opencv-python"]
+
+
+# ---------------------------------------------------------------------------
+# collect_requirements_packages
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+from packagealert.parsers.lockfiles import collect_requirements_packages
+
+
+class TestCollectRequirementsPackages:
+    def test_parses_pinned_packages(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("requests==2.31.0\nflask==3.0.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        names = [p.name for p in pinned]
+        assert "requests" in names
+        assert "flask" in names
+
+    def test_follows_nested_include(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("cryptography==42.0.0\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("requests==2.31.0\n-r inner.txt\n")
+        pinned, _ = collect_requirements_packages(outer)
+        names = [p.name for p in pinned]
+        assert "requests" in names
+        assert "cryptography" in names
+
+    def test_follows_include_equals_form(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("cryptography==42.0.0\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("--requirement=inner.txt\n")
+        pinned, _ = collect_requirements_packages(outer)
+        assert any(p.name == "cryptography" for p in pinned)
+
+    def test_cycle_protection(self, tmp_path):
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("-r b.txt\nrequests==2.31.0\n")
+        b.write_text("-r a.txt\nflask==3.0.0\n")
+        pinned, _ = collect_requirements_packages(a)
+        names = [p.name for p in pinned]
+        assert "requests" in names
+        assert "flask" in names
+
+    def test_comments_ignored(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("# requests==1.0.0\nflask==3.0.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        assert all(p.name != "requests" for p in pinned)
+        assert any(p.name == "flask" for p in pinned)
+
+    def test_missing_include_skipped(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("-r nonexistent.txt\nrequests==2.31.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "requests" for p in pinned)
+
+    def test_shared_visited_deduplicates_across_roots(self, tmp_path):
+        shared = tmp_path / "shared.txt"
+        shared.write_text("requests==2.31.0\n")
+        a = tmp_path / "a.txt"
+        a.write_text("-r shared.txt\n")
+        b = tmp_path / "b.txt"
+        b.write_text("-r shared.txt\n")
+        visited: set[Path] = set()
+        pinned_a, _ = collect_requirements_packages(a, visited)
+        pinned_b, _ = collect_requirements_packages(b, visited)
+        # shared.txt is only processed once across both calls
+        total = [p.name for p in pinned_a + pinned_b]
+        assert total.count("requests") == 1
