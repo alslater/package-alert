@@ -6,6 +6,15 @@ from pathlib import Path
 
 # Matches the leading PEP 508 distribution name (letters, digits, hyphens, underscores, dots).
 _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
+# Flags whose next argument is a non-package value and must be consumed (not treated as a pkg spec).
+_PIP_VALUE_FLAGS = frozenset({
+    "-c", "--constraint",
+    "--index-url", "-i", "--extra-index-url",
+    "--find-links", "-f",
+    "--target", "-t",
+    "--prefix", "--root",
+    "--config-settings", "--config-setting", "-C",  # pip 22.1+ / uv: build-system config
+})
 # Matches scp-style VCS refs: git@host:path (colon, not slash, after hostname).
 _SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
@@ -202,9 +211,7 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
             if _is_vcs_editable(val):
                 packages.append(val)
             continue
-        if arg in ("-c", "--constraint",
-                   "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
-                   "--target", "-t", "--prefix", "--root"):
+        if arg in _PIP_VALUE_FLAGS:
             skip_value_for = arg
             continue
         if arg.startswith("-"):
@@ -256,6 +263,9 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
                 val = arg[len("--editable="):]
                 if _is_vcs_editable(val):
                     packages.append(val)
+                continue
+            if arg in _PIP_VALUE_FLAGS:
+                skip_value_for = arg
                 continue
             if not arg.startswith("-"):
                 packages.append(arg)

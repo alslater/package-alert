@@ -55,20 +55,24 @@ class OsvClient:
 
     async def _enrich(self, results: list[OsvResult]) -> None:
         """Fetch full advisory details for each advisory ID in parallel."""
-        advisories = [adv for r in results for adv in r.advisories]
-        if not advisories:
+        # Pair each advisory with its result so we have ecosystem/package context for
+        # fixed_versions extraction (the batch response omits the `affected` array).
+        adv_with_ctx = [(adv, r.package_name, r.ecosystem) for r in results for adv in r.advisories]
+        if not adv_with_ctx:
             return
         fetched = await asyncio.gather(
-            *[self._fetch_vuln(adv.id) for adv in advisories],
+            *[self._fetch_vuln(adv.id) for adv, _, _ in adv_with_ctx],
             return_exceptions=True,
         )
-        for adv, data in zip(advisories, fetched):
+        for (adv, pkg_name, ecosystem), data in zip(adv_with_ctx, fetched):
             if isinstance(data, Exception) or not isinstance(data, dict):
                 continue
             adv.summary = data.get("summary", adv.summary)
             adv.details = data.get("details")
             db_specific = data.get("database_specific", {})
             adv.severity = db_specific.get("severity")
+            if not adv.fixed_versions:
+                adv.fixed_versions = _extract_fixed_versions(data, pkg_name, ecosystem)
 
     async def _fetch_vuln(self, vuln_id: str) -> dict:
         resp = await self._client.get(f"/vulns/{vuln_id}")
@@ -109,16 +113,26 @@ def _parse_batch_response(
     return results
 
 
+def _normalize_pypi_name(name: str) -> str:
+    """Normalize a PyPI package name per PEP 503: lowercase, collapse [-_.] to '-'."""
+    import re
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[str]:
     """Return fixed versions from OSV affected ranges for the queried package."""
     eco_map = {"pypi": "PyPI", "npm": "npm", "packagist": "Packagist"}
     canonical_eco = eco_map.get(ecosystem, ecosystem).lower()
+    is_pypi = ecosystem == "pypi"
+    query_name = _normalize_pypi_name(package_name) if is_pypi else package_name.lower()
     fixed: list[str] = []
     for affected in vuln.get("affected", []):
         pkg = affected.get("package", {})
         if pkg.get("ecosystem", "").lower() != canonical_eco:
             continue
-        if pkg.get("name", "").lower() != package_name.lower():
+        adv_name = pkg.get("name", "")
+        adv_name_norm = _normalize_pypi_name(adv_name) if is_pypi else adv_name.lower()
+        if adv_name_norm != query_name:
             continue
         for r in affected.get("ranges", []):
             if r.get("type") in ("SEMVER", "ECOSYSTEM"):
