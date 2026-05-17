@@ -110,6 +110,19 @@ class SandboxRunner:
 
         cwd = Path.cwd()
 
+        if expose_ssh_keys:
+            from rich.prompt import Confirm
+            self._console.print(
+                "[yellow]⚠  --expose-ssh-keys: your ~/.ssh directory will be mounted "
+                "read-only inside the sandbox.[/yellow]"
+            )
+            self._console.print(
+                "[dim]Install-time scripts will be able to read your private keys "
+                "and SSH config. Only proceed if you trust the packages being installed.[/dim]"
+            )
+            if not Confirm.ask("Continue with SSH keys exposed?", default=False):
+                return 1
+
         if argv and Path(argv[0]).name in _SHELL_NAMES:
             return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys)
 
@@ -610,18 +623,21 @@ def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
         return False
     visited.add(path)
     try:
-        text = path.read_text(errors="replace")
+        lines = path.read_text(errors="replace").splitlines()
     except OSError:
         return False
-    if _is_ssh_vcs_url(text):
-        return True
-    # Follow nested includes: -r other.txt / --requirement other.txt /
-    # --requirement=other.txt / -rother.txt
     base = path.parent
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    for line in lines:
+        # Strip inline comments: everything from the first unquoted # onward.
+        # Requirements files don't support quoting, so a simple split is correct.
+        line = line.split("#")[0].strip()
+        if not line:
             continue
+        # Check this line for an SSH VCS URL before inspecting it as an include.
+        if _is_ssh_vcs_url(line):
+            return True
+        # Follow nested includes: -r other.txt / --requirement other.txt /
+        # --requirement=other.txt / -rother.txt
         include: str | None = None
         if line.startswith("--requirement="):
             include = line[len("--requirement="):]

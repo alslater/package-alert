@@ -698,6 +698,23 @@ class TestReqFileHasSsh:
         outer.write_text("requests==2.31.0\n-r inner.txt\n")
         assert _req_file_has_ssh(outer, set()) is False
 
+    def test_commented_out_ssh_url_is_not_a_false_positive(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("# git+ssh://git@github.com/org/lib.git\nrequests==2.31.0\n")
+        assert _req_file_has_ssh(f, set()) is False
+
+    def test_inline_comment_does_not_trigger(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("requests==2.31.0  # was: git+ssh://git@github.com/org/lib.git\n")
+        assert _req_file_has_ssh(f, set()) is False
+
+    def test_commented_include_not_followed(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("# -r inner.txt\nrequests==2.31.0\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
     def test_cycle_protection(self, tmp_path):
         a = tmp_path / "a.txt"
         b = tmp_path / "b.txt"
@@ -1102,3 +1119,40 @@ class TestRunShell:
             if tok == "--setenv"
         }
         assert str(nm_bin) in setenv_pairs.get("PATH", "")
+
+
+class TestExposeSSHKeysConfirmation:
+    def _setup(self, monkeypatch):
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
+
+    def test_confirms_before_proceeding(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=True) as mock_ask:
+            runner = _make_runner()
+            asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
+        mock_ask.assert_called_once()
+        assert "SSH" in mock_ask.call_args[0][0] or "ssh" in mock_ask.call_args[0][0].lower()
+
+    def test_aborts_when_user_declines(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=False):
+            runner = _make_runner()
+            rc = asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
+        assert rc == 1
+
+    def test_no_prompt_without_flag(self, tmp_path, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        with unittest.mock.patch("rich.prompt.Confirm.ask") as mock_ask:
+            runner = _make_runner()
+            asyncio.run(runner.run(["bash"], expose_ssh_keys=False))
+        mock_ask.assert_not_called()
