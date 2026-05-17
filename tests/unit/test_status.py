@@ -6,7 +6,6 @@ import io
 import time
 import pytest
 from unittest.mock import patch, MagicMock
-from pathlib import Path
 from rich.console import Console
 from packagealert.cli.status import _format_uptime, _severity_label, gather_status, render_status, StatusData, AlertRow
 from packagealert.storage.db import open_db

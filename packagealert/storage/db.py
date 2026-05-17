@@ -69,7 +69,8 @@ CREATE INDEX IF NOT EXISTS idx_scan_results_type
     ON scan_results(project_path, scan_type, scanned_at DESC);
 """
 
-_DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "package-alert" / "package-alert.db"
+DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "package-alert" / "package-alert.db"
+_DEFAULT_DB_PATH = DEFAULT_DB_PATH  # internal alias
 
 
 async def open_db(path: Path = _DEFAULT_DB_PATH) -> aiosqlite.Connection:

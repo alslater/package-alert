@@ -81,7 +81,8 @@ class AppConfig(BaseModel):
     scheduler: SchedulerConfig = SchedulerConfig()
 
 
-_DEFAULT_CONFIG = Path.home() / ".config" / "package-alert" / "config.toml"
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "package-alert" / "config.toml"
+_DEFAULT_CONFIG = DEFAULT_CONFIG_PATH  # internal alias
 
 # Default cache paths — used to distinguish user-configured vs default values.
 _DEFAULT_WATCH = WatchConfig()

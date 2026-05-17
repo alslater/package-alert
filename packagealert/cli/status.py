@@ -9,9 +9,9 @@ from pathlib import Path
 
 import psutil
 
-from packagealert.config import load_config, _DEFAULT_CONFIG
+from packagealert.config import load_config, DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
 from packagealert.daemon import check_already_running, PID_FILE as _PID_FILE
-from packagealert.storage.db import _DEFAULT_DB_PATH as _DB_PATH
+from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -138,6 +138,7 @@ def render_status(
         return
 
     from rich.console import Console as RichConsole
+    from rich.markup import escape
     if console is None:
         console = RichConsole()
 
@@ -151,7 +152,7 @@ def render_status(
         )
     else:
         console.print("  Status:   [red]stopped[/red]")
-    console.print(f"  Config:   {data.config_path}")
+    console.print(f"  Config:   {escape(data.config_path)}")
     cache = "[green]✓[/green]" if data.cache_monitoring else "[red]✗[/red]"
     proc = "[green]✓[/green]" if data.process_monitoring else "[red]✗[/red]"
     sched = "[green]✓[/green]" if data.scheduler_enabled else "[red]✗[/red]"
@@ -167,9 +168,12 @@ def render_status(
         for alert in data.recent_alerts:
             ts = datetime.fromtimestamp(alert.alerted_at).strftime("%Y-%m-%d %H:%M")  # local time for display; to_dict() uses UTC
             colour = _SEV_COLOUR.get(alert.severity, "white")
+            pkg = escape(alert.package)
+            eco = escape(alert.ecosystem)
+            ver = escape(alert.version or "")
             console.print(
-                f"  {alert.package:<15} {alert.ecosystem:<8}"
-                f" {(alert.version or ''):<12}"
+                f"  {pkg:<15} {eco:<8}"
+                f" {ver:<12}"
                 f" [{colour}]{alert.severity:<10}[/{colour}] {ts}"
             )
     else:
