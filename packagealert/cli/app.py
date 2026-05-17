@@ -45,6 +45,18 @@ def daemon(config: Optional[Path] = _cfg_option):
     asyncio.run(d.run())
 
 
+@app.command()
+def status(
+    config: Optional[Path] = _cfg_option,
+    json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
+):
+    """Show daemon running state, recent alerts, and configuration summary."""
+    # Skips configure_logging intentionally — status is a read-only diagnostic check
+    from packagealert.cli.status import gather_status, render_status
+    data = asyncio.run(gather_status(config))
+    render_status(data, as_json=json_output)
+
+
 @app.command("scan-cache")
 def scan_cache(config: Optional[Path] = _cfg_option):
     """Scan package manager caches for malicious packages."""

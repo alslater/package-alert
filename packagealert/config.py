@@ -3,9 +3,20 @@ from __future__ import annotations
 import logging
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+
+def _expand(v: object) -> object:
+    if isinstance(v, str):
+        return Path(v).expanduser()
+    if isinstance(v, Path):
+        return v.expanduser()
+    return v
+
+
+ExpandedPath = Annotated[Path, BeforeValidator(_expand)]
 
 log = logging.getLogger(__name__)
 
@@ -22,10 +33,10 @@ class OsvConfig(BaseModel):
 class WatchConfig(BaseModel):
     enable_cache_monitoring: bool = True
     enable_process_monitoring: bool = True
-    pip_cache_dir: Path = Path.home() / ".cache" / "pip"
-    uv_cache_dir: Path = Path.home() / ".cache" / "uv"
-    npm_cache_dir: Path = Path.home() / ".npm" / "_cacache"
-    site_packages_dirs: list[Path] = Field(default_factory=list)
+    pip_cache_dir: ExpandedPath = Path.home() / ".cache" / "pip"
+    uv_cache_dir: ExpandedPath = Path.home() / ".cache" / "uv"
+    npm_cache_dir: ExpandedPath = Path.home() / ".npm" / "_cacache"
+    site_packages_dirs: list[ExpandedPath] = Field(default_factory=list)
     process_poll_interval_seconds: float = 1.0
 
 
@@ -37,7 +48,7 @@ class AlertsConfig(BaseModel):
 
 class LogConfig(BaseModel):
     level: str = "INFO"
-    file: Path | None = Path.home() / ".local" / "share" / "package-alert" / "package-alert.log"
+    file: ExpandedPath | None = Path.home() / ".local" / "share" / "package-alert" / "package-alert.log"
     max_bytes: int = 10 * 1024 * 1024
     backup_count: int = 3
 
@@ -70,7 +81,8 @@ class AppConfig(BaseModel):
     scheduler: SchedulerConfig = SchedulerConfig()
 
 
-_DEFAULT_CONFIG = Path.home() / ".config" / "package-alert" / "config.toml"
+DEFAULT_CONFIG_PATH = Path.home() / ".config" / "package-alert" / "config.toml"
+_DEFAULT_CONFIG = DEFAULT_CONFIG_PATH  # internal alias
 
 # Default cache paths — used to distinguish user-configured vs default values.
 _DEFAULT_WATCH = WatchConfig()
