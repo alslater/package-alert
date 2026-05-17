@@ -135,10 +135,10 @@ class SandboxRunner:
             return 1
 
         if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
-            self._console.print("[yellow]⚠ This install includes git+ssh:// VCS dependencies.[/yellow]")
+            self._console.print("[yellow]⚠ This install includes SSH VCS dependencies.[/yellow]")
             self._console.print("[dim]SSH keys are not exposed in the sandbox by default.[/dim]")
             self._console.print("[dim]Re-run with --expose-ssh-keys to allow SSH key access:[/dim]")
-            self._console.print(f"[dim]  package-alert run --expose-ssh-keys {' '.join(argv)}[/dim]")
+            self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
         if not await self._preflight(ctx):
