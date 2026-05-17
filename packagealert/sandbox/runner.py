@@ -193,12 +193,16 @@ class SandboxRunner:
             else:
                 sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
+        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+        if not self._check_extra_tmpfs(extra_tmpfs):
+            return 1
+
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
-            extra_tmpfs=list(self._cfg.sandbox.extra_tmpfs),
+            extra_tmpfs=extra_tmpfs,
         ))
         print()
 
@@ -251,6 +255,20 @@ class SandboxRunner:
         self._console.print(f"  [dim]Project     = {cwd}[/dim]")
         self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
         return False
+
+    def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
+        """Return False (and print an error) if any configured extra_tmpfs path does not exist.
+
+        bwrap cannot create a missing mount point under the read-only root bind,
+        so a non-existent path causes the entire sandbox to abort silently.
+        """
+        ok = True
+        for p in paths:
+            if not p.exists():
+                self._console.print(f"[bold red]✗ sandbox.extra_tmpfs path does not exist: {p}[/bold red]")
+                self._console.print("[dim]Remove or correct the path in your config file (sandbox.extra_tmpfs).[/dim]")
+                ok = False
+        return ok
 
     async def _run_shell(
         self,
@@ -366,12 +384,16 @@ class SandboxRunner:
             else:
                 sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
+        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+        if not self._check_extra_tmpfs(extra_tmpfs):
+            return 1
+
         result = subprocess.run(build_cmd(
             argv, write_dirs,
             allow_network=allow_network,
             env=sandbox_env,
             home_ro_dirs=home_ro,
-            extra_tmpfs=list(self._cfg.sandbox.extra_tmpfs),
+            extra_tmpfs=extra_tmpfs,
         ))
         print()
 

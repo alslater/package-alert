@@ -44,6 +44,38 @@ def test_pip_install_from_requirements_parses_req_files():
     assert result.req_files == ["requirements.txt"]
 
 
+def test_pip_install_requirement_inline_concatenated():
+    result = parse_pip_args(["pip", "install", "-rcustom.txt"])
+    assert result is not None
+    assert result.req_files == ["custom.txt"]
+
+
+def test_pip_install_requirement_equals_form():
+    result = parse_pip_args(["pip", "install", "--requirement=custom.txt"])
+    assert result is not None
+    assert result.req_files == ["custom.txt"]
+
+
+def test_pip_install_editable_vcs_space_separated():
+    result = parse_pip_args(["pip", "install", "-e", "git+ssh://git@github.com/org/repo.git"])
+    assert result is not None
+    assert result.packages == ["git+ssh://git@github.com/org/repo.git"]
+
+
+def test_pip_install_editable_vcs_equals_form():
+    result = parse_pip_args(["pip", "install", "--editable=git+ssh://git@github.com/org/repo.git"])
+    assert result is not None
+    assert result.packages == ["git+ssh://git@github.com/org/repo.git"]
+
+
+def test_pip_install_editable_local_path_not_in_packages():
+    # Local paths are editable installs but not SSH VCS deps; they land in
+    # packages but _is_ssh_vcs_url will return False for them.
+    result = parse_pip_args(["pip", "install", "-e", "."])
+    assert result is not None
+    assert result.packages == ["."]
+
+
 def test_uv_add():
     result = parse_uv_args(["uv", "add", "httpx"])
     assert result is not None

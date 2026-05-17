@@ -299,6 +299,16 @@ class TestTryParse:
         assert result is not None
         assert result.req_files == ["reqs/base.txt"]
 
+    def test_pip_install_r_inline_concatenated(self):
+        result = _try_parse(["pip", "install", "-rcustom.txt"])
+        assert result is not None
+        assert result.req_files == ["custom.txt"]
+
+    def test_pip_install_requirement_equals_form(self):
+        result = _try_parse(["pip", "install", "--requirement=custom.txt"])
+        assert result is not None
+        assert result.req_files == ["custom.txt"]
+
     def test_unknown_command_returns_none(self):
         assert _try_parse(["make", "build"]) is None
         assert _try_parse(["cargo", "build"]) is None
@@ -654,6 +664,10 @@ class TestHasSshVcsDeps:
         (tmp_path / "Pipfile.lock").write_text('{"default": {"mylib": {"git": "git@github.com:org/repo.git", "ref": "main"}}}')
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_detects_ssh_in_editable_install(self):
+        parsed = ParsedInstall(manager="pip", packages=["git+ssh://git@github.com/org/repo.git"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, Path(".")) is True
 
 
 class TestIsSshVcsUrl:

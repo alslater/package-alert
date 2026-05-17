@@ -286,8 +286,10 @@ def _make_status_data(*, running=True, alerts=None) -> StatusData:
         pid_file_exists=running,
         db_path="/home/user/.local/share/package-alert/package-alert.db",
         db_exists=True,
-        log_path="/home/user/.local/share/package-alert/package-alert.log",
+        log_path="/home/user/.local/share/package-alert/daemon.log",
         log_exists=True,
+        cli_log_path="/home/user/.local/share/package-alert/cli.log",
+        cli_log_exists=True,
     )
 
 
@@ -405,6 +407,36 @@ def test_render_status_rich_no_scheduled_projects():
     render_status(data, as_json=False, console=console)
     output = console.file.getvalue()
     assert "No projects scheduled" in output
+
+
+def test_render_status_rich_shows_log_paths():
+    data = _make_status_data()
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "Logs" in output
+    assert "daemon.log" in output
+    assert "cli.log" in output
+
+
+def test_render_status_rich_log_not_yet_created():
+    data = _make_status_data()
+    data.log_exists = False
+    data.cli_log_exists = False
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "not yet created" in output
+
+
+def test_render_status_rich_log_disabled():
+    data = _make_status_data()
+    data.log_path = ""
+    data.cli_log_path = ""
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "disabled" in output
 
 
 def test_render_status_json_includes_severity(capsys):

@@ -197,6 +197,21 @@ def render_status(
 
     console.print()
 
+    # ── Logs ──────────────────────────────────────────────────────────────────
+    console.print("[bold]Logs[/bold]")
+
+    def _log_line(label: str, path: str, exists: bool) -> None:
+        if not path:
+            console.print(f"  {label}: [dim]disabled[/dim]")
+        else:
+            indicator = "[green]✓[/green]" if exists else "[dim]✗ not yet created[/dim]"
+            console.print(f"  {label}: {escape(path)}  {indicator}")
+
+    _log_line("Daemon", data.log_path, data.log_exists)
+    _log_line("CLI   ", data.cli_log_path, data.cli_log_exists)
+
+    console.print()
+
     # ── Scheduled projects ────────────────────────────────────────────────────
     console.print("[bold]Scheduled Projects[/bold]")
     if data.scheduled_projects_count > 0:

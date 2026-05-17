@@ -159,12 +159,26 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         if skip_value_for is not None:
             if skip_value_for in ("-r", "--requirement"):
                 req_files.append(arg)
+            elif skip_value_for in ("-e", "--editable"):
+                packages.append(arg)
             skip_value_for = None
             continue
         if arg in ("-r", "--requirement"):
             skip_value_for = arg
             continue
-        if arg in ("-c", "--constraint", "-e", "--editable",
+        if arg.startswith("--requirement="):
+            req_files.append(arg[len("--requirement="):])
+            continue
+        if arg.startswith("-r") and len(arg) > 2:
+            req_files.append(arg[2:])
+            continue
+        if arg in ("-e", "--editable"):
+            skip_value_for = arg
+            continue
+        if arg.startswith("--editable="):
+            packages.append(arg[len("--editable="):])
+            continue
+        if arg in ("-c", "--constraint",
                    "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
                    "--target", "-t", "--prefix", "--root"):
             skip_value_for = arg
