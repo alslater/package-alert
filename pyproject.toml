@@ -57,3 +57,6 @@ testpaths = ["tests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["packagealert"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["/.venv", "/.venv-*"]
