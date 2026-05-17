@@ -814,6 +814,21 @@ class TestHasSshVcsDeps:
         parsed = ParsedInstall(manager="pip", packages=["git+ssh://git@github.com/org/repo.git"], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, Path(".")) is True
 
+    def test_uv_pip_install_r_detects_ssh(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
+    def test_uv_pip_install_r_no_ssh(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("requests==2.31.0\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi", req_files=["requirements.txt"])
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
+    def test_uv_bare_install_scans_glob(self, tmp_path):
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is True
+
 
 class TestIsSshVcsUrl:
     @pytest.mark.parametrize("url", [

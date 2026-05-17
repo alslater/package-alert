@@ -693,11 +693,11 @@ def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
                     return True
             except OSError:
                 pass
-    elif parsed.manager == "pip":
+    elif parsed.manager in ("pip", "uv"):
         if parsed.req_files:
             roots = [cwd / f for f in parsed.req_files]
         elif not parsed.packages:
-            # Bare `pip install` with no explicit packages or -r flags — treat as
+            # Bare install with no explicit packages or -r flags — treat as
             # a lock-file-style install and scan requirements*.txt in the project.
             roots = sorted(cwd.glob("requirements*.txt"))
         else:

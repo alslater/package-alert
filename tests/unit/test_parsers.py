@@ -145,6 +145,37 @@ def test_uv_pip_install():
     assert result.packages == ["numpy"]
 
 
+def test_uv_pip_install_r_space_separated():
+    result = parse_uv_args(["uv", "pip", "install", "-r", "requirements.txt"])
+    assert result is not None
+    assert result.packages == []
+    assert result.req_files == ["requirements.txt"]
+
+
+def test_uv_pip_install_r_concatenated():
+    result = parse_uv_args(["uv", "pip", "install", "-rrequirements.txt"])
+    assert result is not None
+    assert result.req_files == ["requirements.txt"]
+
+
+def test_uv_pip_install_requirement_equals_form():
+    result = parse_uv_args(["uv", "pip", "install", "--requirement=custom.txt"])
+    assert result is not None
+    assert result.req_files == ["custom.txt"]
+
+
+def test_uv_pip_install_editable_local_path_excluded():
+    result = parse_uv_args(["uv", "pip", "install", "-e", "."])
+    assert result is not None
+    assert result.packages == []
+
+
+def test_uv_pip_install_editable_vcs_included():
+    result = parse_uv_args(["uv", "pip", "install", "-e", "git+ssh://git@github.com/org/repo.git"])
+    assert result is not None
+    assert result.packages == ["git+ssh://git@github.com/org/repo.git"]
+
+
 def test_pip_full_path_recognized():
     result = parse_pip_args(["/home/user/.venv/bin/pip", "install", "requests"])
     assert result is not None

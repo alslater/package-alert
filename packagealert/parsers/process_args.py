@@ -228,8 +228,38 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
         return ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     if subcmd == "pip" and len(args) > 1 and args[1] == "install":
         rest = args[2:]
-        packages = [a for a in rest if not a.startswith("-")]
-        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+        packages: list[str] = []
+        req_files: list[str] = []
+        skip_value_for: str | None = None
+        for arg in rest:
+            if skip_value_for is not None:
+                if skip_value_for in ("-r", "--requirement"):
+                    req_files.append(arg)
+                elif skip_value_for in ("-e", "--editable"):
+                    if _is_vcs_editable(arg):
+                        packages.append(arg)
+                skip_value_for = None
+                continue
+            if arg in ("-r", "--requirement"):
+                skip_value_for = arg
+                continue
+            if arg.startswith("--requirement="):
+                req_files.append(arg[len("--requirement="):])
+                continue
+            if arg.startswith("-r") and len(arg) > 2:
+                req_files.append(arg[2:])
+                continue
+            if arg in ("-e", "--editable"):
+                skip_value_for = arg
+                continue
+            if arg.startswith("--editable="):
+                val = arg[len("--editable="):]
+                if _is_vcs_editable(val):
+                    packages.append(val)
+                continue
+            if not arg.startswith("-"):
+                packages.append(arg)
+        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
     if subcmd in ("run", "python", "tool", "init", "build", "publish", "export",
                   "cache", "version", "generate-shell-completion", "self",
                   "pip", "venv", "remove"):
