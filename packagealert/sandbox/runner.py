@@ -497,6 +497,17 @@ class SandboxRunner:
                 if name:
                     queries.append((parsed.ecosystem, name, version))
             source = f"{len(queries)} explicit package(s)"
+        elif parsed.req_files:
+            # -r / --requirement files — parse each one directly
+            from packagealert.parsers.lockfiles import _parse_requirements_txt
+            file_sources: list[str] = []
+            for rf in parsed.req_files:
+                req_path = ctx.cwd / rf
+                if req_path.exists():
+                    pinned, _ = _parse_requirements_txt(req_path)
+                    queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
+                    file_sources.append(rf)
+            source = f"{len(queries)} packages ({', '.join(file_sources) or 'no packages found'})"
         else:
             # Lock-file install — read lockfile for exact versions
             scan = scan_project(ctx.cwd)
@@ -674,13 +685,15 @@ def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
             except OSError:
                 pass
     elif parsed.manager == "pip":
-        # Explicit -r files take precedence; fall back to requirements*.txt glob
-        # for bare lock-file installs (pip install with no packages or -r flags).
-        roots = (
-            [cwd / f for f in parsed.req_files]
-            if parsed.req_files
-            else sorted(cwd.glob("requirements*.txt"))
-        )
+        if parsed.req_files:
+            roots = [cwd / f for f in parsed.req_files]
+        elif not parsed.packages:
+            # Bare `pip install` with no explicit packages or -r flags — treat as
+            # a lock-file-style install and scan requirements*.txt in the project.
+            roots = sorted(cwd.glob("requirements*.txt"))
+        else:
+            # Explicit packages were given; their URLs were already checked above.
+            roots = []
         visited: set[Path] = set()
         for root in roots:
             if _req_file_has_ssh(root, visited):

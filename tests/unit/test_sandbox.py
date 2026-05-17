@@ -788,6 +788,13 @@ class TestHasSshVcsDeps:
         parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, tmp_path) is False
 
+    def test_explicit_packages_do_not_trigger_glob_scan(self, tmp_path):
+        # `pip install requests` must not be blocked because an unrelated
+        # requirements.txt in the project happens to contain an SSH URL.
+        (tmp_path / "requirements.txt").write_text("git+ssh://git@github.com/org/lib.git\n")
+        parsed = ParsedInstall(manager="pip", packages=["requests"], ecosystem="pypi")
+        assert _has_ssh_vcs_deps(parsed, tmp_path) is False
+
     def test_detects_scp_style_in_explicit_packages(self):
         parsed = ParsedInstall(manager="pip", packages=["git+git@github.com:org/repo.git"], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, Path(".")) is True
