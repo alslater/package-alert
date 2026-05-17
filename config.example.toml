@@ -8,6 +8,10 @@ max_retries = 3
 enable_cache_monitoring = true
 enable_process_monitoring = true
 process_poll_interval_seconds = 1.0
+# pip_cache_dir = "~/.cache/pip"
+# uv_cache_dir = "~/.cache/uv"
+# npm_cache_dir = "~/.npm/_cacache"
+# site_packages_dirs = []
 
 [alerts]
 desktop_notifications = true
@@ -17,8 +21,20 @@ min_severity_for_desktop = "MEDIUM"
 [log]
 level = "INFO"
 # file = "~/.local/share/package-alert/package-alert.log"
+max_bytes = 10485760   # 10 MB
+backup_count = 3
 
 [heuristics]
 enabled = true
 warning_threshold = 40
 critical_threshold = 70
+
+[sandbox]
+# extra_env = []   # additional environment variable names to pass into the bubblewrap sandbox
+
+[scheduler]
+enabled = true
+daily_hour = 2     # hour of day (0-23) to run daily scans
+weekly_day = 6     # day of week (0=Monday … 6=Sunday) to run weekly scans
+weekly_hour = 2    # hour of day (0-23) to run weekly scans
+max_scan_history = 5
