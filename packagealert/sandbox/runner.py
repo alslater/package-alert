@@ -599,35 +599,76 @@ def _is_ssh_vcs_url(s: str) -> bool:
     )
 
 
+def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
+    """Recursively scan a requirements file for SSH VCS URLs.
+
+    Follows -r / --requirement include directives, resolving paths relative to
+    the directory of the including file.  *visited* prevents infinite loops.
+    """
+    path = path.resolve()
+    if path in visited:
+        return False
+    visited.add(path)
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return False
+    if _is_ssh_vcs_url(text):
+        return True
+    # Follow nested includes: -r other.txt / --requirement other.txt /
+    # --requirement=other.txt / -rother.txt
+    base = path.parent
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        include: str | None = None
+        if line.startswith("--requirement="):
+            include = line[len("--requirement="):]
+        elif line.startswith("-r") and len(line) > 2 and not line[2:].startswith("-"):
+            include = line[2:].lstrip()
+        elif line.startswith("--requirement "):
+            include = line[len("--requirement "):].lstrip()
+        elif line.startswith("-r "):
+            include = line[3:].lstrip()
+        if include:
+            if _req_file_has_ssh(base / include, visited):
+                return True
+    return False
+
+
 def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
     """Return True if the install involves SSH-authenticated Git VCS dependencies.
 
     Checks explicit packages on the command line, and for lock-file installs
     scans Pipfile.lock (pipenv) or requirements*.txt (pip) for SSH VCS URLs.
     Both URL-style (git+ssh://, ssh://) and scp-style (git@host:org/repo)
-    patterns are detected.
+    patterns are detected.  Nested pip -r includes are followed recursively.
     """
     if parsed is None:
         return False
     if any(_is_ssh_vcs_url(p) for p in parsed.packages):
         return True
-    candidates: list[Path] = []
     if parsed.manager == "pipenv":
-        candidates.append(cwd / "Pipfile.lock")
+        candidates: list[Path] = [cwd / "Pipfile.lock"]
+        for path in candidates:
+            try:
+                if _is_ssh_vcs_url(path.read_text(errors="replace")):
+                    return True
+            except OSError:
+                pass
     elif parsed.manager == "pip":
         # Explicit -r files take precedence; fall back to requirements*.txt glob
         # for bare lock-file installs (pip install with no packages or -r flags).
-        if parsed.req_files:
-            candidates.extend(cwd / f for f in parsed.req_files)
-        else:
-            candidates.extend(sorted(cwd.glob("requirements*.txt")))
-    for path in candidates:
-        try:
-            text = path.read_text(errors="replace")
-            if _is_ssh_vcs_url(text):
+        roots = (
+            [cwd / f for f in parsed.req_files]
+            if parsed.req_files
+            else sorted(cwd.glob("requirements*.txt"))
+        )
+        visited: set[Path] = set()
+        for root in roots:
+            if _req_file_has_ssh(root, visited):
                 return True
-        except OSError:
-            pass
     return False
 
 
@@ -708,12 +749,42 @@ def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:
             if candidates:
                 return candidates[0]
 
-    # 3. .venv / venv inside the project (uv default)
+    # 3. pipenv-managed venv under WORKON_HOME (outside the project by default)
+    if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+        pipenv_venv = _find_pipenv_venv(cwd)
+        if pipenv_venv:
+            candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
+            if candidates:
+                return candidates[0]
+
+    # 4. .venv / venv inside the project (uv default, pipenv with PIPENV_VENV_IN_PROJECT)
     for name in (".venv", "venv"):
         candidates = sorted((cwd / name).glob("lib/python*/site-packages"))
         if candidates:
             return candidates[0]
 
+    return None
+
+
+def _find_pipenv_venv(cwd: Path) -> Path | None:
+    """Return the pipenv-managed virtualenv root for the project at *cwd*, or None.
+
+    Runs `pipenv --venv` outside the sandbox to resolve the path, which works
+    for both pre-existing venvs (pre-install snapshot) and freshly-created ones
+    (post-install scan).  Returns None if pipenv is not installed or the venv
+    does not exist yet (e.g. before the first `pipenv sync`).
+    """
+    try:
+        result = subprocess.run(
+            ["pipenv", "--venv"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        if result.returncode == 0:
+            venv = Path(result.stdout.strip())
+            if venv.exists():
+                return venv
+    except FileNotFoundError:
+        pass
     return None
 
 
@@ -763,6 +834,16 @@ def _resolve_targets(ctx: _Context) -> None:
             venv_dir = _pipenv_venv_dir()
             venv_dir.mkdir(parents=True, exist_ok=True)
             ctx.write_dirs.append(venv_dir)
+            # If the venv already exists, add its site-packages as a scan target
+            # so the pre-install snapshot captures current state.  Fresh installs
+            # produce an empty snapshot here; the post-install fallback below
+            # then finds the newly-created venv and diffs against empty.
+            if not ctx.scan_targets:
+                pipenv_venv = _find_pipenv_venv(cwd)
+                if pipenv_venv:
+                    sp_candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
+                    if sp_candidates:
+                        ctx.scan_targets.append(sp_candidates[0])
 
     elif eco == "npm":
         # node_modules lives under cwd, so it's already covered by the cwd bind

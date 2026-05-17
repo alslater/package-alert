@@ -6,6 +6,7 @@ are pure functions (no I/O, no async, no OSV calls).
 from __future__ import annotations
 
 import json
+import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -14,10 +15,12 @@ from packagealert.sandbox.bwrap import build_cmd
 from packagealert.sandbox.runner import (
     SandboxRunner,
     _collect_new_packages,
+    _find_pipenv_venv,
     _find_site_packages,
     _find_venv_root,
     _has_ssh_vcs_deps,
     _is_ssh_vcs_url,
+    _req_file_has_ssh,
     _home_ro_dirs,
     _new_composer_packages,
     _new_npm_packages,
@@ -458,6 +461,61 @@ class TestResolveTargets:
         assert venvs_dir not in ctx.write_dirs
         assert not venvs_dir.exists()
 
+    def test_pipenv_adds_existing_venv_site_packages_to_scan_targets(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        venv = venvs_dir / "myproject-abc123"
+        site_pkgs = venv / "lib" / "python3.12" / "site-packages"
+        site_pkgs.mkdir(parents=True)
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        with unittest.mock.patch(
+            "packagealert.sandbox.runner._find_pipenv_venv", return_value=venv
+        ):
+            _resolve_targets(ctx)
+        assert site_pkgs in ctx.scan_targets
+
+    def test_pipenv_no_scan_target_when_venv_not_yet_created(self, tmp_path, monkeypatch):
+        venvs_dir = tmp_path / "virtualenvs"
+        monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
+        with unittest.mock.patch(
+            "packagealert.sandbox.runner._find_pipenv_venv", return_value=None
+        ):
+            _resolve_targets(ctx)
+        # No scan targets yet — the post-install fallback will find them after creation
+        assert ctx.scan_targets == []
+
+
+class TestFindPipenvVenv:
+    def test_returns_path_when_pipenv_succeeds(self, tmp_path):
+        venv = tmp_path / "myproject-abc123"
+        venv.mkdir()
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout=str(venv) + "\n")
+            result = _find_pipenv_venv(tmp_path)
+        assert result == venv
+
+    def test_returns_none_when_venv_does_not_exist(self, tmp_path):
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=0, stdout="/nonexistent/path\n")
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
+
+    def test_returns_none_when_pipenv_fails(self, tmp_path):
+        with unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = unittest.mock.Mock(returncode=1, stdout="")
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
+
+    def test_returns_none_when_pipenv_not_installed(self, tmp_path):
+        with unittest.mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            result = _find_pipenv_venv(tmp_path)
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # _new_python_packages
@@ -597,6 +655,69 @@ class TestFindVenvRoot:
         venv2 = tmp_path / "venv"
         site2 = self._make_venv(venv2)
         assert _find_venv_root([site1, site2]) == venv1
+
+
+class TestReqFileHasSsh:
+    def test_direct_ssh_url(self, tmp_path):
+        f = tmp_path / "reqs.txt"
+        f.write_text("git+ssh://git@github.com/org/lib.git\n")
+        assert _req_file_has_ssh(f, set()) is True
+
+    def test_nested_include_detected(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("requests==2.31.0\n-r inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_long_flag(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git@github.com:org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("--requirement inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_equals_form(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("--requirement=inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_nested_include_concatenated_form(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("-rinner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
+
+    def test_no_ssh_in_any_file(self, tmp_path):
+        inner = tmp_path / "inner.txt"
+        inner.write_text("flask==3.0.0\n")
+        outer = tmp_path / "outer.txt"
+        outer.write_text("requests==2.31.0\n-r inner.txt\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
+    def test_cycle_protection(self, tmp_path):
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("-r b.txt\n")
+        b.write_text("-r a.txt\n")
+        assert _req_file_has_ssh(a, set()) is False
+
+    def test_missing_include_is_skipped(self, tmp_path):
+        outer = tmp_path / "outer.txt"
+        outer.write_text("-r nonexistent.txt\n")
+        assert _req_file_has_ssh(outer, set()) is False
+
+    def test_subdirectory_relative_resolution(self, tmp_path):
+        subdir = tmp_path / "requirements"
+        subdir.mkdir()
+        base = subdir / "base.txt"
+        base.write_text("git+ssh://git@github.com/org/lib.git\n")
+        outer = tmp_path / "requirements.txt"
+        outer.write_text("-r requirements/base.txt\n")
+        assert _req_file_has_ssh(outer, set()) is True
 
 
 class TestHasSshVcsDeps:
