@@ -201,6 +201,15 @@ def test_uv_pip_install_config_settings_value_not_treated_as_package():
     assert result.packages == []
 
 
+def test_uv_pip_install_config_setting_singular_value_not_treated_as_package():
+    result = parse_uv_args([
+        "uv", "pip", "install", "-e", "../../libs/graph",
+        "--config-setting", "editable_mode=strict",
+    ])
+    assert result is not None
+    assert result.packages == []
+
+
 def test_pip_full_path_recognized():
     result = parse_pip_args(["/home/user/.venv/bin/pip", "install", "requests"])
     assert result is not None

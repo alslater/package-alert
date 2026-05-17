@@ -13,7 +13,7 @@ _PIP_VALUE_FLAGS = frozenset({
     "--find-links", "-f",
     "--target", "-t",
     "--prefix", "--root",
-    "--config-settings", "-C",   # pip 22.1+: build-system config, e.g. editable_mode=strict
+    "--config-settings", "--config-setting", "-C",  # pip 22.1+ / uv: build-system config
 })
 # Matches scp-style VCS refs: git@host:path (colon, not slash, after hostname).
 _SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")

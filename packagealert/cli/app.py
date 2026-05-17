@@ -238,11 +238,19 @@ def scan_project(
     if fmt not in ("text", "json", "html", "browser"):
         console.print("[red]--format must be one of: text, json, html, browser[/red]")
         raise typer.Exit(1)
-    if requirements is not None and not requirements.exists():
-        console.print(f"[red]Requirements file not found: {requirements}[/red]")
-        raise typer.Exit(1)
+    root = path.resolve()
+    if requirements is not None:
+        # Resolve relative to the project root so that `-r requirements-lock.txt`
+        # works correctly when PATH is not the current working directory.
+        requirements = (root / requirements).resolve()
+        if not requirements.exists():
+            console.print(f"[red]Requirements file not found: {requirements}[/red]")
+            raise typer.Exit(1)
+        if not requirements.is_file():
+            console.print(f"[red]--requirements must be a file, not a directory: {requirements}[/red]")
+            raise typer.Exit(1)
     cfg = _load(config)
-    asyncio.run(_run_scan_project(cfg, path.resolve(), scan_unpinned, scan_installed, details, fmt, requirements=requirements))
+    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements))
 
 
 async def _run_scan_project(
@@ -261,7 +269,7 @@ async def _run_scan_project(
     )
 
     if requirements is not None:
-        pinned, unpinned = collect_requirements_packages(requirements.resolve())
+        pinned, unpinned = collect_requirements_packages(requirements)
         result = ProjectScan(
             sources=[f"pypi ({requirements.name})"],
             pinned=pinned,
