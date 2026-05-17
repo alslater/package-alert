@@ -25,8 +25,16 @@
 
 ## Installation
 
+**Recommended — pipx (isolated environment, `package-alert` available system-wide):**
+
 ```bash
-pip install -e .
+pipx install package-alert
+```
+
+**Development install:**
+
+```bash
+pipx install -e .
 ```
 
 ## Quick Start
