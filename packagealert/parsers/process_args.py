@@ -6,6 +6,8 @@ from pathlib import Path
 
 # Matches the leading PEP 508 distribution name (letters, digits, hyphens, underscores, dots).
 _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
+# Matches scp-style VCS refs: git@host:path (colon, not slash, after hostname).
+_SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
 
 @dataclass
@@ -54,8 +56,13 @@ def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
 def _parse_pip_spec(spec: str) -> tuple[str, str | None]:
     # Strip PEP 508 environment markers (everything after the first ';')
     spec = spec.partition(";")[0].strip()
-    # Reject local paths, VCS URLs, and direct URLs before touching the name
-    if spec.startswith((".", "/")) or "://" in spec or spec.startswith(("git+", "hg+", "svn+", "bzr+", "file:")):
+    # Reject local paths, VCS URLs (scheme-based and scp-style), and direct URLs
+    if (
+        spec.startswith((".", "/"))
+        or "://" in spec
+        or spec.startswith(("git+", "hg+", "svn+", "bzr+", "file:"))
+        or _SCP_VCS_RE.match(spec)
+    ):
         return "", None
     m = _PIP_NAME_RE.match(spec)
     if not m:

@@ -3,6 +3,7 @@ from packagealert.parsers.process_args import (
     parse_pip_args,
     parse_uv_args,
     parse_npm_args,
+    parse_package_spec,
     ParsedInstall,
 )
 
@@ -251,3 +252,33 @@ class TestCollectRequirementsPackages:
         # shared.txt is only processed once across both calls
         total = [p.name for p in pinned_a + pinned_b]
         assert total.count("requests") == 1
+
+
+# ---------------------------------------------------------------------------
+# parse_package_spec — VCS / non-PyPI token rejection
+# ---------------------------------------------------------------------------
+
+class TestParsePackageSpec:
+    def test_plain_name(self):
+        assert parse_package_spec("requests", "pypi") == ("requests", None)
+
+    def test_pinned_version(self):
+        assert parse_package_spec("requests==2.31.0", "pypi") == ("requests", "2.31.0")
+
+    def test_scheme_vcs_url_rejected(self):
+        # git+ssh:// and other scheme-based VCS refs must return ("", None)
+        assert parse_package_spec("git+ssh://git@github.com/org/repo.git", "pypi") == ("", None)
+
+    def test_https_vcs_url_rejected(self):
+        assert parse_package_spec("git+https://github.com/org/repo.git", "pypi") == ("", None)
+
+    def test_scp_style_vcs_rejected(self):
+        # git@host:path was previously parsed as package name "git"
+        assert parse_package_spec("git@github.com:org/repo.git", "pypi") == ("", None)
+
+    def test_scp_style_with_git_plus_prefix_rejected(self):
+        assert parse_package_spec("git+git@github.com:org/repo.git", "pypi") == ("", None)
+
+    def test_https_with_git_at_username_not_rejected(self):
+        # HTTPS URL with git@ username — rejected by "://" guard, not scp regex
+        assert parse_package_spec("git+https://git@github.com/org/repo.git", "pypi") == ("", None)
