@@ -238,6 +238,9 @@ def scan_project(
     if fmt not in ("text", "json", "html", "browser"):
         console.print("[red]--format must be one of: text, json, html, browser[/red]")
         raise typer.Exit(1)
+    if requirements is not None and scan_installed:
+        console.print("[red]--requirements and --scan-installed are mutually exclusive[/red]")
+        raise typer.Exit(1)
     root = path.resolve()
     if requirements is not None:
         # Resolve relative to the project root so that `-r requirements-lock.txt`

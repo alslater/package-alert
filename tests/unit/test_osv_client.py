@@ -1,7 +1,7 @@
 import pytest
 import respx
 import httpx
-from packagealert.osv.client import OsvClient
+from packagealert.osv.client import OsvClient, _extract_fixed_versions, _normalize_pypi_name
 from packagealert.config import OsvConfig
 
 
@@ -115,3 +115,37 @@ async def test_fixed_versions_populated_from_enrich(osv_client):
     assert len(results) == 1
     adv = results[0].advisories[0]
     assert adv.fixed_versions == ["26.4.0rc2"]
+
+
+def _make_vuln(pkg_name: str, fixed: str) -> dict:
+    return {
+        "id": "GHSA-test-0000-0000",
+        "affected": [
+            {
+                "package": {"name": pkg_name, "ecosystem": "PyPI"},
+                "ranges": [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": fixed}]}],
+            }
+        ],
+    }
+
+
+def test_normalize_pypi_name():
+    assert _normalize_pypi_name("Django_Debug_Toolbar") == "django-debug-toolbar"
+    assert _normalize_pypi_name("my.package-name") == "my-package-name"
+    assert _normalize_pypi_name("requests") == "requests"
+
+
+def test_extract_fixed_versions_underscore_query_hyphen_advisory():
+    # Query uses underscores; OSV advisory spells the name with hyphens.
+    vuln = _make_vuln("django-debug-toolbar", "4.0.0")
+    assert _extract_fixed_versions(vuln, "django_debug_toolbar", "pypi") == ["4.0.0"]
+
+
+def test_extract_fixed_versions_hyphen_query_underscore_advisory():
+    vuln = _make_vuln("my_package", "2.1.0")
+    assert _extract_fixed_versions(vuln, "my-package", "pypi") == ["2.1.0"]
+
+
+def test_extract_fixed_versions_dot_separator():
+    vuln = _make_vuln("zope.interface", "6.0.0")
+    assert _extract_fixed_versions(vuln, "zope-interface", "pypi") == ["6.0.0"]

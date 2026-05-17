@@ -113,16 +113,26 @@ def _parse_batch_response(
     return results
 
 
+def _normalize_pypi_name(name: str) -> str:
+    """Normalize a PyPI package name per PEP 503: lowercase, collapse [-_.] to '-'."""
+    import re
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[str]:
     """Return fixed versions from OSV affected ranges for the queried package."""
     eco_map = {"pypi": "PyPI", "npm": "npm", "packagist": "Packagist"}
     canonical_eco = eco_map.get(ecosystem, ecosystem).lower()
+    is_pypi = ecosystem == "pypi"
+    query_name = _normalize_pypi_name(package_name) if is_pypi else package_name.lower()
     fixed: list[str] = []
     for affected in vuln.get("affected", []):
         pkg = affected.get("package", {})
         if pkg.get("ecosystem", "").lower() != canonical_eco:
             continue
-        if pkg.get("name", "").lower() != package_name.lower():
+        adv_name = pkg.get("name", "")
+        adv_name_norm = _normalize_pypi_name(adv_name) if is_pypi else adv_name.lower()
+        if adv_name_norm != query_name:
             continue
         for r in affected.get("ranges", []):
             if r.get("type") in ("SEMVER", "ECOSYSTEM"):
