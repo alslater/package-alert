@@ -250,7 +250,7 @@ Displays a table with: package name, ecosystem, version, advisory ID or risk sco
 Clear the OSV query cache.
 
 ```bash
-package-alert clear-cache [--ecosystem pypi|npm] [--config PATH]
+package-alert clear-cache [--ecosystem pypi|npm|packagist] [--config PATH]
 ```
 
 Omit `--ecosystem` to clear all ecosystems.

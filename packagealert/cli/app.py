@@ -486,7 +486,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list) -> s
 
 @app.command("clear-cache")
 def clear_cache(
-    ecosystem: Optional[str] = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear: pypi or npm. Clears all if omitted."),
+    ecosystem: Optional[str] = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear: pypi, npm, or packagist. Clears all if omitted."),
     config: Optional[Path] = _cfg_option,
 ):
     """Clear the OSV query cache, optionally filtered by ecosystem."""
@@ -497,8 +497,8 @@ def clear_cache(
 async def _run_clear_cache(cfg, ecosystem: Optional[str]):
     from packagealert.storage.db import open_db
 
-    if ecosystem and ecosystem not in ("pypi", "npm"):
-        console.print(f"[red]Unknown ecosystem '{ecosystem}'. Use 'pypi' or 'npm'.[/red]")
+    if ecosystem and ecosystem not in ("pypi", "npm", "packagist"):
+        console.print(f"[red]Unknown ecosystem '{ecosystem}'. Use 'pypi', 'npm', or 'packagist'.[/red]")
         raise typer.Exit(1)
 
     db = await open_db()
