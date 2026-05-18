@@ -388,6 +388,10 @@ systemctl --user enable --now package-alert
 
 See [ARCHITECTURE.md](ARCHITECTURE.md).
 
+## Sandbox
+
+See [SANDBOX.md](SANDBOX.md).
+
 ## Security
 
 See [THREAT_MODEL.md](THREAT_MODEL.md).
