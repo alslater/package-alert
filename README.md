@@ -119,7 +119,7 @@ package-alert run --allow-developer-packages uv sync  # monorepo with symlinked 
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already in the local cache. |
 | `--env VAR` | Pass an additional environment variable through into the sandbox. Repeatable: `--env MY_TOKEN --env CUSTOM_URL`. |
 | `--expose-ssh-keys` | Expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
-| `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks pointing outside the project root. Without this flag, such symlinks are not read or restored (treated as unreadable) to prevent a malicious install from redirecting lock file writes to arbitrary paths. |
+| `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks pointing outside the project root. Without this flag, lock files that resolve outside the project are rejected at every stage — pre-flight scan, post-run lock-file scan, snapshot, and restore — to prevent a malicious install from reading or writing arbitrary paths via a redirected lock file symlink. |
 | `--config PATH` | Path to config TOML file. |
 
 **Filesystem isolation:**

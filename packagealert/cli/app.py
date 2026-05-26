@@ -541,7 +541,9 @@ def run_cmd(
     allow_developer_packages: bool = typer.Option(
         False, "--allow-developer-packages",
         help="Disable symlink containment checks on lock files. "
-             "Use when lock files are symlinks to paths outside the project (e.g. monorepo or editable-install setups).",
+             "Without this flag, lock files that are symlinks resolving outside the project root are "
+             "rejected at every stage: pre-flight scan, post-run lock-file scan, snapshot, and restore. "
+             "Use this flag when lock files legitimately point outside the project (e.g. monorepo or editable-install setups).",
     ),
     config: Optional[Path] = _cfg_option,
 ):

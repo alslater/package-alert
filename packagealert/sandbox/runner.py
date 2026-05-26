@@ -374,7 +374,7 @@ class SandboxRunner:
             self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
 
         # Pre-flight: scan all project lock files for known-malicious packages
-        if not await self._preflight_shell(cwd):
+        if not await self._preflight_shell(cwd, allow_developer_packages=allow_developer_packages):
             return 1
 
         # Snapshot install targets and lock files before the shell session opens
@@ -439,12 +439,25 @@ class SandboxRunner:
 
         return result.returncode
 
-    async def _preflight_shell(self, cwd: Path) -> bool:
+    async def _preflight_shell(self, cwd: Path, *, allow_developer_packages: bool = False) -> bool:
         """Pre-flight OSV check for shell sessions: scans all project lock files."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
         from packagealert.parsers.lockfiles import scan_project
         from packagealert.storage.db import open_db
+
+        if not allow_developer_packages:
+            offender = _assert_scannable_lock_files_contained(cwd)
+            if offender is not None:
+                self._console.print(
+                    f"[bold red]✗ Lock file {offender} resolves outside the project directory "
+                    f"— refusing pre-flight scan. Pass --allow-developer-packages to override.[/bold red]"
+                )
+                log.warning(
+                    "Lock file resolves outside project root, refusing pre-flight scan: %s",
+                    cwd / offender,
+                )
+                return False
 
         scan = scan_project(cwd)
         queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
@@ -639,25 +652,17 @@ class SandboxRunner:
         # Even lock files that were not in `changed` must be checked because
         # scan_project() reads every parseable lock file it finds under cwd.
         if not allow_developer_packages:
-            project_root = cwd.resolve()
-            for name in _SCANNABLE_LOCK_FILES:
-                p = cwd / name
-                if not p.exists():
-                    continue
-                try:
-                    resolved = p.resolve()
-                except OSError:
-                    resolved = None
-                if resolved is None or not resolved.is_relative_to(project_root):
-                    self._console.print(
-                        f"[bold red]✗ Lock file {p.name} resolves outside the project directory "
-                        f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
-                    )
-                    log.warning(
-                        "Lock file resolves outside project root, refusing scan_project call: %s",
-                        p,
-                    )
-                    return False
+            offender = _assert_scannable_lock_files_contained(cwd)
+            if offender is not None:
+                self._console.print(
+                    f"[bold red]✗ Lock file {offender} resolves outside the project directory "
+                    f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
+                )
+                log.warning(
+                    "Lock file resolves outside project root, refusing scan_project call: %s",
+                    cwd / offender,
+                )
+                return False
 
         scan = scan_project(cwd)
         queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
@@ -1072,6 +1077,27 @@ _SCANNABLE_LOCK_FILES = [
 ]
 
 
+def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
+    """Check every existing scannable lock file in *cwd* resolves within the project.
+
+    Returns the name of the first offending file, or ``None`` if all are safe.
+    Used by both pre-flight and post-run scans before calling ``scan_project()``,
+    which follows symlinks unconditionally via ``read_text()``.
+    """
+    project_root = cwd.resolve()
+    for name in _SCANNABLE_LOCK_FILES:
+        p = cwd / name
+        if not p.exists() and not p.is_symlink():
+            continue
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return name
+        if not resolved.is_relative_to(project_root):
+            return name
+    return None
+
+
 def _snapshot_lock_files(
     cwd: Path, *, allow_developer_packages: bool = False
 ) -> dict[Path, bytes | None | _LockUnreadable]:
@@ -1140,33 +1166,51 @@ def _restore_lock_files(
     *,
     allow_developer_packages: bool = False,
 ) -> None:
+    # Check the *parent directory* (not the resolved symlink target) to decide
+    # whether it is safe to operate on this path.  unlink() and rename() act on
+    # the directory entry itself without following symlinks, so a containment
+    # check on the parent is both necessary and sufficient.
+    # Note: allow_developer_packages has no effect here; parent-containment is
+    # always enforced because it is safe regardless of symlink targets.
     project_root = cwd.resolve()
     restored = []
     for path, content in snapshots.items():
-        if not allow_developer_packages:
-            try:
-                resolved = path.resolve()
-            except OSError:
-                log.warning("Cannot resolve path during lock file restore, skipping: %s", path)
-                continue
-            if not resolved.is_relative_to(project_root):
-                log.warning(
-                    "Lock file path resolves outside project directory, skipping restore: %s -> %s",
-                    path,
-                    resolved,
-                )
-                continue
         if isinstance(content, _LockUnreadable):
             # Pre-run state was unknown; skip to avoid accidental data loss.
             continue
         try:
+            parent_resolved = path.parent.resolve()
+        except OSError:
+            log.warning("Cannot resolve parent directory during lock file restore, skipping: %s", path)
+            continue
+        if not parent_resolved.is_relative_to(project_root):
+            log.warning(
+                "Lock file parent directory resolves outside project, skipping restore: %s",
+                path,
+            )
+            continue
+        try:
             if content is None:
-                if path.exists():
+                # Was absent pre-run; remove whatever appeared, including symlinks.
+                # lstat() detects broken symlinks that exists() would miss.
+                try:
+                    path.lstat()
                     path.unlink()
                     restored.append(path.name)
+                except FileNotFoundError:
+                    pass
             else:
-                path.write_bytes(content)
-                restored.append(path.name)
+                # Write to a sibling temp file then atomically rename into place.
+                # rename() replaces the directory entry without following symlinks,
+                # so an attacker-placed symlink is overwritten by a regular file
+                # rather than the content being written to the symlink's target.
+                tmp = path.with_name(path.name + ".pa-restore-tmp")
+                try:
+                    tmp.write_bytes(content)
+                    tmp.rename(path)
+                    restored.append(path.name)
+                finally:
+                    tmp.unlink(missing_ok=True)
         except OSError:
             log.warning("Failed to restore lock file: %s", path)
     if restored:

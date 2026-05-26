@@ -31,6 +31,7 @@ from packagealert.sandbox.runner import (
     _snapshot_lock_files,
     _try_parse,
     _build_sandbox_env,
+    _assert_scannable_lock_files_contained,
     _LOCK_UNREADABLE,
     _RESTORABLE_LOCK_FILES,
     _SCANNABLE_LOCK_FILES,
@@ -1300,31 +1301,38 @@ class TestRestoreLockFiles:
         _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)  # no exception
 
     def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
-        # Simulate write_bytes raising after the containment check passes; must not propagate.
+        # Simulate rename() failing after the temp file is written; must not propagate.
+        # The original file must survive (temp file cleaned up, rename never happened).
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"current content")
-        original_wb = Path.write_bytes
-        def patched(self, data):
-            if self.name == "Pipfile.lock":
+        original_rename = Path.rename
+        def patched(self, target):
+            if Path(target).name == "Pipfile.lock":
                 raise OSError("disk full")
-            return original_wb(self, data)
-        monkeypatch.setattr(Path, "write_bytes", patched)
+            return original_rename(self, target)
+        monkeypatch.setattr(Path, "rename", patched)
         snapshots = {lock: b"original content"}
         _restore_lock_files(snapshots, tmp_path, _make_runner()._console)  # no exception
-        # File unchanged because write failed, but no exception propagated
+        # Original file unchanged because rename failed; temp file was cleaned up.
         assert lock.read_bytes() == b"current content"
+        assert not (tmp_path / "Pipfile.lock.pa-restore-tmp").exists()
 
     def test_empty_snapshots_is_noop(self, tmp_path):
         _restore_lock_files({}, tmp_path, _make_runner()._console)  # no exception
 
-    def test_skips_symlink_pointing_outside_project(self, tmp_path):
-        # A lock file name that is a symlink to a path outside the project must be skipped
+    def test_replaces_external_symlink_with_regular_file(self, tmp_path):
+        # When a lock file is an external symlink, restore must not write through it.
+        # Instead it should remove the symlink and create a regular file in its place.
         target = tmp_path.parent / "sensitive_file"
         target.write_bytes(b"should not be overwritten")
         link = tmp_path / "Pipfile.lock"
         link.symlink_to(target)
-        _restore_lock_files({link: b"attacker content"}, tmp_path, _make_runner()._console)
+        _restore_lock_files({link: b"original content"}, tmp_path, _make_runner()._console)
+        # External target is untouched.
         assert target.read_bytes() == b"should not be overwritten"
+        # Symlink replaced by a regular file containing the snapshot content.
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"original content"
 
     def test_does_not_delete_unreadable_file_on_restore(self, tmp_path):
         # _LOCK_UNREADABLE means the file existed pre-run but content was unknown;
@@ -1335,17 +1343,32 @@ class TestRestoreLockFiles:
         assert lock.exists()
         assert lock.read_bytes() == b"pre-existing content"
 
-    def test_allow_developer_packages_writes_through_external_symlink(self, tmp_path):
-        # With the flag, a symlink pointing outside cwd is restored through
+    def test_deletes_newly_created_external_symlink(self, tmp_path):
+        # If a lock file was absent pre-run (None) but appeared as an external symlink,
+        # unlink() removes the symlink itself without touching the target.
+        target = tmp_path.parent / "external_target"
+        target.write_bytes(b"external data")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        _restore_lock_files({link: None}, tmp_path, _make_runner()._console)
+        assert not link.exists() and not link.is_symlink()  # symlink removed
+        assert target.read_bytes() == b"external data"  # target untouched
+
+    def test_allow_developer_packages_also_replaces_external_symlink(self, tmp_path):
+        # Even with allow_developer_packages, restore uses rename() which replaces
+        # the directory entry without following symlinks — the external target is
+        # never written to, the symlink is replaced by a regular file.
         target = tmp_path.parent / "shared_lock"
-        target.write_bytes(b"modified content")
+        target.write_bytes(b"external content")
         link = tmp_path / "Pipfile.lock"
         link.symlink_to(target)
         _restore_lock_files(
             {link: b"original content"}, tmp_path, _make_runner()._console,
             allow_developer_packages=True,
         )
-        assert target.read_bytes() == b"original content"
+        assert target.read_bytes() == b"external content"  # external file untouched
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"original content"
 
 
 # ---------------------------------------------------------------------------
@@ -1389,6 +1412,92 @@ def _fake_scan_result(packages: list[tuple[str, str, str]]):
     from types import SimpleNamespace
     pkgs = [SimpleNamespace(ecosystem=eco, name=name, version=ver) for eco, name, ver in packages]
     return SimpleNamespace(pinned=pkgs, sources=["Pipfile.lock"])
+
+
+class TestAssertScannableLockFilesContained:
+    def test_returns_none_when_all_files_within_project(self, tmp_path):
+        (tmp_path / "Pipfile.lock").write_bytes(b"content")
+        assert _assert_scannable_lock_files_contained(tmp_path) is None
+
+    def test_returns_none_when_no_lock_files_exist(self, tmp_path):
+        assert _assert_scannable_lock_files_contained(tmp_path) is None
+
+    def test_returns_name_for_external_symlink(self, tmp_path):
+        target = tmp_path.parent / "external"
+        target.write_bytes(b"content")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+        result = _assert_scannable_lock_files_contained(tmp_path)
+        assert result == "Pipfile.lock"
+
+    def test_returns_name_for_broken_symlink_pointing_outside_project(self, tmp_path):
+        # Broken symlink whose (missing) target is outside the project root.
+        (tmp_path / "uv.lock").symlink_to(tmp_path.parent / "nonexistent_external")
+        result = _assert_scannable_lock_files_contained(tmp_path)
+        assert result == "uv.lock"
+
+    def test_ignores_non_scannable_lock_files(self, tmp_path):
+        # yarn.lock is restorable but not scannable — external symlink should not trigger
+        target = tmp_path.parent / "external_yarn"
+        target.write_bytes(b"content")
+        (tmp_path / "yarn.lock").symlink_to(target)
+        assert _assert_scannable_lock_files_contained(tmp_path) is None
+
+
+class TestPreflightShellContainment:
+    """_preflight_shell must enforce lock-file symlink containment like _scan_updated_lock_files."""
+
+    def test_blocks_when_lock_file_is_external_symlink(self, tmp_path):
+        import asyncio
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"[[package]]")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+
+        runner = _make_runner()
+        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan:
+            result = asyncio.run(runner._preflight_shell(tmp_path))
+
+        assert result is False
+        mock_scan.assert_not_called()
+
+    def test_allows_external_symlink_with_flag(self, tmp_path):
+        import asyncio
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"[[package]]")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(
+                runner._preflight_shell(tmp_path, allow_developer_packages=True)
+            )
+
+        assert result is True
+
+    def test_proceeds_when_all_lock_files_within_project(self, tmp_path):
+        import asyncio
+        (tmp_path / "Pipfile.lock").write_bytes(b"content")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._preflight_shell(tmp_path))
+
+        assert result is True
 
 
 class TestScanUpdatedLockFiles:
