@@ -1206,6 +1206,10 @@ class TestRunExitCode:
             subprocess, "run",
             lambda *a, **kw: type("R", (), {"returncode": returncode})(),
         )
+        # Stub _preflight so tests don't hit the real OSV client or SQLite DB.
+        async def _preflight_ok(*a, **kw):
+            return True
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
 
     def test_malicious_lock_file_returns_1_when_command_succeeds(self, tmp_path, monkeypatch):
         """Malicious lock-file detection always yields exit code 1 (zero-exit path)."""
@@ -1569,6 +1573,97 @@ class TestPreflightShellContainment:
         ):
             result = asyncio.run(runner._preflight_shell(tmp_path))
 
+        assert result is True
+
+
+class TestPreflightContainment:
+    """_preflight() must enforce lock-file containment on the lock-file install branch."""
+
+    def _make_ctx(self, tmp_path, argv):
+        import packagealert.sandbox.runner as runner_mod
+        parsed = runner_mod._try_parse(argv)
+        return runner_mod._Context(argv=argv, parsed=parsed, cwd=tmp_path)
+
+    def test_blocks_lock_file_install_when_lock_file_is_external_symlink(self, tmp_path):
+        """When a lock file resolves outside the project, _preflight() returns False
+        without calling scan_project()."""
+        import asyncio
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"[[package]]\nname = 'requests'\nversion = '2.31.0'\n")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+
+        ctx = self._make_ctx(tmp_path, ["pipenv", "install"])
+        runner = _make_runner()
+        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan:
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is False
+        mock_scan.assert_not_called()
+
+    def test_allows_external_symlink_with_flag(self, tmp_path):
+        """With allow_developer_packages=True, the external symlink is followed normally."""
+        import asyncio
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"contents")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        ctx = self._make_ctx(tmp_path, ["pipenv", "install"])
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._preflight(ctx, allow_developer_packages=True))
+
+        assert result is True
+
+    def test_proceeds_when_lock_file_is_within_project(self, tmp_path):
+        """Regular (non-symlink) lock files within the project pass containment."""
+        import asyncio
+        (tmp_path / "Pipfile.lock").write_bytes(b"content")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        ctx = self._make_ctx(tmp_path, ["pipenv", "install"])
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+
+    def test_explicit_packages_bypass_containment_check(self, tmp_path):
+        """When packages are explicit on the CLI, the lock-file branch is not entered
+        at all — no containment check is needed or performed."""
+        import asyncio
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"contents")
+        (tmp_path / "Pipfile.lock").symlink_to(target)
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        ctx = self._make_ctx(tmp_path, ["pip", "install", "requests"])
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        # Explicit package — containment guard not triggered, OSV check runs normally.
         assert result is True
 
 

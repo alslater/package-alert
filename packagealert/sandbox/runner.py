@@ -143,7 +143,7 @@ class SandboxRunner:
             self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
-        if not await self._preflight(ctx):
+        if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
 
         _resolve_targets(ctx)
@@ -510,7 +510,7 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _preflight(self, ctx: _Context) -> bool:
+    async def _preflight(self, ctx: _Context, *, allow_developer_packages: bool = False) -> bool:
         """Query OSV for what's about to be installed. Return False to block."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
@@ -554,7 +554,16 @@ class SandboxRunner:
             )
 
         if not parsed.packages and not parsed.req_files:
-            # Lock-file install — read lockfile for exact versions
+            # Lock-file install — read lockfile for exact versions.
+            # Enforce containment before scan_project() follows any symlinks.
+            if not allow_developer_packages:
+                bad = _assert_scannable_lock_files_contained(ctx.cwd)
+                if bad is not None:
+                    self._console.print(
+                        f"[bold red]✗ Blocked — lock file '{bad}' resolves outside the project "
+                        f"directory. Use --allow-developer-packages to override.[/bold red]"
+                    )
+                    return False
             scan = scan_project(ctx.cwd)
             queries = [
                 (p.ecosystem, p.name, p.version)
@@ -1236,10 +1245,11 @@ def _restore_lock_files(
                 fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=".pa-restore-")
                 tmp = Path(tmp_str)
                 try:
-                    try:
-                        os.write(fd, content)
-                    finally:
-                        os.close(fd)
+                    # os.fdopen takes ownership of fd; the context manager flushes
+                    # and closes it, guaranteeing all bytes are written (no partial
+                    # write) before we rename into place.
+                    with os.fdopen(fd, "wb") as fobj:
+                        fobj.write(content)
                     tmp.rename(path)
                     restored.append(path.name)
                 finally:
