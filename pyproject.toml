@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "package-alert"
-version = "0.1.1"
+version = "0.1.2"
 description = "Real-time security monitor for Python, Node.js, and PHP package installations"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [
-    { name = "Al Slater", email = "al.slater@essiell.com" },
+    { name = "Al Slater", email = "al@coralnet.name" },
 ]
 keywords = ["security", "supply-chain", "osv", "malware", "sandbox", "pip", "npm", "composer"]
 classifiers = [

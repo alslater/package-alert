@@ -151,8 +151,9 @@ class SandboxRunner:
         network_label = "allowed" if allow_network else "blocked"
         self._console.print(f"[dim]Running in sandbox (network: {network_label})...[/dim]\n")
 
-        # Snapshot scan targets before execution
+        # Snapshot scan targets and lock files before execution
         snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
+        lock_snapshots = _snapshot_lock_files(cwd)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
@@ -223,6 +224,10 @@ class SandboxRunner:
             self._console.print(f"[yellow]Command exited with code {result.returncode}[/yellow]")
             return result.returncode
 
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots):
+            _restore_lock_files(lock_snapshots, self._console)
+            return 1
+
         # Re-detect scan targets that may have been created by the install
         # (e.g. uv sync creating .venv from scratch)
         if parsed and parsed.ecosystem == "pypi" and not ctx.scan_targets:
@@ -236,6 +241,7 @@ class SandboxRunner:
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
+                _restore_lock_files(lock_snapshots, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -365,8 +371,9 @@ class SandboxRunner:
         if not await self._preflight_shell(cwd):
             return 1
 
-        # Snapshot install targets before the shell session opens
+        # Snapshot install targets and lock files before the shell session opens
         snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
+        lock_snapshots = _snapshot_lock_files(cwd)
 
         network_label = "allowed" if allow_network else "blocked"
         self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
@@ -410,11 +417,15 @@ class SandboxRunner:
         ))
         print()
 
-        # Post-exit: scan for any packages installed during the shell session
+        # Post-exit: scan changed lock files, then any newly installed packages
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots):
+            _restore_lock_files(lock_snapshots, self._console)
+
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
-            await self._post_scan(new_pkgs)
+            if not await self._post_scan(new_pkgs):
+                _restore_lock_files(lock_snapshots, self._console)
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
 
@@ -573,6 +584,75 @@ class SandboxRunner:
             return False
 
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        return True
+
+    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes]) -> bool:
+        """Scan any lock files that changed during the sandbox run for malicious packages.
+
+        Uses the OSV cache for packages that haven't changed (fast) and queries
+        fresh for anything new, so this is cheap when only a few packages were added.
+        Returns False if a malicious package is found.
+        """
+        changed = [
+            p for p, before in lock_snapshots.items()
+            if p.exists() and p.read_bytes() != before
+        ]
+        if not changed:
+            return True
+
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.parsers.lockfiles import scan_project
+        from packagealert.storage.db import open_db
+
+        scan = scan_project(cwd)
+        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
+        if not queries:
+            return True
+
+        changed_names = ", ".join(p.name for p in changed)
+        self._console.print(
+            f"[dim]Lock file scan: {len(queries)} packages ({changed_names} updated)...[/dim]"
+        )
+
+        db = await open_db()
+        client = OsvClient(self._cfg.osv)
+        cache = OsvCache(db, self._cfg.osv)
+        malicious: list[tuple[str, str]] = []
+
+        try:
+            for i in range(0, len(queries), 50):
+                batch = queries[i : i + 50]
+                cached_results, uncached = [], []
+                for q in batch:
+                    r = await cache.get(*q)
+                    if r is not None:
+                        cached_results.append(r)
+                    else:
+                        uncached.append(q)
+                fresh = []
+                if uncached:
+                    fresh = await client.batch_query(uncached)
+                    for q, r in zip(uncached, fresh):
+                        if r:
+                            await cache.set(*q, r)
+                for r in cached_results + fresh:
+                    if r and r.has_malicious:
+                        adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
+                        malicious.append((r.package_name, adv_id))
+        finally:
+            await client.aclose()
+            await db.close()
+
+        if malicious:
+            self._console.print(
+                f"[bold red]✗ Malicious package(s) found in updated lock file(s):[/bold red]"
+            )
+            for name, adv_id in malicious:
+                self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
+            return False
+
+        self._console.print("[green]✓ Lock file scan: clean[/green]")
         return True
 
     async def _post_scan(self, packages: list[tuple[str, str, str | None]]) -> bool:
@@ -896,6 +976,40 @@ def _resolve_targets(ctx: _Context) -> None:
         composer_home = Path.home() / ".config" / "composer"
         if composer_home.exists():
             ctx.write_dirs.append(composer_home)
+
+
+_LOCK_FILES = [
+    "Pipfile.lock",
+    "uv.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "composer.lock",
+]
+
+
+def _snapshot_lock_files(cwd: Path) -> dict[Path, bytes]:
+    result: dict[Path, bytes] = {}
+    for name in _LOCK_FILES:
+        p = cwd / name
+        if p.exists():
+            try:
+                result[p] = p.read_bytes()
+            except OSError:
+                pass
+    return result
+
+
+def _restore_lock_files(snapshots: dict[Path, bytes], console: Console) -> None:
+    restored = []
+    for path, content in snapshots.items():
+        try:
+            path.write_bytes(content)
+            restored.append(path.name)
+        except OSError:
+            log.warning("Failed to restore lock file: %s", path)
+    if restored:
+        console.print(f"[yellow]Restored lock file(s) to pre-install state: {', '.join(restored)}[/yellow]")
 
 
 def _snapshot(path: Path) -> set[Path]:
