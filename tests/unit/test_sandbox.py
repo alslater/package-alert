@@ -27,8 +27,11 @@ from packagealert.sandbox.runner import (
     _new_python_packages,
     _pipenv_venv_dir,
     _resolve_targets,
+    _restore_lock_files,
+    _snapshot_lock_files,
     _try_parse,
     _build_sandbox_env,
+    _LOCK_FILES,
     _SANDBOX_ENV,
     _SHELL_NAMES,
     _SHELL_RC_FILES,
@@ -1184,6 +1187,270 @@ class TestExposeSSHKeysConfirmation:
 
 # ---------------------------------------------------------------------------
 # _preflight — unpinned requirements included in OSV queries
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# _snapshot_lock_files / _restore_lock_files
+# ---------------------------------------------------------------------------
+
+class TestSnapshotLockFiles:
+    def test_snapshots_existing_file(self, tmp_path):
+        (tmp_path / "uv.lock").write_bytes(b"some content")
+        result = _snapshot_lock_files(tmp_path)
+        assert tmp_path / "uv.lock" in result
+        assert result[tmp_path / "uv.lock"] == b"some content"
+
+    def test_ignores_nonexistent_files(self, tmp_path):
+        assert _snapshot_lock_files(tmp_path) == {}
+
+    def test_snapshots_multiple_lock_files(self, tmp_path):
+        (tmp_path / "uv.lock").write_bytes(b"a")
+        (tmp_path / "package-lock.json").write_bytes(b"b")
+        result = _snapshot_lock_files(tmp_path)
+        assert len(result) == 2
+
+    def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"content")
+        original_rb = Path.read_bytes
+        def patched(self):
+            if self.name == "uv.lock":
+                raise OSError("permission denied")
+            return original_rb(self)
+        monkeypatch.setattr(Path, "read_bytes", patched)
+        # Should not raise; unreadable file is simply omitted
+        result = _snapshot_lock_files(tmp_path)
+        assert lock not in result
+
+    def test_all_known_lock_file_names_checked(self, tmp_path):
+        for name in _LOCK_FILES:
+            (tmp_path / name).write_bytes(b"x")
+        result = _snapshot_lock_files(tmp_path)
+        assert len(result) == len(_LOCK_FILES)
+
+
+class TestRestoreLockFiles:
+    def test_restores_original_content(self, tmp_path):
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"malicious content")
+        _restore_lock_files({lock: b"original content"}, _make_runner()._console)
+        assert lock.read_bytes() == b"original content"
+
+    def test_restores_multiple_files(self, tmp_path):
+        lock1 = tmp_path / "uv.lock"
+        lock2 = tmp_path / "package-lock.json"
+        lock1.write_bytes(b"new1")
+        lock2.write_bytes(b"new2")
+        _restore_lock_files({lock1: b"orig1", lock2: b"orig2"}, _make_runner()._console)
+        assert lock1.read_bytes() == b"orig1"
+        assert lock2.read_bytes() == b"orig2"
+
+    def test_handles_oserror_gracefully(self):
+        # Non-existent parent directory — write_bytes will raise; must not propagate
+        snapshots = {Path("/nonexistent/dir/Pipfile.lock"): b"content"}
+        _restore_lock_files(snapshots, _make_runner()._console)  # no exception
+
+    def test_empty_snapshots_is_noop(self, tmp_path):
+        _restore_lock_files({}, _make_runner()._console)  # no exception
+
+
+# ---------------------------------------------------------------------------
+# _scan_updated_lock_files
+# ---------------------------------------------------------------------------
+
+def _fake_osv_context(malicious_names: set[str]):
+    """Return (fake_open_db, FakeClient, FakeCache) that flag packages in malicious_names."""
+
+    async def fake_open_db():
+        return unittest.mock.AsyncMock()
+
+    class FakeCache:
+        def __init__(self, db, cfg): pass
+        async def get(self, ecosystem, name, version):
+            return None  # force fresh queries for all packages
+        async def set(self, *a): pass
+
+    class FakeAdvisory:
+        def __init__(self, malicious):
+            self.id = "GHSA-fake-0001"
+            self.is_malicious = malicious
+
+    class FakeResult:
+        def __init__(self, name, malicious):
+            self.package_name = name
+            self.advisories = [FakeAdvisory(malicious)] if malicious else []
+            self.has_malicious = malicious
+
+    class FakeClient:
+        def __init__(self, cfg): pass
+        async def batch_query(self, queries):
+            return [FakeResult(name, name in malicious_names) for _, name, _ in queries]
+        async def aclose(self): pass
+
+    return fake_open_db, FakeClient, FakeCache
+
+
+def _fake_scan_result(packages: list[tuple[str, str, str]]):
+    """Return a fake scan_project result with the given (ecosystem, name, version) tuples."""
+    from types import SimpleNamespace
+    pkgs = [SimpleNamespace(ecosystem=eco, name=name, version=ver) for eco, name, ver in packages]
+    return SimpleNamespace(pinned=pkgs, sources=["Pipfile.lock"])
+
+
+class TestScanUpdatedLockFiles:
+    def test_returns_true_when_no_lock_files_changed(self, tmp_path):
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"original")
+        snapshots = {lock: b"original"}  # unchanged
+        runner = _make_runner()
+        result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+        assert result is True
+
+    def test_returns_true_when_no_lock_files_exist_at_all(self, tmp_path):
+        import asyncio
+        runner = _make_runner()
+        result = asyncio.run(runner._scan_updated_lock_files(tmp_path, {}))
+        assert result is True
+
+    def test_changed_lock_file_triggers_osv_query_and_returns_true_when_clean(self, tmp_path):
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"updated content")
+        snapshots = {lock: b"original content"}
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is True
+
+    def test_changed_lock_file_with_malicious_package_returns_false(self, tmp_path):
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"updated content")
+        snapshots = {lock: b"original content"}
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"evilpkg"})
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0"), ("pypi", "evilpkg", "1.0.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is False
+
+    def test_newly_created_lock_file_is_detected_and_scanned(self, tmp_path):
+        """Lock file that did not exist at snapshot time but appeared after the run."""
+        import asyncio
+        # Snapshot taken when Pipfile.lock did not exist
+        snapshots: dict = {}
+        # Sandbox creates it
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"freshly generated")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "starlette", "0.36.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is True  # clean packages → allowed
+
+    def test_newly_created_lock_file_with_malicious_package_returns_false(self, tmp_path):
+        import asyncio
+        snapshots: dict = {}
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"freshly generated with bad dep")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
+        scan_result = _fake_scan_result([("pypi", "starlette", "0.36.0"), ("pypi", "fastapi", "0.1.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is False
+
+    def test_oserror_on_changed_check_treats_file_as_changed(self, tmp_path):
+        """Unreadable lock file after sandbox run is treated as changed (fail-safe)."""
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"original")
+        snapshots = {lock: b"original"}
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        original_rb = Path.read_bytes
+        def patched(self):
+            if self.name == "Pipfile.lock":
+                raise OSError("permission denied")
+            return original_rb(self)
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch.object(Path, "read_bytes", patched),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        # OSV check ran (file was treated as changed) and returned clean
+        assert result is True
+
+    def test_lock_file_restored_by_caller_when_malicious(self, tmp_path):
+        """Integration: caller restores lock file when _scan_updated_lock_files returns False."""
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        original_content = b"original Pipfile.lock"
+        lock.write_bytes(b"updated with malicious dep")
+        snapshots = {lock: original_content}
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
+        scan_result = _fake_scan_result([("pypi", "fastapi", "0.1.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            clean = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert clean is False
+        # Simulate what run() does on False
+        _restore_lock_files(snapshots, runner._console)
+        assert lock.read_bytes() == original_content
+
+
 # ---------------------------------------------------------------------------
 
 class TestPreflightUnpinnedRequirements:

@@ -593,10 +593,19 @@ class SandboxRunner:
         fresh for anything new, so this is cheap when only a few packages were added.
         Returns False if a malicious package is found.
         """
-        changed = [
-            p for p, before in lock_snapshots.items()
-            if p.exists() and p.read_bytes() != before
-        ]
+        changed = []
+        for p, before in lock_snapshots.items():
+            try:
+                if p.read_bytes() != before:
+                    changed.append(p)
+            except OSError:
+                log.warning("Could not read lock file after sandbox run: %s", p)
+                changed.append(p)  # treat as changed — err on the side of caution
+        # Also catch lock files that were newly created during the run
+        for name in _LOCK_FILES:
+            p = cwd / name
+            if p not in lock_snapshots and p.exists():
+                changed.append(p)
         if not changed:
             return True
 
