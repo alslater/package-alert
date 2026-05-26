@@ -31,7 +31,8 @@ from packagealert.sandbox.runner import (
     _snapshot_lock_files,
     _try_parse,
     _build_sandbox_env,
-    _LOCK_FILES,
+    _RESTORABLE_LOCK_FILES,
+    _SCANNABLE_LOCK_FILES,
     _SANDBOX_ENV,
     _SHELL_NAMES,
     _SHELL_RC_FILES,
@@ -471,6 +472,7 @@ class TestResolveTargets:
         site_pkgs.mkdir(parents=True)
         monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         with unittest.mock.patch(
@@ -483,6 +485,7 @@ class TestResolveTargets:
         venvs_dir = tmp_path / "virtualenvs"
         monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         with unittest.mock.patch(
@@ -1223,10 +1226,10 @@ class TestSnapshotLockFiles:
         assert lock not in result
 
     def test_all_known_lock_file_names_checked(self, tmp_path):
-        for name in _LOCK_FILES:
+        for name in _RESTORABLE_LOCK_FILES:
             (tmp_path / name).write_bytes(b"x")
         result = _snapshot_lock_files(tmp_path)
-        assert len(result) == len(_LOCK_FILES)
+        assert len(result) == len(_RESTORABLE_LOCK_FILES)
 
 
 class TestRestoreLockFiles:

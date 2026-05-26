@@ -420,12 +420,14 @@ class SandboxRunner:
         # Post-exit: scan changed lock files, then any newly installed packages
         if not await self._scan_updated_lock_files(cwd, lock_snapshots):
             _restore_lock_files(lock_snapshots, self._console)
+            return 1
 
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
                 _restore_lock_files(lock_snapshots, self._console)
+                return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
 
@@ -593,16 +595,19 @@ class SandboxRunner:
         fresh for anything new, so this is cheap when only a few packages were added.
         Returns False if a malicious package is found.
         """
+        scannable = {cwd / name for name in _SCANNABLE_LOCK_FILES}
         changed = []
         for p, before in lock_snapshots.items():
+            if p not in scannable:
+                continue
             try:
                 if p.read_bytes() != before:
                     changed.append(p)
             except OSError:
                 log.warning("Could not read lock file after sandbox run: %s", p)
                 changed.append(p)  # treat as changed — err on the side of caution
-        # Also catch lock files that were newly created during the run
-        for name in _LOCK_FILES:
+        # Also catch scannable lock files that were newly created during the run
+        for name in _SCANNABLE_LOCK_FILES:
             p = cwd / name
             if p not in lock_snapshots and p.exists():
                 changed.append(p)
@@ -987,7 +992,8 @@ def _resolve_targets(ctx: _Context) -> None:
             ctx.write_dirs.append(composer_home)
 
 
-_LOCK_FILES = [
+# Lock files to snapshot and restore if a malicious package is detected.
+_RESTORABLE_LOCK_FILES = [
     "Pipfile.lock",
     "uv.lock",
     "package-lock.json",
@@ -996,10 +1002,20 @@ _LOCK_FILES = [
     "composer.lock",
 ]
 
+# Subset of the above that scan_project() can actually parse. Used to decide
+# whether to trigger an OSV scan after a sandbox run. yarn.lock and
+# pnpm-lock.yaml are intentionally excluded until parser support is added.
+_SCANNABLE_LOCK_FILES = [
+    "Pipfile.lock",
+    "uv.lock",
+    "package-lock.json",
+    "composer.lock",
+]
+
 
 def _snapshot_lock_files(cwd: Path) -> dict[Path, bytes]:
     result: dict[Path, bytes] = {}
-    for name in _LOCK_FILES:
+    for name in _RESTORABLE_LOCK_FILES:
         p = cwd / name
         if p.exists():
             try:
