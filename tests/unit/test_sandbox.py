@@ -1203,14 +1203,22 @@ class TestSnapshotLockFiles:
         assert tmp_path / "uv.lock" in result
         assert result[tmp_path / "uv.lock"] == b"some content"
 
-    def test_ignores_nonexistent_files(self, tmp_path):
-        assert _snapshot_lock_files(tmp_path) == {}
+    def test_records_none_for_nonexistent_files(self, tmp_path):
+        result = _snapshot_lock_files(tmp_path)
+        # All restorable lock file names are present; absent ones map to None
+        assert len(result) == len(_RESTORABLE_LOCK_FILES)
+        assert all(v is None for v in result.values())
 
     def test_snapshots_multiple_lock_files(self, tmp_path):
         (tmp_path / "uv.lock").write_bytes(b"a")
         (tmp_path / "package-lock.json").write_bytes(b"b")
         result = _snapshot_lock_files(tmp_path)
-        assert len(result) == 2
+        # All restorable names present; two have content, rest are None
+        assert len(result) == len(_RESTORABLE_LOCK_FILES)
+        assert result[tmp_path / "uv.lock"] == b"a"
+        assert result[tmp_path / "package-lock.json"] == b"b"
+        none_count = sum(1 for v in result.values() if v is None)
+        assert none_count == len(_RESTORABLE_LOCK_FILES) - 2
 
     def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
         lock = tmp_path / "uv.lock"
@@ -1221,9 +1229,10 @@ class TestSnapshotLockFiles:
                 raise OSError("permission denied")
             return original_rb(self)
         monkeypatch.setattr(Path, "read_bytes", patched)
-        # Should not raise; unreadable file is simply omitted
+        # Should not raise; unreadable file is stored as None (treated as absent)
         result = _snapshot_lock_files(tmp_path)
-        assert lock not in result
+        assert lock in result
+        assert result[lock] is None
 
     def test_all_known_lock_file_names_checked(self, tmp_path):
         for name in _RESTORABLE_LOCK_FILES:
@@ -1236,7 +1245,7 @@ class TestRestoreLockFiles:
     def test_restores_original_content(self, tmp_path):
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"malicious content")
-        _restore_lock_files({lock: b"original content"}, _make_runner()._console)
+        _restore_lock_files({lock: b"original content"}, tmp_path, _make_runner()._console)
         assert lock.read_bytes() == b"original content"
 
     def test_restores_multiple_files(self, tmp_path):
@@ -1244,17 +1253,38 @@ class TestRestoreLockFiles:
         lock2 = tmp_path / "package-lock.json"
         lock1.write_bytes(b"new1")
         lock2.write_bytes(b"new2")
-        _restore_lock_files({lock1: b"orig1", lock2: b"orig2"}, _make_runner()._console)
+        _restore_lock_files({lock1: b"orig1", lock2: b"orig2"}, tmp_path, _make_runner()._console)
         assert lock1.read_bytes() == b"orig1"
         assert lock2.read_bytes() == b"orig2"
 
-    def test_handles_oserror_gracefully(self):
+    def test_deletes_newly_created_file(self, tmp_path):
+        # None sentinel means the file was absent before the run; restore should delete it
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"created during sandbox run")
+        _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)
+        assert not lock.exists()
+
+    def test_noop_for_absent_sentinel_when_file_still_absent(self, tmp_path):
+        # None sentinel + file still absent → nothing to do, no error
+        lock = tmp_path / "Pipfile.lock"
+        _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)  # no exception
+
+    def test_handles_oserror_gracefully(self, tmp_path):
         # Non-existent parent directory — write_bytes will raise; must not propagate
         snapshots = {Path("/nonexistent/dir/Pipfile.lock"): b"content"}
-        _restore_lock_files(snapshots, _make_runner()._console)  # no exception
+        _restore_lock_files(snapshots, tmp_path, _make_runner()._console)  # no exception
 
     def test_empty_snapshots_is_noop(self, tmp_path):
-        _restore_lock_files({}, _make_runner()._console)  # no exception
+        _restore_lock_files({}, tmp_path, _make_runner()._console)  # no exception
+
+    def test_skips_symlink_pointing_outside_project(self, tmp_path):
+        # A lock file name that is a symlink to a path outside the project must be skipped
+        target = tmp_path.parent / "sensitive_file"
+        target.write_bytes(b"should not be overwritten")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        _restore_lock_files({link: b"attacker content"}, tmp_path, _make_runner()._console)
+        assert target.read_bytes() == b"should not be overwritten"
 
 
 # ---------------------------------------------------------------------------
@@ -1359,10 +1389,10 @@ class TestScanUpdatedLockFiles:
     def test_newly_created_lock_file_is_detected_and_scanned(self, tmp_path):
         """Lock file that did not exist at snapshot time but appeared after the run."""
         import asyncio
-        # Snapshot taken when Pipfile.lock did not exist
-        snapshots: dict = {}
-        # Sandbox creates it
+        # Snapshot taken when Pipfile.lock did not exist — recorded as None sentinel
         lock = tmp_path / "Pipfile.lock"
+        snapshots = {lock: None}
+        # Sandbox creates it
         lock.write_bytes(b"freshly generated")
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
@@ -1381,8 +1411,8 @@ class TestScanUpdatedLockFiles:
 
     def test_newly_created_lock_file_with_malicious_package_returns_false(self, tmp_path):
         import asyncio
-        snapshots: dict = {}
         lock = tmp_path / "Pipfile.lock"
+        snapshots = {lock: None}
         lock.write_bytes(b"freshly generated with bad dep")
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
@@ -1450,8 +1480,31 @@ class TestScanUpdatedLockFiles:
 
         assert clean is False
         # Simulate what run() does on False
-        _restore_lock_files(snapshots, runner._console)
+        _restore_lock_files(snapshots, tmp_path, runner._console)
         assert lock.read_bytes() == original_content
+
+    def test_newly_created_lock_file_deleted_on_restore(self, tmp_path):
+        """Integration: newly created lock file is deleted when malicious deps found."""
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        snapshots = {lock: None}  # absent before the run
+        lock.write_bytes(b"freshly generated with bad dep")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
+        scan_result = _fake_scan_result([("pypi", "fastapi", "0.1.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            clean = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert clean is False
+        _restore_lock_files(snapshots, tmp_path, runner._console)
+        assert not lock.exists()
 
 
 # ---------------------------------------------------------------------------

@@ -225,7 +225,7 @@ class SandboxRunner:
             return result.returncode
 
         if not await self._scan_updated_lock_files(cwd, lock_snapshots):
-            _restore_lock_files(lock_snapshots, self._console)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
             return 1
 
         # Re-detect scan targets that may have been created by the install
@@ -241,7 +241,7 @@ class SandboxRunner:
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -419,14 +419,14 @@ class SandboxRunner:
 
         # Post-exit: scan changed lock files, then any newly installed packages
         if not await self._scan_updated_lock_files(cwd, lock_snapshots):
-            _restore_lock_files(lock_snapshots, self._console)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
             return 1
 
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
@@ -588,7 +588,7 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes]) -> bool:
+    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes | None]) -> bool:
         """Scan any lock files that changed during the sandbox run for malicious packages.
 
         Uses the OSV cache for packages that haven't changed (fast) and queries
@@ -600,17 +600,17 @@ class SandboxRunner:
         for p, before in lock_snapshots.items():
             if p not in scannable:
                 continue
-            try:
-                if p.read_bytes() != before:
+            if before is None:
+                # File was absent before the run; if it exists now it was created.
+                if p.exists():
                     changed.append(p)
-            except OSError:
-                log.warning("Could not read lock file after sandbox run: %s", p)
-                changed.append(p)  # treat as changed — err on the side of caution
-        # Also catch scannable lock files that were newly created during the run
-        for name in _SCANNABLE_LOCK_FILES:
-            p = cwd / name
-            if p not in lock_snapshots and p.exists():
-                changed.append(p)
+            else:
+                try:
+                    if p.read_bytes() != before:
+                        changed.append(p)
+                except OSError:
+                    log.warning("Could not read lock file after sandbox run: %s", p)
+                    changed.append(p)  # treat as changed — err on the side of caution
         if not changed:
             return True
 
@@ -1013,24 +1013,52 @@ _SCANNABLE_LOCK_FILES = [
 ]
 
 
-def _snapshot_lock_files(cwd: Path) -> dict[Path, bytes]:
-    result: dict[Path, bytes] = {}
+def _snapshot_lock_files(cwd: Path) -> dict[Path, bytes | None]:
+    """Snapshot all known restorable lock files under *cwd*.
+
+    Files that exist are recorded with their contents; files that are absent
+    are recorded with ``None`` so that ``_restore_lock_files`` knows to delete
+    them if they were created during the sandbox run.
+    """
+    result: dict[Path, bytes | None] = {}
     for name in _RESTORABLE_LOCK_FILES:
         p = cwd / name
         if p.exists():
             try:
                 result[p] = p.read_bytes()
             except OSError:
-                pass
+                result[p] = None
+        else:
+            result[p] = None
     return result
 
 
-def _restore_lock_files(snapshots: dict[Path, bytes], console: Console) -> None:
+def _restore_lock_files(
+    snapshots: dict[Path, bytes | None], cwd: Path, console: Console
+) -> None:
+    project_root = cwd.resolve()
     restored = []
     for path, content in snapshots.items():
         try:
-            path.write_bytes(content)
-            restored.append(path.name)
+            resolved = path.resolve()
+        except OSError:
+            log.warning("Cannot resolve path during lock file restore, skipping: %s", path)
+            continue
+        if not resolved.is_relative_to(project_root):
+            log.warning(
+                "Lock file path resolves outside project directory, skipping restore: %s -> %s",
+                path,
+                resolved,
+            )
+            continue
+        try:
+            if content is None:
+                if path.exists():
+                    path.unlink()
+                    restored.append(path.name)
+            else:
+                path.write_bytes(content)
+                restored.append(path.name)
         except OSError:
             log.warning("Failed to restore lock file: %s", path)
     if restored:
