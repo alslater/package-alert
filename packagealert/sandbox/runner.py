@@ -100,7 +100,7 @@ class SandboxRunner:
         self._cfg = cfg
         self._console = Console()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_developer_packages: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -124,7 +124,7 @@ class SandboxRunner:
                 return 1
 
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages)
 
         parsed = _try_parse(argv)
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -153,7 +153,7 @@ class SandboxRunner:
 
         # Snapshot scan targets and lock files before execution
         snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
-        lock_snapshots = _snapshot_lock_files(cwd)
+        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
@@ -225,7 +225,7 @@ class SandboxRunner:
             return result.returncode
 
         if not await self._scan_updated_lock_files(cwd, lock_snapshots):
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
             return 1
 
         # Re-detect scan targets that may have been created by the install
@@ -241,7 +241,7 @@ class SandboxRunner:
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -297,6 +297,7 @@ class SandboxRunner:
         allow_network: bool,
         extra_env: list[str] | None,
         expose_ssh_keys: bool = False,
+        allow_developer_packages: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
 
@@ -373,7 +374,7 @@ class SandboxRunner:
 
         # Snapshot install targets and lock files before the shell session opens
         snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
-        lock_snapshots = _snapshot_lock_files(cwd)
+        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
 
         network_label = "allowed" if allow_network else "blocked"
         self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
@@ -419,14 +420,14 @@ class SandboxRunner:
 
         # Post-exit: scan changed lock files, then any newly installed packages
         if not await self._scan_updated_lock_files(cwd, lock_snapshots):
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
             return 1
 
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
@@ -588,7 +589,7 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes | None]) -> bool:
+    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes | None | _LockUnreadable]) -> bool:
         """Scan any lock files that changed during the sandbox run for malicious packages.
 
         Uses the OSV cache for packages that haven't changed (fast) and queries
@@ -600,7 +601,10 @@ class SandboxRunner:
         for p, before in lock_snapshots.items():
             if p not in scannable:
                 continue
-            if before is None:
+            if isinstance(before, _LockUnreadable):
+                # Pre-run state was unknown; treat as changed — err on the side of caution.
+                changed.append(p)
+            elif before is None:
                 # File was absent before the run; if it exists now it was created.
                 if p.exists():
                     changed.append(p)
@@ -622,7 +626,16 @@ class SandboxRunner:
         scan = scan_project(cwd)
         queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
         if not queries:
-            return True
+            changed_names = ", ".join(p.name for p in changed)
+            self._console.print(
+                f"[bold red]✗ Lock file(s) changed ({changed_names}) but no packages could be parsed "
+                f"— file may be corrupt or empty. Blocking as a precaution.[/bold red]"
+            )
+            log.warning(
+                "Changed lock file(s) yielded no parseable packages; failing safe: %s",
+                changed_names,
+            )
+            return False
 
         changed_names = ", ".join(p.name for p in changed)
         self._console.print(
@@ -992,6 +1005,16 @@ def _resolve_targets(ctx: _Context) -> None:
             ctx.write_dirs.append(composer_home)
 
 
+class _LockUnreadable:
+    """Sentinel: lock file existed at snapshot time but its content could not be read
+    (e.g. permission denied, symlink outside project root).  On restore this entry is
+    skipped — we neither overwrite nor delete — to avoid data loss."""
+    __slots__ = ()
+    def __repr__(self) -> str:
+        return "<LockUnreadable>"
+
+_LOCK_UNREADABLE = _LockUnreadable()
+
 # Lock files to snapshot and restore if a malicious package is detected.
 _RESTORABLE_LOCK_FILES = [
     "Pipfile.lock",
@@ -1013,43 +1036,76 @@ _SCANNABLE_LOCK_FILES = [
 ]
 
 
-def _snapshot_lock_files(cwd: Path) -> dict[Path, bytes | None]:
+def _snapshot_lock_files(
+    cwd: Path, *, allow_developer_packages: bool = False
+) -> dict[Path, bytes | None | _LockUnreadable]:
     """Snapshot all known restorable lock files under *cwd*.
 
-    Files that exist are recorded with their contents; files that are absent
-    are recorded with ``None`` so that ``_restore_lock_files`` knows to delete
-    them if they were created during the sandbox run.
+    Return values per entry:
+    - ``bytes``            — file existed and was readable; content stored.
+    - ``None``             — file was absent; restore should delete it if created.
+    - ``_LOCK_UNREADABLE`` — file existed but content could not be read (permission
+                             error or symlink outside project); restore skips it.
+
+    Symlinks whose resolved target lies outside *cwd* are recorded as
+    ``_LOCK_UNREADABLE`` unless *allow_developer_packages* is True, which relaxes
+    the check for monorepo / editable-install setups where lock files may
+    legitimately live elsewhere.
     """
-    result: dict[Path, bytes | None] = {}
+    project_root = cwd.resolve()
+    result: dict[Path, bytes | None | _LockUnreadable] = {}
     for name in _RESTORABLE_LOCK_FILES:
         p = cwd / name
         if p.exists():
+            if not allow_developer_packages:
+                try:
+                    resolved = p.resolve()
+                except OSError:
+                    log.warning("Cannot resolve lock file path, skipping snapshot: %s", p)
+                    result[p] = _LOCK_UNREADABLE
+                    continue
+                if not resolved.is_relative_to(project_root):
+                    log.warning(
+                        "Lock file resolves outside project directory, skipping snapshot: %s -> %s",
+                        p,
+                        resolved,
+                    )
+                    result[p] = _LOCK_UNREADABLE
+                    continue
             try:
                 result[p] = p.read_bytes()
             except OSError:
-                result[p] = None
+                result[p] = _LOCK_UNREADABLE
         else:
             result[p] = None
     return result
 
 
 def _restore_lock_files(
-    snapshots: dict[Path, bytes | None], cwd: Path, console: Console
+    snapshots: dict[Path, bytes | None | _LockUnreadable],
+    cwd: Path,
+    console: Console,
+    *,
+    allow_developer_packages: bool = False,
 ) -> None:
     project_root = cwd.resolve()
     restored = []
     for path, content in snapshots.items():
-        try:
-            resolved = path.resolve()
-        except OSError:
-            log.warning("Cannot resolve path during lock file restore, skipping: %s", path)
-            continue
-        if not resolved.is_relative_to(project_root):
-            log.warning(
-                "Lock file path resolves outside project directory, skipping restore: %s -> %s",
-                path,
-                resolved,
-            )
+        if not allow_developer_packages:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                log.warning("Cannot resolve path during lock file restore, skipping: %s", path)
+                continue
+            if not resolved.is_relative_to(project_root):
+                log.warning(
+                    "Lock file path resolves outside project directory, skipping restore: %s -> %s",
+                    path,
+                    resolved,
+                )
+                continue
+        if isinstance(content, _LockUnreadable):
+            # Pre-run state was unknown; skip to avoid accidental data loss.
             continue
         try:
             if content is None:

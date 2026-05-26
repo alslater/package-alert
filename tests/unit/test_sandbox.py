@@ -31,6 +31,7 @@ from packagealert.sandbox.runner import (
     _snapshot_lock_files,
     _try_parse,
     _build_sandbox_env,
+    _LOCK_UNREADABLE,
     _RESTORABLE_LOCK_FILES,
     _SCANNABLE_LOCK_FILES,
     _SANDBOX_ENV,
@@ -1229,16 +1230,36 @@ class TestSnapshotLockFiles:
                 raise OSError("permission denied")
             return original_rb(self)
         monkeypatch.setattr(Path, "read_bytes", patched)
-        # Should not raise; unreadable file is stored as None (treated as absent)
+        # Should not raise; unreadable file is stored as _LOCK_UNREADABLE (not None)
+        # so restore does not mistakenly delete it.
         result = _snapshot_lock_files(tmp_path)
         assert lock in result
-        assert result[lock] is None
+        assert result[lock] is _LOCK_UNREADABLE
 
     def test_all_known_lock_file_names_checked(self, tmp_path):
         for name in _RESTORABLE_LOCK_FILES:
             (tmp_path / name).write_bytes(b"x")
         result = _snapshot_lock_files(tmp_path)
         assert len(result) == len(_RESTORABLE_LOCK_FILES)
+
+    def test_skips_symlink_pointing_outside_project(self, tmp_path):
+        # Symlink pointing outside cwd must be stored as _LOCK_UNREADABLE, not None,
+        # so that restore does not delete it (the file "existed" before the run).
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"external content")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        result = _snapshot_lock_files(tmp_path)
+        assert result[link] is _LOCK_UNREADABLE
+
+    def test_allow_developer_packages_reads_external_symlink(self, tmp_path):
+        # With the flag, symlinks resolving outside cwd are still read
+        target = tmp_path.parent / "external_lock"
+        target.write_bytes(b"external content")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        result = _snapshot_lock_files(tmp_path, allow_developer_packages=True)
+        assert result[link] == b"external content"
 
 
 class TestRestoreLockFiles:
@@ -1269,10 +1290,20 @@ class TestRestoreLockFiles:
         lock = tmp_path / "Pipfile.lock"
         _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)  # no exception
 
-    def test_handles_oserror_gracefully(self, tmp_path):
-        # Non-existent parent directory — write_bytes will raise; must not propagate
-        snapshots = {Path("/nonexistent/dir/Pipfile.lock"): b"content"}
+    def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
+        # Simulate write_bytes raising after the containment check passes; must not propagate.
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"current content")
+        original_wb = Path.write_bytes
+        def patched(self, data):
+            if self.name == "Pipfile.lock":
+                raise OSError("disk full")
+            return original_wb(self, data)
+        monkeypatch.setattr(Path, "write_bytes", patched)
+        snapshots = {lock: b"original content"}
         _restore_lock_files(snapshots, tmp_path, _make_runner()._console)  # no exception
+        # File unchanged because write failed, but no exception propagated
+        assert lock.read_bytes() == b"current content"
 
     def test_empty_snapshots_is_noop(self, tmp_path):
         _restore_lock_files({}, tmp_path, _make_runner()._console)  # no exception
@@ -1285,6 +1316,27 @@ class TestRestoreLockFiles:
         link.symlink_to(target)
         _restore_lock_files({link: b"attacker content"}, tmp_path, _make_runner()._console)
         assert target.read_bytes() == b"should not be overwritten"
+
+    def test_does_not_delete_unreadable_file_on_restore(self, tmp_path):
+        # _LOCK_UNREADABLE means the file existed pre-run but content was unknown;
+        # restore must not delete it (that would be data loss).
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"pre-existing content")
+        _restore_lock_files({lock: _LOCK_UNREADABLE}, tmp_path, _make_runner()._console)
+        assert lock.exists()
+        assert lock.read_bytes() == b"pre-existing content"
+
+    def test_allow_developer_packages_writes_through_external_symlink(self, tmp_path):
+        # With the flag, a symlink pointing outside cwd is restored through
+        target = tmp_path.parent / "shared_lock"
+        target.write_bytes(b"modified content")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        _restore_lock_files(
+            {link: b"original content"}, tmp_path, _make_runner()._console,
+            allow_developer_packages=True,
+        )
+        assert target.read_bytes() == b"original content"
 
 
 # ---------------------------------------------------------------------------
@@ -1424,6 +1476,23 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
             unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is False
+
+    def test_changed_lock_file_with_no_parseable_packages_returns_false(self, tmp_path):
+        """Changed lock file that parses to zero packages fails safe instead of returning True."""
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"corrupt or empty content")
+        snapshots = {lock: b"original content"}
+
+        empty_scan = _fake_scan_result([])  # parser returns nothing
+
+        runner = _make_runner()
+        with unittest.mock.patch(
+            "packagealert.parsers.lockfiles.scan_project", return_value=empty_scan
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
