@@ -1261,6 +1261,15 @@ class TestSnapshotLockFiles:
         result = _snapshot_lock_files(tmp_path, allow_developer_packages=True)
         assert result[link] == b"external content"
 
+    def test_broken_symlink_recorded_as_unreadable_not_none(self, tmp_path):
+        # A broken symlink has a directory entry (lstat succeeds) but no readable
+        # target (exists() returns False). It must be _LOCK_UNREADABLE, not None,
+        # so restore does not delete it thinking the file was absent pre-run.
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(tmp_path / "nonexistent_target")  # broken — target missing
+        result = _snapshot_lock_files(tmp_path)
+        assert result[link] is _LOCK_UNREADABLE
+
 
 class TestRestoreLockFiles:
     def test_restores_original_content(self, tmp_path):
@@ -1497,6 +1506,50 @@ class TestScanUpdatedLockFiles:
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
         assert result is False
+
+    def test_symlinked_lock_file_outside_project_blocks_scan(self, tmp_path):
+        """scan_project() is not called when a scannable lock file resolves outside cwd."""
+        import asyncio
+        target = tmp_path.parent / "external_pipfile_lock"
+        target.write_bytes(b"[[package]]\nname = 'requests'\nversion = '2.31.0'\n")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        # File changed (was absent, now present)
+        snapshots = {link: None}
+
+        runner = _make_runner()
+        with unittest.mock.patch(
+            "packagealert.parsers.lockfiles.scan_project"
+        ) as mock_scan:
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is False
+        mock_scan.assert_not_called()
+
+    def test_symlinked_lock_file_outside_project_allowed_with_flag(self, tmp_path):
+        """With allow_developer_packages, symlinked lock files outside cwd are scanned normally."""
+        import asyncio
+        target = tmp_path.parent / "external_pipfile_lock"
+        target.write_bytes(b"contents")
+        link = tmp_path / "Pipfile.lock"
+        link.symlink_to(target)
+        snapshots = {link: None}
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(
+                runner._scan_updated_lock_files(tmp_path, snapshots, allow_developer_packages=True)
+            )
+
+        assert result is True
 
     def test_oserror_on_changed_check_treats_file_as_changed(self, tmp_path):
         """Unreadable lock file after sandbox run is treated as changed (fail-safe)."""

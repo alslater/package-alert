@@ -222,9 +222,14 @@ class SandboxRunner:
 
         if result.returncode != 0:
             self._console.print(f"[yellow]Command exited with code {result.returncode}[/yellow]")
+            # A failing install can still write or modify lock files, so run the
+            # lock-file scan and restore unconditionally — exiting non-zero must
+            # not be a way to evade the check.
+            if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
             return result.returncode
 
-        if not await self._scan_updated_lock_files(cwd, lock_snapshots):
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
             _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
             return 1
 
@@ -419,7 +424,7 @@ class SandboxRunner:
         print()
 
         # Post-exit: scan changed lock files, then any newly installed packages
-        if not await self._scan_updated_lock_files(cwd, lock_snapshots):
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
             _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
             return 1
 
@@ -589,7 +594,13 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _scan_updated_lock_files(self, cwd: Path, lock_snapshots: dict[Path, bytes | None | _LockUnreadable]) -> bool:
+    async def _scan_updated_lock_files(
+        self,
+        cwd: Path,
+        lock_snapshots: dict[Path, bytes | None | _LockUnreadable],
+        *,
+        allow_developer_packages: bool = False,
+    ) -> bool:
         """Scan any lock files that changed during the sandbox run for malicious packages.
 
         Uses the OSV cache for packages that haven't changed (fast) and queries
@@ -622,6 +633,31 @@ class SandboxRunner:
         from packagealert.osv.client import OsvClient
         from packagealert.parsers.lockfiles import scan_project
         from packagealert.storage.db import open_db
+
+        # Enforce symlink containment before handing any lock file path to
+        # scan_project(), which follows symlinks unconditionally via read_text().
+        # Even lock files that were not in `changed` must be checked because
+        # scan_project() reads every parseable lock file it finds under cwd.
+        if not allow_developer_packages:
+            project_root = cwd.resolve()
+            for name in _SCANNABLE_LOCK_FILES:
+                p = cwd / name
+                if not p.exists():
+                    continue
+                try:
+                    resolved = p.resolve()
+                except OSError:
+                    resolved = None
+                if resolved is None or not resolved.is_relative_to(project_root):
+                    self._console.print(
+                        f"[bold red]✗ Lock file {p.name} resolves outside the project directory "
+                        f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
+                    )
+                    log.warning(
+                        "Lock file resolves outside project root, refusing scan_project call: %s",
+                        p,
+                    )
+                    return False
 
         scan = scan_project(cwd)
         queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
@@ -1043,9 +1079,12 @@ def _snapshot_lock_files(
 
     Return values per entry:
     - ``bytes``            — file existed and was readable; content stored.
-    - ``None``             — file was absent; restore should delete it if created.
-    - ``_LOCK_UNREADABLE`` — file existed but content could not be read (permission
-                             error or symlink outside project); restore skips it.
+    - ``None``             — file was genuinely absent (no directory entry at all);
+                             restore should delete it if created during the run.
+    - ``_LOCK_UNREADABLE`` — file had a directory entry (regular file, symlink, etc.)
+                             but content could not be read (broken symlink, permission
+                             error, or target outside project root); restore skips it
+                             to avoid data loss.
 
     Symlinks whose resolved target lies outside *cwd* are recorded as
     ``_LOCK_UNREADABLE`` unless *allow_developer_packages* is True, which relaxes
@@ -1056,28 +1095,41 @@ def _snapshot_lock_files(
     result: dict[Path, bytes | None | _LockUnreadable] = {}
     for name in _RESTORABLE_LOCK_FILES:
         p = cwd / name
-        if p.exists():
-            if not allow_developer_packages:
-                try:
-                    resolved = p.resolve()
-                except OSError:
-                    log.warning("Cannot resolve lock file path, skipping snapshot: %s", p)
-                    result[p] = _LOCK_UNREADABLE
-                    continue
-                if not resolved.is_relative_to(project_root):
-                    log.warning(
-                        "Lock file resolves outside project directory, skipping snapshot: %s -> %s",
-                        p,
-                        resolved,
-                    )
-                    result[p] = _LOCK_UNREADABLE
-                    continue
-            try:
-                result[p] = p.read_bytes()
-            except OSError:
-                result[p] = _LOCK_UNREADABLE
-        else:
+        # Use lstat() rather than exists() so that a broken symlink (inode present
+        # but target missing) is treated as _LOCK_UNREADABLE rather than None.
+        # FileNotFoundError from lstat() means the path truly does not exist.
+        try:
+            p.lstat()
+        except FileNotFoundError:
             result[p] = None
+            continue
+        except OSError:
+            # Other lstat failures (e.g. permission on parent dir) — treat as
+            # unreadable rather than absent to avoid accidental deletion on restore.
+            log.warning("Cannot stat lock file, skipping snapshot: %s", p)
+            result[p] = _LOCK_UNREADABLE
+            continue
+        # Path has a directory entry (file, symlink, etc.).  Apply the containment
+        # check before reading so we never follow external symlinks.
+        if not allow_developer_packages:
+            try:
+                resolved = p.resolve()
+            except OSError:
+                log.warning("Cannot resolve lock file path, skipping snapshot: %s", p)
+                result[p] = _LOCK_UNREADABLE
+                continue
+            if not resolved.is_relative_to(project_root):
+                log.warning(
+                    "Lock file resolves outside project directory, skipping snapshot: %s -> %s",
+                    p,
+                    resolved,
+                )
+                result[p] = _LOCK_UNREADABLE
+                continue
+        try:
+            result[p] = p.read_bytes()
+        except OSError:
+            result[p] = _LOCK_UNREADABLE
     return result
 
 
