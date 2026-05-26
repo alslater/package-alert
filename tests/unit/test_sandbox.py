@@ -1191,6 +1191,63 @@ class TestExposeSSHKeysConfirmation:
 
 
 # ---------------------------------------------------------------------------
+# run() exit-code guarantees
+# ---------------------------------------------------------------------------
+
+class TestRunExitCode:
+    """run() must return 1 when malicious lock-file content is detected,
+    regardless of the wrapped command's own exit code."""
+
+    def _setup(self, monkeypatch, returncode: int):
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: type("R", (), {"returncode": returncode})(),
+        )
+
+    def test_malicious_lock_file_returns_1_when_command_succeeds(self, tmp_path, monkeypatch):
+        """Malicious lock-file detection always yields exit code 1 (zero-exit path)."""
+        self._setup(monkeypatch, returncode=0)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        runner = _make_runner()
+        async def _malicious(*a, **kw):
+            return False
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _malicious)
+        rc = asyncio.run(runner.run(["npm", "install", "lodash"]))
+        assert rc == 1
+
+    def test_malicious_lock_file_returns_1_when_command_fails(self, tmp_path, monkeypatch):
+        """Malicious lock-file detection always yields exit code 1, even when the
+        wrapped command also exited non-zero (so callers can distinguish a security
+        failure from an ordinary install failure)."""
+        self._setup(monkeypatch, returncode=2)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        runner = _make_runner()
+        async def _malicious(*a, **kw):
+            return False
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _malicious)
+        rc = asyncio.run(runner.run(["npm", "install", "lodash"]))
+        assert rc == 1
+
+    def test_clean_lock_file_propagates_command_exit_code(self, tmp_path, monkeypatch):
+        """When the lock-file scan passes but the command failed, the command's
+        exit code is propagated so ordinary failures are still reported correctly."""
+        self._setup(monkeypatch, returncode=42)
+        monkeypatch.chdir(tmp_path)
+        import asyncio
+        runner = _make_runner()
+        async def _clean(*a, **kw):
+            return True
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean)
+        rc = asyncio.run(runner.run(["npm", "install", "lodash"]))
+        assert rc == 42
+
+
+# ---------------------------------------------------------------------------
 # _preflight — unpinned requirements included in OSV queries
 # ---------------------------------------------------------------------------
 
@@ -1368,6 +1425,22 @@ class TestRestoreLockFiles:
         assert target.read_bytes() == b"external content"  # external file untouched
         assert not link.is_symlink()
         assert link.read_bytes() == b"original content"
+
+    def test_removes_directory_created_at_lock_file_path(self, tmp_path):
+        # If a sandbox creates a directory where a lock file was absent, unlink()
+        # raises IsADirectoryError.  Restore must fall back to rmtree() so the
+        # project is fully restored to its pre-run state.
+        lock = tmp_path / "Pipfile.lock"
+        lock.mkdir()  # directory, not a file
+        (lock / "subfile").write_bytes(b"attacker content")
+        _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)
+        assert not lock.exists()
+
+    def test_removes_empty_directory_created_at_lock_file_path(self, tmp_path):
+        lock = tmp_path / "package-lock.json"
+        lock.mkdir()
+        _restore_lock_files({lock: None}, tmp_path, _make_runner()._console)
+        assert not lock.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1685,7 +1758,7 @@ class TestScanUpdatedLockFiles:
 
     def test_regular_file_replaced_by_external_symlink_treated_as_changed_without_read(self, tmp_path):
         """Lock file that was a regular file at snapshot but is now an external symlink
-        must be flagged as changed without following the symlink."""
+        must be flagged as changed without reading the external target."""
         import asyncio
         # Snapshot: Pipfile.lock was a regular file
         lock = tmp_path / "Pipfile.lock"
@@ -1695,22 +1768,23 @@ class TestScanUpdatedLockFiles:
         target.write_bytes(b"secret data")
         lock.symlink_to(target)
 
-        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
-        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+        # Fail the test immediately if anything reads the external target file.
+        original_rb = Path.read_bytes
+        def guarded_read_bytes(self: Path):
+            if self.resolve() == target.resolve():
+                raise AssertionError(f"read_bytes() followed symlink to external target: {self}")
+            return original_rb(self)
 
         runner = _make_runner()
         with (
-            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
-            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
-            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch.object(Path, "read_bytes", guarded_read_bytes),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan,
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
-        # Scan proceeded (changed=True triggered the scan) and the symlink was
-        # blocked before the later _assert_scannable_lock_files_contained check.
-        # The important property: target was never read.
-        assert target.read_bytes() == b"secret data"  # not read by read_bytes()
+        # Containment check must block the scan before scan_project() is called.
+        assert result is False
+        mock_scan.assert_not_called()
 
     def test_oserror_on_changed_check_treats_file_as_changed(self, tmp_path):
         """Unreadable lock file after sandbox run is treated as changed (fail-safe)."""

@@ -4,9 +4,10 @@ import json
 import logging
 import os
 import re
-import tempfile
 import shlex
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -228,6 +229,7 @@ class SandboxRunner:
             # not be a way to evade the check.
             if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
                 _restore_lock_files(lock_snapshots, cwd, self._console)
+                return 1
             return result.returncode
 
         if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
@@ -1208,11 +1210,19 @@ def _restore_lock_files(
             continue
         try:
             if content is None:
-                # Was absent pre-run; remove whatever appeared, including symlinks.
-                # lstat() detects broken symlinks that exists() would miss.
+                # Was absent pre-run; remove whatever appeared, including symlinks
+                # and directories.  lstat() detects broken symlinks that exists()
+                # would miss.  If the sandbox created a directory at this path
+                # (e.g. an attacker replacing a lock file with a directory to
+                # frustrate restore), unlink() would raise IsADirectoryError so we
+                # fall back to rmtree().  These are known lock-file paths that must
+                # be regular files, so removing any unexpected directory is correct.
                 try:
                     path.lstat()
-                    path.unlink()
+                    try:
+                        path.unlink()
+                    except IsADirectoryError:
+                        shutil.rmtree(path)
                     restored.append(path.name)
                 except FileNotFoundError:
                     pass
