@@ -5,7 +5,9 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -100,7 +102,7 @@ class SandboxRunner:
         self._cfg = cfg
         self._console = Console()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_developer_packages: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -124,7 +126,7 @@ class SandboxRunner:
                 return 1
 
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages)
 
         parsed = _try_parse(argv)
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -141,7 +143,7 @@ class SandboxRunner:
             self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
-        if not await self._preflight(ctx):
+        if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
 
         _resolve_targets(ctx)
@@ -151,8 +153,9 @@ class SandboxRunner:
         network_label = "allowed" if allow_network else "blocked"
         self._console.print(f"[dim]Running in sandbox (network: {network_label})...[/dim]\n")
 
-        # Snapshot scan targets before execution
+        # Snapshot scan targets and lock files before execution
         snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
+        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
@@ -221,7 +224,17 @@ class SandboxRunner:
 
         if result.returncode != 0:
             self._console.print(f"[yellow]Command exited with code {result.returncode}[/yellow]")
+            # A failing install can still write or modify lock files, so run the
+            # lock-file scan and restore unconditionally — exiting non-zero must
+            # not be a way to evade the check.
+            if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                return 1
             return result.returncode
+
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            return 1
 
         # Re-detect scan targets that may have been created by the install
         # (e.g. uv sync creating .venv from scratch)
@@ -236,6 +249,7 @@ class SandboxRunner:
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
+                _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -291,6 +305,7 @@ class SandboxRunner:
         allow_network: bool,
         extra_env: list[str] | None,
         expose_ssh_keys: bool = False,
+        allow_developer_packages: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
 
@@ -362,11 +377,12 @@ class SandboxRunner:
             self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
 
         # Pre-flight: scan all project lock files for known-malicious packages
-        if not await self._preflight_shell(cwd):
+        if not await self._preflight_shell(cwd, allow_developer_packages=allow_developer_packages):
             return 1
 
-        # Snapshot install targets before the shell session opens
+        # Snapshot install targets and lock files before the shell session opens
         snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
+        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
 
         network_label = "allowed" if allow_network else "blocked"
         self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
@@ -410,22 +426,41 @@ class SandboxRunner:
         ))
         print()
 
-        # Post-exit: scan for any packages installed during the shell session
+        # Post-exit: scan changed lock files, then any newly installed packages
+        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            return 1
+
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
-            await self._post_scan(new_pkgs)
+            if not await self._post_scan(new_pkgs):
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
 
         return result.returncode
 
-    async def _preflight_shell(self, cwd: Path) -> bool:
+    async def _preflight_shell(self, cwd: Path, *, allow_developer_packages: bool = False) -> bool:
         """Pre-flight OSV check for shell sessions: scans all project lock files."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
         from packagealert.parsers.lockfiles import scan_project
         from packagealert.storage.db import open_db
+
+        if not allow_developer_packages:
+            offender = _assert_scannable_lock_files_contained(cwd)
+            if offender is not None:
+                self._console.print(
+                    f"[bold red]✗ Lock file {offender} resolves outside the project directory "
+                    f"— refusing pre-flight scan. Pass --allow-developer-packages to override.[/bold red]"
+                )
+                log.warning(
+                    "Lock file resolves outside project root, refusing pre-flight scan: %s",
+                    cwd / offender,
+                )
+                return False
 
         scan = scan_project(cwd)
         queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
@@ -475,7 +510,7 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _preflight(self, ctx: _Context) -> bool:
+    async def _preflight(self, ctx: _Context, *, allow_developer_packages: bool = False) -> bool:
         """Query OSV for what's about to be installed. Return False to block."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
@@ -519,7 +554,16 @@ class SandboxRunner:
             )
 
         if not parsed.packages and not parsed.req_files:
-            # Lock-file install — read lockfile for exact versions
+            # Lock-file install — read lockfile for exact versions.
+            # Enforce containment before scan_project() follows any symlinks.
+            if not allow_developer_packages:
+                bad = _assert_scannable_lock_files_contained(ctx.cwd)
+                if bad is not None:
+                    self._console.print(
+                        f"[bold red]✗ Blocked — lock file '{bad}' resolves outside the project "
+                        f"directory. Use --allow-developer-packages to override.[/bold red]"
+                    )
+                    return False
             scan = scan_project(ctx.cwd)
             queries = [
                 (p.ecosystem, p.name, p.version)
@@ -573,6 +617,140 @@ class SandboxRunner:
             return False
 
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        return True
+
+    async def _scan_updated_lock_files(
+        self,
+        cwd: Path,
+        lock_snapshots: dict[Path, bytes | None | _LockUnreadable],
+        *,
+        allow_developer_packages: bool = False,
+    ) -> bool:
+        """Scan any lock files that changed during the sandbox run for malicious packages.
+
+        Uses the OSV cache for packages that haven't changed (fast) and queries
+        fresh for anything new, so this is cheap when only a few packages were added.
+        Returns False if a malicious package is found.
+        """
+        scannable = {cwd / name for name in _SCANNABLE_LOCK_FILES}
+        changed = []
+        for p, before in lock_snapshots.items():
+            if p not in scannable:
+                continue
+            if isinstance(before, _LockUnreadable):
+                # Pre-run state was unknown; treat as changed — err on the side of caution.
+                changed.append(p)
+            elif before is None:
+                # File was absent before the run; if any directory entry exists now
+                # (including broken symlinks) it was created during the run.
+                if p.exists() or p.is_symlink():
+                    changed.append(p)
+            else:
+                # Before reading, verify the path hasn't been replaced by an
+                # external symlink during the sandbox run.  p.read_bytes() follows
+                # symlinks, so an attacker-placed symlink would otherwise let the
+                # sandbox read arbitrary files outside the project.
+                if not allow_developer_packages and p.is_symlink():
+                    try:
+                        resolved = p.resolve()
+                    except OSError:
+                        resolved = None
+                    if resolved is None or not resolved.is_relative_to(cwd.resolve()):
+                        log.warning(
+                            "Lock file replaced by external symlink during sandbox run, "
+                            "treating as changed without reading: %s",
+                            p,
+                        )
+                        changed.append(p)
+                        continue
+                try:
+                    if p.read_bytes() != before:
+                        changed.append(p)
+                except OSError:
+                    log.warning("Could not read lock file after sandbox run: %s", p)
+                    changed.append(p)  # treat as changed — err on the side of caution
+        if not changed:
+            return True
+
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.parsers.lockfiles import scan_project
+        from packagealert.storage.db import open_db
+
+        # Enforce symlink containment before handing any lock file path to
+        # scan_project(), which follows symlinks unconditionally via read_text().
+        # Even lock files that were not in `changed` must be checked because
+        # scan_project() reads every parseable lock file it finds under cwd.
+        if not allow_developer_packages:
+            offender = _assert_scannable_lock_files_contained(cwd)
+            if offender is not None:
+                self._console.print(
+                    f"[bold red]✗ Lock file {offender} resolves outside the project directory "
+                    f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
+                )
+                log.warning(
+                    "Lock file resolves outside project root, refusing scan_project call: %s",
+                    cwd / offender,
+                )
+                return False
+
+        scan = scan_project(cwd)
+        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
+        if not queries:
+            changed_names = ", ".join(p.name for p in changed)
+            self._console.print(
+                f"[bold red]✗ Lock file(s) changed ({changed_names}) but no packages could be parsed "
+                f"— file may be corrupt or empty. Blocking as a precaution.[/bold red]"
+            )
+            log.warning(
+                "Changed lock file(s) yielded no parseable packages; failing safe: %s",
+                changed_names,
+            )
+            return False
+
+        changed_names = ", ".join(p.name for p in changed)
+        self._console.print(
+            f"[dim]Lock file scan: {len(queries)} packages ({changed_names} updated)...[/dim]"
+        )
+
+        db = await open_db()
+        client = OsvClient(self._cfg.osv)
+        cache = OsvCache(db, self._cfg.osv)
+        malicious: list[tuple[str, str]] = []
+
+        try:
+            for i in range(0, len(queries), 50):
+                batch = queries[i : i + 50]
+                cached_results, uncached = [], []
+                for q in batch:
+                    r = await cache.get(*q)
+                    if r is not None:
+                        cached_results.append(r)
+                    else:
+                        uncached.append(q)
+                fresh = []
+                if uncached:
+                    fresh = await client.batch_query(uncached)
+                    for q, r in zip(uncached, fresh):
+                        if r:
+                            await cache.set(*q, r)
+                for r in cached_results + fresh:
+                    if r and r.has_malicious:
+                        adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
+                        malicious.append((r.package_name, adv_id))
+        finally:
+            await client.aclose()
+            await db.close()
+
+        if malicious:
+            self._console.print(
+                f"[bold red]✗ Malicious package(s) found in updated lock file(s):[/bold red]"
+            )
+            for name, adv_id in malicious:
+                self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
+            return False
+
+        self._console.print("[green]✓ Lock file scan: clean[/green]")
         return True
 
     async def _post_scan(self, packages: list[tuple[str, str, str | None]]) -> bool:
@@ -896,6 +1074,190 @@ def _resolve_targets(ctx: _Context) -> None:
         composer_home = Path.home() / ".config" / "composer"
         if composer_home.exists():
             ctx.write_dirs.append(composer_home)
+
+
+class _LockUnreadable:
+    """Sentinel: lock file existed at snapshot time but its content could not be read
+    (e.g. permission denied, symlink outside project root).  On restore this entry is
+    skipped — we neither overwrite nor delete — to avoid data loss."""
+    __slots__ = ()
+    def __repr__(self) -> str:
+        return "<LockUnreadable>"
+
+_LOCK_UNREADABLE = _LockUnreadable()
+
+# Lock files to snapshot and restore if a malicious package is detected.
+_RESTORABLE_LOCK_FILES = [
+    "Pipfile.lock",
+    "uv.lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "composer.lock",
+]
+
+# Subset of the above that scan_project() can actually parse. Used to decide
+# whether to trigger an OSV scan after a sandbox run. yarn.lock and
+# pnpm-lock.yaml are intentionally excluded until parser support is added.
+_SCANNABLE_LOCK_FILES = [
+    "Pipfile.lock",
+    "uv.lock",
+    "package-lock.json",
+    "composer.lock",
+]
+
+
+def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
+    """Check every existing scannable lock file in *cwd* resolves within the project.
+
+    Returns the name of the first offending file, or ``None`` if all are safe.
+    Used by both pre-flight and post-run scans before calling ``scan_project()``,
+    which follows symlinks unconditionally via ``read_text()``.
+    """
+    project_root = cwd.resolve()
+    for name in _SCANNABLE_LOCK_FILES:
+        p = cwd / name
+        if not p.exists() and not p.is_symlink():
+            continue
+        try:
+            resolved = p.resolve()
+        except OSError:
+            return name
+        if not resolved.is_relative_to(project_root):
+            return name
+    return None
+
+
+def _snapshot_lock_files(
+    cwd: Path, *, allow_developer_packages: bool = False
+) -> dict[Path, bytes | None | _LockUnreadable]:
+    """Snapshot all known restorable lock files under *cwd*.
+
+    Return values per entry:
+    - ``bytes``            — file existed and was readable; content stored.
+    - ``None``             — file was genuinely absent (no directory entry at all);
+                             restore should delete it if created during the run.
+    - ``_LOCK_UNREADABLE`` — file had a directory entry (regular file, symlink, etc.)
+                             but content could not be read (broken symlink, permission
+                             error, or target outside project root); restore skips it
+                             to avoid data loss.
+
+    Symlinks whose resolved target lies outside *cwd* are recorded as
+    ``_LOCK_UNREADABLE`` unless *allow_developer_packages* is True, which relaxes
+    the check for monorepo / editable-install setups where lock files may
+    legitimately live elsewhere.
+    """
+    project_root = cwd.resolve()
+    result: dict[Path, bytes | None | _LockUnreadable] = {}
+    for name in _RESTORABLE_LOCK_FILES:
+        p = cwd / name
+        # Use lstat() rather than exists() so that a broken symlink (inode present
+        # but target missing) is treated as _LOCK_UNREADABLE rather than None.
+        # FileNotFoundError from lstat() means the path truly does not exist.
+        try:
+            p.lstat()
+        except FileNotFoundError:
+            result[p] = None
+            continue
+        except OSError:
+            # Other lstat failures (e.g. permission on parent dir) — treat as
+            # unreadable rather than absent to avoid accidental deletion on restore.
+            log.warning("Cannot stat lock file, skipping snapshot: %s", p)
+            result[p] = _LOCK_UNREADABLE
+            continue
+        # Path has a directory entry (file, symlink, etc.).  Apply the containment
+        # check before reading so we never follow external symlinks.
+        if not allow_developer_packages:
+            try:
+                resolved = p.resolve()
+            except OSError:
+                log.warning("Cannot resolve lock file path, skipping snapshot: %s", p)
+                result[p] = _LOCK_UNREADABLE
+                continue
+            if not resolved.is_relative_to(project_root):
+                log.warning(
+                    "Lock file resolves outside project directory, skipping snapshot: %s -> %s",
+                    p,
+                    resolved,
+                )
+                result[p] = _LOCK_UNREADABLE
+                continue
+        try:
+            result[p] = p.read_bytes()
+        except OSError:
+            result[p] = _LOCK_UNREADABLE
+    return result
+
+
+def _restore_lock_files(
+    snapshots: dict[Path, bytes | None | _LockUnreadable],
+    cwd: Path,
+    console: Console,
+) -> None:
+    # Check the *parent directory* (not the resolved symlink target) to decide
+    # whether it is safe to operate on this path.  unlink() and rename() act on
+    # the directory entry itself without following symlinks, so a containment
+    # check on the parent is both necessary and sufficient.  This check is
+    # unconditional because it guards the host filesystem, not the sandboxed
+    # package manager — allow_developer_packages does not apply.
+    project_root = cwd.resolve()
+    restored = []
+    for path, content in snapshots.items():
+        if isinstance(content, _LockUnreadable):
+            # Pre-run state was unknown; skip to avoid accidental data loss.
+            continue
+        try:
+            parent_resolved = path.parent.resolve()
+        except OSError:
+            log.warning("Cannot resolve parent directory during lock file restore, skipping: %s", path)
+            continue
+        if not parent_resolved.is_relative_to(project_root):
+            log.warning(
+                "Lock file parent directory resolves outside project, skipping restore: %s",
+                path,
+            )
+            continue
+        try:
+            if content is None:
+                # Was absent pre-run; remove whatever appeared, including symlinks
+                # and directories.  lstat() detects broken symlinks that exists()
+                # would miss.  If the sandbox created a directory at this path
+                # (e.g. an attacker replacing a lock file with a directory to
+                # frustrate restore), unlink() would raise IsADirectoryError so we
+                # fall back to rmtree().  These are known lock-file paths that must
+                # be regular files, so removing any unexpected directory is correct.
+                try:
+                    path.lstat()
+                    try:
+                        path.unlink()
+                    except IsADirectoryError:
+                        shutil.rmtree(path)
+                    restored.append(path.name)
+                except FileNotFoundError:
+                    pass
+            else:
+                # Write to a securely-created temp file in the same directory,
+                # then atomically rename into place.  mkstemp() uses O_CREAT|O_EXCL
+                # so it never follows an existing symlink.  rename() replaces the
+                # destination directory entry without following symlinks, so an
+                # attacker-placed symlink at `path` is overwritten by a regular file
+                # rather than the content going to the symlink's target.
+                fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=".pa-restore-")
+                tmp = Path(tmp_str)
+                try:
+                    # os.fdopen takes ownership of fd; the context manager flushes
+                    # and closes it, guaranteeing all bytes are written (no partial
+                    # write) before we rename into place.
+                    with os.fdopen(fd, "wb") as fobj:
+                        fobj.write(content)
+                    tmp.rename(path)
+                    restored.append(path.name)
+                finally:
+                    tmp.unlink(missing_ok=True)
+        except OSError:
+            log.warning("Failed to restore lock file: %s", path)
+    if restored:
+        console.print(f"[yellow]Restored lock file(s) to pre-install state: {', '.join(restored)}[/yellow]")
 
 
 def _snapshot(path: Path) -> set[Path]:

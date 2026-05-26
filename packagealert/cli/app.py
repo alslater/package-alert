@@ -538,6 +538,13 @@ def run_cmd(
         False, "--expose-ssh-keys",
         help="Expose ~/.ssh read-only inside the sandbox (required for git+ssh:// VCS dependencies).",
     ),
+    allow_developer_packages: bool = typer.Option(
+        False, "--allow-developer-packages",
+        help="Disable symlink containment checks on lock files. "
+             "Without this flag, lock files that are symlinks resolving outside the project root are "
+             "rejected at every stage: pre-flight scan, post-run lock-file scan, snapshot, and restore. "
+             "Use this flag when lock files legitimately point outside the project (e.g. monorepo or editable-install setups).",
+    ),
     config: Optional[Path] = _cfg_option,
 ):
     """Run a package manager command inside a bubblewrap sandbox.
@@ -573,7 +580,7 @@ def run_cmd(
     cfg = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
-    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys))
+    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages))
     raise typer.Exit(code)
 
 
