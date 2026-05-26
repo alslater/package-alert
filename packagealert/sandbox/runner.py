@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -226,11 +227,11 @@ class SandboxRunner:
             # lock-file scan and restore unconditionally — exiting non-zero must
             # not be a way to evade the check.
             if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
-                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
             return result.returncode
 
         if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
-            _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
             return 1
 
         # Re-detect scan targets that may have been created by the install
@@ -246,7 +247,7 @@ class SandboxRunner:
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -425,14 +426,14 @@ class SandboxRunner:
 
         # Post-exit: scan changed lock files, then any newly installed packages
         if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
-            _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
             return 1
 
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
             if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console, allow_developer_packages=allow_developer_packages)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
@@ -629,10 +630,28 @@ class SandboxRunner:
                 # Pre-run state was unknown; treat as changed — err on the side of caution.
                 changed.append(p)
             elif before is None:
-                # File was absent before the run; if it exists now it was created.
-                if p.exists():
+                # File was absent before the run; if any directory entry exists now
+                # (including broken symlinks) it was created during the run.
+                if p.exists() or p.is_symlink():
                     changed.append(p)
             else:
+                # Before reading, verify the path hasn't been replaced by an
+                # external symlink during the sandbox run.  p.read_bytes() follows
+                # symlinks, so an attacker-placed symlink would otherwise let the
+                # sandbox read arbitrary files outside the project.
+                if not allow_developer_packages and p.is_symlink():
+                    try:
+                        resolved = p.resolve()
+                    except OSError:
+                        resolved = None
+                    if resolved is None or not resolved.is_relative_to(cwd.resolve()):
+                        log.warning(
+                            "Lock file replaced by external symlink during sandbox run, "
+                            "treating as changed without reading: %s",
+                            p,
+                        )
+                        changed.append(p)
+                        continue
                 try:
                     if p.read_bytes() != before:
                         changed.append(p)
@@ -1163,15 +1182,13 @@ def _restore_lock_files(
     snapshots: dict[Path, bytes | None | _LockUnreadable],
     cwd: Path,
     console: Console,
-    *,
-    allow_developer_packages: bool = False,
 ) -> None:
     # Check the *parent directory* (not the resolved symlink target) to decide
     # whether it is safe to operate on this path.  unlink() and rename() act on
     # the directory entry itself without following symlinks, so a containment
-    # check on the parent is both necessary and sufficient.
-    # Note: allow_developer_packages has no effect here; parent-containment is
-    # always enforced because it is safe regardless of symlink targets.
+    # check on the parent is both necessary and sufficient.  This check is
+    # unconditional because it guards the host filesystem, not the sandboxed
+    # package manager — allow_developer_packages does not apply.
     project_root = cwd.resolve()
     restored = []
     for path, content in snapshots.items():
@@ -1200,13 +1217,19 @@ def _restore_lock_files(
                 except FileNotFoundError:
                     pass
             else:
-                # Write to a sibling temp file then atomically rename into place.
-                # rename() replaces the directory entry without following symlinks,
-                # so an attacker-placed symlink is overwritten by a regular file
-                # rather than the content being written to the symlink's target.
-                tmp = path.with_name(path.name + ".pa-restore-tmp")
+                # Write to a securely-created temp file in the same directory,
+                # then atomically rename into place.  mkstemp() uses O_CREAT|O_EXCL
+                # so it never follows an existing symlink.  rename() replaces the
+                # destination directory entry without following symlinks, so an
+                # attacker-placed symlink at `path` is overwritten by a regular file
+                # rather than the content going to the symlink's target.
+                fd, tmp_str = tempfile.mkstemp(dir=path.parent, prefix=".pa-restore-")
+                tmp = Path(tmp_str)
                 try:
-                    tmp.write_bytes(content)
+                    try:
+                        os.write(fd, content)
+                    finally:
+                        os.close(fd)
                     tmp.rename(path)
                     restored.append(path.name)
                 finally:

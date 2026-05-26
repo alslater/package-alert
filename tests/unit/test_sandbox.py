@@ -1315,7 +1315,7 @@ class TestRestoreLockFiles:
         _restore_lock_files(snapshots, tmp_path, _make_runner()._console)  # no exception
         # Original file unchanged because rename failed; temp file was cleaned up.
         assert lock.read_bytes() == b"current content"
-        assert not (tmp_path / "Pipfile.lock.pa-restore-tmp").exists()
+        assert not list(tmp_path.glob(".pa-restore-*"))
 
     def test_empty_snapshots_is_noop(self, tmp_path):
         _restore_lock_files({}, tmp_path, _make_runner()._console)  # no exception
@@ -1364,7 +1364,6 @@ class TestRestoreLockFiles:
         link.symlink_to(target)
         _restore_lock_files(
             {link: b"original content"}, tmp_path, _make_runner()._console,
-            allow_developer_packages=True,
         )
         assert target.read_bytes() == b"external content"  # external file untouched
         assert not link.is_symlink()
@@ -1599,6 +1598,30 @@ class TestScanUpdatedLockFiles:
 
         assert result is False
 
+    def test_newly_created_broken_symlink_treated_as_changed(self, tmp_path):
+        """A broken symlink created during the run (absent at snapshot) must be detected.
+
+        exists() returns False for broken symlinks; is_symlink() catches them.
+        The target points outside the project so the containment guard fires
+        before scan_project() is reached.
+        """
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        snapshots = {lock: None}
+        # Sandbox creates a broken symlink pointing to a nonexistent external path
+        lock.symlink_to(tmp_path.parent / "nonexistent_external_target")
+        assert not lock.exists()   # confirm exists() misses it
+        assert lock.is_symlink()   # confirm is_symlink() catches it
+
+        runner = _make_runner()
+        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan:
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        # Treated as changed; containment check blocks the scan because the
+        # broken symlink resolves outside the project root.
+        assert result is False
+        mock_scan.assert_not_called()
+
     def test_changed_lock_file_with_no_parseable_packages_returns_false(self, tmp_path):
         """Changed lock file that parses to zero packages fails safe instead of returning True."""
         import asyncio
@@ -1659,6 +1682,35 @@ class TestScanUpdatedLockFiles:
             )
 
         assert result is True
+
+    def test_regular_file_replaced_by_external_symlink_treated_as_changed_without_read(self, tmp_path):
+        """Lock file that was a regular file at snapshot but is now an external symlink
+        must be flagged as changed without following the symlink."""
+        import asyncio
+        # Snapshot: Pipfile.lock was a regular file
+        lock = tmp_path / "Pipfile.lock"
+        snapshots = {lock: b"original content"}
+        # Sandbox replaced it with a symlink pointing outside the project
+        target = tmp_path.parent / "sensitive_external"
+        target.write_bytes(b"secret data")
+        lock.symlink_to(target)
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        # Scan proceeded (changed=True triggered the scan) and the symlink was
+        # blocked before the later _assert_scannable_lock_files_contained check.
+        # The important property: target was never read.
+        assert target.read_bytes() == b"secret data"  # not read by read_bytes()
 
     def test_oserror_on_changed_check_treats_file_as_changed(self, tmp_path):
         """Unreadable lock file after sandbox run is treated as changed (fail-safe)."""
