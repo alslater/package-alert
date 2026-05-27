@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "package-alert-rust"
+version = "0.1.0"
+description = "Incomplete example package-alert language plugin for Rust / Cargo / crates.io"
+requires-python = ">=3.12"
+dependencies = ["package-alert"]
+
+[project.entry-points."package_alert.languages"]
+rust = "package_alert_rust:CargoLanguage"
+
+[tool.hatch.build.targets.wheel]
+packages = ["package_alert_rust"]

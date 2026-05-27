@@ -160,69 +160,10 @@ class ScheduledScanner:
 
     async def _scan_installed(self, project_path: Path) -> tuple[list[dict], list[str]]:
         """Enumerate actually-installed packages and scan them against OSV."""
-        import json
-        import subprocess
-
-        # Resolve the Python interpreter: prefer project venv, fall back to None.
-        venv_python = None
-        for candidate in (
-            project_path / ".venv" / "bin" / "python",
-            project_path / "venv" / "bin" / "python",
-        ):
-            if candidate.exists():
-                venv_python = candidate
-                break
-
-        pinned: list[tuple[str, str, str]] = []  # (ecosystem, name, version)
-        sources: list[str] = []
-
-        if venv_python is not None:
-            try:
-                out = subprocess.check_output(
-                    [str(venv_python), "-m", "pip", "list", "--format=json"],
-                    cwd=project_path,
-                    timeout=30,
-                )
-                for pkg in json.loads(out):
-                    pinned.append(("pypi", pkg["name"], pkg["version"]))
-                sources.append(f"{venv_python} pip list")
-            except Exception:
-                log.warning("pip list failed for %s, skipping pypi installed scan", project_path)
-
-        node_modules = project_path / "node_modules"
-        if node_modules.is_dir():
-            try:
-                out = subprocess.check_output(
-                    ["npm", "ls", "--json", "--depth=0"],
-                    cwd=project_path,
-                    timeout=30,
-                )
-                data = json.loads(out)
-                for name, info in data.get("dependencies", {}).items():
-                    ver = info.get("version")
-                    if ver:
-                        pinned.append(("npm", name, ver))
-                sources.append("npm ls")
-            except Exception:
-                log.warning("npm ls failed for %s, skipping npm installed scan", project_path)
-
-        vendor = project_path / "vendor"
-        if vendor.is_dir() and (project_path / "composer.json").exists():
-            try:
-                out = subprocess.check_output(
-                    ["composer", "show", "--format=json", "--no-interaction"],
-                    cwd=project_path,
-                    timeout=30,
-                )
-                data = json.loads(out)
-                for pkg in data.get("installed", []):
-                    pinned.append(("packagist", pkg["name"], pkg["version"]))
-                sources.append("composer show")
-            except Exception:
-                log.warning("composer show failed for %s, skipping packagist installed scan", project_path)
-
-        if not pinned:
-            return [], sources
-
-        findings = await self._run_osv_queries(pinned)
-        return findings, sources
+        from packagealert.parsers.lockfiles import scan_installed
+        result = scan_installed(project_path)
+        if not result.sources:
+            return [], []
+        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
+        findings = await self._run_osv_queries(queries)
+        return findings, result.sources

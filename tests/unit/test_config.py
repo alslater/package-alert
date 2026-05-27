@@ -1,8 +1,12 @@
+import asyncio
 import textwrap
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 from pydantic import ValidationError
-from packagealert.config import AppConfig, SandboxConfig, SchedulerConfig, load_config
+
+from packagealert.config import AppConfig, SandboxConfig, SchedulerConfig, load_config, warn_missing_paths
 
 
 def test_defaults_load_without_file():
@@ -93,3 +97,88 @@ def test_sandbox_extra_tmpfs_rejects_relative_via_toml(tmp_path):
     toml.write_text('[sandbox]\nextra_tmpfs = ["relative/path"]\n')
     with pytest.raises(ValidationError, match="must be absolute"):
         load_config(toml)
+
+
+def test_warn_missing_paths_skips_buggy_plugin():
+    """A plugin that raises in cache_paths() must not abort warn_missing_paths()."""
+    bad_lang = MagicMock()
+    bad_lang.name = "bad"
+    bad_lang.cache_paths.side_effect = RuntimeError("plugin exploded")
+
+    cfg = load_config(None)
+    with patch("packagealert.languages.registry.all_languages", return_value=[bad_lang]):
+        warn_missing_paths(cfg)  # must not raise
+
+    bad_lang.cache_paths.assert_called_once()
+
+
+# --- _run_scan_cache exception isolation ---
+
+
+def _make_fake_osv():
+    """Return (fake_open_db, FakeOsvClient, FakeOsvCache) suitable for mocking _run_scan_cache."""
+    fake_db = MagicMock()
+    fake_db.close = AsyncMock(return_value=None)
+    fake_osv_cache = MagicMock()
+    fake_osv_cache.get = AsyncMock(return_value=None)
+    fake_osv_cache.set = AsyncMock(return_value=None)
+    FakeOsvCache = MagicMock(return_value=fake_osv_cache)
+    fake_osv_client = MagicMock()
+    fake_osv_client.batch_query = AsyncMock(return_value=[])
+    fake_osv_client.aclose = AsyncMock(return_value=None)
+    FakeOsvClient = MagicMock(return_value=fake_osv_client)
+    return AsyncMock(return_value=fake_db), FakeOsvClient, FakeOsvCache
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_skips_lang_when_cache_paths_raises():
+    """cache_file_globs/cache_paths raising must not abort scan-cache for other languages."""
+    from packagealert.cli.app import _run_scan_cache
+
+    bad_lang = MagicMock()
+    bad_lang.name = "bad"
+    bad_lang.cache_file_globs.side_effect = RuntimeError("plugin exploded")
+
+    good_lang = MagicMock()
+    good_lang.name = "good"
+    good_lang.cache_file_globs.return_value = []  # no globs → skip inner loop cleanly
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[bad_lang, good_lang]),
+    ):
+        await _run_scan_cache(cfg)  # must not raise
+
+    bad_lang.cache_file_globs.assert_called_once()
+    good_lang.cache_file_globs.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
+    """classify_cache_file raising for one entry must not abort scan of remaining entries."""
+    from packagealert.cli.app import _run_scan_cache
+
+    whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
+    whl.touch()
+
+    lang = MagicMock()
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.whl"]
+    lang.cache_paths.return_value = [tmp_path]
+    lang.classify_cache_file.side_effect = RuntimeError("plugin exploded")
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+    ):
+        await _run_scan_cache(cfg)  # must not raise
+
+    lang.classify_cache_file.assert_called_once_with(whl)

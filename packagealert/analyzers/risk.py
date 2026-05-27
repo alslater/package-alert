@@ -4,22 +4,24 @@ import logging
 from pathlib import Path
 
 from packagealert.config import HeuristicsConfig
-from packagealert.heuristics.npm import NpmHeuristics
-from packagealert.heuristics.python import PythonHeuristics
-from packagealert.heuristics.typosquat import TyposquatDetector, _LOW_DEPENDENT_COUNT, _LOW_VERSION_COUNT
+from packagealert.heuristics.top_packages import TopPackagesCache
+from packagealert.heuristics.typosquat import TyposquatDetector
+from packagealert.languages import registry as lang_registry
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport, RiskSignal
 from packagealert.osv.popularity import PopularityCache, PopularityClient
 
 log = logging.getLogger(__name__)
 
+_LOW_VERSION_COUNT = 5
+_LOW_DEPENDENT_COUNT = 10
+
 
 class RiskEngine:
-    def __init__(self, cfg: HeuristicsConfig, pop_client: PopularityClient | None = None, pop_cache: PopularityCache | None = None) -> None:
+    def __init__(self, cfg: HeuristicsConfig, pop_client: PopularityClient | None = None, pop_cache: PopularityCache | None = None, top_packages_cache: TopPackagesCache | None = None) -> None:
+        lang_registry.load()
         self._cfg = cfg
-        self._npm_heuristics = NpmHeuristics()
-        self._python_heuristics = PythonHeuristics()
-        self._typosquat = TyposquatDetector()
+        self._typosquat = TyposquatDetector(cache=top_packages_cache)
         self._pop_client = pop_client
         self._pop_cache = pop_cache
 
@@ -50,11 +52,24 @@ class RiskEngine:
         )
 
     async def _run_heuristics(self, event: PackageEvent, package_dir: Path) -> list[RiskSignal]:
-        if event.ecosystem == "npm":
-            return await self._npm_heuristics.analyze(package_dir)
-        if event.ecosystem == "pypi":
-            return await self._python_heuristics.analyze(package_dir)
-        return []
+        lang = lang_registry.for_ecosystem(event.ecosystem)
+        if lang is None:
+            return []
+        signals = []
+        try:
+            heuristics = lang.heuristics()
+        except Exception:
+            log.warning("heuristics() raised for lang=%s — skipping heuristics", getattr(lang, "name", "?"), exc_info=True)
+            return signals
+        for heuristic in heuristics:
+            try:
+                signals.extend(await heuristic.analyze(package_dir))
+            except Exception:
+                log.warning(
+                    "heuristic %s raised unexpectedly for lang=%s package_dir=%s — skipping",
+                    type(heuristic).__name__, getattr(lang, "name", "?"), package_dir, exc_info=True,
+                )
+        return signals
 
     async def _popularity_signal(self, event: PackageEvent, has_typo_match: bool) -> RiskSignal | None:
         if not self._pop_client or not self._pop_cache:

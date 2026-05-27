@@ -67,6 +67,13 @@ CREATE INDEX IF NOT EXISTS idx_scan_results_project
     ON scan_results(project_path, scanned_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scan_results_type
     ON scan_results(project_path, scan_type, scanned_at DESC);
+
+CREATE TABLE IF NOT EXISTS top_packages_cache (
+    ecosystem     TEXT NOT NULL PRIMARY KEY,
+    fetched_at    REAL NOT NULL,
+    package_count INTEGER NOT NULL,
+    packages      TEXT NOT NULL
+);
 """
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "package-alert" / "package-alert.db"

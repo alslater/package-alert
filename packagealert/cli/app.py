@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -10,6 +11,8 @@ from rich.table import Table
 
 from packagealert.config import load_config
 from packagealert.logging_setup import configure_logging
+
+log = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="package-alert",
@@ -22,6 +25,9 @@ app.add_typer(schedule_app, name="schedule")
 
 scans_app = typer.Typer(help="List and display completed scheduled scan results.")
 app.add_typer(scans_app, name="scans")
+
+from packagealert.cli.languages_cmd import languages_app  # noqa: E402
+app.add_typer(languages_app, name="languages")
 
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
@@ -76,9 +82,9 @@ async def _run_scan_cache(cfg):
     from packagealert.osv.client import OsvClient
     from packagealert.osv.cache import OsvCache
     from packagealert.storage.db import open_db
-    from packagealert.parsers.wheel import parse_wheel_filename
     from packagealert.models.events import PackageEvent
     from packagealert.alerts.terminal import alert_malicious
+    from packagealert.languages import registry as lang_registry
     from datetime import datetime, timezone
 
     db = await open_db()
@@ -86,35 +92,56 @@ async def _run_scan_cache(cfg):
     osv_cache = OsvCache(db, cfg.osv)
     found = 0
 
-    scan_dirs = [
-        (cfg.watch.pip_cache_dir, "pypi"),
-        (cfg.watch.uv_cache_dir, "pypi"),
-    ]
-    for cache_dir, ecosystem in scan_dirs:
-        if not cache_dir.exists():
+    lang_registry.load()
+    for lang in lang_registry.all_languages():
+        try:
+            globs = lang.cache_file_globs()
+            cache_dirs = lang.cache_paths()
+        except Exception:
+            log.warning(
+                "cache_file_globs/cache_paths raised unexpectedly for lang=%s — skipping",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
             continue
-        for wheel in cache_dir.rglob("*.whl"):
-            info = parse_wheel_filename(wheel)
-            if not info:
+        if not globs:
+            continue
+        for cache_dir in cache_dirs:
+            if not cache_dir.exists():
                 continue
-            result = await osv_cache.get(ecosystem, info.name, info.version)
-            if result is None:
-                results = await osv_client.batch_query([(ecosystem, info.name, info.version)])
-                if results:
-                    result = results[0]
-                    await osv_cache.set(ecosystem, info.name, info.version, result)
-            if result and result.has_malicious:
-                ev = PackageEvent(
-                    ecosystem=ecosystem,
-                    package_name=info.name,
-                    version=info.version,
-                    source="cache",
-                    manager="unknown",
-                    project_path=None,
-                    timestamp=datetime.now(timezone.utc),
-                )
-                alert_malicious(ev, result)
-                found += 1
+            seen: set[Path] = set()
+            for glob in globs:
+                for entry in cache_dir.glob(glob):
+                    if entry in seen:
+                        continue
+                    seen.add(entry)
+                    try:
+                        metadata = lang.classify_cache_file(entry)
+                    except Exception:
+                        log.warning(
+                            "classify_cache_file raised unexpectedly for lang=%s path=%s — skipping",
+                            getattr(lang, "name", "?"), entry, exc_info=True,
+                        )
+                        continue
+                    if not metadata or not metadata.version:
+                        continue
+                    result = await osv_cache.get(metadata.ecosystem.lower(), metadata.name, metadata.version)
+                    if result is None:
+                        results = await osv_client.batch_query([(metadata.ecosystem.lower(), metadata.name, metadata.version)])
+                        if results:
+                            result = results[0]
+                            await osv_cache.set(metadata.ecosystem.lower(), metadata.name, metadata.version, result)
+                    if result and result.has_malicious:
+                        ev = PackageEvent(
+                            ecosystem=metadata.ecosystem.lower(),
+                            package_name=metadata.name,
+                            version=metadata.version,
+                            source="cache",
+                            manager="unknown",
+                            project_path=None,
+                            timestamp=datetime.now(timezone.utc),
+                        )
+                        alert_malicious(ev, result)
+                        found += 1
 
     console.print(f"Scan complete. [bold red]{found}[/bold red] malicious package(s) found.")
     await osv_client.aclose()
@@ -545,6 +572,12 @@ def run_cmd(
              "rejected at every stage: pre-flight scan, post-run lock-file scan, snapshot, and restore. "
              "Use this flag when lock files legitimately point outside the project (e.g. monorepo or editable-install setups).",
     ),
+    no_change: bool = typer.Option(
+        False, "--no-change", "-n",
+        help="Dry-run mode: run the command in the sandbox and perform all pre- and post-checks, "
+             "but always restore lock files to their pre-run state on exit regardless of outcome. "
+             "Useful for auditing what a command would install without committing changes to the project.",
+    ),
     config: Optional[Path] = _cfg_option,
 ):
     """Run a package manager command inside a bubblewrap sandbox.
@@ -571,6 +604,8 @@ def run_cmd(
       package-alert run --no-network uv sync   # fully offline, cache must be warm
 
       package-alert run --env MY_TOKEN uv sync
+
+      package-alert run -n pipenv lock          # audit without keeping the new lock file
     """
     command = list(ctx.args)
     if not command:
@@ -580,7 +615,7 @@ def run_cmd(
     cfg = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
-    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages))
+    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change))
     raise typer.Exit(code)
 
 
@@ -902,4 +937,6 @@ async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
 
 
 def main():
-    app()
+    import sys
+    import os
+    app(prog_name=os.path.basename(sys.argv[0]))

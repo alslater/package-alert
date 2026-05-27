@@ -250,11 +250,11 @@ class TestBatchPrefetch:
 
 class TestOsvFailures:
     @pytest.fixture
-    def client(self):
+    async def client(self):
         cfg = OsvConfig(base_url="https://api.osv.dev/v1", max_retries=3)
         c = OsvClient(cfg)
         yield c
-        asyncio.get_event_loop().run_until_complete(c.aclose())
+        await c.aclose()
 
     @respx.mock
     async def test_retries_on_429_then_succeeds(self, client):

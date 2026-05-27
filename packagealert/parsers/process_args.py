@@ -40,6 +40,7 @@ class ParsedInstall:
     ecosystem: str = "pypi"
     venv_exe: str | None = None  # path used to derive site-packages
     req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
+    lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -66,6 +67,10 @@ def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
 
     Non-pinned version constraints (>=, ~=, ^, ranges) are dropped and None is
     returned for version so that OSV queries are broadened rather than skipped.
+
+    For built-in ecosystems the appropriate parser is called directly.  For
+    unknown ecosystems the language registry is consulted so that external
+    plugins can provide their own spec parsing via parse_package_spec().
     """
     if ecosystem == "pypi":
         return _parse_pip_spec(spec)
@@ -73,6 +78,12 @@ def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
         return _parse_npm_spec(spec)
     if ecosystem == "packagist":
         return _parse_composer_spec(spec)
+    # Fall back to the language module's own parser for plugin ecosystems.
+    from packagealert.languages import registry as lang_registry
+    lang_registry.load()
+    lang = lang_registry.for_ecosystem(ecosystem)
+    if lang is not None:
+        return lang.parse_package_spec(spec)
     return spec, None
 
 
@@ -150,15 +161,34 @@ def _parse_composer_spec(spec: str) -> tuple[str, str | None]:
     return name, version
 
 
+_CMD_VERSION_SUFFIX_RE = re.compile(r"[-.](\d[\d.]*)$")
+
+
 def _basename(path: str) -> str:
-    return path.rsplit("/", 1)[-1]
+    return re.split(r"[/\\]", path)[-1]
+
+
+def _cmd(path: str) -> str:
+    """Return the normalised command basename: strip path, version suffixes,
+    Windows .exe extension, and Node *-cli.js wrappers.
+
+    e.g. /usr/bin/python3.11 -> python3
+         C:\\Python\\pip.exe  -> pip
+         /usr/lib/node/npm-cli.js -> npm
+    """
+    name = _basename(path).lower()
+    if name.endswith(".exe"):
+        name = name[:-4]
+    if name.endswith("-cli.js"):
+        name = name[:-7]
+    return _CMD_VERSION_SUFFIX_RE.sub("", name)
 
 
 def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
     # Handle: pip install, /path/to/pip install, python -m pip install
-    cmd = _basename(argv[0])
+    cmd = _cmd(argv[0])
     if cmd in ("pip", "pip3"):
         args = argv[1:]
         venv_exe = argv[0]
@@ -166,7 +196,7 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         # python -m pip install ...
         args = argv[3:]
         venv_exe = argv[0]
-    elif cmd in ("python", "python3") and len(argv) >= 2 and _basename(argv[1]) in ("pip", "pip3"):
+    elif cmd in ("python", "python3") and len(argv) >= 2 and _cmd(argv[1]) in ("pip", "pip3"):
         # python /path/to/pip install ...
         args = argv[2:]
         venv_exe = argv[0]
@@ -221,7 +251,7 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
 
 
 def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
-    if not argv or _basename(argv[0]) != "uv":
+    if not argv or _cmd(argv[0]) != "uv":
         return None
     venv_exe = argv[0]
     args = argv[1:]
@@ -280,7 +310,7 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
 def parse_composer_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
-    cmd = _basename(argv[0])
+    cmd = _cmd(argv[0])
     if cmd == "composer":
         args = argv[1:]
     elif cmd in ("php", "php8", "php7") and len(argv) > 1 and "composer" in _basename(argv[1]):
@@ -295,20 +325,13 @@ def parse_composer_args(argv: list[str]) -> ParsedInstall | None:
         return ParsedInstall(manager="composer", packages=packages, ecosystem="packagist")
     if subcmd in ("install", "update", "upgrade"):
         return ParsedInstall(manager="composer", packages=[], ecosystem="packagist")
-    if subcmd in ("show", "info", "status", "validate", "check-platform-reqs",
-                  "diagnose", "outdated", "suggests", "browse", "home",
-                  "run-script", "run", "exec", "search", "config",
-                  "licenses", "prohibits", "why", "why-not",
-                  "remove", "reinstall", "archive", "dump-autoload", "dumpautoload",
-                  "self-update", "selfupdate", "help"):
-        return ParsedInstall(manager="composer", packages=[], ecosystem="packagist")
     return None
 
 
 def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
-    cmd = _basename(argv[0])
+    cmd = _cmd(argv[0])
     if cmd == "pipenv":
         args = argv[1:]
         venv_exe = argv[0]
@@ -330,6 +353,51 @@ def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     return None
 
 
+def parse_yarn_args(argv: list[str]) -> ParsedInstall | None:
+    if not argv:
+        return None
+    cmd = _cmd(argv[0])
+    if cmd != "yarn":
+        return None
+    args = argv[1:]
+    if not args:
+        # bare `yarn` installs all deps from lockfile
+        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
+    subcmd = args[0]
+    if subcmd == "add":
+        packages = [a for a in args[1:] if not a.startswith("-")]
+        return ParsedInstall(manager="yarn", packages=packages, ecosystem="npm")
+    if subcmd in ("install", "dedupe"):
+        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
+    if subcmd == "remove":
+        # Removal mutates yarn.lock; defer to lockfile scan.
+        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
+    return None
+
+
+def parse_pnpm_args(argv: list[str]) -> ParsedInstall | None:
+    if not argv:
+        return None
+    cmd = _cmd(argv[0])
+    if cmd != "pnpm":
+        return None
+    args = argv[1:]
+    if not args:
+        return None
+    subcmd = args[0]
+    if subcmd in ("add", "install", "i"):
+        packages = []
+        if subcmd == "add":
+            packages = [a for a in args[1:] if not a.startswith("-")]
+        return ParsedInstall(manager="pnpm", packages=packages, ecosystem="npm")
+    if subcmd in ("dedupe", "fetch", "import"):
+        return ParsedInstall(manager="pnpm", packages=[], ecosystem="npm")
+    if subcmd in ("remove", "rm", "uninstall", "un"):
+        # Removal mutates pnpm-lock.yaml; defer to lockfile scan.
+        return ParsedInstall(manager="pnpm", packages=[], ecosystem="npm")
+    return None
+
+
 def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
@@ -337,7 +405,7 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     # a single packed argv[0] e.g. "npm install react" with empty trailing slots.
     if " " in argv[0] and argv[0].lstrip().startswith("npm"):
         argv = argv[0].split() + [a for a in argv[1:] if a]
-    cmd = _basename(argv[0])
+    cmd = _cmd(argv[0])
     if cmd == "npm":
         args = argv[1:]
     elif cmd in ("node", "nodejs") and len(argv) > 1 and "npm" in _basename(argv[1]):
@@ -351,10 +419,12 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     if subcmd in ("install", "i", "add", "ci"):
         packages = [a for a in args[1:] if not a.startswith("-")]
         return ParsedInstall(manager="npm", packages=packages, ecosystem="npm")
-    if subcmd in ("run", "run-script", "test", "t", "start", "stop", "restart", "build",
-                  "ls", "list", "ll", "la", "outdated", "audit", "fund",
-                  "view", "info", "show", "search", "pack", "diff",
-                  "update", "up", "upgrade", "uninstall", "remove", "rm", "r", "un",
-                  "unlink", "dedupe", "prune", "link", "exec", "help"):
+    if subcmd in ("update", "up", "upgrade", "dedupe"):
+        return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
+    if subcmd in ("uninstall", "remove", "rm", "un", "r"):
+        # Removal mutates package-lock.json; defer to lockfile scan.
+        return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
+    if subcmd == "audit" and len(args) > 1 and args[1] == "fix":
+        # `npm audit fix` modifies package-lock.json; defer to lockfile scan.
         return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
     return None

@@ -30,12 +30,13 @@ from packagealert.sandbox.runner import (
     _restore_lock_files,
     _snapshot_lock_files,
     _try_parse,
+    _serialise_package_spec,
     _build_sandbox_env,
     _assert_scannable_lock_files_contained,
     _LOCK_UNREADABLE,
-    _RESTORABLE_LOCK_FILES,
-    _SCANNABLE_LOCK_FILES,
-    _SANDBOX_ENV,
+    _restorable_lock_files,
+    _scannable_lock_files,
+    _SANDBOX_ENV_COMMON,
     _SHELL_NAMES,
     _SHELL_RC_FILES,
     _Context,
@@ -237,8 +238,10 @@ class TestHomeRoDirs:
         )
 
     def test_sandbox_env_allowlist_includes_pyenv_and_nvm(self):
-        assert "PYENV_ROOT" in _SANDBOX_ENV
-        assert "NVM_DIR" in _SANDBOX_ENV
+        from packagealert.languages.python import PythonLanguage
+        from packagealert.languages.node import NodeLanguage
+        assert "PYENV_ROOT" in PythonLanguage().sandbox_env()
+        assert "NVM_DIR" in NodeLanguage().sandbox_env()
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +324,137 @@ class TestTryParse:
     def test_unknown_command_returns_none(self):
         assert _try_parse(["make", "build"]) is None
         assert _try_parse(["cargo", "build"]) is None
+
+    def test_pip_pinned_package_uses_double_equals(self):
+        result = _try_parse(["pip", "install", "requests==2.31.0"])
+        assert result is not None
+        assert result.packages == ["requests==2.31.0"]
+
+    def test_npm_pinned_package_uses_at_separator(self):
+        result = _try_parse(["npm", "install", "lodash@4.17.21"])
+        assert result is not None
+        assert result.packages == ["lodash@4.17.21"]
+
+    def test_composer_pinned_package_uses_colon_separator(self):
+        result = _try_parse(["composer", "require", "vendor/pkg:1.2.3"])
+        assert result is not None
+        assert result.packages == ["vendor/pkg:1.2.3"]
+
+    def test_windows_path_backslash_resolved(self):
+        result = _try_parse([r"C:\Python\Scripts\pip.exe", "install", "requests"])
+        assert result is not None
+        assert result.packages == ["requests"]
+
+    def test_windows_path_npm_backslash_resolved(self):
+        result = _try_parse([r"C:\Program Files\nodejs\npm.exe", "install", "lodash"])
+        assert result is not None
+        assert result.ecosystem == "npm"
+
+    def test_returns_none_when_plugin_raises(self):
+        from unittest.mock import MagicMock, patch
+        bad_lang = MagicMock()
+        bad_lang.name = "bad"
+        bad_lang.process_names = frozenset(["pip"])
+        bad_lang.parse_process_install.side_effect = RuntimeError("plugin exploded")
+        with patch("packagealert.languages.registry.for_process", return_value=bad_lang):
+            result = _try_parse(["pip", "install", "flask"])
+        assert result is None
+        bad_lang.parse_process_install.assert_called_once()
+
+    def test_lockfile_hint_propagated(self):
+        from packagealert.languages.base import ProcessInstall, PackageSpec
+        from unittest.mock import MagicMock, patch
+        lang = MagicMock()
+        lang.name = "node"
+        lang.ecosystems = ["npm"]
+        lang.parse_process_install.return_value = ProcessInstall(
+            manager="yarn",
+            packages=[],
+            defer_to_lockfile=True,
+            lockfile_hint="yarn.lock",
+        )
+        with patch("packagealert.languages.registry.for_process", return_value=lang):
+            result = _try_parse(["yarn", "install"])
+        assert result is not None
+        assert result.lockfile_hint == "yarn.lock"
+
+    def test_lockfile_hint_propagated_from_node_npm(self):
+        # npm sets lockfile_hint="package-lock.json" via _LOCKFILE_HINTS
+        result = _try_parse(["npm", "install"])
+        assert result is not None
+        assert result.lockfile_hint == "package-lock.json"
+
+    def test_lockfile_hint_none_for_pip(self):
+        # pip does not set a lockfile_hint
+        result = _try_parse(["pip", "install", "flask"])
+        assert result is not None
+        assert result.lockfile_hint is None
+
+
+# ---------------------------------------------------------------------------
+# _serialise_package_spec
+# ---------------------------------------------------------------------------
+
+class TestSerialisePackageSpec:
+    """_serialise_package_spec must use the ecosystem-appropriate version separator
+    so that the round-trip through parse_package_spec() in _preflight recovers the
+    correct (name, version) pair for every ecosystem."""
+
+    def _make(self, name, version, ecosystem):
+        from packagealert.languages.base import PackageSpec
+        return PackageSpec(name=name, version=version, ecosystem=ecosystem)
+
+    def test_pypi_pinned(self):
+        assert _serialise_package_spec(self._make("requests", "2.31.0", "pypi")) == "requests==2.31.0"
+
+    def test_pypi_unpinned(self):
+        assert _serialise_package_spec(self._make("requests", None, "pypi")) == "requests"
+
+    def test_npm_pinned(self):
+        assert _serialise_package_spec(self._make("lodash", "4.17.21", "npm")) == "lodash@4.17.21"
+
+    def test_npm_scoped_pinned(self):
+        assert _serialise_package_spec(self._make("@types/node", "18.0.0", "npm")) == "@types/node@18.0.0"
+
+    def test_npm_unpinned(self):
+        assert _serialise_package_spec(self._make("lodash", None, "npm")) == "lodash"
+
+    def test_packagist_pinned(self):
+        assert _serialise_package_spec(self._make("vendor/pkg", "1.2.3", "Packagist")) == "vendor/pkg:1.2.3"
+
+    def test_packagist_unpinned(self):
+        assert _serialise_package_spec(self._make("vendor/pkg", None, "Packagist")) == "vendor/pkg"
+
+    def test_roundtrip_pypi(self):
+        from packagealert.parsers.process_args import parse_package_spec
+        spec = self._make("requests", "2.31.0", "pypi")
+        name, version = parse_package_spec(_serialise_package_spec(spec), "pypi")
+        assert name == "requests"
+        assert version == "2.31.0"
+
+    def test_roundtrip_npm(self):
+        from packagealert.parsers.process_args import parse_package_spec
+        spec = self._make("lodash", "4.17.21", "npm")
+        name, version = parse_package_spec(_serialise_package_spec(spec), "npm")
+        assert name == "lodash"
+        assert version == "4.17.21"
+
+    def test_roundtrip_packagist(self):
+        from packagealert.parsers.process_args import parse_package_spec
+        spec = self._make("vendor/pkg", "1.2.3", "Packagist")
+        name, version = parse_package_spec(_serialise_package_spec(spec), "packagist")
+        assert name == "vendor/pkg"
+        assert version == "1.2.3"
+
+    def test_falls_back_to_double_equals_when_plugin_raises(self):
+        from unittest.mock import MagicMock, patch
+        bad_lang = MagicMock()
+        bad_lang.name = "bad"
+        bad_lang.serialise_package_spec.side_effect = RuntimeError("plugin exploded")
+        spec = self._make("pkg", "1.0.0", "custom")
+        with patch("packagealert.languages.registry.for_ecosystem", return_value=bad_lang):
+            result = _serialise_package_spec(spec)
+        assert result == "pkg==1.0.0"
 
 
 # ---------------------------------------------------------------------------
@@ -958,21 +1092,50 @@ class TestBuildSandboxEnv:
         result = _build_sandbox_env(["NONEXISTENT_VAR"])
         assert "NONEXISTENT_VAR" not in result
 
-    def test_sandbox_env_allowlist_includes_core_vars(self):
-        assert "PATH" in _SANDBOX_ENV
-        assert "HOME" in _SANDBOX_ENV
-        assert "VIRTUAL_ENV" in _SANDBOX_ENV
-        assert "HTTP_PROXY" in _SANDBOX_ENV
-        assert "UV_INDEX_URL" in _SANDBOX_ENV
-        assert "NPM_CONFIG_REGISTRY" in _SANDBOX_ENV
-        assert "COMPOSER_HOME" in _SANDBOX_ENV
+    def test_sandbox_env_common_includes_core_vars(self):
+        assert "PATH" in _SANDBOX_ENV_COMMON
+        assert "HOME" in _SANDBOX_ENV_COMMON
+        assert "HTTP_PROXY" in _SANDBOX_ENV_COMMON
+
+    def test_sandbox_env_language_specific_vars_come_from_modules(self):
+        from packagealert.languages.python import PythonLanguage
+        from packagealert.languages.node import NodeLanguage
+        from packagealert.languages.php import PhpLanguage
+        assert "VIRTUAL_ENV" in PythonLanguage().sandbox_env()
+        assert "UV_INDEX_URL" in PythonLanguage().sandbox_env()
+        assert "NPM_CONFIG_REGISTRY" in NodeLanguage().sandbox_env()
+        assert "COMPOSER_HOME" in PhpLanguage().sandbox_env()
 
     def test_returns_only_present_env_vars(self, monkeypatch):
-        for key in list(_SANDBOX_ENV):
+        from packagealert.languages import registry as lang_registry
+        all_known: set[str] = set(_SANDBOX_ENV_COMMON)
+        for lang in lang_registry.all_languages():
+            all_known.update(lang.sandbox_env())
+        for key in list(all_known):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("PATH", "/usr/bin")
         result = _build_sandbox_env([])
         assert result == {"PATH": "/usr/bin"}
+
+    def test_buggy_plugin_sandbox_env_is_skipped(self, monkeypatch):
+        """A plugin that raises in sandbox_env() must not abort _build_sandbox_env()."""
+        from unittest.mock import MagicMock, patch
+        bad_lang = MagicMock()
+        bad_lang.name = "bad"
+        bad_lang.sandbox_env.side_effect = RuntimeError("plugin exploded")
+
+        good_lang = MagicMock()
+        good_lang.name = "good"
+        good_lang.sandbox_env.return_value = ["MY_GOOD_VAR"]
+
+        monkeypatch.setenv("MY_GOOD_VAR", "present")
+
+        with patch("packagealert.languages.registry.all_languages", return_value=[bad_lang, good_lang]):
+            result = _build_sandbox_env([])
+
+        bad_lang.sandbox_env.assert_called_once()
+        good_lang.sandbox_env.assert_called_once()
+        assert "MY_GOOD_VAR" in result
 
 
 class TestCollectNewPackages:
@@ -1251,11 +1414,137 @@ class TestRunExitCode:
         assert rc == 42
 
 
+class TestNoChangeLockFileRestore:
+    """run() must always restore lock files when --no-change is set, regardless
+    of the wrapped command's exit code or lock-file scan result."""
+
+    def _setup(self, monkeypatch, returncode: int):
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: type("R", (), {"returncode": returncode})(),
+        )
+        async def _preflight_ok(*a, **kw):
+            return True
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+
+    def test_restores_on_success_clean_scan(self, tmp_path, monkeypatch):
+        """no_change=True: command succeeds, scan clean → restore called, returns 0."""
+        self._setup(monkeypatch, returncode=0)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"original")
+        import asyncio
+        runner = _make_runner()
+        async def _clean(*a, **kw):
+            lock.write_bytes(b"modified by install")
+            return True
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean)
+        rc = asyncio.run(runner.run(["uv", "add", "requests"], no_change=True))
+        assert rc == 0
+        assert lock.read_bytes() == b"original"
+
+    def test_restores_on_success_malicious_scan(self, tmp_path, monkeypatch):
+        """no_change=True: command succeeds, scan fails → restore called, returns 1."""
+        self._setup(monkeypatch, returncode=0)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"original")
+        import asyncio
+        runner = _make_runner()
+        async def _malicious(*a, **kw):
+            lock.write_bytes(b"modified by install")
+            return False
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _malicious)
+        rc = asyncio.run(runner.run(["uv", "add", "requests"], no_change=True))
+        assert rc == 1
+        assert lock.read_bytes() == b"original"
+
+    def test_restores_on_command_failure_clean_scan(self, tmp_path, monkeypatch):
+        """no_change=True: command fails, scan clean → restore called, returns command exit code."""
+        self._setup(monkeypatch, returncode=2)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"original")
+        import asyncio
+        runner = _make_runner()
+        async def _clean(*a, **kw):
+            lock.write_bytes(b"modified by install")
+            return True
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean)
+        rc = asyncio.run(runner.run(["uv", "add", "requests"], no_change=True))
+        assert rc == 2
+        assert lock.read_bytes() == b"original"
+
+    def test_restores_on_command_failure_malicious_scan(self, tmp_path, monkeypatch):
+        """no_change=True: command fails, scan fails → restore called, returns 1."""
+        self._setup(monkeypatch, returncode=2)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"original")
+        import asyncio
+        runner = _make_runner()
+        async def _malicious(*a, **kw):
+            lock.write_bytes(b"modified by install")
+            return False
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _malicious)
+        rc = asyncio.run(runner.run(["uv", "add", "requests"], no_change=True))
+        assert rc == 1
+        assert lock.read_bytes() == b"original"
+
+    def test_does_not_restore_on_success_without_no_change(self, tmp_path, monkeypatch):
+        """Without no_change, a clean scan leaves lock files untouched (not restored)."""
+        self._setup(monkeypatch, returncode=0)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "uv.lock"
+        lock.write_bytes(b"original")
+        import asyncio
+        runner = _make_runner()
+        async def _clean(*a, **kw):
+            lock.write_bytes(b"modified by install")
+            return True
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean)
+        rc = asyncio.run(runner.run(["uv", "add", "requests"], no_change=False))
+        assert rc == 0
+        assert lock.read_bytes() == b"modified by install"
+
+
 # ---------------------------------------------------------------------------
 # _preflight — unpinned requirements included in OSV queries
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# _restorable_lock_files — exception isolation
+# ---------------------------------------------------------------------------
+
+class TestRestorableLockFiles:
+    def test_buggy_lockfile_patterns_skipped(self):
+        """_restorable_lock_files() must skip a language whose lockfile_patterns() raises."""
+        from unittest.mock import MagicMock, patch
+        from packagealert.languages import registry as lang_registry
+
+        lang_registry.load()
+        good_names = _restorable_lock_files()
+        assert len(good_names) > 0
+
+        bad_lang = MagicMock()
+        bad_lang.name = "bad"
+        bad_lang.lockfile_patterns.side_effect = RuntimeError("patterns boom")
+
+        real_all_languages = lang_registry.all_languages
+
+        def patched_all_languages():
+            return [bad_lang] + real_all_languages()
+
+        with patch("packagealert.languages.registry.all_languages", side_effect=patched_all_languages):
+            result = _restorable_lock_files()
+
+        # Bad plugin skipped; good language patterns still present
+        assert set(result) == set(good_names)
+
+
 # _snapshot_lock_files / _restore_lock_files
 # ---------------------------------------------------------------------------
 
@@ -1269,7 +1558,7 @@ class TestSnapshotLockFiles:
     def test_records_none_for_nonexistent_files(self, tmp_path):
         result = _snapshot_lock_files(tmp_path)
         # All restorable lock file names are present; absent ones map to None
-        assert len(result) == len(_RESTORABLE_LOCK_FILES)
+        assert len(result) == len(_restorable_lock_files())
         assert all(v is None for v in result.values())
 
     def test_snapshots_multiple_lock_files(self, tmp_path):
@@ -1277,11 +1566,11 @@ class TestSnapshotLockFiles:
         (tmp_path / "package-lock.json").write_bytes(b"b")
         result = _snapshot_lock_files(tmp_path)
         # All restorable names present; two have content, rest are None
-        assert len(result) == len(_RESTORABLE_LOCK_FILES)
+        assert len(result) == len(_restorable_lock_files())
         assert result[tmp_path / "uv.lock"] == b"a"
         assert result[tmp_path / "package-lock.json"] == b"b"
         none_count = sum(1 for v in result.values() if v is None)
-        assert none_count == len(_RESTORABLE_LOCK_FILES) - 2
+        assert none_count == len(_restorable_lock_files()) - 2
 
     def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
         lock = tmp_path / "uv.lock"
@@ -1299,10 +1588,12 @@ class TestSnapshotLockFiles:
         assert result[lock] is _LOCK_UNREADABLE
 
     def test_all_known_lock_file_names_checked(self, tmp_path):
-        for name in _RESTORABLE_LOCK_FILES:
-            (tmp_path / name).write_bytes(b"x")
+        for name in _restorable_lock_files():
+            p = tmp_path / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
         result = _snapshot_lock_files(tmp_path)
-        assert len(result) == len(_RESTORABLE_LOCK_FILES)
+        assert len(result) == len(_restorable_lock_files())
 
     def test_skips_symlink_pointing_outside_project(self, tmp_path):
         # Symlink pointing outside cwd must be stored as _LOCK_UNREADABLE, not None,
@@ -1487,7 +1778,7 @@ def _fake_scan_result(packages: list[tuple[str, str, str]]):
     """Return a fake scan_project result with the given (ecosystem, name, version) tuples."""
     from types import SimpleNamespace
     pkgs = [SimpleNamespace(ecosystem=eco, name=name, version=ver) for eco, name, ver in packages]
-    return SimpleNamespace(pinned=pkgs, sources=["Pipfile.lock"])
+    return SimpleNamespace(pinned=pkgs, unpinned=[], sources=["Pipfile.lock"])
 
 
 class TestAssertScannableLockFilesContained:
@@ -1511,12 +1802,12 @@ class TestAssertScannableLockFilesContained:
         result = _assert_scannable_lock_files_contained(tmp_path)
         assert result == "uv.lock"
 
-    def test_ignores_non_scannable_lock_files(self, tmp_path):
-        # yarn.lock is restorable but not scannable — external symlink should not trigger
+    def test_detects_external_symlink_for_yarn_lock(self, tmp_path):
+        # yarn.lock is now scannable; an external symlink should be rejected
         target = tmp_path.parent / "external_yarn"
         target.write_bytes(b"content")
         (tmp_path / "yarn.lock").symlink_to(target)
-        assert _assert_scannable_lock_files_contained(tmp_path) is None
+        assert _assert_scannable_lock_files_contained(tmp_path) == "yarn.lock"
 
 
 class TestPreflightShellContainment:
@@ -1549,7 +1840,7 @@ class TestPreflightShellContainment:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(
                 runner._preflight_shell(tmp_path, allow_developer_packages=True)
@@ -1569,7 +1860,7 @@ class TestPreflightShellContainment:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._preflight_shell(tmp_path))
 
@@ -1616,7 +1907,7 @@ class TestPreflightContainment:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._preflight(ctx, allow_developer_packages=True))
 
@@ -1636,7 +1927,7 @@ class TestPreflightContainment:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._preflight(ctx))
 
@@ -1659,12 +1950,135 @@ class TestPreflightContainment:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._preflight(ctx))
 
         # Explicit package — containment guard not triggered, OSV check runs normally.
         assert result is True
+
+    def test_lockfile_hint_used_instead_of_scan_project(self, tmp_path):
+        """When parsed.lockfile_hint is set, _preflight() scans that specific file
+        instead of calling scan_project() (which would pick the wrong file via
+        first-match-per-language in repos with multiple lockfiles for the same ecosystem)."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+
+        # Simulate a repo with both package-lock.json and yarn.lock.
+        # The user ran `yarn install` so lockfile_hint == "yarn.lock".
+        (tmp_path / "package-lock.json").write_text('{"name":"pkg","lockfileVersion":2,"requires":true,"packages":{}}')
+        (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        yarn_scan = _fake_scan_result([("npm", "lodash", "4.17.21")])
+
+        parsed = runner_mod.ParsedInstall(
+            manager="yarn", packages=[], ecosystem="npm", lockfile_hint="yarn.lock"
+        )
+        ctx = runner_mod._Context(argv=["yarn", "install"], parsed=parsed, cwd=tmp_path)
+        runner = _make_runner()
+
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=yarn_scan) as mock_scan_lockfiles,
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan_project,
+        ):
+            asyncio.run(runner._preflight(ctx))
+
+        mock_scan_lockfiles.assert_called_once_with([tmp_path / "yarn.lock"])
+        mock_scan_project.assert_not_called()
+
+    def test_no_lockfile_hint_falls_back_to_scan_project(self, tmp_path):
+        """Without a lockfile_hint, _preflight() falls back to scan_project() as before."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+
+        (tmp_path / "package-lock.json").write_text('{"name":"pkg","lockfileVersion":2,"requires":true,"packages":{}}')
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("npm", "lodash", "4.17.21")])
+
+        parsed = runner_mod.ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint=None
+        )
+        ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
+        runner = _make_runner()
+
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result) as mock_scan_project,
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles") as mock_scan_lockfiles,
+        ):
+            asyncio.run(runner._preflight(ctx))
+
+        mock_scan_project.assert_called_once_with(tmp_path)
+        mock_scan_lockfiles.assert_not_called()
+
+    def test_lockfile_hint_absent_falls_back_to_scan_project(self, tmp_path):
+        """When lockfile_hint names a file that doesn't exist, _preflight() falls back
+        to scan_project() so an existing lockfile for the same ecosystem isn't missed."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+
+        # yarn.lock is present but package-lock.json (the hint) is absent.
+        (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        scan_result = _fake_scan_result([("npm", "lodash", "4.17.21")])
+
+        parsed = runner_mod.ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json"
+        )
+        ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
+        runner = _make_runner()
+
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result) as mock_scan_project,
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles") as mock_scan_lockfiles,
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+        mock_scan_lockfiles.assert_not_called()
+        mock_scan_project.assert_called_once_with(tmp_path)
+
+    def test_lockfile_hint_empty_parse_falls_back_to_scan_project(self, tmp_path):
+        """When the hinted file exists but yields no packages (e.g. empty lock file),
+        _preflight() falls back to scan_project() rather than skipping the check."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod
+
+        (tmp_path / "package-lock.json").write_text('{"lockfileVersion":2,"packages":{}}')
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        empty_scan = _fake_scan_result([])
+        fallback_scan = _fake_scan_result([("npm", "lodash", "4.17.21")])
+
+        parsed = runner_mod.ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json"
+        )
+        ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
+        runner = _make_runner()
+
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=empty_scan) as mock_scan_lockfiles,
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=fallback_scan) as mock_scan_project,
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+        mock_scan_lockfiles.assert_called_once_with([tmp_path / "package-lock.json"])
+        mock_scan_project.assert_called_once_with(tmp_path)
 
 
 class TestScanUpdatedLockFiles:
@@ -1697,7 +2111,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1717,7 +2131,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1740,7 +2154,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1760,7 +2174,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1771,7 +2185,7 @@ class TestScanUpdatedLockFiles:
 
         exists() returns False for broken symlinks; is_symlink() catches them.
         The target points outside the project so the containment guard fires
-        before scan_project() is reached.
+        before scan_lockfiles() is reached.
         """
         import asyncio
         lock = tmp_path / "Pipfile.lock"
@@ -1782,7 +2196,7 @@ class TestScanUpdatedLockFiles:
         assert lock.is_symlink()   # confirm is_symlink() catches it
 
         runner = _make_runner()
-        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan:
+        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles") as mock_scan:
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
         # Treated as changed; containment check blocks the scan because the
@@ -1801,14 +2215,50 @@ class TestScanUpdatedLockFiles:
 
         runner = _make_runner()
         with unittest.mock.patch(
-            "packagealert.parsers.lockfiles.scan_project", return_value=empty_scan
+            "packagealert.parsers.lockfiles.scan_lockfiles", return_value=empty_scan
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
         assert result is False
 
+    def test_unpinned_only_lockfile_not_blocked(self, tmp_path):
+        """A lock file with only unpinned packages must NOT be blocked — the parse succeeded."""
+        import asyncio
+        from types import SimpleNamespace
+        lock = tmp_path / "requirements.txt"
+        lock.write_bytes(b"flask\nrequests\n")
+        snapshots = {lock: b"original"}
+
+        unpinned_pkg = SimpleNamespace(ecosystem="pypi", name="flask", version=None)
+        unpinned_scan = SimpleNamespace(
+            pinned=[], unpinned=[unpinned_pkg], sources=["requirements.txt"]
+        )
+
+        seen_queries = []
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+
+        class CapturingClient:
+            async def batch_query(self, queries):
+                seen_queries.extend(queries)
+                return [None] * len(queries)
+            async def aclose(self): pass
+
+        runner = _make_runner()
+        with (
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=unpinned_scan),
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", lambda *a, **kw: CapturingClient()),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+
+        assert result is True
+        queried_names = {name for _, name, _ in seen_queries}
+        assert "flask" in queried_names
+
     def test_symlinked_lock_file_outside_project_blocks_scan(self, tmp_path):
-        """scan_project() is not called when a scannable lock file resolves outside cwd."""
+        """scan_lockfiles() is not called when a scannable lock file resolves outside cwd."""
         import asyncio
         target = tmp_path.parent / "external_pipfile_lock"
         target.write_bytes(b"[[package]]\nname = 'requests'\nversion = '2.31.0'\n")
@@ -1819,7 +2269,7 @@ class TestScanUpdatedLockFiles:
 
         runner = _make_runner()
         with unittest.mock.patch(
-            "packagealert.parsers.lockfiles.scan_project"
+            "packagealert.parsers.lockfiles.scan_lockfiles"
         ) as mock_scan:
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1843,7 +2293,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(
                 runner._scan_updated_lock_files(tmp_path, snapshots, allow_developer_packages=True)
@@ -1873,11 +2323,11 @@ class TestScanUpdatedLockFiles:
         runner = _make_runner()
         with (
             unittest.mock.patch.object(Path, "read_bytes", guarded_read_bytes),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project") as mock_scan,
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles") as mock_scan,
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
-        # Containment check must block the scan before scan_project() is called.
+        # Containment check must block the scan before scan_lockfiles() is called.
         assert result is False
         mock_scan.assert_not_called()
 
@@ -1902,7 +2352,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
             unittest.mock.patch.object(Path, "read_bytes", patched),
         ):
             result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
@@ -1926,7 +2376,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             clean = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 
@@ -1950,7 +2400,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
             unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
-            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan_result),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             clean = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
 

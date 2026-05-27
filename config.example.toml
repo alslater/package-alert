@@ -8,10 +8,9 @@ max_retries = 3
 enable_cache_monitoring = true
 enable_process_monitoring = true
 process_poll_interval_seconds = 1.0
-# pip_cache_dir = "~/.cache/pip"
-# uv_cache_dir = "~/.cache/uv"
-# npm_cache_dir = "~/.npm/_cacache"
-# site_packages_dirs = []
+# Cache paths (pip, uv, npm, composer, etc.) are discovered automatically
+# from each language module — no manual configuration needed.
+# site_packages_dirs = []   # extra site-packages dirs to watch beyond auto-discovered ones
 
 [alerts]
 desktop_notifications = true
@@ -39,6 +38,7 @@ min_severity_for_desktop = "MEDIUM"
 enabled = true
 warning_threshold = 40
 critical_threshold = 70
+# top_packages_refresh_days = 7   # how often to refresh top-packages lists from each registry (default: 7 days)
 
 [sandbox]
 # extra_env = []      # additional environment variable names to pass into the bubblewrap sandbox

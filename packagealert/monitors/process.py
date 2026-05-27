@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import os
+import shlex
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,95 +12,36 @@ from pathlib import Path
 import psutil
 
 from packagealert.config import WatchConfig
+from packagealert.languages import registry as lang_registry
+from packagealert.languages.base import ProcessInstall
+from packagealert.languages.registry import _normalise_process_name
 from packagealert.models.events import PackageEvent
 from packagealert.monitors.base import AbstractMonitor
-from packagealert.parsers.process_args import ParsedInstall, derive_site_packages, parse_composer_args, parse_npm_args, parse_package_spec, parse_pip_args, parse_pipenv_args, parse_uv_args
+from packagealert.parsers.process_args import derive_site_packages
 
 log = logging.getLogger(__name__)
 
-_PARSERS = [parse_pip_args, parse_uv_args, parse_pipenv_args, parse_npm_args, parse_composer_args]
-# Process short-names that may be package manager invocations.
-# python/python3 are included to catch `python -m pip install`.
-_PACKAGE_MANAGERS = {"pip", "pip3", "uv", "npm", "pipenv", "composer", "python", "python3", "php"}
+def _package_managers() -> frozenset[str]:
+    """Return the set of process short-names that may be package manager invocations."""
+    lang_registry.load()
+    names: set[str] = set()
+    for lang in lang_registry.all_languages():
+        try:
+            names.update(lang.process_names)
+        except Exception:
+            log.warning(
+                "process_names raised unexpectedly for lang=%s — skipping",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+    return frozenset(names)
 
 
 @dataclass
 class _PendingInstall:
     manager: str
-    ecosystem: str
     cwd: Path
     site_pkgs: Path | None
-
-
-def _read_package_lock(cwd: Path) -> list[tuple[str, str | None]]:
-    """Return (name, version) pairs from package-lock.json, excluding the root package."""
-    lock = cwd / "package-lock.json"
-    if not lock.exists():
-        return []
-    try:
-        data = json.loads(lock.read_text())
-        results = []
-        for key, info in data.get("packages", {}).items():
-            if not key:  # root entry has empty key
-                continue
-            name = key.removeprefix("node_modules/")
-            results.append((name, info.get("version")))
-        return results
-    except Exception:
-        log.debug("Failed to read package-lock.json in %s", cwd)
-        return []
-
-
-def _read_pipfile_lock(cwd: Path) -> list[tuple[str, str | None]]:
-    """Return (name, version) pairs from Pipfile.lock."""
-    lock = cwd / "Pipfile.lock"
-    if not lock.exists():
-        return []
-    try:
-        data = json.loads(lock.read_text())
-        results = []
-        for section in ("default", "develop"):
-            for name, info in data.get(section, {}).items():
-                version = info.get("version", "").lstrip("=") or None
-                results.append((name, version))
-        return results
-    except Exception:
-        log.debug("Failed to read Pipfile.lock in %s", cwd)
-        return []
-
-
-def _read_composer_lock(cwd: Path) -> list[tuple[str, str | None]]:
-    """Return (name, version) pairs from composer.lock."""
-    lock = cwd / "composer.lock"
-    if not lock.exists():
-        return []
-    try:
-        data = json.loads(lock.read_text())
-        results = []
-        for section in ("packages", "packages-dev"):
-            for pkg in data.get(section, []):
-                name = pkg.get("name", "")
-                version = pkg.get("version", "").lstrip("v") or None
-                if name:
-                    results.append((name, version))
-        return results
-    except Exception:
-        log.debug("Failed to read composer.lock in %s", cwd)
-        return []
-
-
-def _read_uv_lock(cwd: Path) -> list[tuple[str, str | None]]:
-    """Return (name, version) pairs from uv.lock."""
-    import tomllib
-    lock = cwd / "uv.lock"
-    if not lock.exists():
-        return []
-    try:
-        data = tomllib.loads(lock.read_text())
-        return [(pkg["name"], pkg.get("version")) for pkg in data.get("package", []) if pkg.get("name")]
-    except Exception:
-        log.debug("Failed to read uv.lock in %s", cwd)
-        return []
+    lockfile_hint: str | None = None
 
 
 class ProcessMonitor(AbstractMonitor):
@@ -109,6 +51,7 @@ class ProcessMonitor(AbstractMonitor):
         self._pending: dict[int, _PendingInstall] = {}
         self._running = False
         self._queue: asyncio.Queue[PackageEvent] = asyncio.Queue()
+        self._pm_names: frozenset[str] = _package_managers()
 
     async def start(self) -> None:
         self._running = True
@@ -129,11 +72,11 @@ class ProcessMonitor(AbstractMonitor):
 
     async def _scan_processes(self) -> None:
         current_pids: set[int] = set()
-        for proc in psutil.process_iter(["pid", "name", "cmdline", "cwd"]):
+        pm_names = self._pm_names
+        for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
             try:
                 info = proc.info
                 pid = info["pid"]
-                name = (info.get("name") or "").lower()
                 cmdline: list[str] = info.get("cmdline") or []
                 current_pids.add(pid)
 
@@ -141,8 +84,23 @@ class ProcessMonitor(AbstractMonitor):
                     continue
                 if not cmdline:
                     continue
-                cmdline_head = " ".join(cmdline[:4]).lower()
-                if not any(pm in name for pm in _PACKAGE_MANAGERS) and not any(pm in cmdline_head for pm in _PACKAGE_MANAGERS):
+                # Node.js can pack the full invocation into cmdline[0] as a single
+                # space-separated string (e.g. "npm install react") with empty trailing
+                # slots.  Only unpack when all remaining slots are empty so that
+                # legitimate executable paths containing spaces are not split.
+                if " " in cmdline[0] and not any(a for a in cmdline[1:] if a):
+                    try:
+                        cmdline = shlex.split(cmdline[0])
+                    except ValueError:
+                        cmdline = cmdline[0].split()
+
+                # Use exact basename matching to avoid false positives from
+                # substring hits (e.g. "node" matching "electron", "nodemon";
+                # "php" matching "phpstorm"). Check argv[0] basename and, for
+                # runtimes like python/node that run scripts, argv[1] basename.
+                argv0 = _normalise_process_name(os.path.basename(cmdline[0]))
+                argv1 = _normalise_process_name(os.path.basename(cmdline[1])) if len(cmdline) > 1 else ""
+                if argv0 not in pm_names and argv1 not in pm_names:
                     continue
 
                 parsed = self._try_parse(cmdline)
@@ -153,26 +111,22 @@ class ProcessMonitor(AbstractMonitor):
                 cwd_str = info.get("cwd")
                 project_path = Path(cwd_str) if cwd_str else None
                 site_pkgs = derive_site_packages(parsed.venv_exe) if parsed.venv_exe else None
-
-                if parsed.manager in ("npm", "pipenv", "uv-lock", "composer"):
+                if parsed.defer_to_lockfile:
                     if project_path:
                         self._pending[pid] = _PendingInstall(
                             manager=parsed.manager,
-                            ecosystem=parsed.ecosystem,
                             cwd=project_path,
                             site_pkgs=site_pkgs,
+                            lockfile_hint=parsed.lockfile_hint,
                         )
                         log.info("Tracking %s install pid=%d in %s", parsed.manager, pid, project_path)
                     continue
 
-                for pkg_spec in parsed.packages or [""]:
-                    name_part, version_part = parse_package_spec(pkg_spec, parsed.ecosystem)
-                    if not name_part:
-                        continue
+                for spec in parsed.packages:
                     event = PackageEvent(
-                        ecosystem=parsed.ecosystem,
-                        package_name=name_part,
-                        version=version_part,
+                        ecosystem=spec.ecosystem.lower(),
+                        package_name=spec.name,
+                        version=spec.version,
                         source="process",
                         manager=parsed.manager,
                         project_path=project_path,
@@ -196,24 +150,51 @@ class ProcessMonitor(AbstractMonitor):
         self._seen_pids &= current_pids  # gc dead pids
 
     async def _emit_from_lockfile(self, pending: _PendingInstall) -> None:
-        if pending.manager == "npm":
-            packages = _read_package_lock(pending.cwd)
-        elif pending.manager == "uv-lock":
-            packages = _read_uv_lock(pending.cwd)
-        elif pending.manager == "composer":
-            packages = _read_composer_lock(pending.cwd)
-        else:
-            packages = _read_pipfile_lock(pending.cwd)
+        # "uv-lock" is a synthetic manager name used internally; map it to "uv" for registry lookup.
+        lookup_name = "uv" if pending.manager == "uv-lock" else pending.manager
+        lang = lang_registry.for_process(lookup_name)
+        if lang is None:
+            log.debug("No language registered for manager '%s', skipping lockfile scan", pending.manager)
+            return
+
+        hint = pending.lockfile_hint
+        try:
+            lang_patterns = lang.lockfile_patterns()
+        except Exception:
+            log.warning(
+                "lockfile_patterns raised unexpectedly for lang=%s — skipping lockfile scan",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+            return
+        patterns: list[str] = [hint, *lang_patterns] if hint else list(lang_patterns)
+        seen: set[str] = set()
+        packages = []
+        for pattern in patterns:
+            if pattern in seen:
+                continue
+            seen.add(pattern)
+            candidate = pending.cwd / pattern
+            if candidate.exists():
+                try:
+                    packages = lang.parse_lockfile(candidate)
+                except Exception:
+                    log.warning(
+                        "parse_lockfile raised unexpectedly for lang=%s path=%s",
+                        getattr(lang, "name", "?"), candidate, exc_info=True,
+                    )
+                    continue
+                if packages:
+                    break
 
         if not packages:
             log.debug("No lock file found in %s after %s install", pending.cwd, pending.manager)
             return
         log.info("%s install finished in %s, scanning %d package(s) from lock file", pending.manager, pending.cwd, len(packages))
-        for name, version in packages:
+        for spec in packages:
             event = PackageEvent(
-                ecosystem=pending.ecosystem,
-                package_name=name,
-                version=version,
+                ecosystem=spec.ecosystem.lower(),
+                package_name=spec.name,
+                version=spec.version,
                 source="process",
                 manager=pending.manager,
                 project_path=pending.cwd,
@@ -228,9 +209,16 @@ class ProcessMonitor(AbstractMonitor):
             events.append(self._queue.get_nowait())
         return events
 
-    def _try_parse(self, cmdline: list[str]) -> ParsedInstall | None:
-        for parser in _PARSERS:
-            result = parser(cmdline)
-            if result is not None:
-                return result
-        return None
+    def _try_parse(self, cmdline: list[str]) -> ProcessInstall | None:
+        cmd = os.path.basename(cmdline[0])
+        lang = lang_registry.for_process(cmd)
+        if lang is None:
+            return None
+        try:
+            return lang.parse_process_install(cmdline)
+        except Exception:
+            log.warning(
+                "parse_process_install raised unexpectedly for lang=%s cmdline=%r",
+                getattr(lang, "name", "?"), cmdline, exc_info=True,
+            )
+            return None

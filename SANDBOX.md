@@ -37,24 +37,32 @@ package-alert run bash                        # sandboxed interactive shell
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already cached locally. |
 | `--env VAR` | Forward an additional environment variable into the sandbox. Repeatable. |
 | `--expose-ssh-keys` | Mount `~/.ssh` read-only inside the sandbox. Required for SSH VCS dependencies (`git+ssh://`, `git@host:org/repo`). package-alert detects these automatically and prompts if the flag is missing. |
+| `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. |
+| `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
 ## Execution Flow
 
 ### Package manager commands
 
-For recognised package manager commands (`pip`, `uv`, `npm`, `composer`, `pipenv`):
+For recognised package manager commands (`pip`, `uv`, `npm`, `yarn`, `pnpm`, `composer`, `pipenv`):
 
 1. **Pre-flight check** — identify what will be installed and query OSV before anything runs. Block immediately if a known-malicious package is found.
 2. **Sandboxed execution** — run the command inside a bubblewrap namespace.
-3. **Post-install scan** — diff the install target directories against a pre-run snapshot, identify new packages, and run another OSV check.
+3. **Post-install lock file scan** — check any lock files that changed during the run against OSV. Restore lock files to their pre-run state if a malicious package is found (or always, when `--no-change` is set).
+4. **Post-install package scan** — diff the install target directories against a pre-run snapshot, identify new packages, and run another OSV check.
 
 ### Interactive shell
 
 When the command is a shell (`bash`, `zsh`, `sh`, etc.):
 
-1. **Pre-flight check** — scan all project lock files for known-malicious packages and block if any are found.
+1. **Pre-flight check** — scan project lock files for known-malicious packages and block if any are found.
 2. **Sandboxed shell** — open the shell inside the sandbox with project venvs and `node_modules/.bin` on `PATH`.
-3. **Post-exit scan** — diff install targets after the shell exits and check any new packages against OSV.
+3. **Post-exit lock file scan** — check any lock files that changed during the session. Restore if malicious (or always, when `--no-change` is set).
+4. **Post-exit package scan** — diff install targets after the shell exits and check any new packages against OSV.
+
+### Dry-run mode (`--no-change`)
+
+All stages run as normal, but lock files are **always** restored to their pre-run state on exit, whether or not anything suspicious is found. The sandbox itself is already isolated by bwrap — `--no-change` only controls whether lock file changes are kept on the host. Use it to audit what a command would install or lock without committing the result.
 
 ## Pre-flight Check
 
@@ -66,7 +74,7 @@ How the pre-flight determines what to query depends on the command:
 | Requirements files (`pip install -r requirements.txt`) | All packages in the file(s), including nested `-r` includes; both pinned and unpinned |
 | Lock-file install (`uv sync`, `npm ci`, `composer install`) | All packages found in the project lock file (`uv.lock`, `package-lock.json`, `composer.lock`, etc.) for the matching ecosystem |
 | Unrecognised command | Skipped |
-| Interactive shell | All packages from all lock files found in the project |
+| Interactive shell | Packages from the highest-priority lock file found per ecosystem (e.g. `uv.lock` before `Pipfile.lock`; `package-lock.json` before `yarn.lock`) |
 
 Queries are batched in groups of 50 and sent to OSV. Results are cached in the local SQLite database (TTL configured via `osv.cache_ttl_hours`). If any package has a malicious advisory the command is blocked and the advisory ID is shown.
 
@@ -147,20 +155,29 @@ Paths **not** accessible by default: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/
 
 The sandbox process starts with a stripped environment. Only variables on a curated allowlist are forwarded from the parent process:
 
+The allowlist is split into two parts:
+
+**Common variables** (always forwarded regardless of language):
+
 | Category | Variables |
 |---|---|
 | Core POSIX | `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL` |
 | Locale / terminal | `LANG`, `LC_*`, `TERM`, `COLORTERM` |
-| Python / pip / uv | `VIRTUAL_ENV`, `PYTHONPATH`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_CERT`, `UV_INDEX_URL`, `UV_INDEX`, `UV_CACHE_DIR`, `UV_PYTHON`, `UV_PROJECT_ENVIRONMENT`, `UV_SYSTEM_PYTHON` |
-| pyenv / nvm | `PYENV_ROOT`, `PYENV_VERSION`, `NVM_DIR`, `NVM_BIN` |
-| npm / Node | `NPM_CONFIG_REGISTRY`, `NPM_CONFIG_CACHE`, `NODE_PATH`, `NODE_ENV` |
-| pipenv | `PIPENV_VENV_IN_PROJECT`, `PIPENV_IGNORE_VIRTUALENVS`, `PIPENV_VERBOSITY`, `WORKON_HOME` |
-| Composer | `COMPOSER_HOME`, `COMPOSER_CACHE_DIR`, `COMPOSER_MIRROR` |
 | Network proxies | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and lowercase forms) |
 | SSL / TLS | `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` |
 | Git | `GIT_CONFIG_GLOBAL`, `GIT_AUTHOR_NAME`, `GIT_COMMITTER_NAME`, `GIT_SSH_COMMAND` |
 
-Variables not on this list are removed. Use `--env VAR` or `sandbox.extra_env` in the config file to forward additional variables.
+**Language-specific variables** (contributed at runtime by each language module via `sandbox_env()`):
+
+| Language | Variables |
+|---|---|
+| Python | `VIRTUAL_ENV`, `PYTHONPATH`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`, `PIP_TRUSTED_HOST`, `PIP_CERT`, `UV_INDEX_URL`, `UV_INDEX`, `UV_CACHE_DIR`, `UV_PYTHON`, `UV_PROJECT_ENVIRONMENT`, `UV_SYSTEM_PYTHON`, `PYENV_ROOT`, `PYENV_VERSION`, `PIPENV_VENV_IN_PROJECT`, `PIPENV_IGNORE_VIRTUALENVS`, `PIPENV_VERBOSITY`, `WORKON_HOME`, and others |
+| Node.js | `NPM_CONFIG_REGISTRY`, `NPM_CONFIG_CACHE`, `NODE_PATH`, `NODE_ENV`, `NVM_DIR`, `NVM_BIN` |
+| PHP | `COMPOSER_HOME`, `COMPOSER_CACHE_DIR`, `COMPOSER_MIRROR` |
+
+Language plugins contribute additional variables via the `sandbox_env()` contract method (see [LANGUAGES.md](LANGUAGES.md)).
+
+Variables not on the combined allowlist are removed. Use `--env VAR` or `sandbox.extra_env` in the config file to forward additional variables.
 
 ## Virtualenv Handling
 
