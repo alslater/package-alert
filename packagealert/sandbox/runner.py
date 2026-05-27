@@ -14,15 +14,12 @@ from typing import TYPE_CHECKING
 
 from rich.console import Console
 
+from packagealert.languages import registry as lang_registry
+from packagealert.languages.base import PackageSpec
 from packagealert.parsers.process_args import (
     ParsedInstall,
     derive_site_packages,
-    parse_composer_args,
-    parse_npm_args,
     parse_package_spec,
-    parse_pip_args,
-    parse_pipenv_args,
-    parse_uv_args,
 )
 from packagealert.sandbox.bwrap import available as bwrap_available
 from packagealert.sandbox.bwrap import build_cmd
@@ -31,8 +28,6 @@ if TYPE_CHECKING:
     from packagealert.config import AppConfig
 
 log = logging.getLogger(__name__)
-
-_PARSERS = [parse_pip_args, parse_uv_args, parse_pipenv_args, parse_npm_args, parse_composer_args]
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
 
 _SHELL_NAMES: frozenset[str] = frozenset({
@@ -51,30 +46,16 @@ _SHELL_RC_FILES: dict[str, list[str]] = {
     "dash": [".profile"],
 }
 
-# Minimal environment allowlist: names always forwarded into the sandbox when present.
-_SANDBOX_ENV: frozenset[str] = frozenset({
+# Environment variable names that are always forwarded into the sandbox regardless
+# of which package manager is being used.  Language-specific names are contributed
+# at runtime by each language module via LanguageBase.sandbox_env().
+_SANDBOX_ENV_COMMON: frozenset[str] = frozenset({
     # Core POSIX
     "PATH", "HOME", "USER", "LOGNAME", "SHELL",
     # Locale / terminal
     "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "LC_MESSAGES",
     "LC_COLLATE", "LC_NUMERIC", "LC_TIME", "LC_MONETARY", "LC_PAPER",
     "TERM", "COLORTERM",
-    # Python / pip / uv / pyenv
-    "VIRTUAL_ENV", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE",
-    "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST", "PIP_CERT",
-    "UV_INDEX_URL", "UV_INDEX", "UV_CACHE_DIR", "UV_PYTHON",
-    "UV_PROJECT_ENVIRONMENT", "UV_SYSTEM_PYTHON",
-    "PYENV_ROOT", "PYENV_VERSION", "PYENV_VERSION_FILE",
-    # npm / Node / nvm
-    "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CACHE", "NODE_PATH", "NODE_ENV",
-    "NVM_DIR", "NVM_BIN",
-    # pipenv behaviour flags
-    "PIPENV_VENV_IN_PROJECT", "PIPENV_IGNORE_VIRTUALENVS", "PIPENV_VERBOSITY",
-    "WORKON_HOME",
-    # pip behaviour flags
-    "PIP_REQUIRE_VIRTUALENV",
-    # Composer / PHP
-    "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "COMPOSER_MIRROR",
     # Network proxies (package managers respect these)
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
@@ -101,8 +82,9 @@ class SandboxRunner:
     def __init__(self, cfg: AppConfig) -> None:
         self._cfg = cfg
         self._console = Console()
+        lang_registry.load()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_developer_packages: bool = False) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_developer_packages: bool = False, no_change: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -126,7 +108,7 @@ class SandboxRunner:
                 return 1
 
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change)
 
         parsed = _try_parse(argv)
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -151,6 +133,8 @@ class SandboxRunner:
         targets_label = ", ".join(str(t) for t in ctx.scan_targets) or "none detected"
         self._console.print(f"[dim]Scan targets: {targets_label}[/dim]")
         network_label = "allowed" if allow_network else "blocked"
+        if no_change:
+            self._console.print("[dim]Mode: dry run (--no-change) — lock files will be restored after the run[/dim]")
         self._console.print(f"[dim]Running in sandbox (network: {network_label})...[/dim]\n")
 
         # Snapshot scan targets and lock files before execution
@@ -227,13 +211,21 @@ class SandboxRunner:
             # A failing install can still write or modify lock files, so run the
             # lock-file scan and restore unconditionally — exiting non-zero must
             # not be a way to evade the check.
-            if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+            scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+            if no_change:
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+            elif not scan_ok:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
-            return result.returncode
+            return result.returncode if scan_ok else 1
 
-        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+        if no_change:
             _restore_lock_files(lock_snapshots, cwd, self._console)
+        elif not scan_ok:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            return 1
+        if not scan_ok:
             return 1
 
         # Re-detect scan targets that may have been created by the install
@@ -248,8 +240,10 @@ class SandboxRunner:
 
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
-            if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+            post_ok = await self._post_scan(new_pkgs)
+            if not post_ok:
+                if not no_change:
+                    _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
@@ -306,6 +300,7 @@ class SandboxRunner:
         extra_env: list[str] | None,
         expose_ssh_keys: bool = False,
         allow_developer_packages: bool = False,
+        no_change: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
 
@@ -385,6 +380,8 @@ class SandboxRunner:
         lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
 
         network_label = "allowed" if allow_network else "blocked"
+        if no_change:
+            self._console.print("[dim]Mode: dry run (--no-change) — lock files will be restored after the session[/dim]")
         self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
         self._console.print("[dim]Type 'exit' or press Ctrl-D to leave the sandbox.[/dim]\n")
 
@@ -427,15 +424,22 @@ class SandboxRunner:
         print()
 
         # Post-exit: scan changed lock files, then any newly installed packages
-        if not await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages):
+        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+        if no_change:
             _restore_lock_files(lock_snapshots, cwd, self._console)
+        elif not scan_ok:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            return 1
+        if not scan_ok:
             return 1
 
         new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
-            if not await self._post_scan(new_pkgs):
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+            post_ok = await self._post_scan(new_pkgs)
+            if not post_ok:
+                if not no_change:
+                    _restore_lock_files(lock_snapshots, cwd, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
@@ -544,7 +548,7 @@ class SandboxRunner:
             for rf in parsed.req_files:
                 req_path = ctx.cwd / rf
                 if req_path.exists():
-                    pinned, unpinned = collect_requirements_packages(req_path, visited)
+                    pinned, unpinned = collect_requirements_packages(req_path, visited, ctx.cwd)
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
                     queries.extend((p.ecosystem, p.name, None) for p in unpinned)
                     file_sources.append(rf)
@@ -564,12 +568,28 @@ class SandboxRunner:
                         f"directory. Use --allow-developer-packages to override.[/bold red]"
                     )
                     return False
-            scan = scan_project(ctx.cwd)
-            queries = [
-                (p.ecosystem, p.name, p.version)
-                for p in scan.pinned
-                if p.ecosystem == parsed.ecosystem
-            ]
+            if parsed.lockfile_hint:
+                # Use the hinted lockfile directly so we scan the right file in
+                # repos with multiple lockfiles for the same ecosystem (e.g. a
+                # repo with both package-lock.json and yarn.lock).
+                from packagealert.parsers.lockfiles import scan_lockfiles
+                hint_path = ctx.cwd / parsed.lockfile_hint
+                if hint_path.exists():
+                    scan = scan_lockfiles([hint_path])
+                    # If the hint file exists but parsed to nothing, fall back so
+                    # we don't silently skip the pre-flight check.
+                    if not scan.pinned and not scan.unpinned:
+                        scan = scan_project(ctx.cwd)
+                else:
+                    # Hint file absent — fall back to full project scan so we
+                    # don't miss an existing lockfile for the same ecosystem.
+                    scan = scan_project(ctx.cwd)
+            else:
+                scan = scan_project(ctx.cwd)
+            queries = (
+                [(p.ecosystem, p.name, p.version) for p in scan.pinned if p.ecosystem == parsed.ecosystem]
+                + [(p.ecosystem, p.name, None) for p in scan.unpinned if p.ecosystem == parsed.ecosystem]
+            )
             lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
             source_parts.append(f"{len(queries)} packages ({lock_sources})")
 
@@ -632,7 +652,7 @@ class SandboxRunner:
         fresh for anything new, so this is cheap when only a few packages were added.
         Returns False if a malicious package is found.
         """
-        scannable = {cwd / name for name in _SCANNABLE_LOCK_FILES}
+        scannable = {cwd / name for name in _scannable_lock_files()}
         changed = []
         for p, before in lock_snapshots.items():
             if p not in scannable:
@@ -674,13 +694,10 @@ class SandboxRunner:
 
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
-        from packagealert.parsers.lockfiles import scan_project
+        from packagealert.parsers.lockfiles import scan_lockfiles
         from packagealert.storage.db import open_db
 
-        # Enforce symlink containment before handing any lock file path to
-        # scan_project(), which follows symlinks unconditionally via read_text().
-        # Even lock files that were not in `changed` must be checked because
-        # scan_project() reads every parseable lock file it finds under cwd.
+        # Enforce symlink containment before reading any changed lock file.
         if not allow_developer_packages:
             offender = _assert_scannable_lock_files_contained(cwd)
             if offender is not None:
@@ -689,14 +706,16 @@ class SandboxRunner:
                     f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
                 )
                 log.warning(
-                    "Lock file resolves outside project root, refusing scan_project call: %s",
+                    "Lock file resolves outside project root, refusing scan: %s",
                     cwd / offender,
                 )
                 return False
 
-        scan = scan_project(cwd)
-        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
-        if not queries:
+        # Parse exactly the files that changed rather than calling scan_project(),
+        # which applies first-match-per-language logic and would skip a changed
+        # yarn.lock if package-lock.json also exists in the same project.
+        scan = scan_lockfiles(changed)
+        if not scan.pinned and not scan.unpinned:
             changed_names = ", ".join(p.name for p in changed)
             self._console.print(
                 f"[bold red]✗ Lock file(s) changed ({changed_names}) but no packages could be parsed "
@@ -707,6 +726,10 @@ class SandboxRunner:
                 changed_names,
             )
             return False
+        queries = (
+            [(p.ecosystem, p.name, p.version) for p in scan.pinned]
+            + [(p.ecosystem, p.name, None) for p in scan.unpinned]
+        )
 
         changed_names = ", ".join(p.name for p in changed)
         self._console.print(
@@ -932,17 +955,94 @@ def _home_ro_dirs() -> list[Path]:
 
 
 def _build_sandbox_env(extra: list[str]) -> dict[str, str]:
-    """Return a filtered copy of os.environ containing only the sandbox allowlist plus *extra*."""
-    allowed = _SANDBOX_ENV | set(extra)
+    """Return a filtered copy of os.environ containing only the sandbox allowlist plus *extra*.
+
+    The allowlist is the union of the common names, names contributed by every
+    loaded language module via ``sandbox_env()``, and any caller-supplied *extra*
+    names (from config or CLI flags).
+    """
+    lang_env: set[str] = set()
+    for lang in lang_registry.all_languages():
+        try:
+            lang_env.update(lang.sandbox_env())
+        except Exception:
+            log.warning(
+                "sandbox_env() raised unexpectedly for lang=%s — skipping its env contributions",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+    allowed = _SANDBOX_ENV_COMMON | lang_env | set(extra)
     return {k: v for k, v in os.environ.items() if k in allowed}
 
 
+def _serialise_package_spec(p: PackageSpec) -> str:
+    """Serialise a PackageSpec back to the string format its language module expects.
+
+    Delegates to the language module's serialise_package_spec() so the result
+    round-trips correctly through parse_package_spec() for every ecosystem,
+    including external plugins.  Falls back to ``name==version`` when no module
+    is registered for the ecosystem — the name is always preserved, but the
+    version may not survive the round-trip through parse_package_spec() if the
+    calling code later re-parses the string.  OSV queries will still run against
+    the name but without a pinned version.
+    """
+    lang = lang_registry.for_ecosystem(p.ecosystem)
+    if lang is not None:
+        try:
+            return lang.serialise_package_spec(p.name, p.version)
+        except Exception:
+            log.warning(
+                "serialise_package_spec raised unexpectedly for lang=%s spec=%r — falling back",
+                getattr(lang, "name", "?"), p, exc_info=True,
+            )
+    return f"{p.name}=={p.version}" if p.version else p.name
+
+
 def _try_parse(argv: list[str]) -> ParsedInstall | None:
-    for parser in _PARSERS:
-        result = parser(argv)
-        if result is not None:
-            return result
-    return None
+    """Return a ParsedInstall for *argv*, or None if the command is unrecognised.
+
+    Delegates to the language module's parse_process_install() and adapts the
+    result to ParsedInstall so the sandbox runner can work with a single type.
+    """
+    if not argv:
+        return None
+    # Unpack a packed argv[0] (Node.js packs "npm install react" into a single
+    # string with empty trailing slots).  Only trigger when all remaining slots
+    # are empty so we don't corrupt legitimate paths that contain spaces.
+    if " " in argv[0] and not any(argv[1:]):
+        import shlex
+        try:
+            argv = shlex.split(argv[0])
+        except ValueError:
+            argv = argv[0].split()
+    cmd = re.split(r"[/\\]", argv[0])[-1]
+    lang = lang_registry.for_process(cmd)
+    if lang is None:
+        return None
+    try:
+        pi = lang.parse_process_install(argv)
+    except Exception:
+        log.warning(
+            "parse_process_install raised unexpectedly for lang=%s argv=%r",
+            getattr(lang, "name", "?"), argv, exc_info=True,
+        )
+        return None
+    if pi is None:
+        return None
+    # Derive a single ecosystem string from the first package, or from the
+    # language's primary ecosystem.
+    ecosystem = (
+        pi.packages[0].ecosystem.lower()
+        if pi.packages
+        else (lang.ecosystems[0].lower() if lang.ecosystems else "unknown")
+    )
+    return ParsedInstall(
+        manager=pi.manager,
+        packages=[_serialise_package_spec(p) for p in pi.packages],
+        ecosystem=ecosystem,
+        venv_exe=pi.venv_exe,
+        req_files=pi.req_files,
+        lockfile_hint=pi.lockfile_hint,
+    )
 
 
 def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:
@@ -1086,25 +1186,36 @@ class _LockUnreadable:
 
 _LOCK_UNREADABLE = _LockUnreadable()
 
-# Lock files to snapshot and restore if a malicious package is detected.
-_RESTORABLE_LOCK_FILES = [
-    "Pipfile.lock",
-    "uv.lock",
-    "package-lock.json",
-    "yarn.lock",
-    "pnpm-lock.yaml",
-    "composer.lock",
-]
+def _restorable_lock_files() -> list[str]:
+    """All lock/manifest file patterns to snapshot, restore, and check for containment.
 
-# Subset of the above that scan_project() can actually parse. Used to decide
-# whether to trigger an OSV scan after a sandbox run. yarn.lock and
-# pnpm-lock.yaml are intentionally excluded until parser support is added.
-_SCANNABLE_LOCK_FILES = [
-    "Pipfile.lock",
-    "uv.lock",
-    "package-lock.json",
-    "composer.lock",
-]
+    Includes every pattern advertised by language modules via lockfile_patterns(),
+    including subdirectory variants (e.g. requirements/base.txt), so that
+    _assert_scannable_lock_files_contained() covers exactly the same set that
+    scan_project() will try to read.
+    """
+    lang_registry.load()
+    seen: set[str] = set()
+    result: list[str] = []
+    for lang in lang_registry.all_languages():
+        try:
+            patterns = lang.lockfile_patterns()
+        except Exception:
+            log.warning(
+                "lockfile_patterns raised unexpectedly for lang=%s — skipping language",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+            continue
+        for name in patterns:
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+    return result
+
+
+def _scannable_lock_files() -> list[str]:
+    """Lock file patterns that scan_project() may read — identical to restorable set."""
+    return _restorable_lock_files()
 
 
 def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
@@ -1115,7 +1226,7 @@ def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
     which follows symlinks unconditionally via ``read_text()``.
     """
     project_root = cwd.resolve()
-    for name in _SCANNABLE_LOCK_FILES:
+    for name in _scannable_lock_files():
         p = cwd / name
         if not p.exists() and not p.is_symlink():
             continue
@@ -1149,7 +1260,7 @@ def _snapshot_lock_files(
     """
     project_root = cwd.resolve()
     result: dict[Path, bytes | None | _LockUnreadable] = {}
-    for name in _RESTORABLE_LOCK_FILES:
+    for name in _restorable_lock_files():
         p = cwd / name
         # Use lstat() rather than exists() so that a broken symlink (inode present
         # but target missing) is treated as _LOCK_UNREADABLE rather than None.

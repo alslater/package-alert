@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,16 +13,29 @@ from watchdog.observers.api import ObservedWatch
 from packagealert.config import WatchConfig
 from packagealert.models.events import PackageEvent
 from packagealert.monitors.base import AbstractMonitor
-from packagealert.parsers.wheel import parse_wheel_filename
 
 log = logging.getLogger(__name__)
 
-_WHEEL_RE = re.compile(r".*\.whl$")
-_NPM_RE = re.compile(r".*\.tgz$")
-# Matches: {name}-{version}.dist-info  (version always starts with a digit)
-_DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
-# PEP 508: distribution names must start with a letter or digit
-_VALID_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9]")
+
+def _classify_distinfo_dir(path: Path) -> PackageEvent | None:
+    """Classify a .dist-info directory path as a PackageEvent, or None if not parseable.
+
+    Thin shim retained for integration-test compatibility; logic lives in
+    packagealert.languages.python._distinfo_to_metadata.
+    """
+    from packagealert.languages.python import _distinfo_to_metadata
+    metadata = _distinfo_to_metadata(path)
+    if metadata is None:
+        return None
+    return PackageEvent(
+        ecosystem=metadata.ecosystem.lower(),
+        package_name=metadata.name,
+        version=metadata.version,
+        source="cache",
+        manager="unknown",
+        project_path=None,
+        timestamp=datetime.now(timezone.utc),
+    )
 
 
 class _Handler(FileSystemEventHandler):
@@ -32,62 +44,29 @@ class _Handler(FileSystemEventHandler):
         self._loop = loop
 
     def on_created(self, event: FileCreatedEvent) -> None:
+        from packagealert.languages import registry as lang_registry
         path = Path(event.src_path)
-        if event.is_directory:
-            event_data = _classify_distinfo_dir(path)
-        else:
-            event_data = _classify_file(path)
-        if event_data:
-            asyncio.run_coroutine_threadsafe(self._queue.put(event_data), self._loop)
-
-
-def _classify_distinfo_dir(path: Path) -> PackageEvent | None:
-    m = _DISTINFO_RE.match(path.name)
-    if not m:
-        return None
-    # Normalize name per PEP 503
-    name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
-    if not _VALID_PKG_NAME_RE.match(name):
-        log.debug("Ignoring dist-info with invalid package name: %s", path.name)
-        return None
-    version = m.group(2)
-    log.debug("dist-info created: %s %s", name, version)
-    return PackageEvent(
-        ecosystem="pypi",
-        package_name=name,
-        version=version,
-        source="cache",
-        manager="pip",
-        project_path=None,
-        timestamp=datetime.now(timezone.utc),
-    )
-
-
-def _classify_file(path: Path) -> PackageEvent | None:
-    name = path.name
-    if _WHEEL_RE.match(name):
-        info = parse_wheel_filename(path)
-        if info and _VALID_PKG_NAME_RE.match(info.name):
-            return PackageEvent(
-                ecosystem="pypi",
-                package_name=info.name,
-                version=info.version,
-                source="cache",
-                manager="unknown",
-                project_path=None,
-                timestamp=datetime.now(timezone.utc),
-            )
-    if _NPM_RE.match(name) and ".npm" in str(path):
-        return PackageEvent(
-            ecosystem="npm",
-            package_name="__unknown__",
-            version=None,
-            source="cache",
-            manager="npm",
-            project_path=None,
-            timestamp=datetime.now(timezone.utc),
-        )
-    return None
+        for lang in lang_registry.all_languages():
+            try:
+                metadata = lang.classify_cache_file(path)
+            except Exception:
+                log.warning(
+                    "classify_cache_file raised unexpectedly for lang=%s path=%s",
+                    getattr(lang, "name", "?"), path, exc_info=True,
+                )
+                continue
+            if metadata:
+                event_data = PackageEvent(
+                    ecosystem=metadata.ecosystem.lower(),
+                    package_name=metadata.name,
+                    version=metadata.version,
+                    source="cache",
+                    manager="unknown",
+                    project_path=None,
+                    timestamp=datetime.now(timezone.utc),
+                )
+                asyncio.run_coroutine_threadsafe(self._queue.put(event_data), self._loop)
+                return
 
 
 class CacheMonitor(AbstractMonitor):
@@ -106,7 +85,26 @@ class CacheMonitor(AbstractMonitor):
         self._observer = Observer()
         watch_dirs = []
         if self._cfg.enable_cache_monitoring:
-            cache_dirs = [self._cfg.pip_cache_dir, self._cfg.uv_cache_dir, self._cfg.npm_cache_dir]
+            from packagealert.languages import registry as lang_registry
+            lang_registry.load()
+            seen: set[Path] = set()
+            cache_dirs: list[Path] = []
+            for lang in lang_registry.all_languages():
+                try:
+                    globs = lang.cache_file_globs()
+                    paths = lang.cache_paths()
+                except Exception:
+                    log.warning(
+                        "cache_file_globs/cache_paths raised unexpectedly for lang=%s — skipping",
+                        getattr(lang, "name", "?"), exc_info=True,
+                    )
+                    continue
+                if not globs:
+                    continue
+                for p in paths:
+                    if p not in seen:
+                        seen.add(p)
+                        cache_dirs.append(p)
             for d in cache_dirs:
                 if d.exists():
                     self._observer.schedule(self._handler, str(d), recursive=True)

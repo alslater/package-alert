@@ -16,9 +16,17 @@
 - [x] Composite risk scoring engine (0–100, info/warning/critical)
 - [x] Sandboxed installs (`package-alert run`) with bubblewrap, pre-flight + post-install OSV checks
 - [x] SSH VCS dependency support (`--expose-ssh-keys`, scp-style URL detection)
+- [x] Pluggable language module architecture (`LanguageBase` protocol, entry-point plugin discovery)
+- [x] Dynamic top-packages lists fetched from each registry, cached in SQLite with configurable TTL
+- [x] `sandbox_env()` contract — language modules contribute their own environment variable allowlist
+- [x] `package-alert languages list` / `package-alert languages info` introspection commands
+- [x] `--no-change` / `-n` dry-run mode for `package-alert run`
+- [x] Scheduled project scans (daily/weekly) via `package-alert schedule`
 
 ## Phase 3 (Planned)
-- [ ] pnpm + yarn + poetry + pdm support
+- [x] yarn + pnpm process monitoring, lockfile parsing, and lockfile-hint deferred scanning
+- [ ] Typosquatting and heuristic risk analysis during `scan-project` and `package-alert run` pre-flight
+- [ ] poetry + pdm support
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)
 - [ ] macOS support (FSEvents-based cache monitoring, Homebrew)
 - [ ] Windows support (ReadDirectoryChangesW)

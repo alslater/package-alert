@@ -36,9 +36,6 @@ class OsvConfig(BaseModel):
 class WatchConfig(BaseModel):
     enable_cache_monitoring: bool = True
     enable_process_monitoring: bool = True
-    pip_cache_dir: ExpandedPath = Path.home() / ".cache" / "pip"
-    uv_cache_dir: ExpandedPath = Path.home() / ".cache" / "uv"
-    npm_cache_dir: ExpandedPath = Path.home() / ".npm" / "_cacache"
     site_packages_dirs: list[ExpandedPath] = Field(default_factory=list)
     process_poll_interval_seconds: float = 1.0
 
@@ -68,6 +65,7 @@ class HeuristicsConfig(BaseModel):
     enabled: bool = True
     warning_threshold: int = 40
     critical_threshold: int = 70
+    top_packages_refresh_days: int = Field(7, ge=1)
 
 
 class SandboxConfig(BaseModel):
@@ -108,33 +106,30 @@ class AppConfig(BaseModel):
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "package-alert" / "config.toml"
 _DEFAULT_CONFIG = DEFAULT_CONFIG_PATH  # internal alias
 
-# Default cache paths — used to distinguish user-configured vs default values.
-_DEFAULT_WATCH = WatchConfig()
-
-
 def warn_missing_paths(cfg: AppConfig) -> None:
     """Log warnings for configured paths that don't exist."""
-    watch = cfg.watch
+    from packagealert.languages import registry as lang_registry
+    lang_registry.load()
+    for lang in lang_registry.all_languages():
+        try:
+            paths = lang.cache_paths()
+        except Exception:
+            log.warning(
+                "cache_paths() raised unexpectedly for lang=%s — skipping path checks",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+            continue
+        for path in paths:
+            _check_cache_dir(path, path, lang.name)
 
-    _check_cache_dir(watch.pip_cache_dir, _DEFAULT_WATCH.pip_cache_dir, "pip")
-    _check_cache_dir(watch.uv_cache_dir, _DEFAULT_WATCH.uv_cache_dir, "uv")
-    _check_cache_dir(watch.npm_cache_dir, _DEFAULT_WATCH.npm_cache_dir, "npm")
-
-    for path in watch.site_packages_dirs:
+    for path in cfg.watch.site_packages_dirs:
         if not path.exists():
             log.warning("Configured site-packages dir does not exist: %s", path)
 
 
-def _check_cache_dir(path: Path, default: Path, tool: str) -> None:
-    if path.exists():
-        return
-    if path == default:
-        log.info("%s cache dir not found (%s) — %s monitoring disabled", tool, path, tool)
-    else:
-        log.warning(
-            "%s cache dir does not exist: %s — check your config (watch.%s_cache_dir)",
-            tool, path, tool,
-        )
+def _check_cache_dir(path: Path, _default: Path, tool: str) -> None:
+    if not path.exists():
+        log.info("%s cache dir not found (%s) — %s cache monitoring disabled", tool, path, tool)
 
 
 def load_config(path: Path | None) -> AppConfig:

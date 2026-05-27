@@ -9,6 +9,8 @@ from pathlib import Path
 from packagealert.alerts.desktop import notify_malicious, notify_risk
 from packagealert.alerts.terminal import alert_malicious, alert_risk
 from packagealert.analyzers.risk import RiskEngine
+from packagealert.heuristics.top_packages import TopPackagesCache
+from packagealert.languages import registry as lang_registry
 from packagealert.osv.popularity import PopularityCache, PopularityClient
 from packagealert.config import AppConfig
 from packagealert.models.events import PackageEvent
@@ -63,13 +65,15 @@ class Daemon:
             _PID_FILE.unlink(missing_ok=True)
 
     async def _run(self) -> None:
+        lang_registry.load()
         warn_missing_paths(self._cfg)
         db = await open_db()
         osv_client = OsvClient(self._cfg.osv)
         osv_cache = OsvCache(db, self._cfg.osv)
         pop_client = PopularityClient()
         pop_cache = PopularityCache(db)
-        risk_engine = RiskEngine(self._cfg.heuristics, pop_client=pop_client, pop_cache=pop_cache)
+        top_packages_cache = TopPackagesCache(db=db, cfg=self._cfg.heuristics)
+        risk_engine = RiskEngine(self._cfg.heuristics, pop_client=pop_client, pop_cache=pop_cache, top_packages_cache=top_packages_cache)
 
         process_monitor: ProcessMonitor | None = None
         cache_monitor: CacheMonitor | None = None

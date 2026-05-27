@@ -14,14 +14,15 @@
 - **Low latency alerts** — Rich terminal panel + `notify-send` desktop notifications
 - **Alert history** — all alerts persisted in SQLite with package name, version, advisory, and project path
 - **Sandboxed installs** — `package-alert run` wraps any package manager command in a bubblewrap sandbox with pre-flight and post-install OSV checks
+- **Language introspection** — `package-alert languages list` and `package-alert languages info` show loaded language modules and their capabilities
 
 ## Supported Ecosystems
 
 | Ecosystem | Package managers monitored | Lock files scanned |
 |-----------|---------------------------|-------------------|
 | PyPI | `pip`, `python -m pip`, `uv add`, `uv sync`, `uv lock`, `pipenv install` | `uv.lock`, `Pipfile.lock`, `requirements.txt` |
-| npm | `npm install`, `npm add`, `npm ci` | `package-lock.json` |
-| Packagist | `composer install`, `composer update`, `composer require`, `php composer.phar …` | `composer.lock`, `composer.json` |
+| npm | `npm install`, `npm add`, `npm ci`, `yarn add`, `yarn install`, `pnpm add`, `pnpm install` | `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+| Packagist | `composer install`, `composer update`, `composer require`, `php composer.phar …` | `composer.lock` |
 
 ## Installation
 
@@ -36,6 +37,15 @@ pipx install package-alert
 ```bash
 pipx install -e .
 ```
+
+The installer registers two entry points: `package-alert` (full name) and `pa` (short alias). Both are identical — use whichever you prefer:
+
+```bash
+pa daemon          # same as: package-alert daemon
+pa run npm install # same as: package-alert run npm install
+```
+
+Shell completions work correctly with both names. To generate completions for `pa`, run the appropriate command for your shell (e.g. `pa --install-completion`).
 
 ## Quick Start
 
@@ -92,7 +102,7 @@ The daemon:
 Run a package manager command inside a [bubblewrap](https://github.com/containers/bubblewrap) sandbox.
 
 ```bash
-package-alert run [--no-network] <command> [args...]
+package-alert run [--no-network] [--no-change] <command> [args...]
 ```
 
 **Examples:**
@@ -106,6 +116,8 @@ package-alert run npm install lodash@4.17.21
 package-alert run composer install
 package-alert run --no-network uv sync          # fully offline; uv cache must be warm
 package-alert run --allow-developer-packages uv sync  # monorepo with symlinked lock files
+package-alert run -n pipenv lock                # audit what would be locked without keeping it
+package-alert run bash                          # interactive sandboxed shell
 ```
 
 **What it does:**
@@ -120,6 +132,7 @@ package-alert run --allow-developer-packages uv sync  # monorepo with symlinked 
 | `--env VAR` | Pass an additional environment variable through into the sandbox. Repeatable: `--env MY_TOKEN --env CUSTOM_URL`. |
 | `--expose-ssh-keys` | Expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
 | `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks pointing outside the project root. Without this flag, lock files that resolve outside the project are rejected at every stage — pre-flight scan, post-run lock-file scan, snapshot, and restore — to prevent a malicious install from reading or writing arbitrary paths via a redirected lock file symlink. |
+| `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. Useful for auditing what a command would install without committing changes to the project. |
 | `--config PATH` | Path to config TOML file. |
 
 **Filesystem isolation:**
@@ -257,6 +270,22 @@ package-alert clear-cache [--ecosystem pypi|npm|packagist] [--config PATH]
 
 Omit `--ecosystem` to clear all ecosystems.
 
+### `languages`
+
+Inspect the loaded language modules.
+
+```bash
+# List all supported languages with their ecosystems and process names
+package-alert languages list
+
+# Show full details for a specific language
+package-alert languages info python
+package-alert languages info node
+package-alert languages info php
+```
+
+`languages info` shows: ecosystems, process names, lockfile patterns, cache paths, and the top-packages URL used for typosquatting detection.
+
 ### `config-show`
 
 Print the resolved configuration as JSON (useful for verifying config file is being read).
@@ -320,9 +349,8 @@ file = "~/.local/share/package-alert/cli.log"       # set file = "" to disable f
 [watch]
 enable_cache_monitoring = true
 enable_process_monitoring = true
-pip_cache_dir = "~/.cache/pip"
-uv_cache_dir = "~/.cache/uv"
-npm_cache_dir = "~/.npm/_cacache"
+# Cache paths (pip, uv, npm, composer, etc.) are discovered automatically
+# from each language module — no manual configuration needed.
 site_packages_dirs = []                             # extra site-packages to watch
 process_poll_interval_seconds = 1.0
 
@@ -341,6 +369,7 @@ min_severity_for_desktop = "MEDIUM"
 enabled = true
 warning_threshold = 40
 critical_threshold = 70
+# top_packages_refresh_days = 7   # how often to refresh top-packages lists from each registry (default: 7 days)
 
 [sandbox]
 # Additional environment variable names to forward into the sandbox beyond
@@ -373,7 +402,7 @@ All persistent data lives in `~/.local/share/package-alert/`:
 
 | File | Purpose |
 |------|---------|
-| `package-alert.db` | SQLite database: OSV cache, alert history, popularity cache |
+| `package-alert.db` | SQLite database: OSV cache, alert history, popularity cache, top-packages cache |
 | `daemon.log` | Rotating daemon log file (10 MB × 3 backups) |
 | `cli.log` | Rotating CLI command log file (10 MB × 3 backups) |
 | `daemon.pid` | PID file used to prevent duplicate daemon instances |
@@ -385,6 +414,11 @@ mkdir -p ~/.config/systemd/user
 cp package-alert.service ~/.config/systemd/user/
 systemctl --user enable --now package-alert
 ```
+
+## Language Support & Plugins
+
+See [LANGUAGES.md](LANGUAGES.md) for the full language module contract, how to write
+an external plugin, and the incomplete Rust/Cargo example plugin.
 
 ## Architecture
 

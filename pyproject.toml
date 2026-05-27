@@ -41,6 +41,7 @@ Repository = "https://github.com/alslater/package-alert"
 
 [project.scripts]
 package-alert = "packagealert.cli.app:main"
+pa = "packagealert.cli.app:main"
 
 [project.optional-dependencies]
 dev = [
@@ -54,6 +55,9 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: marks tests that exercise real OS resources (filesystem, processes, network)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["packagealert"]
