@@ -294,6 +294,21 @@ Print the resolved configuration as JSON (useful for verifying config file is be
 package-alert config-show [--config PATH]
 ```
 
+### `update`
+
+Upgrade package-alert to the latest version. Requires a [pipx](https://pipx.pypa.io/) install (the recommended install method); exits with an error if the tool was installed another way.
+
+```bash
+package-alert update
+```
+
+This is equivalent to running `pipx upgrade package-alert` directly.
+
+If the version changes and the daemon is running, `update` will restart it automatically:
+
+- **systemd-managed daemon** — runs `systemctl --user restart package-alert`.
+- **Standalone daemon** — sends `SIGTERM`, waits up to 10 seconds for the process to stop, then re-spawns `package-alert daemon` in the background.
+
 ### Scheduled Scans
 
 Register projects for automatic daily or weekly scans run by the daemon. Each path can be registered for multiple scan types independently.
@@ -410,9 +425,15 @@ All persistent data lives in `~/.local/share/package-alert/`:
 ## systemd (Linux)
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp package-alert.service ~/.config/systemd/user/
-systemctl --user enable --now package-alert
+package-alert daemon-install
+```
+
+This writes the unit file to `~/.config/systemd/user/package-alert.service`, enables it, and starts it immediately. The daemon will start automatically on future logins.
+
+To stop and remove the service:
+
+```bash
+package-alert daemon-remove
 ```
 
 ## Language Support & Plugins

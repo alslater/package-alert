@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +19,7 @@ from rich.table import Table
 
 from packagealert.config import load_config
 from packagealert.logging_setup import configure_logging
+from packagealert.daemon_pid import check_already_running, is_started_by_systemd, PID_FILE
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +28,46 @@ app = typer.Typer(
     help="package-alert: Real-time developer security monitor for Python, Node.js, and PHP packages.",
 )
 console = Console()
+
+_update_thread: threading.Thread | None = None
+_atexit_registered = False
+
+
+def _pipx_venvs_candidates() -> list[Path]:
+    pipx_home = os.environ.get("PIPX_HOME")
+    if pipx_home:
+        return [Path(pipx_home).expanduser() / "venvs"]
+    return [
+        Path("~/.local/pipx/venvs").expanduser(),
+        Path("~/.local/share/pipx/venvs").expanduser(),
+    ]
+
+
+def _is_pipx_install() -> bool:
+    # Do NOT resolve symlinks — venv Pythons are symlinks to the system Python,
+    # so resolve() would return /usr/bin/pythonX.Y and break the path check.
+    exe = Path(sys.executable)
+    for venvs in _pipx_venvs_candidates():
+        try:
+            exe.relative_to(venvs)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _is_interactive() -> bool:
+    return sys.stderr.isatty()
+
+
+def _daemon_cmdline(pid: int) -> list[str] | None:
+    """Return the original command line of *pid* by reading /proc/<pid>/cmdline, or None on error."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        return [arg.decode(errors="replace") for arg in raw.rstrip(b"\x00").split(b"\x00")]
+    except OSError:
+        return None
+
 
 schedule_app = typer.Typer(help="Manage projects registered for scheduled scans.")
 app.add_typer(schedule_app, name="schedule")
@@ -36,8 +85,33 @@ _verbose: bool = False
 
 @app.callback()
 def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log output on the console.")):
-    global _verbose
+    global _verbose, _update_thread, _atexit_registered
     _verbose = verbose
+
+    if not _is_interactive():
+        return
+
+    from packagealert.update_check import read_notice, check_and_cache, is_cache_stale
+
+    notice = read_notice()
+    if notice:
+        Console(stderr=True).print(f"[dim yellow]{notice}[/dim yellow]")
+
+    stale = is_cache_stale()
+
+    if stale and _update_thread is None:
+        def _bg():
+            asyncio.run(check_and_cache())
+
+        _update_thread = threading.Thread(target=_bg, daemon=True)
+        _update_thread.start()
+
+        if not _atexit_registered:
+            def _join():
+                if _update_thread is not None:
+                    _update_thread.join(timeout=2.0)
+            atexit.register(_join)
+            _atexit_registered = True
 
 
 def _load(config: Optional[Path], *, daemon: bool = False):
@@ -546,6 +620,162 @@ def config_show(config: Optional[Path] = _cfg_option):
     """Show current configuration as JSON."""
     cfg = load_config(config)
     console.print_json(cfg.model_dump_json(indent=2))
+
+
+_SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"
+_SERVICE_NAME = "package-alert.service"
+
+
+def _systemd_is_running() -> bool:
+    return Path("/run/systemd/private").exists()
+
+
+def _systemctl(*args: str) -> subprocess.CompletedProcess:
+    """Run systemctl --user <args>, raising typer.Exit on FileNotFoundError."""
+    try:
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True)
+    except FileNotFoundError:
+        console.print("[red]systemctl not found on PATH.[/red]")
+        raise typer.Exit(1)
+
+
+_SERVICE_UNIT = """\
+[Unit]
+Description=package-alert developer security monitor
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/package-alert daemon --config %h/.config/package-alert/config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=package-alert
+
+[Install]
+WantedBy=default.target
+"""
+
+
+@app.command("daemon-install")
+def daemon_install_cmd():
+    """Install and enable the package-alert systemd user service."""
+    if not _systemd_is_running():
+        console.print("[red]systemd is not running on this system.[/red]")
+        raise typer.Exit(1)
+
+    unit_path = _SYSTEMD_USER_DIR / _SERVICE_NAME
+    if unit_path.exists():
+        console.print(f"[yellow]Service file already exists at {unit_path}.[/yellow]")
+        console.print("Run [bold]package-alert daemon-remove[/bold] first if you want to reinstall.")
+        raise typer.Exit(1)
+
+    _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(_SERVICE_UNIT)
+    console.print(f"[dim]Wrote {unit_path}[/dim]")
+
+    r = _systemctl("enable", "--now", _SERVICE_NAME)
+    if r.returncode != 0:
+        stderr = r.stderr.decode(errors="replace").strip()
+        console.print(f"[red]systemctl enable --now failed:[/red] {stderr}")
+        console.print(f"[dim]Unit file left at {unit_path} — fix the error and run:[/dim]")
+        console.print(f"  systemctl --user enable --now {_SERVICE_NAME}")
+        raise typer.Exit(r.returncode)
+
+    console.print("[green]package-alert daemon installed and started.[/green]")
+    console.print("[dim]It will start automatically on login.[/dim]")
+
+
+@app.command("daemon-remove")
+def daemon_remove_cmd():
+    """Disable and remove the package-alert systemd user service."""
+    if not _systemd_is_running():
+        console.print("[red]systemd is not running on this system.[/red]")
+        raise typer.Exit(1)
+
+    unit_path = _SYSTEMD_USER_DIR / _SERVICE_NAME
+    if not unit_path.exists():
+        console.print("[yellow]No service file found — nothing to remove.[/yellow]")
+        raise typer.Exit(0)
+
+    _systemctl("disable", "--now", _SERVICE_NAME)
+
+    unit_path.unlink()
+    console.print(f"[dim]Removed {unit_path}[/dim]")
+
+    _systemctl("daemon-reload")
+    console.print("[green]package-alert daemon removed.[/green]")
+
+
+@app.command("update")
+def update_cmd():
+    """Upgrade package-alert to the latest version using pipx."""
+    if not _is_pipx_install():
+        console.print("[red]package-alert is not installed via pipx. Cannot self-update.[/red]")
+        raise typer.Exit(1)
+
+    version_before = _pkg_version("package-alert")
+
+    try:
+        result = subprocess.run(["pipx", "upgrade", "package-alert"])
+    except FileNotFoundError:
+        console.print("[red]pipx not found on PATH. Cannot self-update.[/red]")
+        raise typer.Exit(1)
+
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode)
+
+    version_after = _pkg_version("package-alert")
+
+    if version_before == version_after:
+        console.print("[dim]Already up to date.[/dim]")
+        raise typer.Exit(0)
+
+    console.print(f"Upgraded package-alert [dim]{version_before}[/dim] → [green]{version_after}[/green].")
+
+    pid = check_already_running()
+    if pid is None:
+        raise typer.Exit(0)
+
+    try:
+        if is_started_by_systemd(pid):
+            r = _systemctl("restart", "package-alert")
+            if r.returncode == 0:
+                console.print("[green]Daemon restarted via systemd.[/green]")
+            else:
+                console.print(f"[yellow]systemctl restart failed (exit {r.returncode}); run [bold]journalctl --user -u package-alert -n 20[/bold] to see why.[/yellow]")
+        else:
+            cmd = _daemon_cmdline(pid) or ["package-alert", "daemon"]
+            os.kill(pid, signal.SIGTERM)
+            console.print(f"[dim]Stopping daemon (pid {pid})...[/dim]")
+            deadline = time.time() + 10.0
+            while PID_FILE.exists() and time.time() < deadline:
+                time.sleep(0.5)
+            if PID_FILE.exists():
+                console.print("[yellow]Timed out waiting for daemon to stop; spawning new instance anyway.[/yellow]")
+            proc = subprocess.Popen(cmd, start_new_session=True)
+            # Confirm the new daemon started by waiting for a *new* PID (different from the old
+            # one) to appear in the PID file and the process to be alive. This guards against the
+            # case where the old daemon exited without removing the PID file, which would make a
+            # simple exists() check report a false success.
+            deadline = time.time() + 5.0
+            new_pid = None
+            while time.time() < deadline:
+                if proc.poll() is not None:
+                    console.print(f"[yellow]Daemon process exited early (code {proc.returncode}); it may already be running.[/yellow]")
+                    break
+                new_pid = check_already_running()
+                if new_pid is not None and new_pid != pid:
+                    console.print("[green]Daemon restarted.[/green]")
+                    break
+                time.sleep(0.2)
+            else:
+                console.print("[yellow]Daemon spawned but could not confirm it is running; it may still be starting.[/yellow]")
+    except OSError as exc:
+        console.print(f"[yellow]Could not restart daemon: {exc}[/yellow]")
+
+    raise typer.Exit(0)
 
 
 @app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})

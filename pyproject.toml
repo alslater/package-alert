@@ -33,6 +33,7 @@ dependencies = [
     "watchdog>=4",
     "psutil>=6",
     "Levenshtein>=0.25",
+    "packaging>=23",
 ]
 
 [project.urls]

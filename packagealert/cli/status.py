@@ -10,7 +10,7 @@ from pathlib import Path
 import psutil
 
 from packagealert.config import load_config, DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
-from packagealert.daemon import check_already_running, PID_FILE as _PID_FILE
+from packagealert.daemon_pid import check_already_running, is_started_by_systemd, PID_FILE as _PID_FILE
 from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
 
 
@@ -111,14 +111,6 @@ def _severity_label(
         return "MEDIUM"
     return "LOW"
 
-
-def _started_by_systemd(pid: int) -> bool:
-    """Return True if the process has INVOCATION_ID in its environment (set by systemd)."""
-    try:
-        environ = Path(f"/proc/{pid}/environ").read_bytes()
-        return b"INVOCATION_ID=" in environ
-    except OSError:
-        return False
 
 
 def _format_uptime(seconds: float | None) -> str:
@@ -253,7 +245,7 @@ async def gather_status(
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 continue
 
-    managed_by_systemd = _started_by_systemd(pid) if pid is not None else False
+    managed_by_systemd = is_started_by_systemd(pid) if pid is not None else False
     uptime: float | None = None
     if pid is not None:
         try:

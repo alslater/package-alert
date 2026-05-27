@@ -9,20 +9,29 @@ from pathlib import Path
 from packagealert.alerts.desktop import notify_malicious, notify_risk
 from packagealert.alerts.terminal import alert_malicious, alert_risk
 from packagealert.analyzers.risk import RiskEngine
+from packagealert.config import AppConfig, warn_missing_paths
+from packagealert.daemon_pid import PID_FILE as _PID_FILE
+from packagealert.daemon_pid import check_already_running as _check_already_running
 from packagealert.heuristics.top_packages import TopPackagesCache
 from packagealert.languages import registry as lang_registry
-from packagealert.osv.popularity import PopularityCache, PopularityClient
-from packagealert.config import AppConfig
 from packagealert.models.events import PackageEvent
 from packagealert.monitors.cache import CacheMonitor
 from packagealert.monitors.process import ProcessMonitor
 from packagealert.osv.cache import OsvCache
 from packagealert.osv.client import OsvClient
-from packagealert.config import warn_missing_paths
+from packagealert.osv.popularity import PopularityCache, PopularityClient
 from packagealert.scheduler.runner import ScheduledScanner
 from packagealert.storage.db import open_db, store_alert
+from packagealert.update_check import check_and_cache
 
 log = logging.getLogger(__name__)
+
+
+async def _update_check_loop(interval: float = 86400.0) -> None:
+    """Check PyPI for a newer version once, then every *interval* seconds."""
+    while True:
+        await check_and_cache()
+        await asyncio.sleep(interval)
 
 
 async def _scheduler_loop(scanner: ScheduledScanner, interval: float = 3600.0) -> None:
@@ -34,20 +43,12 @@ async def _scheduler_loop(scanner: ScheduledScanner, interval: float = 3600.0) -
             log.exception("Unexpected error in scheduler loop")
         await asyncio.sleep(interval)
 
-PID_FILE = Path.home() / ".local" / "share" / "package-alert" / "daemon.pid"
-_PID_FILE = PID_FILE  # backward-compat alias
+PID_FILE = _PID_FILE  # public alias
 
 
 def check_already_running() -> int | None:
     """Return the PID of a running daemon, or None if no daemon is running."""
-    if not _PID_FILE.exists():
-        return None
-    try:
-        pid = int(_PID_FILE.read_text().strip())
-        os.kill(pid, 0)  # signal 0 checks existence without sending a signal
-        return pid
-    except (ValueError, ProcessLookupError, PermissionError):
-        return None
+    return _check_already_running(_PID_FILE)
 
 
 class Daemon:
@@ -85,10 +86,13 @@ class Daemon:
             cache_monitor = CacheMonitor(self._cfg.watch)
             monitors.append(cache_monitor)
 
-        scheduler_task: asyncio.Task | None = None
+        background_tasks: list[asyncio.Task] = []
+
         if self._cfg.scheduler.enabled:
             scheduler = ScheduledScanner(self._cfg, db)
-            scheduler_task = asyncio.create_task(_scheduler_loop(scheduler))
+            background_tasks.append(asyncio.create_task(_scheduler_loop(scheduler)))
+
+        background_tasks.append(asyncio.create_task(_update_check_loop()))
 
         for m in monitors:
             await m.start()
@@ -105,6 +109,7 @@ class Daemon:
         loop.add_signal_handler(signal.SIGTERM, _handle_signal)
 
         log.info("package-alert daemon started (%d monitor(s))", len(monitors))
+        consumer_tasks: list[asyncio.Task] = []
         try:
             consumer_tasks = [
                 asyncio.create_task(
@@ -116,13 +121,10 @@ class Daemon:
             await shutdown_event.wait()
             for m in monitors:
                 await m.stop()
-            if scheduler_task is not None:
-                scheduler_task.cancel()
-            for t in consumer_tasks:
-                t.cancel()
-            all_tasks = ([scheduler_task] if scheduler_task is not None else []) + consumer_tasks
-            await asyncio.gather(*all_tasks, return_exceptions=True)
         finally:
+            for t in background_tasks + consumer_tasks:
+                t.cancel()
+            await asyncio.gather(*background_tasks + consumer_tasks, return_exceptions=True)
             await osv_client.aclose()
             await pop_client.aclose()
             await db.close()

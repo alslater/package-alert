@@ -7,7 +7,8 @@ import time
 import pytest
 from unittest.mock import patch, MagicMock
 from rich.console import Console
-from packagealert.cli.status import _format_uptime, _severity_label, _started_by_systemd, gather_status, render_status, StatusData, AlertRow
+from packagealert.cli.status import _format_uptime, _severity_label, gather_status, render_status, StatusData, AlertRow
+from packagealert.daemon_pid import is_started_by_systemd as _started_by_systemd
 from packagealert.config import AppConfig
 from packagealert.storage.db import open_db
 
@@ -97,7 +98,7 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
-        patch("packagealert.cli.status._started_by_systemd", return_value=False),
+        patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -136,7 +137,7 @@ async def test_gather_status_daemon_running_via_process_scan(mem_db, tmp_path):
         patch("packagealert.cli.status.check_already_running", return_value=None),
         patch("packagealert.cli.status.psutil.process_iter", return_value=[mock_proc]),
         patch("packagealert.cli.status.psutil.Process") as mock_process_cls,
-        patch("packagealert.cli.status._started_by_systemd", return_value=False),
+        patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -219,7 +220,7 @@ async def test_gather_status_psutil_access_denied(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
-        patch("packagealert.cli.status._started_by_systemd", return_value=False),
+        patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
@@ -239,7 +240,7 @@ async def test_gather_status_psutil_zombie_process(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.check_already_running", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
-        patch("packagealert.cli.status._started_by_systemd", return_value=False),
+        patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
     ):
