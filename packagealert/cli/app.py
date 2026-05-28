@@ -226,7 +226,7 @@ async def _run_scan_cache(cfg):
 def query(
     package: str = typer.Argument(..., help="Package name"),
     version: Optional[str] = typer.Argument(None, help="Package version"),
-    ecosystem: str = typer.Option("pypi", "--ecosystem", "-e", help="Ecosystem: pypi or npm"),
+    ecosystem: str = typer.Option("pypi", "--ecosystem", "-e", help="OSV ecosystem identifier, e.g. pypi, npm, packagist, maven, crates.io, rubygems, nuget, go."),
     config: Optional[Path] = _cfg_option,
 ):
     """Query OSV for a specific package."""
@@ -620,6 +620,12 @@ def config_show(config: Optional[Path] = _cfg_option):
     """Show current configuration as JSON."""
     cfg = load_config(config)
     console.print_json(cfg.model_dump_json(indent=2))
+
+
+@app.command("version")
+def version_cmd():
+    """Show the installed package-alert version."""
+    console.print(_pkg_version("package-alert"))
 
 
 _SYSTEMD_USER_DIR = Path.home() / ".config" / "systemd" / "user"

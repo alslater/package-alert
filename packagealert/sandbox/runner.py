@@ -942,7 +942,9 @@ def _home_ro_dirs() -> list[Path]:
         # User-local binaries: uv, pip-installed scripts, etc.
         home / ".local" / "bin",
         # pipx-managed tool environments — shebangs in ~/.local/bin/* may point here
-        home / ".local" / "pipx",
+        # PIPX_HOME defaults differ by install method: ~/.local/pipx or ~/.local/share/pipx
+        Path(os.environ.get("PIPX_HOME", home / ".local" / "pipx")).expanduser(),
+        home / ".local" / "share" / "pipx",
         # pip configuration (index URLs, proxy, trusted hosts)
         home / ".config" / "pip",
         home / ".pip",                          # legacy pip config location

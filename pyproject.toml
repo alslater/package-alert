@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "package-alert"
-version = "0.2.0"
+version = "0.2.1"
 description = "Real-time security monitor for Python, Node.js, and PHP package installations"
 readme = "README.md"
 license = { text = "Apache-2.0" }
