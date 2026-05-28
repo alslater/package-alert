@@ -659,9 +659,6 @@ max_retries = 3
 enable_cache_monitoring = true
 enable_process_monitoring = true
 process_poll_interval_seconds = 1.0
-# Cache paths (pip, uv, npm, composer, etc.) are discovered automatically
-# from each language module — no manual configuration needed.
-# site_packages_dirs = []   # extra site-packages dirs to watch beyond auto-discovered ones
 
 [alerts]
 desktop_notifications = true
