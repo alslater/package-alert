@@ -50,8 +50,11 @@ Shell completions work correctly with both names. To generate completions for `p
 ## Quick Start
 
 ```bash
-# Start the background daemon
+# Start the daemon (foreground)
 package-alert daemon
+
+# Start the daemon and return immediately to the shell
+package-alert daemon --background
 
 # Check daemon status
 package-alert status
@@ -87,8 +90,12 @@ package-alert alerts
 Start the monitoring daemon. Only one instance may run at a time (enforced via a PID file at `~/.local/share/package-alert/daemon.pid`).
 
 ```bash
-package-alert daemon [--config PATH]
+package-alert daemon [--background] [--config PATH]
 ```
+
+| Option | Description |
+|--------|-------------|
+| `--background` / `-b` | Fork into the background and return immediately. Without this flag the daemon runs in the foreground (useful with systemd, Docker, or a terminal multiplexer). |
 
 The daemon:
 1. Polls running processes every second for package manager invocations
@@ -154,7 +161,7 @@ Paths re-exposed inside the home tmpfs (read-only):
 | `$NVM_DIR` (`~/.nvm`) | nvm-managed Node.js installations |
 | `~/.local/bin` | User-local binaries (uv, pip-installed scripts, etc.) |
 | `~/.local/share/uv` | uv-managed Python installations and tool environments |
-| `~/.local/pipx` | pipx-managed tool environments (shebangs in `~/.local/bin` may point here) |
+| `$PIPX_HOME`, `~/.local/pipx`, `~/.local/share/pipx` | pipx-managed tool environments (shebangs in `~/.local/bin` may point here; location varies by how pipx was installed) |
 | `~/.config/pip`, `~/.pip` | pip configuration (index URLs, proxy settings) |
 | `~/.config/uv` | uv configuration |
 | `~/.npmrc` | npm registry and auth configuration |
@@ -247,8 +254,10 @@ package-alert scan-cache [--config PATH]
 Query OSV for a specific package, with full advisory details.
 
 ```bash
-package-alert query PACKAGE [VERSION] [--ecosystem pypi|npm] [--config PATH]
+package-alert query PACKAGE [VERSION] [--ecosystem ECOSYSTEM] [--config PATH]
 ```
+
+`--ecosystem` accepts any [OSV ecosystem identifier](https://ossf.github.io/osv-schema/#affectedpackageecosystem-field) — e.g. `pypi`, `npm`, `packagist`, `maven`, `crates.io`, `rubygems`, `nuget`, `go`. Defaults to `pypi`.
 
 ### `alerts`
 
@@ -285,6 +294,14 @@ package-alert languages info php
 ```
 
 `languages info` shows: ecosystems, process names, lockfile patterns, cache paths, and the top-packages URL used for typosquatting detection.
+
+### `version`
+
+Print the installed version and exit.
+
+```bash
+package-alert version
+```
 
 ### `config-show`
 
@@ -428,7 +445,12 @@ All persistent data lives in `~/.local/share/package-alert/`:
 package-alert daemon-install
 ```
 
-This writes the unit file to `~/.config/systemd/user/package-alert.service`, enables it, and starts it immediately. The daemon will start automatically on future logins.
+This:
+1. Writes a default config to `~/.config/package-alert/config.toml` if one doesn't already exist
+2. Writes the unit file to `~/.config/systemd/user/package-alert.service`
+3. Enables and starts the service immediately
+
+The daemon will start automatically on future logins. Edit `~/.config/package-alert/config.toml` to customise behaviour, then restart with `systemctl --user restart package-alert`.
 
 To stop and remove the service:
 

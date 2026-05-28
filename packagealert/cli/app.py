@@ -121,13 +121,33 @@ def _load(config: Optional[Path], *, daemon: bool = False):
 
 
 @app.command()
-def daemon(config: Optional[Path] = _cfg_option):
+def daemon(
+    config: Optional[Path] = _cfg_option,
+    background: bool = typer.Option(False, "--background", "-b", help="Daemonise: fork into the background and return immediately."),
+):
     """Start the package-alert monitoring daemon."""
     from packagealert.daemon import Daemon, check_already_running
     existing_pid = check_already_running()
     if existing_pid:
         console.print(f"[red]Daemon is already running (pid {existing_pid}). Exiting.[/red]")
         raise typer.Exit(1)
+
+    if background:
+        # Double-fork so the daemon is fully detached from the terminal.
+        pid = os.fork()
+        if pid > 0:
+            console.print(f"[dim]Daemon started in background (pid {pid}).[/dim]")
+            raise typer.Exit(0)
+        os.setsid()
+        pid2 = os.fork()
+        if pid2 > 0:
+            os._exit(0)
+        # Redirect stdio so the detached process has no terminal handles.
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        os.close(devnull)
+
     cfg = _load(config, daemon=True)
     d = Daemon(cfg)
     asyncio.run(d.run())
