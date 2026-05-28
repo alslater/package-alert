@@ -39,27 +39,59 @@ def test_daemon_install_refuses_if_unit_already_exists(tmp_path):
 
 
 def test_daemon_install_writes_unit_and_enables(tmp_path):
+    config_dir = tmp_path / "config"
+    config_file = config_dir / "config.toml"
     with patch("packagealert.cli.app._systemd_is_running", return_value=True):
         with patch("packagealert.cli.app._SYSTEMD_USER_DIR", tmp_path):
-            with patch("subprocess.run", return_value=_ok()) as mock_run:
-                result = runner.invoke(app, ["daemon-install"])
+            with patch("packagealert.cli.app._CONFIG_DIR", config_dir):
+                with patch("packagealert.cli.app._DEFAULT_CONFIG_FILE", config_file):
+                    with patch("subprocess.run", return_value=_ok()) as mock_run:
+                        result = runner.invoke(app, ["daemon-install"])
 
     assert result.exit_code == 0, result.output
     assert "installed and started" in result.output.lower()
     unit_path = tmp_path / "package-alert.service"
     assert unit_path.exists()
     assert "ExecStart=" in unit_path.read_text()
+    assert config_file.exists()
+    assert "[osv]" in config_file.read_text()
     mock_run.assert_called_once_with(
         ["systemctl", "--user", "enable", "--now", "package-alert.service"],
         capture_output=True,
     )
 
 
-def test_daemon_install_prints_error_on_systemctl_failure(tmp_path):
+def test_daemon_install_skips_config_if_already_exists(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config_file = config_dir / "config.toml"
+    config_file.write_text("[osv]\ncache_ttl_hours = 48\n")
     with patch("packagealert.cli.app._systemd_is_running", return_value=True):
         with patch("packagealert.cli.app._SYSTEMD_USER_DIR", tmp_path):
-            with patch("subprocess.run", return_value=_fail(1, "some systemd error")):
-                result = runner.invoke(app, ["daemon-install"])
+            with patch("packagealert.cli.app._CONFIG_DIR", config_dir):
+                with patch("packagealert.cli.app._DEFAULT_CONFIG_FILE", config_file):
+                    with patch("subprocess.run", return_value=_ok()):
+                        result = runner.invoke(app, ["daemon-install"])
+
+    assert result.exit_code == 0, result.output
+    assert "leaving it unchanged" in result.output
+    assert "cache_ttl_hours = 48" in config_file.read_text()
+
+
+def _patch_config(tmp_path):
+    config_dir = tmp_path / "config"
+    config_file = config_dir / "config.toml"
+    return config_dir, config_file
+
+
+def test_daemon_install_prints_error_on_systemctl_failure(tmp_path):
+    config_dir, config_file = _patch_config(tmp_path)
+    with patch("packagealert.cli.app._systemd_is_running", return_value=True):
+        with patch("packagealert.cli.app._SYSTEMD_USER_DIR", tmp_path):
+            with patch("packagealert.cli.app._CONFIG_DIR", config_dir):
+                with patch("packagealert.cli.app._DEFAULT_CONFIG_FILE", config_file):
+                    with patch("subprocess.run", return_value=_fail(1, "some systemd error")):
+                        result = runner.invoke(app, ["daemon-install"])
 
     assert result.exit_code == 1
     assert "failed" in result.output.lower()
@@ -67,10 +99,13 @@ def test_daemon_install_prints_error_on_systemctl_failure(tmp_path):
 
 
 def test_daemon_install_prints_error_when_systemctl_not_found(tmp_path):
+    config_dir, config_file = _patch_config(tmp_path)
     with patch("packagealert.cli.app._systemd_is_running", return_value=True):
         with patch("packagealert.cli.app._SYSTEMD_USER_DIR", tmp_path):
-            with patch("subprocess.run", side_effect=FileNotFoundError):
-                result = runner.invoke(app, ["daemon-install"])
+            with patch("packagealert.cli.app._CONFIG_DIR", config_dir):
+                with patch("packagealert.cli.app._DEFAULT_CONFIG_FILE", config_file):
+                    with patch("subprocess.run", side_effect=FileNotFoundError):
+                        result = runner.invoke(app, ["daemon-install"])
 
     assert result.exit_code == 1
     assert "systemctl not found" in result.output.lower()

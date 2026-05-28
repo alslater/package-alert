@@ -645,6 +645,61 @@ def _systemctl(*args: str) -> subprocess.CompletedProcess:
         raise typer.Exit(1)
 
 
+_CONFIG_DIR = Path.home() / ".config" / "package-alert"
+_DEFAULT_CONFIG_FILE = _CONFIG_DIR / "config.toml"
+
+_DEFAULT_CONFIG_CONTENT = """\
+[osv]
+cache_ttl_hours = 24
+base_url = "https://api.osv.dev/v1"
+timeout_seconds = 10.0
+max_retries = 3
+
+[watch]
+enable_cache_monitoring = true
+enable_process_monitoring = true
+process_poll_interval_seconds = 1.0
+# Cache paths (pip, uv, npm, composer, etc.) are discovered automatically
+# from each language module — no manual configuration needed.
+# site_packages_dirs = []   # extra site-packages dirs to watch beyond auto-discovered ones
+
+[alerts]
+desktop_notifications = true
+terminal_notifications = true
+min_severity_for_desktop = "MEDIUM"
+
+# Logging for the long-running daemon process.
+[log]
+# level = "INFO"              # DEBUG, INFO, WARNING, ERROR, CRITICAL
+# file = "~/.local/share/package-alert/daemon.log"
+# max_bytes = 10485760        # 10 MB per file before rotation
+# backup_count = 3            # number of rotated files to keep
+
+# Logging for short-lived CLI commands (scan-project, query, alerts, etc.).
+[cli_log]
+# level = "INFO"
+# file = "~/.local/share/package-alert/cli.log"
+# max_bytes = 10485760
+# backup_count = 3
+
+[heuristics]
+enabled = true
+warning_threshold = 40
+critical_threshold = 70
+# top_packages_refresh_days = 7
+
+[sandbox]
+# extra_env = []
+# extra_tmpfs = []
+
+[scheduler]
+enabled = true
+daily_hour = 2
+weekly_day = 6
+weekly_hour = 2
+max_scan_history = 5
+"""
+
 _SERVICE_UNIT = """\
 [Unit]
 Description=package-alert developer security monitor
@@ -677,6 +732,13 @@ def daemon_install_cmd():
         console.print("Run [bold]package-alert daemon-remove[/bold] first if you want to reinstall.")
         raise typer.Exit(1)
 
+    if not _DEFAULT_CONFIG_FILE.exists():
+        _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        _DEFAULT_CONFIG_FILE.write_text(_DEFAULT_CONFIG_CONTENT)
+        console.print(f"[dim]Wrote default config to {_DEFAULT_CONFIG_FILE}[/dim]")
+    else:
+        console.print(f"[dim]Config already exists at {_DEFAULT_CONFIG_FILE} — leaving it unchanged.[/dim]")
+
     _SYSTEMD_USER_DIR.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(_SERVICE_UNIT)
     console.print(f"[dim]Wrote {unit_path}[/dim]")
@@ -690,7 +752,8 @@ def daemon_install_cmd():
         raise typer.Exit(r.returncode)
 
     console.print("[green]package-alert daemon installed and started.[/green]")
-    console.print("[dim]It will start automatically on login.[/dim]")
+    console.print(f"[dim]Edit {_DEFAULT_CONFIG_FILE} to customise, then restart with:[/dim]")
+    console.print(f"  systemctl --user restart {_SERVICE_NAME}")
 
 
 @app.command("daemon-remove")
