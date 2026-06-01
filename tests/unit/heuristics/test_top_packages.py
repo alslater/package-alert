@@ -4,7 +4,9 @@ import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import respx
 
 from packagealert.config import HeuristicsConfig
 from packagealert.heuristics.top_packages import TopPackagesCache
@@ -239,6 +241,103 @@ async def test_resolve_db_less_uses_fallback_when_fetch_fails():
         result = await cache.resolve(lang, "pypi")
 
     assert result == ["fallback-pkg"]
+
+
+# ---------------------------------------------------------------------------
+# Redirect detection
+# ---------------------------------------------------------------------------
+
+def _make_real_fetch_lang(url: str):
+    """Lang mock whose fetch_top_packages actually calls client.get() so the
+    event-hook redirect detection in fetch_and_store is exercised."""
+    lang = MagicMock()
+    lang.name = "testlang"
+    lang.top_packages_url.return_value = url
+
+    async def _fetch(client, u):
+        resp = await client.get(u)
+        if not resp.is_success:
+            raise httpx.HTTPStatusError(
+                f"Expected 2xx after redirects, got {resp.status_code}",
+                request=resp.request,
+                response=resp,
+            )
+        return ["pkg-a"]
+
+    lang.fetch_top_packages = _fetch
+    return lang
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fetch_and_store_follows_redirect_and_warns(db, caplog):
+    old_url = "https://example.com/old-packages.json"
+    new_url = "https://example.com/new-packages.json"
+
+    route_old = respx.get(old_url).mock(
+        return_value=httpx.Response(301, headers={"location": new_url})
+    )
+    route_new = respx.get(new_url).mock(
+        return_value=httpx.Response(200, json={"rows": [{"project": "requests"}]})
+    )
+
+    cache = TopPackagesCache(db=db, cfg=_cfg())
+    lang = _make_real_fetch_lang(old_url)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="packagealert.heuristics.top_packages"):
+        result = await cache.fetch_and_store(lang, "pypi")
+
+    assert result == ["pkg-a"]
+    assert route_old.called, "Expected the old URL to have been requested"
+    assert route_new.called, "Expected the new URL to have been followed"
+    assert any(new_url in r.message for r in caplog.records), \
+        "Expected a warning mentioning the new URL"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fetch_and_store_no_warning_when_no_redirect(db, caplog):
+    url = "https://example.com/packages.json"
+
+    respx.get(url).mock(
+        return_value=httpx.Response(200, json={"rows": [{"project": "requests"}]})
+    )
+
+    cache = TopPackagesCache(db=db, cfg=_cfg())
+    lang = _make_real_fetch_lang(url)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="packagealert.heuristics.top_packages"):
+        result = await cache.fetch_and_store(lang, "pypi")
+
+    assert result == ["pkg-a"]
+    assert not any("has moved" in r.message for r in caplog.records)
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_fetch_and_store_no_warning_on_temporary_redirect(db, caplog):
+    """302 on the initial URL should not produce an 'update top_packages_url()' warning."""
+    old_url = "https://example.com/old-packages.json"
+    new_url = "https://example.com/new-packages.json"
+
+    respx.get(old_url).mock(
+        return_value=httpx.Response(302, headers={"location": new_url})
+    )
+    respx.get(new_url).mock(
+        return_value=httpx.Response(200, json={"rows": [{"project": "requests"}]})
+    )
+
+    cache = TopPackagesCache(db=db, cfg=_cfg())
+    lang = _make_real_fetch_lang(old_url)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="packagealert.heuristics.top_packages"):
+        result = await cache.fetch_and_store(lang, "pypi")
+
+    assert result == ["pkg-a"]
+    assert not any("has moved" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

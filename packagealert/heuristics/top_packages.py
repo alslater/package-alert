@@ -84,8 +84,35 @@ class TopPackagesCache:
         if not url:
             return None
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            redirected_to: str | None = None
+            orig_url = httpx.URL(url)
+
+            async def _on_response(response: httpx.Response) -> None:
+                nonlocal redirected_to
+                if (
+                    response.is_redirect
+                    and response.status_code in (301, 308)
+                    and response.request is not None
+                    and response.request.url == orig_url
+                ):
+                    if response.next_request is not None:
+                        redirected_to = str(response.next_request.url)
+                    else:
+                        redirected_to = response.headers.get("location", "?")
+
+            async with httpx.AsyncClient(
+                timeout=10.0,
+                follow_redirects=True,
+                max_redirects=5,
+                event_hooks={"response": [_on_response]},
+            ) as client:
                 packages = await lang.fetch_top_packages(client, url)
+
+            if redirected_to is not None:
+                log.warning(
+                    "top-packages URL for %s has moved — update top_packages_url() to: %s",
+                    ecosystem, redirected_to,
+                )
             if packages is not None:
                 await self.set(ecosystem, packages)
             return packages

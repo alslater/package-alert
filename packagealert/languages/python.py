@@ -485,7 +485,7 @@ class PythonLanguage:
     # ------------------------------------------------------------------
 
     def top_packages_url(self) -> str | None:
-        return "https://hugovk.github.io/top-pypi-packages/top-pypi-packages-30-days.min.json"
+        return "https://hugovk.dev/top-pypi-packages/top-pypi-packages-30-days.min.json"
 
     async def fetch_top_packages(self, client: httpx.AsyncClient, url: str) -> list[str] | None:
         from packagealert.languages.base import MAX_TOP_PACKAGES, normalise_package_name
