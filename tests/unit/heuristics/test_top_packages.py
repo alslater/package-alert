@@ -315,6 +315,31 @@ async def test_fetch_and_store_no_warning_when_no_redirect(db, caplog):
     assert not any("has moved" in r.message for r in caplog.records)
 
 
+@respx.mock
+@pytest.mark.asyncio
+async def test_fetch_and_store_no_warning_on_temporary_redirect(db, caplog):
+    """302 on the initial URL should not produce an 'update top_packages_url()' warning."""
+    old_url = "https://example.com/old-packages.json"
+    new_url = "https://example.com/new-packages.json"
+
+    respx.get(old_url).mock(
+        return_value=httpx.Response(302, headers={"location": new_url})
+    )
+    respx.get(new_url).mock(
+        return_value=httpx.Response(200, json={"rows": [{"project": "requests"}]})
+    )
+
+    cache = TopPackagesCache(db=db, cfg=_cfg())
+    lang = _make_real_fetch_lang(old_url)
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="packagealert.heuristics.top_packages"):
+        result = await cache.fetch_and_store(lang, "pypi")
+
+    assert result == ["pkg-a"]
+    assert not any("has moved" in r.message for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Corrupt cache row handling
 # ---------------------------------------------------------------------------
