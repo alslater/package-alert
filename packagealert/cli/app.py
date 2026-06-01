@@ -795,7 +795,9 @@ def daemon_remove_cmd():
 
 
 @app.command("update")
-def update_cmd():
+def update_cmd(
+    force: bool = typer.Option(False, "--force", help="Force reinstall via pipx reinstall even if already at the latest version."),
+):
     """Upgrade package-alert to the latest version using pipx."""
     if not _is_pipx_install():
         console.print("[red]package-alert is not installed via pipx. Cannot self-update.[/red]")
@@ -803,14 +805,19 @@ def update_cmd():
 
     version_before = _pkg_version("package-alert")
 
+    pipx_cmd = ["pipx", "reinstall", "package-alert"] if force else ["pipx", "upgrade", "package-alert"]
     try:
-        result = subprocess.run(["pipx", "upgrade", "package-alert"])
+        result = subprocess.run(pipx_cmd)
     except FileNotFoundError:
         console.print("[red]pipx not found on PATH. Cannot self-update.[/red]")
         raise typer.Exit(1)
 
     if result.returncode != 0:
         raise typer.Exit(result.returncode)
+
+    if force:
+        console.print(f"[green]Reinstalled package-alert {version_before}.[/green]")
+        raise typer.Exit(0)
 
     version_after = _pkg_version("package-alert")
 

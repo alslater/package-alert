@@ -349,3 +349,34 @@ def test_update_os_kill_error_prints_warning():
     assert result.exit_code == 0
     mock_popen.assert_not_called()
     assert "could not restart" in result.output.lower()
+
+
+def test_force_calls_pipx_reinstall():
+    import subprocess as sp
+    mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=0)
+    with patch("packagealert.cli.app._is_pipx_install", return_value=True):
+        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
+                result = runner.invoke(app, ["update", "--force"])
+    mock_run.assert_called_once_with(["pipx", "reinstall", "package-alert"])
+    assert result.exit_code == 0
+
+
+def test_force_prints_reinstalled_message():
+    import subprocess as sp
+    mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=0)
+    with patch("packagealert.cli.app._is_pipx_install", return_value=True):
+        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
+            with patch("subprocess.run", return_value=mock_result):
+                result = runner.invoke(app, ["update", "--force"])
+    assert "reinstalled" in result.output.lower()
+
+
+def test_force_forwards_nonzero_exit_code():
+    import subprocess as sp
+    mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=1)
+    with patch("packagealert.cli.app._is_pipx_install", return_value=True):
+        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
+            with patch("subprocess.run", return_value=mock_result):
+                result = runner.invoke(app, ["update", "--force"])
+    assert result.exit_code == 1
