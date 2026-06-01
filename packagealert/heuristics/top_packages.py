@@ -88,12 +88,15 @@ class TopPackagesCache:
 
             async def _on_response(response: httpx.Response) -> None:
                 if response.is_redirect:
-                    location = response.headers.get("location", "?")
-                    redirected_to.append(location)
+                    if response.next_request is not None:
+                        redirected_to.append(str(response.next_request.url))
+                    else:
+                        redirected_to.append(response.headers.get("location", "?"))
 
             async with httpx.AsyncClient(
                 timeout=10.0,
                 follow_redirects=True,
+                max_redirects=5,
                 event_hooks={"response": [_on_response]},
             ) as client:
                 packages = await lang.fetch_top_packages(client, url)
