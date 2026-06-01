@@ -256,7 +256,12 @@ def _make_real_fetch_lang(url: str):
 
     async def _fetch(client, u):
         resp = await client.get(u)
-        resp.raise_for_status()
+        if not resp.is_success:
+            raise httpx.HTTPStatusError(
+                f"Expected 2xx after redirects, got {resp.status_code}",
+                request=resp.request,
+                response=resp,
+            )
         return ["pkg-a"]
 
     lang.fetch_top_packages = _fetch
@@ -269,10 +274,10 @@ async def test_fetch_and_store_follows_redirect_and_warns(db, caplog):
     old_url = "https://example.com/old-packages.json"
     new_url = "https://example.com/new-packages.json"
 
-    respx.get(old_url).mock(
+    route_old = respx.get(old_url).mock(
         return_value=httpx.Response(301, headers={"location": new_url})
     )
-    respx.get(new_url).mock(
+    route_new = respx.get(new_url).mock(
         return_value=httpx.Response(200, json={"rows": [{"project": "requests"}]})
     )
 
@@ -284,6 +289,8 @@ async def test_fetch_and_store_follows_redirect_and_warns(db, caplog):
         result = await cache.fetch_and_store(lang, "pypi")
 
     assert result == ["pkg-a"]
+    assert route_old.called, "Expected the old URL to have been requested"
+    assert route_new.called, "Expected the new URL to have been followed"
     assert any(new_url in r.message for r in caplog.records), \
         "Expected a warning mentioning the new URL"
 
