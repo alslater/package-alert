@@ -153,6 +153,22 @@ class LanguageBase(Protocol):
     def publication_date_url(self, name: str, version: str) -> str | None:
         return None
 
+    def latest_version_url(self, name: str) -> str | None:
+        """Return a registry API URL that resolves the latest published version of
+        a package. The response is parsed by latest_version_parse().
+
+        Return None if this ecosystem does not support latest-version resolution.
+        """
+        return None
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        """Extract the latest version string from a registry API response.
+
+        Called with the parsed JSON body from latest_version_url(). Return None
+        if the version cannot be determined from the response.
+        """
+        return None
+
     def package_manager_names(self) -> list[str]:
         """Executable names that are pure package managers (pip, npm, uv, etc.).
 

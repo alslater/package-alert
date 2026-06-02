@@ -384,7 +384,7 @@ class SandboxRunner:
         import sys
         import time as _time
 
-        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_publication_date
+        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_latest_version, fetch_publication_date
 
         if ctx.parsed is None or not ctx.parsed.packages:
             return []
@@ -409,10 +409,18 @@ class SandboxRunner:
                 ecosystem = ctx.parsed.ecosystem.lower()
                 name, version = parse_package_spec(pkg_str, ecosystem)
                 if not version:
-                    self._console.print(
-                        f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
-                    )
-                    continue
+                    lang_for_latest = lang_registry.for_ecosystem(ecosystem)
+                    if lang_for_latest is not None:
+                        latest_url = lang_for_latest.latest_version_url(name)
+                        if latest_url is not None:
+                            version = await fetch_latest_version(latest_url, lang_for_latest)
+                            if version:
+                                self._console.print(f"[dim]Resolving latest version: {name}=={version}[/dim]")
+                    if not version:
+                        self._console.print(
+                            f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
+                        )
+                        continue
 
                 pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
 
@@ -454,6 +462,14 @@ class SandboxRunner:
                     is_tty=is_tty,
                     cleared_at=cleared_at,
                 )
+
+                if typo.is_typosquat and typo.closest_match:
+                    decision = decision.__class__(
+                        action=decision.action,
+                        reason=f"{decision.reason}; possible typosquat of '{typo.closest_match}' (distance {typo.distance})",
+                        package=decision.package,
+                        age_days=decision.age_days,
+                    )
 
                 if decision.action == "block":
                     blocked.append(decision)

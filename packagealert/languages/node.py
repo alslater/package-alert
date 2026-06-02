@@ -465,6 +465,12 @@ class NodeLanguage:
         # in SQLite for 30 days so this large fetch is a one-time cost per version.
         return f"https://registry.npmjs.org/{name}"
 
+    def latest_version_url(self, name: str) -> str | None:
+        return f"https://registry.npmjs.org/{name}/latest"
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        return data.get("version") or None
+
     # ------------------------------------------------------------------
     # snapshot
     # ------------------------------------------------------------------

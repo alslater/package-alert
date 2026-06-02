@@ -531,6 +531,12 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def latest_version_url(self, name: str) -> str | None:
+        return f"https://pypi.org/pypi/{name}/json"
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        return data.get("info", {}).get("version") or None
+
     def package_manager_names(self) -> list[str]:
         return ["pip", "pip3", "uv", "pipenv"]
 
