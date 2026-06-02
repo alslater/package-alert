@@ -129,12 +129,17 @@ class SandboxRunner:
 
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
 
-        self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
+        # Show the interception banner only when invoked through a shim or shell
+        # function — when the user types `package-alert run ...` directly they
+        # already know we're running.
+        via_shim = _resolve_real_binary(argv) != argv or bool(os.environ.get("_PA_VIA_SHELL"))
+        is_global = parsed.global_install
 
-        is_global = parsed is not None and parsed.global_install
+        if via_shim:
+            self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
         if is_global:
             self._console.print("[dim]Global install: pre-flight check only (not sandboxed)[/dim]")
-        else:
+        elif not via_shim:
             self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         if not self._check_venv_scope(parsed, cwd):
@@ -374,7 +379,11 @@ class SandboxRunner:
                 age_days = (_time.time() - pub_ts) / 86400 if isinstance(pub_ts, float) else None
                 cleared_at = await get_cooldown_cleared_at(db, ecosystem=ecosystem, package=name, version=version)
 
-                risk_score = 0  # heuristics not yet run; use baseline
+                from packagealert.heuristics.top_packages import TopPackagesCache
+                from packagealert.heuristics.typosquat import TyposquatDetector
+                top_cache = TopPackagesCache(db, self._cfg.heuristics)
+                typo = await TyposquatDetector(top_cache).analyze(name, ecosystem)
+                risk_score = typo.score
 
                 decision = decide_with_cleared(
                     pkg,
@@ -428,7 +437,6 @@ class SandboxRunner:
         the session.
         """
         shell_name = Path(argv[0]).name
-        self._console.print(f"[bold cyan][package-alert][/bold cyan] {' '.join(argv)}")
         self._console.print(f"\n[bold]Sandbox shell:[/bold] {' '.join(argv)}")
 
         combined_extra = list(self._cfg.sandbox.extra_env)

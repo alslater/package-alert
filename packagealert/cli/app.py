@@ -715,7 +715,7 @@ critical_threshold = 70
 
 [sandbox.cooldown]
 # period_days = 7
-# on_new_medium_risk = "prompt"   # prompt | warn | block | allow
+# on_new_medium_risk = "prompt"   # prompt | warn | block | allow (typosquat match detected)
 # on_new_low_risk = "warn"
 # non_interactive_escalation = "block"
 

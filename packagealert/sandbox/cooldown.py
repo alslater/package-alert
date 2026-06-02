@@ -48,22 +48,16 @@ def decide(
             age_days=age_days,
         )
 
-    # Within cooldown period — pick action by risk level
-    if risk_score >= 40:
-        action = cfg.on_new_medium_risk
-    else:
-        action = cfg.on_new_low_risk
+    action = cfg.on_new_medium_risk if risk_score > 0 else cfg.on_new_low_risk
 
     # Escalate prompt → block in non-interactive contexts
     if action == "prompt" and not is_tty:
         action = cfg.non_interactive_escalation
 
+    risk_label = f", typosquat score: {risk_score}" if risk_score > 0 else ""
     return CooldownDecision(
         action=action,  # type: ignore[arg-type]
-        reason=(
-            f"Package published {age_days:.1f} days ago "
-            f"(cooldown: {cfg.period_days}d, risk score: {risk_score})"
-        ),
+        reason=f"Package published {age_days:.1f} days ago (cooldown: {cfg.period_days}d{risk_label})",
         package=package,
         age_days=age_days,
     )

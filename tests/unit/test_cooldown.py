@@ -57,22 +57,22 @@ class TestCooldownDecisionAge:
 
     def test_within_period_low_risk_warns(self):
         from packagealert.sandbox.cooldown import decide
-        decision = decide(_pkg(), age_days=3.0, risk_score=10, cfg=_make_cfg(), is_tty=True)
+        decision = decide(_pkg(), age_days=3.0, risk_score=0, cfg=_make_cfg(), is_tty=True)
         assert decision.action == "warn"
 
     def test_beyond_period_allows(self):
         from packagealert.sandbox.cooldown import decide
-        decision = decide(_pkg(), age_days=10.0, risk_score=45, cfg=_make_cfg(), is_tty=True)
+        decision = decide(_pkg(), age_days=10.0, risk_score=0, cfg=_make_cfg(), is_tty=True)
         assert decision.action == "allow"
 
     def test_at_boundary_allows(self):
         from packagealert.sandbox.cooldown import decide
-        decision = decide(_pkg(), age_days=7.0, risk_score=45, cfg=_make_cfg(), is_tty=True)
+        decision = decide(_pkg(), age_days=7.0, risk_score=0, cfg=_make_cfg(), is_tty=True)
         assert decision.action == "allow"
 
     def test_no_date_warns_and_allows(self):
         from packagealert.sandbox.cooldown import decide
-        decision = decide(_pkg(), age_days=None, risk_score=45, cfg=_make_cfg(), is_tty=True)
+        decision = decide(_pkg(), age_days=None, risk_score=0, cfg=_make_cfg(), is_tty=True)
         assert decision.action == "warn"
 
     def test_non_interactive_prompt_escalates_to_block(self):
@@ -82,7 +82,7 @@ class TestCooldownDecisionAge:
 
     def test_non_interactive_warn_unchanged(self):
         from packagealert.sandbox.cooldown import decide
-        decision = decide(_pkg(), age_days=3.0, risk_score=10, cfg=_make_cfg(), is_tty=False)
+        decision = decide(_pkg(), age_days=3.0, risk_score=0, cfg=_make_cfg(), is_tty=False)
         assert decision.action == "warn"
 
 
@@ -93,7 +93,7 @@ class TestCooldownCleared:
         cfg = _make_cfg(period_days=7)
         cleared_at = time.time() - (3 * 86400)  # 3 days ago
         decision = decide_with_cleared(
-            pkg, age_days=3.0, risk_score=45, cfg=cfg, is_tty=True,
+            pkg, age_days=3.0, risk_score=0, cfg=cfg, is_tty=True,
             cleared_at=cleared_at,
         )
         assert decision.action == "allow"

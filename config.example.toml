@@ -52,11 +52,11 @@ critical_threshold = 70
 # Packages published more recently than period_days are subject to the cooldown policy.
 # period_days = 7
 
-# Action when a package is within the cooldown period and has medium or unknown risk.
+# Action when a package is within the cooldown period and matches a typosquat pattern.
 # One of: "prompt", "warn", "block", "allow"
 # on_new_medium_risk = "prompt"
 
-# Action when a package is within the cooldown period and has low risk.
+# Action when a package is within the cooldown period and has no typosquat match.
 # on_new_low_risk = "warn"
 
 # In non-interactive contexts (no TTY — coding agents, CI), escalate "prompt" to this action.

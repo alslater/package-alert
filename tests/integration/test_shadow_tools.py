@@ -73,7 +73,7 @@ class TestCooldownEngineEndToEnd:
 
         pkg = PackageSpec(name="newpkg", version="1.0.0", ecosystem="PyPI")
         cfg = CooldownConfig(period_days=7, on_new_medium_risk="prompt", non_interactive_escalation="block")
-        decision = decide(pkg, age_days=2.0, risk_score=50, cfg=cfg, is_tty=False)
+        decision = decide(pkg, age_days=2.0, risk_score=45, cfg=cfg, is_tty=False)
         assert decision.action == "block"
 
     def test_beyond_cooldown_allows(self):
@@ -83,7 +83,7 @@ class TestCooldownEngineEndToEnd:
 
         pkg = PackageSpec(name="oldpkg", version="1.0.0", ecosystem="PyPI")
         cfg = CooldownConfig(period_days=7)
-        decision = decide(pkg, age_days=30.0, risk_score=50, cfg=cfg, is_tty=False)
+        decision = decide(pkg, age_days=30.0, risk_score=0, cfg=cfg, is_tty=False)
         assert decision.action == "allow"
 
     def test_cleared_record_allows_within_period(self, tmp_path):
@@ -95,7 +95,7 @@ class TestCooldownEngineEndToEnd:
         cfg = CooldownConfig(period_days=7)
         cleared_at = time.time() - (2 * 86400)  # cleared 2 days ago, still valid
         decision = decide_with_cleared(
-            pkg, age_days=3.0, risk_score=50, cfg=cfg, is_tty=False,
+            pkg, age_days=3.0, risk_score=0, cfg=cfg, is_tty=False,
             cleared_at=cleared_at,
         )
         assert decision.action == "allow"

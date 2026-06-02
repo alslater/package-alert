@@ -84,11 +84,13 @@ The cooldown policy fires before the OSV pre-flight check and delays installs of
 
 | Condition | Default action |
 |-----------|---------------|
-| Package age < cooldown period, medium/unknown risk | Prompt |
-| Package age < cooldown period, low risk | Warn |
+| Package age < cooldown period, typosquat match detected | Prompt |
+| Package age < cooldown period, no typosquat match | Warn |
 | Package age ≥ cooldown period | Allow |
 | Publication date unavailable | Warn + allow |
 | Non-interactive context (no TTY) and would-prompt | Block |
+
+Risk score is derived from the typosquatting detector, which runs against the top-packages list before the sandbox executes. A score of 0 means no typosquat match; 15–20 indicates a close match to a popular package name.
 
 Configure in `config.toml`:
 

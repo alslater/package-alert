@@ -34,7 +34,7 @@ def generate_shell_snippet(*, shell: str) -> str:
 
     lines = [
         "# package-alert shell integration",
-        '_pa_run() { package-alert run "$@"; }',
+        '_pa_run() { _PA_VIA_SHELL=1 package-alert run "$@"; }',
     ]
     for tool in tools:
         lines.append(f'{tool}() {{ _pa_run {tool} "$@"; }}')
@@ -136,7 +136,9 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
         typer.echo(f"  skip {original} (binary or unreadable)", err=True)
         return
     if PA_FINGERPRINT in content:
-        return  # already a shim but .__pa_real missing — don't touch
+        typer.echo(f"  warning: {original} looks like a package-alert shim but {real.name} is missing — inconsistent state, skipping", err=True)
+        typer.echo(f"  to fix: remove {original} and reinstall the package manager, then re-run 'package-alert setup project'", err=True)
+        return
     original.rename(real)
     if interpreter:
         _write_interpreter_shim(original, real_name=f"{tool}{PA_REAL_SUFFIX}")
