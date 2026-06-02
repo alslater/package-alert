@@ -2500,6 +2500,7 @@ def test_cooldown_blocks_non_interactive(tmp_path, monkeypatch):
 
 def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
     """Unpinned install: latest version is fetched and cooldown runs against it."""
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     import asyncio
     import time
     from unittest.mock import AsyncMock, patch
@@ -2519,6 +2520,7 @@ def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
     with (
         patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
         patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
+        patch.object(SandboxRunner, "_check_venv_scope", return_value=True),
         patch("packagealert.sandbox.runner.get_publication_date", new_callable=AsyncMock, return_value="miss"),
         patch("packagealert.sandbox.runner.store_publication_date", new_callable=AsyncMock),
         patch("packagealert.sandbox.runner.get_cooldown_cleared_at", new_callable=AsyncMock, return_value=None),

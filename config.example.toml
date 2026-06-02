@@ -52,10 +52,11 @@ critical_threshold = 70
                       # source directory accessible inside bwrap's home tmpfs.  Example:
                       #   extra_ro_paths = ["/home/user/dev/my-project"]
 
-# editable_roots = [] # directories from which pip install -e is permitted.
-                      # Required — editable installs are blocked by default when this is empty.
-                      # Paths that are unsafe (system dirs, credential dirs) are always blocked
-                      # regardless of this setting.  Example:
+# editable_roots = [] # directory trees from which pip install -e of *external* sources is permitted.
+                      # In-project editable installs (pip install -e .) always work. This setting
+                      # only restricts editable installs from source directories outside the project
+                      # root. When empty, external editable installs are blocked. System dirs and
+                      # credential dirs (~/.ssh, ~/.aws, etc.) are always blocked.  Example:
                       #   editable_roots = ["~/dev", "~/projects"]
 
 [sandbox.cooldown]

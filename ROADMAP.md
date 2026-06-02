@@ -40,6 +40,7 @@
 
 ## Phase 3 (Continued)
 - [ ] Configuration safety audit — scan the loaded config for common misconfigurations (overly broad `editable_roots`, credential paths in `extra_ro_paths`, etc.) and warn at startup
+- [ ] Refactor sandbox target resolution — move hardcoded ecosystem logic in `_resolve_targets` and `_collect_new_packages` (runner.py) into `LanguageBase` hooks so language modules own their own scan targets and post-install package detection
 
 ## Phase 4 (Future)
 - [ ] ML-based anomaly detection on package metadata patterns
