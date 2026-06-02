@@ -401,10 +401,14 @@ class SandboxRunner:
             resolved = p.resolve()
         except OSError:
             resolved = p
-        # Check if it's a credential/system directory violation
+        # Check if it's a credential/system directory violation — including ancestors
+        # (e.g. $HOME would expose ~/.ssh as a subdirectory of the bind mount).
         for cred in _credential_dirs():
-            if resolved == cred or resolved.is_relative_to(cred):
-                self._console.print(f"✗  Editable path blocked — credential directory: {p}", style="red bold", markup=False)
+            if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
+                if cred.is_relative_to(resolved):
+                    self._console.print(f"✗  Editable path blocked — would expose {cred.name} inside the sandbox: {p}", style="red bold", markup=False)
+                else:
+                    self._console.print(f"✗  Editable path blocked — credential directory: {p}", style="red bold", markup=False)
                 self._console.print("  package-alert never exposes credential directories inside the sandbox.", style="dim")
                 return
         for prefix in _UNSAFE_PREFIXES:
@@ -1375,7 +1379,10 @@ def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> 
         if resolved == prefix or resolved.is_relative_to(prefix):
             return False
     for cred in _credential_dirs():
-        if resolved == cred or resolved.is_relative_to(cred):
+        # Reject both the credential dir itself and any ancestor of it — mounting
+        # a parent (e.g. $HOME or ~/.config) would re-expose the credential dir
+        # as a subdirectory, defeating the sandbox's home tmpfs isolation.
+        if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
             return False
     # editable_roots must be explicitly configured — no roots means no editable installs allowed.
     if not editable_roots or not any(resolved.is_relative_to(root.resolve()) for root in editable_roots):
