@@ -38,6 +38,9 @@
 - [ ] Lightweight local web dashboard
 - [ ] CI integration (GitHub Actions action, GitLab CI component)
 
+## Phase 3 (Continued)
+- [ ] Configuration safety audit — scan the loaded config for common misconfigurations (overly broad `editable_roots`, credential paths in `extra_ro_paths`, etc.) and warn at startup
+
 ## Phase 4 (Future)
 - [ ] ML-based anomaly detection on package metadata patterns
 - [ ] Behavioural sandboxing (eBPF-based syscall monitoring, Linux only)
