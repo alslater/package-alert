@@ -335,10 +335,11 @@ class RubyLanguage:
         return [p] if p.is_dir() else []
 
     def latest_version_url(self, name: str) -> str | None:
-        return f"https://rubygems.org/api/v2/rubygems/{name}/versions/latest.json"  # implement me
+        return f"https://rubygems.org/api/v2/rubygems/{name}/versions/latest.json"
 
     def latest_version_parse(self, data: dict, name: str) -> str | None:
-        return data.get("version") or None  # implement me
+        # Adapt to your registry's actual response shape.
+        return data.get("version") or None
 
     def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
         # Override if any arguments need canonicalisation before entering the sandbox.
