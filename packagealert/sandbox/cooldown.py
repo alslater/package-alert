@@ -167,8 +167,11 @@ async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
         log.debug("Unexpected status %d from %s", resp.status_code, url)
         return None
 
+    parse_fn = getattr(lang, "latest_version_parse", None)
+    if not callable(parse_fn):
+        return None
     try:
-        return lang.latest_version_parse(resp.json(), name)  # type: ignore[union-attr]
+        return parse_fn(resp.json(), name)
     except Exception as exc:
         log.debug("Failed to parse latest version from %s: %s", url, exc)
         return None

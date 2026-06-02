@@ -274,7 +274,18 @@ class SandboxRunner:
         home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         argv = _resolve_real_binary(argv)
-        argv = _resolve_editable_paths(argv, cwd)
+        if ctx.parsed is not None:
+            lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+            if lang is not None:
+                prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
+                if callable(prepare_fn):
+                    argv = prepare_fn(argv, cwd)
+                extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
+                if callable(extra_ro_fn):
+                    home_ro.extend(extra_ro_fn(argv, cwd))
+                extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
+                if callable(extra_write_fn):
+                    ctx.write_dirs.extend(extra_write_fn(argv, cwd))
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -414,11 +425,13 @@ class SandboxRunner:
                 if not version:
                     lang_for_latest = lang_registry.for_ecosystem(ecosystem)
                     if lang_for_latest is not None:
-                        latest_url = lang_for_latest.latest_version_url(name)
-                        if latest_url is not None:
-                            version = await fetch_latest_version(latest_url, lang_for_latest, name)
-                            if version:
-                                self._console.print(f"[dim]Resolving latest version: {name}=={version}[/dim]")
+                        latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
+                        if callable(latest_url_fn):
+                            latest_url = latest_url_fn(name)
+                            if latest_url is not None:
+                                version = await fetch_latest_version(latest_url, lang_for_latest, name)
+                                if version:
+                                    self._console.print(f"[dim]Resolving latest version: {name}=={version}[/dim]")
                     if not version:
                         self._console.print(
                             f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
@@ -1257,30 +1270,6 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         suggested_env=pi.suggested_env,
     )
 
-
-
-def _resolve_editable_paths(argv: list[str], cwd: Path) -> list[str]:
-    """Resolve relative local paths after -e/--editable to absolute so bwrap
-    can locate them inside the sandbox (which mounts / read-only from the host
-    but requires absolute paths for bind mounts and exec targets)."""
-    result = list(argv)
-    i = 0
-    while i < len(result):
-        tok = result[i]
-        if tok in ("-e", "--editable") and i + 1 < len(result):
-            val = result[i + 1]
-            p = Path(val)
-            if not p.is_absolute() and not val.startswith(("git+", "hg+", "svn+", "bzr+")):
-                result[i + 1] = str((cwd / p).resolve())
-            i += 2
-            continue
-        if tok.startswith("--editable="):
-            val = tok[len("--editable="):]
-            p = Path(val)
-            if not p.is_absolute() and not val.startswith(("git+", "hg+", "svn+", "bzr+")):
-                result[i] = f"--editable={(cwd / p).resolve()}"
-        i += 1
-    return result
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:

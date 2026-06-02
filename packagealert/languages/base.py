@@ -153,6 +153,35 @@ class LanguageBase(Protocol):
     def publication_date_url(self, name: str, version: str) -> str | None:
         return None
 
+    def prepare_sandbox_argv(self, argv: list[str], cwd: "Path") -> list[str]:
+        """Pre-process argv before it is passed to the sandbox.
+
+        Called by the sandbox runner just before build_cmd. Language modules can
+        override to canonicalise arguments that the sandbox requires in a different
+        form (e.g. resolving relative paths to absolute). Default returns argv unchanged.
+        """
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
+        """Return additional paths to expose read-only inside the sandbox.
+
+        Called after prepare_sandbox_argv with the original argv and cwd. Use this
+        to expose paths referenced by argv that lie outside the project root and
+        would otherwise be hidden by the home tmpfs (e.g. local editable installs).
+        Default returns an empty list.
+        """
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
+        """Return additional paths to bind writable inside the sandbox.
+
+        Called after prepare_sandbox_argv with the original argv and cwd. Use this
+        to expose paths that the install process must write to (e.g. editable install
+        source directories where egg-info or build artifacts are written).
+        Default returns an empty list.
+        """
+        return []
+
     def latest_version_url(self, name: str) -> str | None:
         """Return a registry API URL that resolves the latest published version of
         a package. The response is parsed by latest_version_parse().

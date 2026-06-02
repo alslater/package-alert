@@ -528,6 +528,63 @@ class PythonLanguage:
             "pygments", "colorama", "tqdm", "rich", "typer", "pydantic-settings",
         ]
 
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        """Resolve relative -e/--editable paths to absolute for bwrap compatibility.
+
+        Preserves PEP 508 extras suffixes (e.g. '.[dev]', '../proj[extra]').
+        """
+        result = list(argv)
+        i = 0
+        while i < len(result):
+            tok = result[i]
+            if tok in ("-e", "--editable") and i + 1 < len(result):
+                result[i + 1] = self._abs_editable(result[i + 1], cwd)
+                i += 2
+                continue
+            if tok.startswith("--editable="):
+                val = tok[len("--editable="):]
+                result[i] = f"--editable={self._abs_editable(val, cwd)}"
+            i += 1
+        return result
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        """Editable install source dirs need to be writable for egg-info generation."""
+        paths: list[Path] = []
+        i = 0
+        while i < len(argv):
+            tok = argv[i]
+            if tok in ("-e", "--editable") and i + 1 < len(argv):
+                val = argv[i + 1]
+                i += 2
+            elif tok.startswith("--editable="):
+                val = tok[len("--editable="):]
+                i += 1
+            else:
+                i += 1
+                continue
+            if not val.startswith(("git+", "hg+", "svn+", "bzr+")):
+                bracket = val.find("[")
+                path_part = val[:bracket] if bracket != -1 else val
+                p = Path(path_part)
+                resolved = p if p.is_absolute() else (cwd / p).resolve()
+                if resolved.exists():
+                    paths.append(resolved)
+        return paths
+
+    @staticmethod
+    def _abs_editable(val: str, cwd: Path) -> str:
+        if val.startswith(("git+", "hg+", "svn+", "bzr+")):
+            return val
+        bracket = val.find("[")
+        if bracket != -1:
+            path_part, extras = val[:bracket], val[bracket:]
+        else:
+            path_part, extras = val, ""
+        p = Path(path_part)
+        if p.is_absolute():
+            return val
+        return str((cwd / p).resolve()) + extras
+
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
