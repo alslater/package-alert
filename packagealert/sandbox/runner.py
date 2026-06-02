@@ -290,7 +290,7 @@ class SandboxRunner:
                     try:
                         for p in extra_ro_fn(argv, cwd):
                             if _is_safe_sandbox_path(p, editable_roots):
-                                home_ro.append(p)
+                                home_ro.append(p.resolve())
                             else:
                                 log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
                                 self._print_editable_rejection(p, editable_roots)
@@ -301,7 +301,7 @@ class SandboxRunner:
                     try:
                         for p in extra_write_fn(argv, cwd):
                             if _is_safe_sandbox_path(p, editable_roots):
-                                ctx.write_dirs.append(p)
+                                ctx.write_dirs.append(p.resolve())
                             else:
                                 log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
                                 self._print_editable_rejection(p, editable_roots)
@@ -480,7 +480,7 @@ class SandboxRunner:
                             if latest_url is not None:
                                 version = await fetch_latest_version(latest_url, lang_for_latest, name)
                                 if version:
-                                    self._console.print(f"[dim]Resolving latest version: {name}=={version}[/dim]")
+                                    self._console.print(f"[dim]Resolving latest version: {lang_for_latest.serialise_package_spec(name, version)}[/dim]")
                     if not version:
                         self._console.print(
                             f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"

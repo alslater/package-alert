@@ -566,8 +566,9 @@ class PythonLanguage:
                 bracket = val.find("[")
                 path_part = val[:bracket] if bracket != -1 else val
                 p = Path(path_part)
-                resolved = p if p.is_absolute() else (cwd / p).resolve()
-                if resolved.exists():
+                resolved = p.resolve() if p.is_absolute() else (cwd / p).resolve()
+                # Only return paths outside cwd — the runner already binds cwd writable.
+                if resolved.exists() and not resolved.is_relative_to(cwd):
                     paths.append(resolved)
         return paths
 
