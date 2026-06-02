@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import tomllib
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
@@ -68,11 +68,14 @@ class HeuristicsConfig(BaseModel):
     top_packages_refresh_days: int = Field(7, ge=1)
 
 
+CooldownAction = Literal["allow", "warn", "prompt", "block"]
+
+
 class CooldownConfig(BaseModel):
     period_days: int = Field(7, ge=1)
-    on_new_medium_risk: str = "prompt"
-    on_new_low_risk: str = "warn"
-    non_interactive_escalation: str = "block"
+    on_new_medium_risk: CooldownAction = "prompt"
+    on_new_low_risk: CooldownAction = "warn"
+    non_interactive_escalation: CooldownAction = "block"
 
 
 class SandboxConfig(BaseModel):

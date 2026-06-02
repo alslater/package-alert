@@ -27,6 +27,7 @@ from packagealert.storage.db import (
     get_cooldown_cleared_at,
     get_publication_date,
     open_db,
+    store_cooldown_cleared,
     store_publication_date,
 )
 
@@ -325,7 +326,6 @@ class SandboxRunner:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
 
         if pending_clears:
-            from packagealert.storage.db import open_db, store_cooldown_cleared
             db = await open_db()
             try:
                 for eco, pkg_name, ver in pending_clears:
@@ -421,6 +421,10 @@ class SandboxRunner:
                     continue
                 url = lang.publication_date_url(pkg.name, pkg.version)
                 if url is None:
+                    # Ecosystem has not opted into cooldown — skip entirely.
+                    # The typosquat check is also skipped: without a publication
+                    # date there is no age to enforce a cooldown period against,
+                    # so a decision cannot be made.
                     continue
 
                 cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
@@ -470,7 +474,7 @@ class SandboxRunner:
 
         if blocked:
             for d in blocked:
-                self._console.print(f"[red]x  {d.package.name}=={d.package.version}: {d.reason}[/red]")
+                self._console.print(f"[red]✗ {d.package.name}=={d.package.version}: {d.reason}[/red]")
                 eco_flag = f" --ecosystem {d.package.ecosystem}" if d.package.ecosystem.lower() != "pypi" else ""
                 self._console.print(f"[dim]  To pre-clear: package-alert cooldown allow {d.package.name} {d.package.version}{eco_flag}[/dim]")
             return False

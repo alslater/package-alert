@@ -54,7 +54,7 @@ def decide(
 
     risk_label = f", typosquat score: {risk_score}" if risk_score > 0 else ""
     return CooldownDecision(
-        action=action,  # type: ignore[arg-type]
+        action=action,
         reason=f"Package published {age_days:.1f} days ago (cooldown: {cfg.period_days}d{risk_label})",
         package=package,
         age_days=age_days,

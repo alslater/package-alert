@@ -58,11 +58,20 @@ def install_shell_rc(*, rc_path: Path, shell: str) -> None:
 
 
 def _pa_executable() -> str:
-    """Return the absolute path to the package-alert binary running right now."""
+    """Return the absolute path to the package-alert CLI entry point.
+
+    Prefers sys.argv[0] when it resolves to the actual CLI binary (i.e. its
+    name is 'package-alert' or 'pa'). Falls back to shutil.which when invoked
+    indirectly (e.g. python -m packagealert.cli.app), where sys.argv[0] would
+    be a .py file rather than an executable script.
+    """
     import sys
-    # sys.argv[0] is always the currently-executing binary — use it directly
-    # rather than shutil.which, which may find a different installation on PATH.
-    return str(Path(sys.argv[0]).resolve())
+    p = Path(sys.argv[0]).resolve()
+    if p.name in ("package-alert", "pa") and p.is_file():
+        return str(p)
+    # Indirect invocation — find the installed entry point on PATH.
+    found = shutil.which("package-alert") or shutil.which("pa")
+    return found if found else str(p)
 
 
 def _write_shim(path: Path) -> None:
@@ -310,7 +319,7 @@ def cooldown_allow(
     package: str = typer.Argument(..., help="Package name."),
     version: str = typer.Argument(..., help="Package version."),
     ecosystem: str = typer.Option("PyPI", help="Ecosystem (PyPI, npm, Packagist)."),
-    config: Path = typer.Option(None, "--config", "-c"),
+    config: Path | None = typer.Option(None, "--config", "-c"),
 ) -> None:
     """Pre-clear a package version to bypass cooldown."""
     import asyncio
