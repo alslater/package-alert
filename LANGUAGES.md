@@ -185,15 +185,17 @@ class LanguageBase(Protocol):
     def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Additional paths to expose read-only inside the sandbox.
 
-        Override to expose paths referenced by argv that lie outside the project root
-        and would otherwise be hidden by the home tmpfs.
+        Called with the prepared argv (after prepare_sandbox_argv). Override to expose
+        paths referenced by argv that lie outside the project root and would otherwise
+        be hidden by the home tmpfs.
         Default returns []."""
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Additional paths to bind writable inside the sandbox.
 
-        Override to expose paths the install process must write to, e.g. editable
-        install source directories where egg-info or build artifacts are written.
+        Called with the prepared argv (after prepare_sandbox_argv). Override to expose
+        paths the install process must write to, e.g. editable install source directories
+        where egg-info or build artifacts are written.
         Default returns []."""
 
     def package_manager_names(self) -> list[str]:

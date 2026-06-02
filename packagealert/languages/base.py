@@ -165,7 +165,7 @@ class LanguageBase(Protocol):
     def sandbox_extra_ro_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
         """Return additional paths to expose read-only inside the sandbox.
 
-        Called after prepare_sandbox_argv with the original argv and cwd. Use this
+        Called with the prepared argv (after prepare_sandbox_argv) and cwd. Use this
         to expose paths referenced by argv that lie outside the project root and
         would otherwise be hidden by the home tmpfs (e.g. local editable installs).
         Default returns an empty list.
@@ -175,7 +175,7 @@ class LanguageBase(Protocol):
     def sandbox_extra_write_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
         """Return additional paths to bind writable inside the sandbox.
 
-        Called after prepare_sandbox_argv with the original argv and cwd. Use this
+        Called with the prepared argv (after prepare_sandbox_argv) and cwd. Use this
         to expose paths that the install process must write to (e.g. editable install
         source directories where egg-info or build artifacts are written).
         Default returns an empty list.
