@@ -25,6 +25,8 @@
 
 ## Phase 3 (Planned)
 - [x] yarn + pnpm process monitoring, lockfile parsing, and lockfile-hint deferred scanning
+- [x] Shadow tools: shell function integration (`setup shell`) and project-local shims (`setup project`) for transparent interception of pip, npm, uv, etc. — including `python -m pip` via interpreter-aware shims
+- [x] Cooldown policy: block/prompt/warn/allow installs of recently-published packages; per-project config; `cooldown allow` for agent pre-clearance
 - [ ] Typosquatting and heuristic risk analysis during `scan-project` and `package-alert run` pre-flight
 - [ ] poetry + pdm support
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)

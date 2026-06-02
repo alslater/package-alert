@@ -153,6 +153,29 @@ class LanguageBase(Protocol):
         Used when the cache is empty and the live fetch has failed. Names must
         be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
 
+    # ── Publication date (cooldown policy) ────────────────────────────────
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        """Registry API URL to fetch when this package version was first published.
+
+        Return None to opt out of cooldown enforcement for this ecosystem.
+        Default implementation returns None."""
+
+    def package_manager_names(self) -> list[str]:
+        """Pure package manager binary names (pip, npm, uv, composer, …).
+
+        Used by `setup shell` to generate shell functions and by `setup project`
+        to write plain pass-through shims. Must NOT include runtime interpreters
+        (python, node, php) — those are handled by interpreter_names().
+        Default implementation returns []."""
+
+    def interpreter_names(self) -> list[str]:
+        """Runtime interpreter names (python, python3, node, php, …).
+
+        `setup project` writes a special shim for these that intercepts
+        `-m pip`-style invocations and routes them through package-alert,
+        while passing all other arguments straight to the real interpreter.
+        Default implementation returns []."""
+
     # ── Snapshots ──────────────────────────────────────────────────────────
     def snapshot(self, install_root: Path) -> Snapshot:
         """Capture installed-package state before an install runs."""
@@ -354,4 +377,4 @@ pip uninstall package-alert-rust
 
 | Version | What changed |
 |---------|-------------|
-| 1 | Initial contract. All methods listed above. |
+| 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, and `interpreter_names` added as optional methods with default no-op implementations (no version bump required). |

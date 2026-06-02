@@ -71,6 +71,7 @@ class ProcessInstall:
     venv_exe: str | None = None
     lockfile_hint: str | None = None
     req_files: list[str] = field(default_factory=list)
+    global_install: bool = False
 
 
 @runtime_checkable
@@ -148,6 +149,27 @@ class LanguageBase(Protocol):
         """Static baseline used when the cache is empty and fetch has failed.
         Names must be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
         ...
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return None
+
+    def package_manager_names(self) -> list[str]:
+        """Executable names that are pure package managers (pip, npm, uv, etc.).
+
+        Used by setup-shell and setup-project to determine which binaries to shim
+        and which shell functions to generate. Must NOT include runtime interpreters
+        (python, node, php) — those are handled separately via interpreter_names().
+        """
+        return []
+
+    def interpreter_names(self) -> list[str]:
+        """Runtime interpreter names (python, python3, node, php, etc.) that may
+        invoke package managers via `-m pip` style invocations.
+
+        setup-project writes a special shim for these that only intercepts package
+        manager sub-invocations and passes everything else through unchanged.
+        """
+        return []
+
     def snapshot(self, install_root: Path) -> Snapshot: ...
     def detect_post_install(self, before: Snapshot, after: Snapshot) -> list[PackageSpec]: ...
 

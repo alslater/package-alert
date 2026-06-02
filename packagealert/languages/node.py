@@ -179,8 +179,9 @@ class NodeLanguage:
         return ProcessInstall(
             manager=result.manager,
             packages=specs,
-            defer_to_lockfile=True,
+            defer_to_lockfile=not result.global_install,
             lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
+            global_install=result.global_install,
         )
 
     # ------------------------------------------------------------------
@@ -442,6 +443,16 @@ class NodeLanguage:
             "next", "nuxt", "vue", "angular", "svelte", "gatsby", "webpack-cli",
             "babel-loader", "css-loader", "style-loader", "mini-css-extract-plugin",
         ]
+
+    def package_manager_names(self) -> list[str]:
+        return ["npm", "yarn", "pnpm"]
+
+    def interpreter_names(self) -> list[str]:
+        return ["node", "nodejs"]
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        # Package-level document contains time dict: {"version": "ISO-timestamp", ...}
+        return f"https://registry.npmjs.org/{name}"
 
     # ------------------------------------------------------------------
     # snapshot

@@ -23,12 +23,20 @@ from packagealert.parsers.process_args import (
 )
 from packagealert.sandbox.bwrap import available as bwrap_available
 from packagealert.sandbox.bwrap import build_cmd
+from packagealert.storage.db import (
+    get_cooldown_cleared_at,
+    get_publication_date,
+    open_db,
+    store_cooldown_cleared,
+    store_publication_date,
+)
 
 if TYPE_CHECKING:
     from packagealert.config import AppConfig
 
 log = logging.getLogger(__name__)
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+_PA_REAL_SUFFIX = ".__pa_real"
 
 _SHELL_NAMES: frozenset[str] = frozenset({
     "bash", "zsh", "sh", "fish", "dash", "ksh", "csh", "tcsh",
@@ -111,9 +119,23 @@ class SandboxRunner:
             return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change)
 
         parsed = _try_parse(argv)
+
+        if parsed is None:
+            # Unrecognised command (e.g. bare `pip`, `npm --version`) — nothing to
+            # sandbox or scan, so exec the real binary directly.
+            real_argv = _resolve_real_binary(argv)
+            os.execvp(real_argv[0], real_argv)
+            return 0  # unreachable; satisfies type checker
+
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
 
-        self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
+        self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
+
+        is_global = parsed is not None and parsed.global_install
+        if is_global:
+            self._console.print("[dim]Global install: pre-flight check only (not sandboxed)[/dim]")
+        else:
+            self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         if not self._check_venv_scope(parsed, cwd):
             return 1
@@ -125,8 +147,16 @@ class SandboxRunner:
             self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
+        if not await self._cooldown_check(ctx):
+            return 1
+
         if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
+
+        if is_global:
+            real_argv = _resolve_real_binary(argv)
+            os.execvp(real_argv[0], real_argv)
+            return 0  # unreachable
 
         _resolve_targets(ctx)
 
@@ -197,6 +227,7 @@ class SandboxRunner:
         if not self._check_extra_tmpfs(extra_tmpfs):
             return 1
 
+        argv = _resolve_real_binary(argv)
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -291,6 +322,94 @@ class SandboxRunner:
                 ok = False
         return ok
 
+    async def _cooldown_check(self, ctx: _Context) -> bool:
+        """Return False if any package is blocked by cooldown policy."""
+        import sys
+        import time as _time
+
+        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_publication_date
+
+        if ctx.parsed is None or not ctx.parsed.packages:
+            return True
+
+        cfg = self._cfg.sandbox.cooldown
+        is_tty = sys.stdin.isatty()
+        db = await open_db()
+
+        blocked: list = []
+        warned: list = []
+
+        try:
+            for pkg_str in ctx.parsed.packages:
+                from packagealert.parsers.process_args import parse_package_spec
+                from packagealert.languages.base import PackageSpec
+
+                ecosystem = ctx.parsed.ecosystem.lower()
+                name, version = parse_package_spec(pkg_str, ecosystem)
+                if not version:
+                    continue
+
+                pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
+
+                lang = lang_registry.for_ecosystem(ecosystem)
+                if lang is None:
+                    continue
+                url = lang.publication_date_url(pkg.name, pkg.version)
+                if url is None:
+                    continue
+
+                cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
+                if cached == "miss":
+                    fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
+                    if isinstance(fetched, float):
+                        await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
+                    elif fetched == "not_found":
+                        await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=None)
+                    pub_ts = fetched if isinstance(fetched, float) else None
+                elif cached == "not_found":
+                    pub_ts = None
+                else:
+                    pub_ts = cached  # float
+
+                age_days = (_time.time() - pub_ts) / 86400 if isinstance(pub_ts, float) else None
+                cleared_at = await get_cooldown_cleared_at(db, ecosystem=ecosystem, package=name, version=version)
+
+                risk_score = 0  # heuristics not yet run; use baseline
+
+                decision = decide_with_cleared(
+                    pkg,
+                    age_days=age_days,
+                    risk_score=risk_score,
+                    cfg=cfg,
+                    is_tty=is_tty,
+                    cleared_at=cleared_at,
+                )
+
+                if decision.action == "block":
+                    blocked.append(decision)
+                elif decision.action == "warn":
+                    warned.append(decision)
+                elif decision.action == "prompt":
+                    from rich.prompt import Confirm
+                    self._console.print(f"[yellow]  {pkg.name}=={pkg.version}: {decision.reason}[/yellow]")
+                    if not Confirm.ask("Install anyway?", default=False):
+                        blocked.append(decision)
+                    else:
+                        await store_cooldown_cleared(db, ecosystem=ecosystem, package=name, version=version)
+        finally:
+            await db.close()
+
+        for d in warned:
+            self._console.print(f"[yellow]  {d.package.name}=={d.package.version}: {d.reason}[/yellow]")
+
+        if blocked:
+            for d in blocked:
+                self._console.print(f"[red]x  {d.package.name}=={d.package.version}: {d.reason}[/red]")
+            self._console.print("[dim]To pre-clear: package-alert cooldown allow <package> <version>[/dim]")
+            return False
+
+        return True
+
     async def _run_shell(
         self,
         argv: list[str],
@@ -309,6 +428,7 @@ class SandboxRunner:
         the session.
         """
         shell_name = Path(argv[0]).name
+        self._console.print(f"[bold cyan][package-alert][/bold cyan] {' '.join(argv)}")
         self._console.print(f"\n[bold]Sandbox shell:[/bold] {' '.join(argv)}")
 
         combined_extra = list(self._cfg.sandbox.extra_env)
@@ -1044,7 +1164,21 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         venv_exe=pi.venv_exe,
         req_files=pi.req_files,
         lockfile_hint=pi.lockfile_hint,
+        global_install=pi.global_install,
     )
+
+
+def _resolve_real_binary(argv: list[str]) -> list[str]:
+    """Replace argv[0] with its .__pa_real original if a shim is installed."""
+    if not argv:
+        return argv
+    tool_path = shutil.which(argv[0])
+    if tool_path is None:
+        return argv
+    real = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+    if real.exists():
+        return [str(real)] + argv[1:]
+    return argv
 
 
 def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:

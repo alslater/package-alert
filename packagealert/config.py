@@ -68,9 +68,17 @@ class HeuristicsConfig(BaseModel):
     top_packages_refresh_days: int = Field(7, ge=1)
 
 
+class CooldownConfig(BaseModel):
+    period_days: int = Field(7, ge=1)
+    on_new_medium_risk: str = "prompt"
+    on_new_low_risk: str = "warn"
+    non_interactive_escalation: str = "block"
+
+
 class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
+    cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
 
     @field_validator("extra_tmpfs")
     @classmethod

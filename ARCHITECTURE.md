@@ -59,7 +59,7 @@ Every language module implements the `LanguageBase` protocol (`languages/base.py
 |--------|------|---------|
 | `name` | `str` | Canonical identifier used as registry key (`"python"`, `"node"`, `"php"`) |
 | `ecosystems` | `list[str]` | OSV ecosystem names (e.g. `["PyPI"]`, `["npm"]`) |
-| `process_names` | `list[str]` | Executable names the process monitor watches (e.g. `["pip", "pip3", "uv"]`) |
+| `process_names` | `list[str]` | Executable names the process monitor watches (e.g. `["pip", "pip3", "uv", "python", "python3"]`) |
 | `contract_version` | `int` | Must equal `CURRENT_CONTRACT_VERSION`; older plugins get shims, newer ones a warning |
 | `author` / `repository` | `str` | Provenance metadata shown by `languages info` |
 | `parse_process_install(argv)` | method | Parses a raw process argv into `ProcessInstall`; returns `None` if unrecognised |
@@ -75,6 +75,9 @@ Every language module implements the `LanguageBase` protocol (`languages/base.py
 | `top_packages_url()` | method | URL for fetching the ranked top-packages list (used by typosquat detection) |
 | `fetch_top_packages(client, url)` | async method | Fetches and normalises the ranked list |
 | `top_packages_fallback()` | method | Static fallback list when fetch and cache both fail |
+| `publication_date_url(name, version)` | method | Registry API URL to fetch a package version's publish timestamp; `None` to skip cooldown for this ecosystem |
+| `package_manager_names()` | method | Pure package manager binaries to shim and wrap as shell functions (e.g. `["pip", "uv"]`). Must NOT include runtime interpreters. |
+| `interpreter_names()` | method | Runtime interpreter names (e.g. `["python", "python3"]`) that get a special shim intercepting `-m pip`-style invocations |
 
 ### `ProcessInstall` and `lockfile_hint`
 
@@ -125,8 +128,10 @@ Every registry lookup (`for_process`, `for_ecosystem`, `for_lockfile`) and every
 | `cli/app.py` | Typer CLI commands, log config routing (daemon vs. CLI log) |
 | `cli/status.py` | Daemon state gathering and rendering |
 | `cli/languages_cmd.py` | `languages list` and `languages info` introspection commands |
-| `sandbox/runner.py` | bubblewrap sandbox orchestration, SSH VCS detection, `--no-change` dry-run |
+| `sandbox/runner.py` | bubblewrap sandbox orchestration, cooldown policy check, SSH VCS detection, `--no-change` dry-run, `.__pa_real` binary resolution |
 | `sandbox/bwrap.py` | bwrap command builder with layered mount strategy |
+| `sandbox/cooldown.py` | Publication date fetch, cooldown decision engine (`decide`, `decide_with_cleared`), per-ecosystem response parsing |
+| `cli/setup_cmd.py` | `setup shell` / `setup project` / `cooldown allow` commands; shell snippet generation; project shim install/uninstall |
 | `languages/base.py` | `LanguageBase` protocol, shared utilities (`normalise_package_name`, `MAX_TOP_PACKAGES`) |
 | `languages/python.py` | Python/pip/uv/pipenv language module |
 | `languages/node.py` | Node.js/npm/yarn/pnpm language module |
@@ -171,5 +176,24 @@ CREATE TABLE top_packages_cache (
     fetched_at    REAL NOT NULL,
     package_count INTEGER NOT NULL,
     packages      TEXT NOT NULL   -- JSON array of normalised names
+);
+
+-- Publication dates fetched from registry APIs (cooldown policy)
+CREATE TABLE publication_cache (
+    ecosystem    TEXT NOT NULL,
+    package      TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    fetched_at   REAL NOT NULL,
+    published_at REAL,            -- NULL means HTTP 404 (package not found)
+    PRIMARY KEY (ecosystem, package, version)
+);
+
+-- User confirmations for within-cooldown installs
+CREATE TABLE cooldown_cleared (
+    ecosystem  TEXT NOT NULL,
+    package    TEXT NOT NULL,
+    version    TEXT NOT NULL,
+    cleared_at REAL NOT NULL,
+    PRIMARY KEY (ecosystem, package, version)
 );
 ```

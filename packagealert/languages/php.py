@@ -202,6 +202,18 @@ class PhpLanguage:
             "aws/aws-sdk-php",
         ]
 
+    def package_manager_names(self) -> list[str]:
+        return ["composer"]
+
+    def interpreter_names(self) -> list[str]:
+        return ["php", "php8", "php7"]
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        if "/" not in name:
+            return None
+        vendor, package = name.split("/", 1)
+        return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
+
     def snapshot(self, install_root: Path) -> Snapshot:
         data: dict[str, str] = {}
         vendor = install_root / "vendor"

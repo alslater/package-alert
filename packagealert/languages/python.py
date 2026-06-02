@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tomllib
@@ -289,6 +290,12 @@ class PythonLanguage:
                 "pipenv": "Pipfile.lock",
                 "uv-lock": "uv.lock",
             }
+            # pip installing outside a venv (--user or no VIRTUAL_ENV) targets
+            # ~/.local or system site-packages — outside sandbox write targets.
+            global_install = (
+                result.manager == "pip"
+                and not os.environ.get("VIRTUAL_ENV")
+            ) or "--user" in args
             return ProcessInstall(
                 manager=result.manager,
                 packages=specs,
@@ -296,6 +303,7 @@ class PythonLanguage:
                 venv_exe=result.venv_exe,
                 lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
                 req_files=result.req_files,
+                global_install=global_install,
             )
         return None
 
@@ -509,6 +517,15 @@ class PythonLanguage:
             "elasticsearch", "twisted", "werkzeug", "jinja2", "markupsafe", "itsdangerous",
             "pygments", "colorama", "tqdm", "rich", "typer", "pydantic-settings",
         ]
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return f"https://pypi.org/pypi/{name}/{version}/json"
+
+    def package_manager_names(self) -> list[str]:
+        return ["pip", "pip3", "uv", "pipenv"]
+
+    def interpreter_names(self) -> list[str]:
+        return ["python", "python3"]
 
     # ------------------------------------------------------------------
     # snapshot

@@ -342,3 +342,41 @@ class TestForLockfile:
 
     def test_returns_none_for_unknown_file(self):
         assert reg.for_lockfile("unknown-lockfile.xyz") is None
+
+
+def test_publication_date_url_python():
+    from packagealert.languages import registry
+    registry.load()
+    lang = registry.for_ecosystem("PyPI")
+    assert lang is not None
+    url = lang.publication_date_url("requests", "2.31.0")
+    assert url == "https://pypi.org/pypi/requests/2.31.0/json"
+
+
+def test_publication_date_url_node():
+    from packagealert.languages import registry
+    registry.load()
+    lang = registry.for_ecosystem("npm")
+    assert lang is not None
+    url = lang.publication_date_url("lodash", "4.17.21")
+    assert url == "https://registry.npmjs.org/lodash"
+
+
+def test_publication_date_url_php():
+    from packagealert.languages import registry
+    registry.load()
+    lang = registry.for_ecosystem("Packagist")
+    assert lang is not None
+    url = lang.publication_date_url("monolog/monolog", "3.5.0")
+    assert url == "https://repo.packagist.org/p2/monolog/monolog.json"
+
+
+def test_publication_date_url_base_default_returns_none():
+    from packagealert.languages.base import LanguageBase
+    # The default implementation on LanguageBase must return None
+    # Use a mock that doesn't override publication_date_url
+    from unittest.mock import MagicMock
+    mock_lang = MagicMock(spec=LanguageBase)
+    # Call the actual default method from LanguageBase directly
+    result = LanguageBase.publication_date_url(mock_lang, "requests", "1.0.0")
+    assert result is None

@@ -41,6 +41,7 @@ class ParsedInstall:
     venv_exe: str | None = None  # path used to derive site-packages
     req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
     lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
+    global_install: bool = False
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -418,7 +419,8 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     subcmd = args[0]
     if subcmd in ("install", "i", "add", "ci"):
         packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="npm", packages=packages, ecosystem="npm")
+        is_global = "-g" in args or "--global" in args
+        return ParsedInstall(manager="npm", packages=packages, ecosystem="npm", global_install=is_global)
     if subcmd in ("update", "up", "upgrade", "dedupe"):
         return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
     if subcmd in ("uninstall", "remove", "rm", "un", "r"):

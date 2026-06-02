@@ -48,6 +48,20 @@ critical_threshold = 70
                       # user namespace.  Example:
                       #   extra_tmpfs = ["/etc/ssh/other_config.d"]
 
+[sandbox.cooldown]
+# Packages published more recently than period_days are subject to the cooldown policy.
+# period_days = 7
+
+# Action when a package is within the cooldown period and has medium or unknown risk.
+# One of: "prompt", "warn", "block", "allow"
+# on_new_medium_risk = "prompt"
+
+# Action when a package is within the cooldown period and has low risk.
+# on_new_low_risk = "warn"
+
+# In non-interactive contexts (no TTY — coding agents, CI), escalate "prompt" to this action.
+# non_interactive_escalation = "block"
+
 [scheduler]
 enabled = true
 daily_hour = 2     # hour of day (0-23) to run daily scans
