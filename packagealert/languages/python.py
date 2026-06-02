@@ -290,11 +290,20 @@ class PythonLanguage:
                 "pipenv": "Pipfile.lock",
                 "uv-lock": "uv.lock",
             }
-            # pip installing outside a venv (--user or no VIRTUAL_ENV) targets
-            # ~/.local or system site-packages — outside sandbox write targets.
+            # If argv[0] is inside a venv's bin/ but VIRTUAL_ENV is not set
+            # (e.g. venv not activated, called directly via shim), derive it so
+            # the sandbox runner and pip both see the correct venv.
+            suggested_env: dict[str, str] = {}
+            if result.venv_exe and not os.environ.get("VIRTUAL_ENV"):
+                venv_bin = Path(result.venv_exe).resolve().parent
+                venv_root = venv_bin.parent
+                if (venv_root / "pyvenv.cfg").exists():
+                    suggested_env["VIRTUAL_ENV"] = str(venv_root)
+
+            virtual_env = suggested_env.get("VIRTUAL_ENV") or os.environ.get("VIRTUAL_ENV")
             global_install = (
                 result.manager == "pip"
-                and not os.environ.get("VIRTUAL_ENV")
+                and not virtual_env
             ) or "--user" in args
             return ProcessInstall(
                 manager=result.manager,
@@ -304,6 +313,7 @@ class PythonLanguage:
                 lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
                 req_files=result.req_files,
                 global_install=global_install,
+                suggested_env=suggested_env,
             )
         return None
 

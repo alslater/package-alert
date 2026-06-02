@@ -382,6 +382,27 @@ def test_python_c_not_recognised():
     assert result is None
 
 
+def test_python_combined_short_flag_m_pip():
+    # python3 -Wd -m pip install foo  — -Wd is -W default (combined form)
+    result = parse_pip_args(["python3", "-Wd", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
+def test_python_long_option_m_pip():
+    # python3 --check-hash-based-pycs always -m pip install foo
+    result = parse_pip_args(["python3", "--check-hash-based-pycs", "always", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
+def test_python_long_option_equals_m_pip():
+    # python3 --check-hash-based-pycs=always -m pip install foo
+    result = parse_pip_args(["python3", "--check-hash-based-pycs=always", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
 # ---------------------------------------------------------------------------
 # parse_composer_args
 # ---------------------------------------------------------------------------

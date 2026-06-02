@@ -9,7 +9,7 @@ import typer
 
 from packagealert.languages import registry as lang_registry
 
-PA_FINGERPRINT = "package-alert"  # present in the absolute path embedded in every shim
+PA_FINGERPRINT = "# __pa_shim__"  # sentinel written into every shim by _write_shim
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
 PA_BLOCK_END = "# END package-alert shell integration"
 PA_REAL_SUFFIX = ".__pa_real"
@@ -69,7 +69,7 @@ def _write_shim(path: Path) -> None:
     pa = _pa_executable()
     # Pass $0 (the full shim path) so the runner can locate the .__pa_real sibling
     # and derive VIRTUAL_ENV even when the venv is not activated.
-    path.write_text(f'#!/bin/sh\nexec {pa} run "$0" "$@"\n')
+    path.write_text(f'#!/bin/sh\n{PA_FINGERPRINT}\nexec {pa} run "$0" "$@"\n')
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -176,6 +176,16 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
             link_target = original.parent / os.readlink(original)
             if link_target.parent == original.parent:
                 return  # symlink within bin dir — target shim covers it
+        # Check for inconsistent state: if the file already contains our fingerprint
+        # but .__pa_real is missing, renaming it would make a shim-of-a-shim chain.
+        try:
+            content = original.read_text(errors="strict")
+            if PA_FINGERPRINT in content:
+                typer.echo(f"  warning: {original} looks like a package-alert shim but {real.name} is missing — inconsistent state, skipping", err=True)
+                typer.echo(f"  to fix: remove {original} and reinstall the interpreter, then re-run 'package-alert setup project'", err=True)
+                return
+        except (UnicodeDecodeError, OSError):
+            pass  # ELF binary or unreadable — safe to rename
         # Real binary: rename and install the shim.
         original.rename(real)
         _write_interpreter_shim(original)

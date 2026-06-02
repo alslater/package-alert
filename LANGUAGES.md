@@ -272,6 +272,30 @@ class RubyLanguage:
     def top_packages_fallback(self) -> list[str]:
         return ["rails", "sinatra", "devise", "pundit", "rspec"]
 
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        # Return the registry API URL for the publication date of this version.
+        # Used by the cooldown policy. Return None to opt out.
+        return f"https://rubygems.org/api/v1/versions/{name}.json"  # implement me
+
+    def package_manager_names(self) -> list[str]:
+        # Binaries to wrap as shell functions and shim in project bin dirs.
+        return ["gem", "bundle", "bundler"]
+
+    def project_shim_names(self) -> list[str]:
+        # Subset of package_manager_names() to shim in project bin dirs.
+        # Exclude tools that manage global state or self-update.
+        return ["bundle", "bundler"]
+
+    def interpreter_names(self) -> list[str]:
+        # Runtime interpreter names that may invoke package managers indirectly.
+        # Ruby has no standard -m style invocation, so this is empty.
+        return []
+
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        # Return bin/ directories within root that contain this language's tools.
+        p = root / "vendor" / "bundle" / "bin"
+        return [p] if p.is_dir() else []
+
     def snapshot(self, install_root: Path) -> Snapshot:
         return Snapshot({})
 

@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 
-PA_FINGERPRINT = "package-alert run"
+PA_FINGERPRINT = "# __pa_shim__"
 PA_REAL_SUFFIX = ".__pa_real"
 
 

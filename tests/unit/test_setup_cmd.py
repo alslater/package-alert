@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 
 
-PA_FINGERPRINT = "package-alert run"
+PA_FINGERPRINT = "# __pa_shim__"
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
 PA_BLOCK_END = "# END package-alert shell integration"
 
@@ -25,7 +25,7 @@ class TestSetupShellSnippet:
         from packagealert.cli.setup_cmd import generate_shell_snippet
         snippet = generate_shell_snippet(shell="bash")
         assert "pip()" in snippet
-        assert PA_FINGERPRINT in snippet
+        assert "package-alert run" in snippet
 
     def test_snippet_contains_npm_function(self):
         from packagealert.cli.setup_cmd import generate_shell_snippet

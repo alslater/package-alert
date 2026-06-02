@@ -27,7 +27,6 @@ from packagealert.storage.db import (
     get_cooldown_cleared_at,
     get_publication_date,
     open_db,
-    store_cooldown_cleared,
     store_publication_date,
 )
 
@@ -120,6 +119,12 @@ class SandboxRunner:
 
         parsed = _try_parse(argv)
 
+        # Apply any environment variables suggested by the language module (e.g.
+        # VIRTUAL_ENV derived from a venv shim path in python.py).
+        if parsed is not None:
+            for key, value in parsed.suggested_env.items():
+                os.environ.setdefault(key, value)
+
         if parsed is None:
             # Unrecognised command (e.g. bare `pip`, `npm --version`) — nothing to
             # sandbox or scan, so exec the real binary directly.
@@ -133,7 +138,7 @@ class SandboxRunner:
                 if not real_sibling.exists():
                     try:
                         content = Path(tool_path).read_text(errors="strict")
-                        if "package-alert run" in content:
+                        if "# __pa_shim__" in content:
                             self._console.print(
                                 f"[red]✗ {argv[0]} is a package-alert shim but "
                                 f"{argv[0]}{_PA_REAL_SUFFIX} is missing — infinite recursion prevented.[/red]"
@@ -160,19 +165,7 @@ class SandboxRunner:
         real_argv = _resolve_real_binary(argv)
         via_project_shim = real_argv is not argv
         via_shim = via_project_shim or bool(os.environ.get("_PA_VIA_SHELL"))
-        is_global = parsed.global_install and not via_shim
-
-        # When invoked through a project-local shim, the .__pa_real binary's
-        # shebang carries its venv but VIRTUAL_ENV may not be set (e.g. venv not
-        # activated). Derive it from the shim location so pip and the sandbox
-        # runner both see the correct venv.
-        if via_project_shim and not os.environ.get("VIRTUAL_ENV"):
-            # argv[0] is the full shim path (e.g. /path/to/venv/bin/pip).
-            # The venv root is one level up from bin/.
-            shim_bin = Path(argv[0]).resolve().parent
-            venv_root = shim_bin.parent
-            if (venv_root / "pyvenv.cfg").exists():
-                os.environ["VIRTUAL_ENV"] = str(venv_root)
+        is_global = parsed.global_install
 
         if via_shim:
             self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
@@ -191,8 +184,10 @@ class SandboxRunner:
             self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
-        if not await self._cooldown_check(ctx):
+        cooldown_result = await self._cooldown_check(ctx)
+        if cooldown_result is False:
             return 1
+        pending_clears = cooldown_result  # list of (ecosystem, name, version) to write on success
 
         if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
@@ -329,6 +324,15 @@ class SandboxRunner:
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
 
+        if pending_clears:
+            from packagealert.storage.db import open_db, store_cooldown_cleared
+            db = await open_db()
+            try:
+                for eco, pkg_name, ver in pending_clears:
+                    await store_cooldown_cleared(db, ecosystem=eco, package=pkg_name, version=ver)
+            finally:
+                await db.close()
+
         return 0
 
     # ------------------------------------------------------------------
@@ -372,8 +376,11 @@ class SandboxRunner:
                 ok = False
         return ok
 
-    async def _cooldown_check(self, ctx: _Context) -> bool:
-        """Return False if any package is blocked by cooldown policy."""
+    async def _cooldown_check(self, ctx: _Context) -> list[tuple[str, str, str]] | bool:
+        """Check cooldown policy. Returns False if blocked, True if no prompts,
+        or a list of (ecosystem, name, version) tuples for packages the user
+        confirmed at the prompt — to be written to cooldown_cleared after a
+        successful install."""
         import sys
         import time as _time
 
@@ -394,6 +401,7 @@ class SandboxRunner:
         detector = TyposquatDetector(top_cache)
 
         blocked: list = []
+        pending_clears: list[tuple[str, str, str]] = []
         warned: list = []
 
         try:
@@ -453,7 +461,7 @@ class SandboxRunner:
                     if not Confirm.ask("Install anyway?", default=False):
                         blocked.append(decision)
                     else:
-                        await store_cooldown_cleared(db, ecosystem=ecosystem, package=name, version=version)
+                        pending_clears.append((ecosystem, name, version))
         finally:
             await db.close()
 
@@ -463,10 +471,11 @@ class SandboxRunner:
         if blocked:
             for d in blocked:
                 self._console.print(f"[red]x  {d.package.name}=={d.package.version}: {d.reason}[/red]")
-            self._console.print("[dim]To pre-clear: package-alert cooldown allow <package> <version>[/dim]")
+                eco_flag = f" --ecosystem {d.package.ecosystem}" if d.package.ecosystem.lower() != "pypi" else ""
+                self._console.print(f"[dim]  To pre-clear: package-alert cooldown allow {d.package.name} {d.package.version}{eco_flag}[/dim]")
             return False
 
-        return True
+        return pending_clears
 
     async def _run_shell(
         self,
@@ -1224,7 +1233,9 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         req_files=pi.req_files,
         lockfile_hint=pi.lockfile_hint,
         global_install=pi.global_install,
+        suggested_env=pi.suggested_env,
     )
+
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:

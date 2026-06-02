@@ -72,6 +72,7 @@ class ProcessInstall:
     lockfile_hint: str | None = None
     req_files: list[str] = field(default_factory=list)
     global_install: bool = False
+    suggested_env: dict[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable

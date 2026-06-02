@@ -184,6 +184,30 @@ class CargoLanguage:
         return ["CARGO_HOME", "CARGO_REGISTRY_TOKEN", "RUSTUP_HOME"]
 
     # ------------------------------------------------------------------
+    # Shadow tools (setup shell / setup project)
+    # ------------------------------------------------------------------
+
+    def package_manager_names(self) -> list[str]:
+        # Binaries to include in the shell function wrapper and project shims.
+        return ["cargo"]
+
+    def project_shim_names(self) -> list[str]:
+        # cargo is a global tool, not installed into a project-local bin/ —
+        # shimming it at the project level doesn't make sense.
+        return []
+
+    def interpreter_names(self) -> list[str]:
+        # Rust has no interpreter that invokes cargo via -m style.
+        return []
+
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        # Cargo does not create a project-local bin/ that needs shimming.
+        return []
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return f"https://crates.io/api/v1/crates/{name}/{version}"
+
+    # ------------------------------------------------------------------
     # Top packages (typosquat baseline)
     # ------------------------------------------------------------------
 

@@ -42,6 +42,7 @@ class ParsedInstall:
     req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
     lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
     global_install: bool = False
+    suggested_env: dict[str, str] = field(default_factory=dict)
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -209,10 +210,25 @@ def _find_m_pip_args(argv: list[str]) -> list[str] | None:
         if tok in ("-c", "--"):
             return None
         if tok in _PY_FLAGS_WITH_VALUE:
-            idx += 2
+            idx += 2  # e.g. -W default
             continue
-        if tok in _PY_FLAGS_NO_VALUE or (tok.startswith("-") and len(tok) == 2):
+        if tok in _PY_FLAGS_NO_VALUE:
             idx += 1
+            continue
+        # Combined short option with inline value: -Wd, -Xfoo, etc.
+        if len(tok) > 2 and tok[0] == "-" and tok[1] in "WXw":
+            idx += 1
+            continue
+        # Any other single-char short flag not in our tables
+        if tok.startswith("-") and len(tok) == 2:
+            idx += 1
+            continue
+        # Long option: --foo or --foo=bar (consume next token as value if no =)
+        if tok.startswith("--"):
+            if "=" not in tok and idx + 1 < len(argv) and not argv[idx + 1].startswith("-"):
+                idx += 2  # --opt value
+            else:
+                idx += 1  # --opt=value or boolean --opt
             continue
         return None  # non-flag token — script name
     return None  # exhausted argv without finding -m pip
