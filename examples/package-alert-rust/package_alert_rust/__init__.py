@@ -207,6 +207,23 @@ class CargoLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://crates.io/api/v1/crates/{name}/{version}"
 
+    def latest_version_url(self, name: str) -> str | None:
+        return f"https://crates.io/api/v1/crates/{name}"
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        # crates.io returns the newest version in crate.newest_version
+        return data.get("crate", {}).get("newest_version") or None
+
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        # No Cargo-specific argv canonicalisation needed.
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
     # ------------------------------------------------------------------
     # Top packages (typosquat baseline)
     # ------------------------------------------------------------------

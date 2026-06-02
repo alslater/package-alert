@@ -153,12 +153,48 @@ class LanguageBase(Protocol):
         Used when the cache is empty and the live fetch has failed. Names must
         be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
 
-    # ── Publication date (cooldown policy) ────────────────────────────────
+    # ── Publication date & latest version (cooldown policy) ──────────────
     def publication_date_url(self, name: str, version: str) -> str | None:
         """Registry API URL to fetch when this package version was first published.
 
         Return None to opt out of cooldown enforcement for this ecosystem.
         Default implementation returns None."""
+
+    def latest_version_url(self, name: str) -> str | None:
+        """Registry API URL that resolves the latest published version of a package.
+
+        Used for unpinned installs (e.g. `pip install requests`) to determine the
+        version that will be installed before running the cooldown check. Return None
+        to skip version resolution for unpinned installs in this ecosystem.
+        Default implementation returns None."""
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        """Extract the latest version string from the response of latest_version_url().
+
+        Return None if the version cannot be determined. Called with the parsed JSON
+        body and the package name. Default implementation returns None."""
+
+    # ── Sandbox argv preprocessing ─────────────────────────────────────────
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        """Pre-process argv before it is passed to the sandbox.
+
+        Override to canonicalise arguments the sandbox requires in a specific form,
+        e.g. resolving relative paths to absolute (pip editable installs).
+        Default returns argv unchanged."""
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        """Additional paths to expose read-only inside the sandbox.
+
+        Override to expose paths referenced by argv that lie outside the project root
+        and would otherwise be hidden by the home tmpfs.
+        Default returns []."""
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        """Additional paths to bind writable inside the sandbox.
+
+        Override to expose paths the install process must write to, e.g. editable
+        install source directories where egg-info or build artifacts are written.
+        Default returns []."""
 
     def package_manager_names(self) -> list[str]:
         """Pure package manager binary names (pip, npm, uv, composer, …).
@@ -296,6 +332,22 @@ class RubyLanguage:
         p = root / "vendor" / "bundle" / "bin"
         return [p] if p.is_dir() else []
 
+    def latest_version_url(self, name: str) -> str | None:
+        return f"https://rubygems.org/api/v2/rubygems/{name}/versions/latest.json"  # implement me
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        return data.get("version") or None  # implement me
+
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        # Override if any arguments need canonicalisation before entering the sandbox.
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
     def snapshot(self, install_root: Path) -> Snapshot:
         return Snapshot({})
 
@@ -401,4 +453,4 @@ pip uninstall package-alert-rust
 
 | Version | What changed |
 |---------|-------------|
-| 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, and `interpreter_names` added as optional methods with default no-op implementations (no version bump required). |
+| 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, and `sandbox_extra_write_paths` added as optional methods with default no-op implementations (no version bump required). |
