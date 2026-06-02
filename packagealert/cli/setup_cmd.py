@@ -129,8 +129,14 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
         return  # already shimmed
 
     if interpreter:
-        # Interpreter binaries are ELF — never try to read them for fingerprint checking.
-        # Just rename and install the shim.
+        # If this interpreter entry is a symlink pointing to another file in the
+        # same bin dir (e.g. python → python3), don't rename it — once the target
+        # is shimmed the symlink already points at the shim. Skip it.
+        if original.is_symlink():
+            link_target = original.parent / os.readlink(original)
+            if link_target.parent == original.parent:
+                return  # symlink within bin dir — target shim covers it
+        # Real binary: rename and install the shim.
         original.rename(real)
         _write_interpreter_shim(original)
         typer.echo(f"  shimmed {original}")
@@ -267,5 +273,5 @@ def cooldown_allow(
 
     asyncio.run(_run())
     expiry = time.time() + cfg.sandbox.cooldown.period_days * 86400
-    expiry_str = datetime.fromtimestamp(expiry).strftime("%Y-%m-%d %H:%M")
+    expiry_str = datetime.fromtimestamp(expiry).astimezone().strftime("%Y-%m-%d %H:%M %Z")
     typer.echo(f"Cleared {ecosystem}/{package}=={version}. Expires: {expiry_str}")

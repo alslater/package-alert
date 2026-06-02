@@ -454,7 +454,11 @@ class NodeLanguage:
         return ["node", "nodejs"]
 
     def publication_date_url(self, name: str, version: str) -> str | None:
-        # Package-level document contains time dict: {"version": "ISO-timestamp", ...}
+        # The per-version endpoint (/name/version) does not include a publish
+        # timestamp. The abbreviated metadata (install-v1 Accept header) also
+        # omits it. The full package document is the only source for the `time`
+        # dict, which maps version strings to ISO timestamps. Results are cached
+        # in SQLite for 30 days so this large fetch is a one-time cost per version.
         return f"https://registry.npmjs.org/{name}"
 
     # ------------------------------------------------------------------

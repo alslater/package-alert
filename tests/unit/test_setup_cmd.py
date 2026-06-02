@@ -138,9 +138,16 @@ class TestSetupProject:
     def _make_venv_with_python(self, tmp_path: Path) -> Path:
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True, exist_ok=True)
-        python = venv / "python3"
-        python.write_text("#!/bin/sh\necho real python\n")
-        python.chmod(python.stat().st_mode | stat.S_IEXEC)
+        python3 = venv / "python3"
+        python3.write_text("#!/bin/sh\necho real python\n")
+        python3.chmod(python3.stat().st_mode | stat.S_IEXEC)
+        return tmp_path
+
+    def _make_venv_with_python_symlink(self, tmp_path: Path) -> Path:
+        """Like _make_venv_with_python but also adds python → python3 symlink."""
+        self._make_venv_with_python(tmp_path)
+        venv = tmp_path / ".venv" / "bin"
+        (venv / "python").symlink_to("python3")
         return tmp_path
 
     def test_interpreter_shim_installed(self, tmp_path):
@@ -197,3 +204,29 @@ class TestSetupProject:
         pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
         install_project_shims(project_root=tmp_path)
         assert not (venv / "pip.__pa_real").exists()
+
+    def test_interpreter_symlink_not_renamed(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+        self._make_venv_with_python_symlink(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        venv = tmp_path / ".venv" / "bin"
+        # python3 (real binary) should be shimmed
+        assert (venv / "python3.__pa_real").exists()
+        assert PA_FINGERPRINT in (venv / "python3").read_text()
+        # python (symlink → python3) must NOT be renamed — it already points at the shim
+        assert not (venv / "python.__pa_real").exists()
+        assert (venv / "python").is_symlink()
+        assert os.readlink(venv / "python") == "python3"
+
+    def test_interpreter_symlink_uninstall_leaves_symlink(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
+        self._make_venv_with_python_symlink(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        uninstall_project_shims(project_root=tmp_path)
+        venv = tmp_path / ".venv" / "bin"
+        # python3 restored to original script
+        assert not (venv / "python3.__pa_real").exists()
+        assert "real python" in (venv / "python3").read_text()
+        # python symlink untouched
+        assert (venv / "python").is_symlink()
+        assert os.readlink(venv / "python") == "python3"

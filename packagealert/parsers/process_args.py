@@ -185,6 +185,39 @@ def _cmd(path: str) -> str:
     return _CMD_VERSION_SUFFIX_RE.sub("", name)
 
 
+_PY_FLAGS_WITH_VALUE = frozenset({"-W", "-X", "-w"})
+_PY_FLAGS_NO_VALUE = frozenset({
+    "-B", "-b", "-d", "-E", "-h", "-i", "-I",
+    "-O", "-OO", "-q", "-s", "-S", "-u", "-v", "-V", "-x",
+})
+
+
+def _find_m_pip_args(argv: list[str]) -> list[str] | None:
+    """Scan the interpreter flag prefix of argv for -m pip.
+
+    Returns the args after '-m pip' if found, or None if the argv is not a
+    'python -m pip ...' invocation. Stops at the first non-flag token (script
+    name), -c, or -- to avoid false-positives from script arguments.
+    """
+    idx = 1
+    while idx < len(argv):
+        tok = argv[idx]
+        if tok == "-m":
+            if idx + 1 < len(argv) and argv[idx + 1] == "pip":
+                return argv[idx + 2:]
+            return None
+        if tok in ("-c", "--"):
+            return None
+        if tok in _PY_FLAGS_WITH_VALUE:
+            idx += 2
+            continue
+        if tok in _PY_FLAGS_NO_VALUE or (tok.startswith("-") and len(tok) == 2):
+            idx += 1
+            continue
+        return None  # non-flag token — script name
+    return None  # exhausted argv without finding -m pip
+
+
 def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
@@ -199,35 +232,10 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
             args = argv[2:]
         else:
             # python [-flags…] -m pip install …
-            # Scan only the interpreter flag prefix — stop at the first non-flag
-            # token (script name), -c (inline code), or -m.
-            # Flags that consume the next token: -W, -X, -w (value follows).
-            _FLAGS_WITH_VALUE = frozenset({"-W", "-X", "-w"})
-            _FLAGS_NO_VALUE = frozenset({
-                "-B", "-b", "-d", "-E", "-h", "-i", "-I",
-                "-O", "-OO", "-q", "-s", "-S", "-u", "-v", "-V", "-x",
-            })
-            idx = 1
-            while idx < len(argv):
-                tok = argv[idx]
-                if tok == "-m":
-                    # -m pip?
-                    if idx + 1 < len(argv) and argv[idx + 1] == "pip":
-                        args = argv[idx + 2:]
-                        break
-                    return None
-                if tok in ("-c", "--"):
-                    return None
-                if tok in _FLAGS_WITH_VALUE:
-                    idx += 2  # skip flag and its value
-                    continue
-                if tok in _FLAGS_NO_VALUE or (tok.startswith("-") and len(tok) == 2):
-                    idx += 1
-                    continue
-                # Non-flag token — this is a script name, not -m pip
+            m_pip_args = _find_m_pip_args(argv)
+            if m_pip_args is None:
                 return None
-            else:
-                return None
+            args = m_pip_args
         venv_exe = argv[0]
     else:
         return None

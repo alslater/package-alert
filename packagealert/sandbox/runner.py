@@ -7,7 +7,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,27 +125,26 @@ class SandboxRunner:
             # sandbox or scan, so exec the real binary directly.
             real_argv = _resolve_real_binary(argv)
             # Guard against infinite recursion: if the binary we are about to exec
-            # is the same file as the current process (inode comparison), we would
-            # call back into ourselves. This can happen when a shim exists without
-            # a .__pa_real sibling (inconsistent state) or due to PATH confusion.
+            # is a package-alert shim without a .__pa_real sibling (inconsistent
+            # state), exec'ing it would call back into us. Check the fingerprint.
             tool_path = shutil.which(real_argv[0])
             if tool_path:
-                try:
-                    self_stat = Path(sys.argv[0]).stat()
-                    tool_stat = Path(tool_path).stat()
-                    if (self_stat.st_dev, self_stat.st_ino) == (tool_stat.st_dev, tool_stat.st_ino):
-                        self._console.print(
-                            f"[red]✗ {argv[0]} resolves to this package-alert process — "
-                            f"infinite recursion prevented.[/red]"
-                        )
-                        self._console.print(
-                            f"[dim]If {argv[0]} is a package-alert shim, "
-                            f"{argv[0]}{_PA_REAL_SUFFIX} may be missing. "
-                            f"Run 'package-alert setup project --uninstall' and reinstall the package manager.[/dim]"
-                        )
-                        return 1
-                except OSError:
-                    pass
+                real_sibling = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+                if not real_sibling.exists():
+                    try:
+                        content = Path(tool_path).read_text(errors="strict")
+                        if "package-alert run" in content:
+                            self._console.print(
+                                f"[red]✗ {argv[0]} is a package-alert shim but "
+                                f"{argv[0]}{_PA_REAL_SUFFIX} is missing — infinite recursion prevented.[/red]"
+                            )
+                            self._console.print(
+                                f"[dim]Run 'package-alert setup project --uninstall' "
+                                f"and reinstall the package manager.[/dim]"
+                            )
+                            return 1
+                    except (UnicodeDecodeError, OSError):
+                        pass  # ELF binary — safe to exec
             os.execvp(real_argv[0], real_argv)
             return 0  # unreachable; satisfies type checker
 
