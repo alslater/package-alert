@@ -198,14 +198,36 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
             # python /path/to/pip install ...
             args = argv[2:]
         else:
-            # python [-flags…] -m pip install …  — find -m pip anywhere in argv
-            try:
-                m_idx = argv.index("-m")
-            except ValueError:
+            # python [-flags…] -m pip install …
+            # Scan only the interpreter flag prefix — stop at the first non-flag
+            # token (script name), -c (inline code), or -m.
+            # Flags that consume the next token: -W, -X, -w (value follows).
+            _FLAGS_WITH_VALUE = frozenset({"-W", "-X", "-w"})
+            _FLAGS_NO_VALUE = frozenset({
+                "-B", "-b", "-d", "-E", "-h", "-i", "-I",
+                "-O", "-OO", "-q", "-s", "-S", "-u", "-v", "-V", "-x",
+            })
+            idx = 1
+            while idx < len(argv):
+                tok = argv[idx]
+                if tok == "-m":
+                    # -m pip?
+                    if idx + 1 < len(argv) and argv[idx + 1] == "pip":
+                        args = argv[idx + 2:]
+                        break
+                    return None
+                if tok in ("-c", "--"):
+                    return None
+                if tok in _FLAGS_WITH_VALUE:
+                    idx += 2  # skip flag and its value
+                    continue
+                if tok in _FLAGS_NO_VALUE or (tok.startswith("-") and len(tok) == 2):
+                    idx += 1
+                    continue
+                # Non-flag token — this is a script name, not -m pip
                 return None
-            if m_idx + 1 >= len(argv) or argv[m_idx + 1] != "pip":
+            else:
                 return None
-            args = argv[m_idx + 2:]
         venv_exe = argv[0]
     else:
         return None

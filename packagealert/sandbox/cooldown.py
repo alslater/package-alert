@@ -13,8 +13,6 @@ from packagealert.languages.base import PackageSpec
 if TYPE_CHECKING:
     from packagealert.config import CooldownConfig
 
-PUBLICATION_CACHE_TTL = 30 * 24 * 3600  # 30 days
-
 
 @dataclass
 class CooldownDecision:

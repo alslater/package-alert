@@ -370,6 +370,18 @@ def test_python_m_other_module_not_recognised():
     assert result is None
 
 
+def test_python_script_args_not_misclassified():
+    # python3 myscript.py -m pip install evil  — args to the script, not to python
+    result = parse_pip_args(["python3", "myscript.py", "-m", "pip", "install", "evil"])
+    assert result is None
+
+
+def test_python_c_not_recognised():
+    # python3 -c "..." should not be treated as pip
+    result = parse_pip_args(["python3", "-c", "import pip; pip.main()"])
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # parse_composer_args
 # ---------------------------------------------------------------------------

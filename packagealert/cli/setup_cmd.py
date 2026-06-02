@@ -112,7 +112,7 @@ def _all_interpreter_names() -> list[str]:
     return result
 
 
-def _write_interpreter_shim(path: Path, real_name: str) -> None:
+def _write_interpreter_shim(path: Path) -> None:
     """Write a shim that delegates all invocations to package-alert run.
 
     package-alert run detects `python -m pip` (including flags before -m) via
@@ -132,7 +132,7 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
         # Interpreter binaries are ELF — never try to read them for fingerprint checking.
         # Just rename and install the shim.
         original.rename(real)
-        _write_interpreter_shim(original, real_name=f"{tool}{PA_REAL_SUFFIX}")
+        _write_interpreter_shim(original)
         typer.echo(f"  shimmed {original}")
         return
 
