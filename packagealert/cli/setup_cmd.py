@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 
@@ -8,7 +9,7 @@ import typer
 
 from packagealert.languages import registry as lang_registry
 
-PA_FINGERPRINT = "package-alert run"
+PA_FINGERPRINT = "package-alert"  # present in the absolute path embedded in every shim
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
 PA_BLOCK_END = "# END package-alert shell integration"
 PA_REAL_SUFFIX = ".__pa_real"
@@ -56,19 +57,58 @@ def install_shell_rc(*, rc_path: Path, shell: str) -> None:
         f.write(block)
 
 
+def _pa_executable() -> str:
+    """Return the absolute path to the package-alert binary running right now."""
+    import sys
+    # sys.argv[0] is always the currently-executing binary — use it directly
+    # rather than shutil.which, which may find a different installation on PATH.
+    return str(Path(sys.argv[0]).resolve())
+
+
 def _write_shim(path: Path) -> None:
-    path.write_text(f'#!/bin/sh\nexec {PA_FINGERPRINT} "$(basename "$0")" "$@"\n')
+    pa = _pa_executable()
+    # Pass $0 (the full shim path) so the runner can locate the .__pa_real sibling
+    # and derive VIRTUAL_ENV even when the venv is not activated.
+    path.write_text(f'#!/bin/sh\nexec {pa} run "$0" "$@"\n')
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _own_venv_bin() -> Path | None:
+    """Return the bin/ directory of the venv package-alert itself is running from, if any."""
+    import sys
+    exe = Path(sys.executable).resolve()
+    # sys.executable is typically .../venv/bin/python — bin/ is the parent
+    bin_dir = exe.parent
+    if (bin_dir / "activate").exists():
+        return bin_dir
+    return None
+
+
 def _tool_dirs(project_root: Path) -> list[Path]:
-    dirs = []
-    venv_bin = project_root / ".venv" / "bin"
-    if venv_bin.is_dir():
-        dirs.append(venv_bin)
-    nm_bin = project_root / "node_modules" / ".bin"
-    if nm_bin.is_dir():
-        dirs.append(nm_bin)
+    """Return bin directories to shim, sourced from each language module."""
+    lang_registry.load()
+    own_bin = _own_venv_bin()
+    dirs: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(p: Path) -> None:
+        resolved = p.resolve()
+        if resolved in seen:
+            return
+        if own_bin is not None and resolved == own_bin.resolve():
+            typer.echo(f"  skip {p} (this is the venv package-alert is running from)", err=True)
+            return
+        seen.add(resolved)
+        dirs.append(p)
+
+    for lang in lang_registry.all_languages():
+        try:
+            candidates = lang.project_bin_dirs(project_root)
+        except Exception:
+            continue
+        for p in candidates:
+            _add(p)
+
     return dirs
 
 
@@ -241,12 +281,18 @@ def setup_project(
         install_project_shims(project_root=root)
     if envrc and not uninstall:
         envrc_path = root / ".envrc"
-        line = "PATH_add .venv/bin\n"
         existing = envrc_path.read_text() if envrc_path.exists() else ""
-        if line not in existing:
-            with envrc_path.open("a") as f:
-                f.write(line)
-            typer.echo(f"  appended PATH_add to {envrc_path}")
+        with envrc_path.open("a") as f:
+            for bin_dir in _tool_dirs(root):
+                try:
+                    rel = bin_dir.relative_to(root)
+                except ValueError:
+                    rel = bin_dir  # absolute path if outside project root
+                line = f"PATH_add {rel}\n"
+                if line not in existing:
+                    f.write(line)
+                    existing += line
+                    typer.echo(f"  appended PATH_add {rel} to {envrc_path}")
 
 
 @cooldown_app.command("allow")

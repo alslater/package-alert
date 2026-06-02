@@ -47,6 +47,10 @@ critical_threshold = 70
                       # where other root-owned paths cause SSH or tool failures inside bwrap's
                       # user namespace.  Example:
                       #   extra_tmpfs = ["/etc/ssh/other_config.d"]
+# extra_ro_paths = [] # additional paths inside $HOME to re-expose read-only inside the sandbox.
+                      # Use this when a tool installed via editable/development install needs its
+                      # source directory accessible inside bwrap's home tmpfs.  Example:
+                      #   extra_ro_paths = ["/home/user/dev/my-project"]
 
 [sandbox.cooldown]
 # Packages published more recently than period_days are subject to the cooldown policy.

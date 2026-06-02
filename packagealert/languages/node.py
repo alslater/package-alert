@@ -453,6 +453,10 @@ class NodeLanguage:
     def interpreter_names(self) -> list[str]:
         return ["node", "nodejs"]
 
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        p = root / "node_modules" / ".bin"
+        return [p] if p.is_dir() else []
+
     def publication_date_url(self, name: str, version: str) -> str | None:
         # The per-version endpoint (/name/version) does not include a publish
         # timestamp. The abbreviated metadata (install-v1 Accept header) also

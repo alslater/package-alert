@@ -3,11 +3,21 @@ import os
 import stat
 import time
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 
 
 PA_FINGERPRINT = "package-alert run"
 PA_REAL_SUFFIX = ".__pa_real"
+
+
+@pytest.fixture(autouse=True)
+def mock_pa_executable():
+    with patch(
+        "packagealert.cli.setup_cmd._pa_executable",
+        return_value="/usr/local/bin/package-alert",
+    ):
+        yield
 
 
 @pytest.fixture

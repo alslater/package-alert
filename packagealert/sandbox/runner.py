@@ -145,7 +145,11 @@ class SandboxRunner:
                             return 1
                     except (UnicodeDecodeError, OSError):
                         pass  # ELF binary — safe to exec
-            os.execvp(real_argv[0], real_argv)
+            try:
+                os.execvp(real_argv[0], real_argv)
+            except FileNotFoundError:
+                self._console.print(f"[red]✗ Command not found: {real_argv[0]}[/red]")
+                return 127
             return 0  # unreachable; satisfies type checker
 
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
@@ -153,8 +157,22 @@ class SandboxRunner:
         # Show the interception banner only when invoked through a shim or shell
         # function — when the user types `package-alert run ...` directly they
         # already know we're running.
-        via_shim = _resolve_real_binary(argv) != argv or bool(os.environ.get("_PA_VIA_SHELL"))
-        is_global = parsed.global_install
+        real_argv = _resolve_real_binary(argv)
+        via_project_shim = real_argv is not argv
+        via_shim = via_project_shim or bool(os.environ.get("_PA_VIA_SHELL"))
+        is_global = parsed.global_install and not via_shim
+
+        # When invoked through a project-local shim, the .__pa_real binary's
+        # shebang carries its venv but VIRTUAL_ENV may not be set (e.g. venv not
+        # activated). Derive it from the shim location so pip and the sandbox
+        # runner both see the correct venv.
+        if via_project_shim and not os.environ.get("VIRTUAL_ENV"):
+            # argv[0] is the full shim path (e.g. /path/to/venv/bin/pip).
+            # The venv root is one level up from bin/.
+            shim_bin = Path(argv[0]).resolve().parent
+            venv_root = shim_bin.parent
+            if (venv_root / "pyvenv.cfg").exists():
+                os.environ["VIRTUAL_ENV"] = str(venv_root)
 
         if via_shim:
             self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
@@ -181,7 +199,11 @@ class SandboxRunner:
 
         if is_global:
             real_argv = _resolve_real_binary(argv)
-            os.execvp(real_argv[0], real_argv)
+            try:
+                os.execvp(real_argv[0], real_argv)
+            except FileNotFoundError:
+                self._console.print(f"[red]✗ Command not found: {real_argv[0]}[/red]")
+                return 127
             return 0  # unreachable
 
         _resolve_targets(ctx)
@@ -252,6 +274,8 @@ class SandboxRunner:
         extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
         if not self._check_extra_tmpfs(extra_tmpfs):
             return 1
+
+        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         argv = _resolve_real_binary(argv)
         result = subprocess.run(build_cmd(
@@ -566,6 +590,8 @@ class SandboxRunner:
         extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
         if not self._check_extra_tmpfs(extra_tmpfs):
             return 1
+
+        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         result = subprocess.run(build_cmd(
             argv, write_dirs,
@@ -1205,7 +1231,10 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
     """Replace argv[0] with its .__pa_real original if a shim is installed."""
     if not argv:
         return argv
-    tool_path = shutil.which(argv[0])
+    # If argv[0] is a full path (from a shim passing $0), use it directly.
+    # Otherwise fall back to shutil.which for bare tool names.
+    p = Path(argv[0])
+    tool_path = str(p) if p.is_absolute() else shutil.which(argv[0])
     if tool_path is None:
         return argv
     real = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"

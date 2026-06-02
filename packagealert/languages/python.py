@@ -532,6 +532,22 @@ class PythonLanguage:
     def interpreter_names(self) -> list[str]:
         return ["python", "python3"]
 
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        dirs: list[Path] = []
+        seen: set[Path] = set()
+
+        def _add(p: Path) -> None:
+            if p.is_dir():
+                resolved = p.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    dirs.append(p)
+
+        for name in (".venv", "venv", "env", ".env"):
+            _add(root / name / "bin")
+
+        return dirs
+
     # ------------------------------------------------------------------
     # snapshot
     # ------------------------------------------------------------------

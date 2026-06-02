@@ -1,12 +1,23 @@
 import os
 import stat
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 
 
 PA_FINGERPRINT = "package-alert run"
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
 PA_BLOCK_END = "# END package-alert shell integration"
+
+
+@pytest.fixture(autouse=True)
+def mock_pa_executable():
+    """Ensure shims embed a predictable package-alert path during tests."""
+    with patch(
+        "packagealert.cli.setup_cmd._pa_executable",
+        return_value="/usr/local/bin/package-alert",
+    ):
+        yield
 
 
 class TestSetupShellSnippet:

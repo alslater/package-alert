@@ -180,6 +180,16 @@ class LanguageBase(Protocol):
         """
         return []
 
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        """Return bin/ directories within root that contain this language's package
+        manager binaries, suitable for shimming by setup-project.
+
+        The default implementation returns an empty list — override in each
+        language module to detect the actual install locations (e.g. venv bin dirs
+        for Python, node_modules/.bin for Node).
+        """
+        return []
+
     def snapshot(self, install_root: Path) -> Snapshot: ...
     def detect_post_install(self, before: Snapshot, after: Snapshot) -> list[PackageSpec]: ...
 

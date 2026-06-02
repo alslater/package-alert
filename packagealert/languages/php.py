@@ -211,6 +211,10 @@ class PhpLanguage:
     def interpreter_names(self) -> list[str]:
         return ["php", "php8", "php7"]
 
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        p = root / "vendor" / "bin"
+        return [p] if p.is_dir() else []
+
     def publication_date_url(self, name: str, version: str) -> str | None:
         if "/" not in name:
             return None
