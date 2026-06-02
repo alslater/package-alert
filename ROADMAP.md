@@ -31,12 +31,17 @@
   - Typosquatting already runs pre-sandbox as part of the cooldown policy decision; full heuristic pre-flight (blocking/warning independent of cooldown) is not yet implemented
 - [ ] poetry + pdm support
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)
-- [ ] macOS support (FSEvents-based cache monitoring, Homebrew)
+- [ ] macOS support (sandbox alternative to bwrap, macOS desktop notifications, Homebrew; platform-specific cache paths e.g. `~/Library/Caches/pip`; cache monitoring already works via watchdog's FSEvents backend)
 - [ ] Windows support (ReadDirectoryChangesW)
 - [ ] YARA rule integration for binary inspection
 - [ ] Webhook / Slack alert channel
 - [ ] Lightweight local web dashboard
-- [ ] CI integration (GitHub Actions action, GitLab CI component)
+- [ ] CI integration (GitHub Actions action, GitLab CI component, Bitbucket Pipelines pipe)
+
+## Phase 3 (Continued)
+- [ ] Configuration safety audit — scan the loaded config for common misconfigurations (overly broad `editable_roots`, credential paths in `extra_ro_paths`, etc.) and warn at startup
+- [ ] IDE/tool install policy — detect and surface package installations triggered by background processes (VS Code extensions, language servers, IDEs) using parent process chain; optionally block or require explicit approval for non-user-initiated installs
+- [ ] Refactor sandbox target resolution — move hardcoded ecosystem logic in `_resolve_targets` and `_collect_new_packages` (runner.py) into `LanguageBase` hooks so language modules own their own scan targets and post-install package detection
 
 ## Phase 4 (Future)
 - [ ] ML-based anomaly detection on package metadata patterns

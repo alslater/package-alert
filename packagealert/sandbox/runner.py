@@ -8,7 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -274,6 +274,39 @@ class SandboxRunner:
         home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         argv = _resolve_real_binary(argv)
+        if ctx.parsed is not None:
+            lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+            if lang is not None:
+                lang_name = getattr(lang, "name", "?")
+                prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
+                if callable(prepare_fn):
+                    try:
+                        argv = prepare_fn(argv, cwd)
+                    except Exception:
+                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
+                editable_roots = self._cfg.sandbox.editable_roots
+                extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
+                if callable(extra_ro_fn):
+                    try:
+                        for p in extra_ro_fn(argv, cwd):
+                            if _is_safe_sandbox_path(p, editable_roots):
+                                home_ro.append(p.resolve())
+                            else:
+                                log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
+                                self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+                extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
+                if callable(extra_write_fn):
+                    try:
+                        for p in extra_write_fn(argv, cwd):
+                            if _is_safe_sandbox_path(p, editable_roots):
+                                ctx.write_dirs.append(p.resolve())
+                            else:
+                                log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
+                                self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -362,6 +395,38 @@ class SandboxRunner:
         self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
         return False
 
+    def _print_editable_rejection(self, p: Path, editable_roots: list[Path]) -> None:
+        """Print a user-facing explanation for why an editable path was blocked."""
+        try:
+            resolved = p.resolve()
+        except OSError:
+            resolved = p
+        # Check if it's a credential/system directory violation — including ancestors
+        # (e.g. $HOME would expose ~/.ssh as a subdirectory of the bind mount).
+        for cred in _credential_dirs():
+            if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
+                if cred.is_relative_to(resolved):
+                    self._console.print(f"✗  Editable path blocked — would expose {cred.name} inside the sandbox: {p}", style="red bold", markup=False)
+                else:
+                    self._console.print(f"✗  Editable path blocked — credential directory: {p}", style="red bold", markup=False)
+                self._console.print("  package-alert never exposes credential directories inside the sandbox.", style="dim")
+                return
+        for prefix in _UNSAFE_PREFIXES:
+            if resolved == prefix or resolved.is_relative_to(prefix):
+                self._console.print(f"✗  Editable path blocked — system directory: {p}", style="red bold", markup=False)
+                return
+        # editable_roots restriction
+        self._console.print(f"⚠  Editable install blocked: {p}", style="yellow", markup=False)
+        if not editable_roots:
+            self._console.print("  Editable installs require sandbox.editable_roots to be configured.", style="dim")
+            self._console.print("  Add to ~/.config/package-alert/config.toml:", style="dim")
+            self._console.print("    [sandbox]", style="dim", markup=False)
+            self._console.print(f'    editable_roots = ["{p.parent}"]', style="dim", markup=False)
+        else:
+            roots = ", ".join(f'"{r}"' for r in editable_roots)
+            self._console.print(f"  Path is outside configured editable_roots: [{roots}]", style="dim", markup=False)
+            self._console.print(f'  Add "{p.parent}" to sandbox.editable_roots to permit this install.', style="dim", markup=False)
+
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
         """Return False (and print an error) if any configured extra_tmpfs path does not exist.
 
@@ -384,7 +449,7 @@ class SandboxRunner:
         import sys
         import time as _time
 
-        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_publication_date
+        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_latest_version, fetch_publication_date
 
         if ctx.parsed is None or not ctx.parsed.packages:
             return []
@@ -408,11 +473,27 @@ class SandboxRunner:
             for pkg_str in ctx.parsed.packages:
                 ecosystem = ctx.parsed.ecosystem.lower()
                 name, version = parse_package_spec(pkg_str, ecosystem)
+                if not name:
+                    continue  # VCS URL, local path, editable install — not a registry package
                 if not version:
-                    self._console.print(
-                        f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
-                    )
-                    continue
+                    lang_for_latest = lang_registry.for_ecosystem(ecosystem)
+                    if lang_for_latest is not None:
+                        latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
+                        if callable(latest_url_fn):
+                            try:
+                                latest_url = latest_url_fn(name)
+                            except Exception:
+                                log.warning("latest_version_url raised for lang=%s pkg=%s — skipping", getattr(lang_for_latest, "name", "?"), name, exc_info=True)
+                                latest_url = None
+                            if latest_url is not None:
+                                version = await fetch_latest_version(latest_url, lang_for_latest, name)
+                                if version:
+                                    self._console.print(f"[dim]Resolving latest version: {lang_for_latest.serialise_package_spec(name, version)}[/dim]")
+                    if not version:
+                        self._console.print(
+                            f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
+                        )
+                        continue
 
                 pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
 
@@ -454,6 +535,12 @@ class SandboxRunner:
                     is_tty=is_tty,
                     cleared_at=cleared_at,
                 )
+
+                if typo.is_typosquat and typo.closest_match:
+                    decision = dataclass_replace(
+                        decision,
+                        reason=f"{decision.reason}; possible typosquat of '{typo.closest_match}' (distance {typo.distance})",
+                    )
 
                 if decision.action == "block":
                     blocked.append(decision)
@@ -1240,6 +1327,74 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         suggested_env=pi.suggested_env,
     )
 
+
+
+_UNSAFE_PREFIXES: tuple[Path, ...] = (
+    Path("/etc"),
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/lib"),
+    Path("/lib64"),
+    Path("/boot"),
+    Path("/sys"),
+    Path("/proc"),
+    Path("/dev"),
+)
+
+# Credential and secret directories inside $HOME that the sandbox deliberately
+# hides. Plugin-supplied extra paths must not re-expose these.
+def _credential_dirs() -> tuple[Path, ...]:
+    home = Path.home()
+    return (
+        home / ".ssh",
+        home / ".aws",
+        home / ".gnupg",
+        home / ".config" / "gcloud",
+        home / ".netrc",
+        home / ".git-credentials",
+        home / ".azure",
+        home / ".kube",
+        home / ".docker",
+    )
+
+
+def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> bool:
+    """Return True if p is safe to bind into the sandbox as a writable or ro mount.
+
+    Rejects the filesystem root, system directories, and credential directories
+    inside $HOME that the sandbox deliberately hides. Callers log a warning and
+    skip the path when this returns False.
+
+    editable_roots is required: an empty list blocks all paths (fail closed).
+    When non-empty, the path must be under one of those roots.
+    """
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return False
+    if resolved == Path("/"):
+        return False
+    for prefix in _UNSAFE_PREFIXES:
+        if resolved == prefix or resolved.is_relative_to(prefix):
+            return False
+    for cred in _credential_dirs():
+        # Reject both the credential dir itself and any ancestor of it — mounting
+        # a parent (e.g. $HOME or ~/.config) would re-expose the credential dir
+        # as a subdirectory, defeating the sandbox's home tmpfs isolation.
+        if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
+            return False
+    # editable_roots must be explicitly configured — no roots means no editable installs allowed.
+    # Treat individual root resolution failures as non-matches (fail closed).
+    if not editable_roots:
+        return False
+    for root in editable_roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:

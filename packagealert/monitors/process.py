@@ -73,7 +73,7 @@ class ProcessMonitor(AbstractMonitor):
     async def _scan_processes(self) -> None:
         current_pids: set[int] = set()
         pm_names = self._pm_names
-        for proc in psutil.process_iter(["pid", "cmdline", "cwd"]):
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline", "cwd"]):
             try:
                 info = proc.info
                 pid = info["pid"]
@@ -119,7 +119,19 @@ class ProcessMonitor(AbstractMonitor):
                             site_pkgs=site_pkgs,
                             lockfile_hint=parsed.lockfile_hint,
                         )
-                        log.info("Tracking %s install pid=%d in %s", parsed.manager, pid, project_path)
+                        ppid = info.get("ppid")
+                        parent_name = ""
+                        parent_cmdline = ""
+                        if ppid:
+                            try:
+                                parent = psutil.Process(ppid)
+                                parent_name = parent.name()
+                                parent_cmdline = shlex.join(parent.cmdline()[:6])
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                parent_name = f"({ppid})"
+                        parent_suffix = f" (via {parent_name})" if parent_name else ""
+                        log.info("Tracking %s install pid=%d in %s%s", parsed.manager, pid, project_path, parent_suffix)
+                        log.debug("  cmdline: %s  cwd: %s  parent cmdline: %s", shlex.join(cmdline), project_path, parent_cmdline)
                     continue
 
                 for spec in parsed.packages:

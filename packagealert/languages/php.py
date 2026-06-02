@@ -221,6 +221,19 @@ class PhpLanguage:
         vendor, package = name.split("/", 1)
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
 
+    def latest_version_url(self, name: str) -> str | None:
+        if "/" not in name:
+            return None
+        vendor, package = name.split("/", 1)
+        return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
+
+    def latest_version_parse(self, data: dict, name: str) -> str | None:
+        # p2 endpoint lists versions newest-first; first entry is latest.
+        for versions in data.get("packages", {}).values():
+            if versions:
+                return versions[0].get("version") or None
+        return None
+
     def snapshot(self, install_root: Path) -> Snapshot:
         data: dict[str, str] = {}
         vendor = install_root / "vendor"

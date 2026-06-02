@@ -362,6 +362,22 @@ def test_publication_date_url_node():
     assert url == "https://registry.npmjs.org/lodash"
 
 
+def test_publication_date_url_node_scoped():
+    from packagealert.languages import registry
+    registry.load()
+    lang = registry.for_ecosystem("npm")
+    assert lang is not None
+    url = lang.publication_date_url("@scope/pkg", "1.0.0")
+    assert url == "https://registry.npmjs.org/@scope%2Fpkg"
+
+
+def test_latest_version_url_node_scoped():
+    from packagealert.languages.node import NodeLanguage
+    lang = NodeLanguage()
+    url = lang.latest_version_url("@types/node")
+    assert url == "https://registry.npmjs.org/@types%2Fnode/latest"
+
+
 def test_publication_date_url_php():
     from packagealert.languages import registry
     registry.load()
@@ -380,3 +396,36 @@ def test_publication_date_url_base_default_returns_none():
     # Call the actual default method from LanguageBase directly
     result = LanguageBase.publication_date_url(mock_lang, "requests", "1.0.0")
     assert result is None
+
+
+def test_php_latest_version_url():
+    from packagealert.languages.php import PhpLanguage
+    lang = PhpLanguage()
+    assert lang.latest_version_url("monolog/monolog") == "https://repo.packagist.org/p2/monolog/monolog.json"
+
+
+def test_php_latest_version_url_no_slash_returns_none():
+    from packagealert.languages.php import PhpLanguage
+    lang = PhpLanguage()
+    assert lang.latest_version_url("invalidpackage") is None
+
+
+def test_php_latest_version_parse_returns_first_entry():
+    from packagealert.languages.php import PhpLanguage
+    lang = PhpLanguage()
+    data = {
+        "packages": {
+            "monolog/monolog": [
+                {"version": "3.10.0", "time": "2026-01-02T08:56:05+00:00"},
+                {"version": "3.9.0",  "time": "2025-03-24T10:02:05+00:00"},
+            ]
+        }
+    }
+    # First entry (newest) should be returned
+    assert lang.latest_version_parse(data, "monolog/monolog") == "3.10.0"
+
+
+def test_php_latest_version_parse_empty_returns_none():
+    from packagealert.languages.php import PhpLanguage
+    lang = PhpLanguage()
+    assert lang.latest_version_parse({}, "monolog/monolog") is None

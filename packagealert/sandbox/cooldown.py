@@ -149,3 +149,29 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
         return None
 
     return None
+
+
+async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
+    """Fetch the latest published version of a package from its registry API.
+
+    Returns the version string, or None on any error (fail open).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.get(url)
+    except Exception as exc:
+        log.debug("Failed to fetch latest version from %s: %s", url, exc)
+        return None
+
+    if resp.status_code != 200:
+        log.debug("Unexpected status %d from %s", resp.status_code, url)
+        return None
+
+    parse_fn = getattr(lang, "latest_version_parse", None)
+    if not callable(parse_fn):
+        return None
+    try:
+        return parse_fn(resp.json(), name)
+    except Exception as exc:
+        log.debug("Failed to parse latest version from %s: %s", url, exc)
+        return None
