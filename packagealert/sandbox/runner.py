@@ -187,7 +187,7 @@ class SandboxRunner:
         cooldown_result = await self._cooldown_check(ctx)
         if cooldown_result is False:
             return 1
-        pending_clears = cooldown_result  # list of (ecosystem, name, version) to write on success
+        pending_clears: list[tuple[str, str, str]] = cooldown_result  # type: ignore[assignment]
 
         if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
@@ -377,17 +377,17 @@ class SandboxRunner:
         return ok
 
     async def _cooldown_check(self, ctx: _Context) -> list[tuple[str, str, str]] | bool:
-        """Check cooldown policy. Returns False if blocked, True if no prompts,
-        or a list of (ecosystem, name, version) tuples for packages the user
-        confirmed at the prompt — to be written to cooldown_cleared after a
-        successful install."""
+        """Check cooldown policy. Returns False if blocked, or a list of
+        (ecosystem, name, version) tuples for packages the user confirmed at the
+        prompt — to be written to cooldown_cleared after a successful install.
+        An empty list means allowed with no prompts."""
         import sys
         import time as _time
 
         from packagealert.sandbox.cooldown import decide_with_cleared, fetch_publication_date
 
         if ctx.parsed is None or not ctx.parsed.packages:
-            return True
+            return []
 
         cfg = self._cfg.sandbox.cooldown
         is_tty = sys.stdin.isatty()
