@@ -524,6 +524,11 @@ class PythonLanguage:
     def package_manager_names(self) -> list[str]:
         return ["pip", "pip3", "uv", "pipenv"]
 
+    def project_shim_names(self) -> list[str]:
+        # uv installs a versioned copy of itself into .venv/bin/uv — shimming it
+        # causes version mismatches and recursive invocation issues.
+        return ["pip", "pip3", "pipenv"]
+
     def interpreter_names(self) -> list[str]:
         return ["python", "python3"]
 

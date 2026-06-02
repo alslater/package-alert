@@ -155,11 +155,21 @@ class LanguageBase(Protocol):
     def package_manager_names(self) -> list[str]:
         """Executable names that are pure package managers (pip, npm, uv, etc.).
 
-        Used by setup-shell and setup-project to determine which binaries to shim
-        and which shell functions to generate. Must NOT include runtime interpreters
-        (python, node, php) — those are handled separately via interpreter_names().
+        Used by setup-shell to generate shell functions. Must NOT include runtime
+        interpreters (python, node, php) — those are handled separately via
+        interpreter_names().
         """
         return []
+
+    def project_shim_names(self) -> list[str]:
+        """Subset of package_manager_names() to shim inside .venv/bin/ and
+        node_modules/.bin/. Defaults to package_manager_names().
+
+        Override to exclude tools that manage the venv itself (e.g. uv) or that
+        install a versioned copy of themselves into the venv — shimming those can
+        cause version mismatches or recursive invocation issues.
+        """
+        return self.package_manager_names()
 
     def interpreter_names(self) -> list[str]:
         """Runtime interpreter names (python, python3, node, php, etc.) that may

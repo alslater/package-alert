@@ -88,6 +88,18 @@ def _all_package_manager_names() -> list[str]:
     return result
 
 
+def _all_project_shim_names() -> list[str]:
+    lang_registry.load()
+    seen: set[str] = set()
+    result: list[str] = []
+    for lang in lang_registry.all_languages():
+        for name in getattr(lang, "project_shim_names", lang.package_manager_names)():
+            if name not in seen:
+                seen.add(name)
+                result.append(name)
+    return result
+
+
 def _all_interpreter_names() -> list[str]:
     lang_registry.load()
     seen: set[str] = set()
@@ -152,7 +164,7 @@ def _uninstall_shim(bin_dir: Path, tool: str) -> None:
 
 
 def install_project_shims(*, project_root: Path) -> None:
-    pm_names = _all_package_manager_names()
+    pm_names = _all_project_shim_names()
     interp_names = _all_interpreter_names()
     for bin_dir in _tool_dirs(project_root):
         for tool in _tools_in_dir(bin_dir, pm_names):
@@ -162,7 +174,7 @@ def install_project_shims(*, project_root: Path) -> None:
 
 
 def uninstall_project_shims(*, project_root: Path) -> None:
-    all_names = _all_package_manager_names() + _all_interpreter_names()
+    all_names = _all_project_shim_names() + _all_interpreter_names()
     for bin_dir in _tool_dirs(project_root):
         for tool in _tools_in_dir(bin_dir, all_names):
             _uninstall_shim(bin_dir, tool)
