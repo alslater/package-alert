@@ -1385,9 +1385,16 @@ def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> 
         if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
             return False
     # editable_roots must be explicitly configured — no roots means no editable installs allowed.
-    if not editable_roots or not any(resolved.is_relative_to(root.resolve()) for root in editable_roots):
+    # Treat individual root resolution failures as non-matches (fail closed).
+    if not editable_roots:
         return False
-    return True
+    for root in editable_roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:
