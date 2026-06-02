@@ -274,6 +274,7 @@ class SandboxRunner:
         home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         argv = _resolve_real_binary(argv)
+        argv = _resolve_editable_paths(argv, cwd)
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -1256,6 +1257,30 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         suggested_env=pi.suggested_env,
     )
 
+
+
+def _resolve_editable_paths(argv: list[str], cwd: Path) -> list[str]:
+    """Resolve relative local paths after -e/--editable to absolute so bwrap
+    can locate them inside the sandbox (which mounts / read-only from the host
+    but requires absolute paths for bind mounts and exec targets)."""
+    result = list(argv)
+    i = 0
+    while i < len(result):
+        tok = result[i]
+        if tok in ("-e", "--editable") and i + 1 < len(result):
+            val = result[i + 1]
+            p = Path(val)
+            if not p.is_absolute() and not val.startswith(("git+", "hg+", "svn+", "bzr+")):
+                result[i + 1] = str((cwd / p).resolve())
+            i += 2
+            continue
+        if tok.startswith("--editable="):
+            val = tok[len("--editable="):]
+            p = Path(val)
+            if not p.is_absolute() and not val.startswith(("git+", "hg+", "svn+", "bzr+")):
+                result[i] = f"--editable={(cwd / p).resolve()}"
+        i += 1
+    return result
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:
