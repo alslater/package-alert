@@ -404,24 +404,24 @@ class SandboxRunner:
         # Check if it's a credential/system directory violation
         for cred in _credential_dirs():
             if resolved == cred or resolved.is_relative_to(cred):
-                self._console.print(f"[red]✗  Editable path blocked — credential directory: {p}[/red]")
-                self._console.print("[dim]  package-alert never exposes credential directories inside the sandbox.[/dim]")
+                self._console.print(f"✗  Editable path blocked — credential directory: {p}", style="red bold", markup=False)
+                self._console.print("  package-alert never exposes credential directories inside the sandbox.", style="dim")
                 return
         for prefix in _UNSAFE_PREFIXES:
             if resolved == prefix or resolved.is_relative_to(prefix):
-                self._console.print(f"[red]✗  Editable path blocked — system directory: {p}[/red]")
+                self._console.print(f"✗  Editable path blocked — system directory: {p}", style="red bold", markup=False)
                 return
         # editable_roots restriction
-        self._console.print(f"[yellow]⚠  Editable install blocked: {p}[/yellow]")
+        self._console.print(f"⚠  Editable install blocked: {p}", style="yellow", markup=False)
         if not editable_roots:
-            self._console.print("[dim]  Editable installs require sandbox.editable_roots to be configured.[/dim]")
-            self._console.print("[dim]  Add to ~/.config/package-alert/config.toml:[/dim]")
-            self._console.print("[dim]    [sandbox][/dim]")
-            self._console.print(f'[dim]    editable_roots = ["{p.parent}"][/dim]')
+            self._console.print("  Editable installs require sandbox.editable_roots to be configured.", style="dim")
+            self._console.print("  Add to ~/.config/package-alert/config.toml:", style="dim")
+            self._console.print("    [sandbox]", style="dim", markup=False)
+            self._console.print(f'    editable_roots = ["{p.parent}"]', style="dim", markup=False)
         else:
             roots = ", ".join(f'"{r}"' for r in editable_roots)
-            self._console.print(f"[dim]  Path is outside configured editable_roots: [{roots}][/dim]")
-            self._console.print(f'[dim]  Add "{p.parent}" to sandbox.editable_roots to permit this install.[/dim]')
+            self._console.print(f"  Path is outside configured editable_roots: [{roots}]", style="dim", markup=False)
+            self._console.print(f'  Add "{p.parent}" to sandbox.editable_roots to permit this install.', style="dim", markup=False)
 
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
         """Return False (and print an error) if any configured extra_tmpfs path does not exist.

@@ -2634,9 +2634,8 @@ class TestIsSafeSandboxPath:
         # .ssh is under home, and home might be an editable root — still blocked
         assert not _is_safe_sandbox_path(home / ".ssh", [home])
 
-    def test_relative_path_resolved_against_cwd(self, tmp_path):
+    def test_allows_absolute_path_under_editable_root(self, tmp_path):
         from packagealert.sandbox.runner import _is_safe_sandbox_path
-        # Absolute path under allowed root — should pass
         project = tmp_path / "proj"
         project.mkdir()
         assert _is_safe_sandbox_path(project, [tmp_path])
