@@ -713,6 +713,7 @@ critical_threshold = 70
 # extra_env = []
 # extra_tmpfs = []
 # extra_ro_paths = []   # paths inside $HOME to re-expose read-only (e.g. editable installs)
+# editable_roots = []   # permit pip install -e from these trees (required; empty = block all editable installs)
 
 [sandbox.cooldown]
 # period_days = 7

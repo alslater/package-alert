@@ -277,15 +277,36 @@ class SandboxRunner:
         if ctx.parsed is not None:
             lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
             if lang is not None:
+                lang_name = getattr(lang, "name", "?")
                 prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
                 if callable(prepare_fn):
-                    argv = prepare_fn(argv, cwd)
+                    try:
+                        argv = prepare_fn(argv, cwd)
+                    except Exception:
+                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
+                editable_roots = self._cfg.sandbox.editable_roots
                 extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
                 if callable(extra_ro_fn):
-                    home_ro.extend(extra_ro_fn(argv, cwd))
+                    try:
+                        for p in extra_ro_fn(argv, cwd):
+                            if _is_safe_sandbox_path(p, editable_roots):
+                                home_ro.append(p)
+                            else:
+                                log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
+                                self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
                 extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
                 if callable(extra_write_fn):
-                    ctx.write_dirs.extend(extra_write_fn(argv, cwd))
+                    try:
+                        for p in extra_write_fn(argv, cwd):
+                            if _is_safe_sandbox_path(p, editable_roots):
+                                ctx.write_dirs.append(p)
+                            else:
+                                log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
+                                self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -373,6 +394,34 @@ class SandboxRunner:
         self._console.print(f"  [dim]Project     = {cwd}[/dim]")
         self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
         return False
+
+    def _print_editable_rejection(self, p: Path, editable_roots: list[Path]) -> None:
+        """Print a user-facing explanation for why an editable path was blocked."""
+        try:
+            resolved = p.resolve()
+        except OSError:
+            resolved = p
+        # Check if it's a credential/system directory violation
+        for cred in _credential_dirs():
+            if resolved == cred or resolved.is_relative_to(cred):
+                self._console.print(f"[red]✗  Editable path blocked — credential directory: {p}[/red]")
+                self._console.print("[dim]  package-alert never exposes credential directories inside the sandbox.[/dim]")
+                return
+        for prefix in _UNSAFE_PREFIXES:
+            if resolved == prefix or resolved.is_relative_to(prefix):
+                self._console.print(f"[red]✗  Editable path blocked — system directory: {p}[/red]")
+                return
+        # editable_roots restriction
+        self._console.print(f"[yellow]⚠  Editable install blocked: {p}[/yellow]")
+        if not editable_roots:
+            self._console.print("[dim]  Editable installs require sandbox.editable_roots to be configured.[/dim]")
+            self._console.print("[dim]  Add to ~/.config/package-alert/config.toml:[/dim]")
+            self._console.print("[dim]    [sandbox][/dim]")
+            self._console.print(f'[dim]    editable_roots = ["{p.parent}"][/dim]')
+        else:
+            roots = ", ".join(f'"{r}"' for r in editable_roots)
+            self._console.print(f"[dim]  Path is outside configured editable_roots: [{roots}][/dim]")
+            self._console.print(f'[dim]  Add "{p.parent}" to sandbox.editable_roots to permit this install.[/dim]')
 
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
         """Return False (and print an error) if any configured extra_tmpfs path does not exist.
@@ -1270,6 +1319,64 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         suggested_env=pi.suggested_env,
     )
 
+
+
+_UNSAFE_PREFIXES: tuple[Path, ...] = (
+    Path("/etc"),
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/lib"),
+    Path("/lib64"),
+    Path("/boot"),
+    Path("/sys"),
+    Path("/proc"),
+    Path("/dev"),
+)
+
+# Credential and secret directories inside $HOME that the sandbox deliberately
+# hides. Plugin-supplied extra paths must not re-expose these.
+def _credential_dirs() -> tuple[Path, ...]:
+    home = Path.home()
+    return (
+        home / ".ssh",
+        home / ".aws",
+        home / ".gnupg",
+        home / ".config" / "gcloud",
+        home / ".netrc",
+        home / ".git-credentials",
+        home / ".azure",
+        home / ".kube",
+        home / ".docker",
+    )
+
+
+def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> bool:
+    """Return True if p is safe to bind into the sandbox as a writable or ro mount.
+
+    Rejects the filesystem root, system directories, and credential directories
+    inside $HOME that the sandbox deliberately hides. Callers log a warning and
+    skip the path when this returns False.
+
+    editable_roots is required: an empty list blocks all paths (fail closed).
+    When non-empty, the path must be under one of those roots.
+    """
+    try:
+        resolved = p.resolve()
+    except OSError:
+        return False
+    if resolved == Path("/"):
+        return False
+    for prefix in _UNSAFE_PREFIXES:
+        if resolved == prefix or resolved.is_relative_to(prefix):
+            return False
+    for cred in _credential_dirs():
+        if resolved == cred or resolved.is_relative_to(cred):
+            return False
+    # editable_roots must be explicitly configured — no roots means no editable installs allowed.
+    if not editable_roots or not any(resolved.is_relative_to(root.resolve()) for root in editable_roots):
+        return False
+    return True
 
 
 def _resolve_real_binary(argv: list[str]) -> list[str]:

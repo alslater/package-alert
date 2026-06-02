@@ -82,9 +82,10 @@ class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
     extra_ro_paths: list[ExpandedPath] = Field(default_factory=list)
+    editable_roots: list[ExpandedPath] = Field(default_factory=list)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
 
-    @field_validator("extra_tmpfs", "extra_ro_paths")
+    @field_validator("extra_tmpfs", "extra_ro_paths", "editable_roots")
     @classmethod
     def _extra_tmpfs_must_be_absolute(cls, paths: list[Path]) -> list[Path]:
         for p in paths:

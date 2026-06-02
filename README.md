@@ -476,6 +476,13 @@ extra_tmpfs = []
 extra_ro_paths = []
 # Example: extra_ro_paths = ["/home/user/dev/my-tool"]
 
+# Directory trees from which pip install -e is permitted.
+# Required — editable installs are blocked by default when this is empty.
+# System directories and credential directories (~/.ssh, ~/.aws, etc.) are
+# always blocked regardless of this setting.
+editable_roots = []
+# Example: editable_roots = ["~/dev", "~/projects"]
+
 [sandbox.cooldown]
 # Packages published more recently than period_days trigger the cooldown policy.
 period_days = 7
