@@ -31,7 +31,7 @@
   - Typosquatting already runs pre-sandbox as part of the cooldown policy decision; full heuristic pre-flight (blocking/warning independent of cooldown) is not yet implemented
 - [ ] poetry + pdm support
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)
-- [ ] macOS support (FSEvents-based cache monitoring, Homebrew)
+- [ ] macOS support (sandbox alternative to bwrap, macOS desktop notifications, Homebrew; platform-specific cache paths e.g. `~/Library/Caches/pip`; cache monitoring already works via watchdog's FSEvents backend)
 - [ ] Windows support (ReadDirectoryChangesW)
 - [ ] YARA rule integration for binary inspection
 - [ ] Webhook / Slack alert channel
