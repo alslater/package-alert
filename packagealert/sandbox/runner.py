@@ -341,14 +341,18 @@ class SandboxRunner:
         is_tty = sys.stdin.isatty()
         db = await open_db()
 
+        from packagealert.heuristics.top_packages import TopPackagesCache
+        from packagealert.heuristics.typosquat import TyposquatDetector
+        from packagealert.languages.base import PackageSpec
+        from packagealert.parsers.process_args import parse_package_spec
+        top_cache = TopPackagesCache(db, self._cfg.heuristics)
+        detector = TyposquatDetector(top_cache)
+
         blocked: list = []
         warned: list = []
 
         try:
             for pkg_str in ctx.parsed.packages:
-                from packagealert.parsers.process_args import parse_package_spec
-                from packagealert.languages.base import PackageSpec
-
                 ecosystem = ctx.parsed.ecosystem.lower()
                 name, version = parse_package_spec(pkg_str, ecosystem)
                 if not version:
@@ -379,10 +383,7 @@ class SandboxRunner:
                 age_days = (_time.time() - pub_ts) / 86400 if isinstance(pub_ts, float) else None
                 cleared_at = await get_cooldown_cleared_at(db, ecosystem=ecosystem, package=name, version=version)
 
-                from packagealert.heuristics.top_packages import TopPackagesCache
-                from packagealert.heuristics.typosquat import TyposquatDetector
-                top_cache = TopPackagesCache(db, self._cfg.heuristics)
-                typo = await TyposquatDetector(top_cache).analyze(name, ecosystem)
+                typo = await detector.analyze(name, ecosystem)
                 risk_score = typo.score
 
                 decision = decide_with_cleared(

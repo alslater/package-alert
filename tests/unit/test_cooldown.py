@@ -251,3 +251,69 @@ class TestFetchPublicationDate:
 
         result = asyncio.run(_run())
         assert result == "not_found"
+
+    def test_packagist_matches_requested_version(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_publication_date
+
+        packagist_response = {
+            "packages": {
+                "monolog/monolog": [
+                    {"version": "3.10.0", "time": "2026-01-02T08:56:05+00:00"},
+                    {"version": "3.5.0",  "time": "2023-06-15T10:00:00+00:00"},
+                    {"version": "3.4.0",  "time": "2023-01-10T10:00:00+00:00"},
+                ]
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = packagist_response
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                return await fetch_publication_date(
+                    "https://repo.packagist.org/p2/monolog/monolog.json",
+                    ecosystem="Packagist",
+                    version="3.5.0",
+                )
+
+        result = asyncio.run(_run())
+        from datetime import datetime, timezone
+        expected = datetime(2023, 6, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        assert result == pytest.approx(expected, abs=1)
+
+    def test_packagist_returns_none_for_missing_version(self):
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_publication_date
+
+        packagist_response = {
+            "packages": {
+                "monolog/monolog": [
+                    {"version": "3.10.0", "time": "2026-01-02T08:56:05+00:00"},
+                ]
+            }
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = packagist_response
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(return_value=mock_resp)
+                return await fetch_publication_date(
+                    "https://repo.packagist.org/p2/monolog/monolog.json",
+                    ecosystem="Packagist",
+                    version="2.0.0",
+                )
+
+        result = asyncio.run(_run())
+        assert result is None

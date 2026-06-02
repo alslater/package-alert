@@ -138,18 +138,13 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
                 return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
             except ValueError:
                 pass
-        # Fall back to first non-special key
-        for v, t in version_time.items():
-            if v not in ("created", "modified"):
-                try:
-                    return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
-                except ValueError:
-                    continue
         return None
 
     if eco == "packagist":
         for pkg_versions in data.get("packages", {}).values():
             for entry in pkg_versions:
+                if entry.get("version") != version:
+                    continue
                 t = entry.get("time")
                 if t:
                     return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
