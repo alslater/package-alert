@@ -78,6 +78,10 @@ app.add_typer(scans_app, name="scans")
 from packagealert.cli.languages_cmd import languages_app  # noqa: E402
 app.add_typer(languages_app, name="languages")
 
+from packagealert.cli.setup_cmd import cooldown_app, setup_app  # noqa: E402
+app.add_typer(setup_app, name="setup")
+app.add_typer(cooldown_app, name="cooldown")
+
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
 _verbose: bool = False
@@ -708,6 +712,13 @@ critical_threshold = 70
 [sandbox]
 # extra_env = []
 # extra_tmpfs = []
+# extra_ro_paths = []   # paths inside $HOME to re-expose read-only (e.g. editable installs)
+
+[sandbox.cooldown]
+# period_days = 7
+# on_new_medium_risk = "prompt"   # prompt | warn | block | allow (typosquat match detected)
+# on_new_low_risk = "warn"
+# non_interactive_escalation = "block"
 
 [scheduler]
 enabled = true

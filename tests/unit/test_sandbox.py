@@ -2453,3 +2453,46 @@ class TestPreflightUnpinnedRequirements:
         queried_names = {name for _, name, _ in seen_queries}
         assert "requests" in queried_names
         assert "flask" in queried_names  # was silently skipped before the fix
+
+
+# ---------------------------------------------------------------------------
+# _cooldown_check — blocks non-interactive runs for recently published packages
+# ---------------------------------------------------------------------------
+
+def test_cooldown_blocks_non_interactive(tmp_path, monkeypatch):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock, patch
+    from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
+    from packagealert.sandbox.runner import SandboxRunner
+
+    cfg = AppConfig()
+    cfg.sandbox = SandboxConfig(cooldown=CooldownConfig(on_new_medium_risk="prompt", on_new_low_risk="prompt", non_interactive_escalation="block"))
+    runner = SandboxRunner(cfg)
+
+    # Mock: publication date is 2 days ago (within 7-day cooldown)
+    pub_ts = time.time() - 2 * 86400
+
+    from packagealert.heuristics.typosquat import TyposquatResult
+
+    with (
+        patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
+        patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
+        patch("packagealert.sandbox.runner.get_publication_date", new_callable=AsyncMock, return_value="miss"),
+        patch("packagealert.sandbox.runner.store_publication_date", new_callable=AsyncMock),
+        patch("packagealert.sandbox.runner.get_cooldown_cleared_at", new_callable=AsyncMock, return_value=None),
+        patch("packagealert.sandbox.cooldown.fetch_publication_date", new_callable=AsyncMock, return_value=pub_ts),
+        patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock) as mock_open_db,
+        patch("packagealert.heuristics.typosquat.TyposquatDetector.analyze",
+              new_callable=AsyncMock,
+              return_value=TyposquatResult(is_typosquat=False, closest_match=None, distance=None, score=0)),
+        patch("sys.stdin") as mock_stdin,
+    ):
+        mock_stdin.isatty.return_value = False
+        mock_db = AsyncMock()
+        mock_db.close = AsyncMock()
+        mock_open_db.return_value = mock_db
+
+        result = asyncio.run(runner.run(["pip", "install", "requests==2.31.0"]))
+
+    assert result == 1  # blocked by cooldown

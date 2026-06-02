@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import tomllib
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
 
@@ -68,18 +68,30 @@ class HeuristicsConfig(BaseModel):
     top_packages_refresh_days: int = Field(7, ge=1)
 
 
+CooldownAction = Literal["allow", "warn", "prompt", "block"]
+
+
+class CooldownConfig(BaseModel):
+    period_days: int = Field(7, ge=1)
+    on_new_medium_risk: CooldownAction = "prompt"
+    on_new_low_risk: CooldownAction = "warn"
+    non_interactive_escalation: CooldownAction = "block"
+
+
 class SandboxConfig(BaseModel):
     extra_env: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
+    extra_ro_paths: list[ExpandedPath] = Field(default_factory=list)
+    cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
 
-    @field_validator("extra_tmpfs")
+    @field_validator("extra_tmpfs", "extra_ro_paths")
     @classmethod
     def _extra_tmpfs_must_be_absolute(cls, paths: list[Path]) -> list[Path]:
         for p in paths:
             if not p.is_absolute():
                 raise ValueError(
-                    f"sandbox.extra_tmpfs paths must be absolute (got '{p}'). "
-                    "bwrap --tmpfs requires an absolute mount target."
+                    f"sandbox paths must be absolute (got '{p}'). "
+                    "bwrap requires absolute mount targets."
                 )
         return paths
 

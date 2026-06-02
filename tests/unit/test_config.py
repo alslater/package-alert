@@ -182,3 +182,22 @@ async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
         await _run_scan_cache(cfg)  # must not raise
 
     lang.classify_cache_file.assert_called_once_with(whl)
+
+
+def test_cooldown_config_defaults():
+    from packagealert.config import AppConfig
+    cfg = AppConfig()
+    assert cfg.sandbox.cooldown.period_days == 7
+    assert cfg.sandbox.cooldown.on_new_medium_risk == "prompt"
+    assert cfg.sandbox.cooldown.on_new_low_risk == "warn"
+    assert cfg.sandbox.cooldown.non_interactive_escalation == "block"
+
+
+def test_cooldown_config_from_toml(tmp_path):
+    from packagealert.config import load_config
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text("[sandbox.cooldown]\nperiod_days = 14\non_new_low_risk = \"block\"\n")
+    cfg = load_config(cfg_file)
+    assert cfg.sandbox.cooldown.period_days == 14
+    assert cfg.sandbox.cooldown.on_new_low_risk == "block"
+    assert cfg.sandbox.cooldown.on_new_medium_risk == "prompt"  # default preserved

@@ -41,6 +41,8 @@ class ParsedInstall:
     venv_exe: str | None = None  # path used to derive site-packages
     req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
     lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
+    global_install: bool = False
+    suggested_env: dict[str, str] = field(default_factory=dict)
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -184,6 +186,54 @@ def _cmd(path: str) -> str:
     return _CMD_VERSION_SUFFIX_RE.sub("", name)
 
 
+_PY_FLAGS_WITH_VALUE = frozenset({"-W", "-X", "-w"})
+_PY_FLAGS_NO_VALUE = frozenset({
+    "-B", "-b", "-d", "-E", "-h", "-i", "-I",
+    "-O", "-OO", "-q", "-s", "-S", "-u", "-v", "-V", "-x",
+})
+
+
+def _find_m_pip_args(argv: list[str]) -> list[str] | None:
+    """Scan the interpreter flag prefix of argv for -m pip.
+
+    Returns the args after '-m pip' if found, or None if the argv is not a
+    'python -m pip ...' invocation. Stops at the first non-flag token (script
+    name), -c, or -- to avoid false-positives from script arguments.
+    """
+    idx = 1
+    while idx < len(argv):
+        tok = argv[idx]
+        if tok == "-m":
+            if idx + 1 < len(argv) and argv[idx + 1] == "pip":
+                return argv[idx + 2:]
+            return None
+        if tok in ("-c", "--"):
+            return None
+        if tok in _PY_FLAGS_WITH_VALUE:
+            idx += 2  # e.g. -W default
+            continue
+        if tok in _PY_FLAGS_NO_VALUE:
+            idx += 1
+            continue
+        # Combined short option with inline value: -Wd, -Xfoo, etc.
+        if len(tok) > 2 and tok[0] == "-" and tok[1] in "WXw":
+            idx += 1
+            continue
+        # Any other single-char short flag not in our tables
+        if tok.startswith("-") and len(tok) == 2:
+            idx += 1
+            continue
+        # Long option: --foo or --foo=bar (consume next token as value if no =)
+        if tok.startswith("--"):
+            if "=" not in tok and idx + 1 < len(argv) and not argv[idx + 1].startswith("-"):
+                idx += 2  # --opt value
+            else:
+                idx += 1  # --opt=value or boolean --opt
+            continue
+        return None  # non-flag token — script name
+    return None  # exhausted argv without finding -m pip
+
+
 def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     if not argv:
         return None
@@ -192,13 +242,16 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     if cmd in ("pip", "pip3"):
         args = argv[1:]
         venv_exe = argv[0]
-    elif cmd in ("python", "python3") and len(argv) >= 3 and argv[1] == "-m" and argv[2] == "pip":
-        # python -m pip install ...
-        args = argv[3:]
-        venv_exe = argv[0]
-    elif cmd in ("python", "python3") and len(argv) >= 2 and _cmd(argv[1]) in ("pip", "pip3"):
-        # python /path/to/pip install ...
-        args = argv[2:]
+    elif cmd in ("python", "python3"):
+        if len(argv) >= 2 and _cmd(argv[1]) in ("pip", "pip3"):
+            # python /path/to/pip install ...
+            args = argv[2:]
+        else:
+            # python [-flags…] -m pip install …
+            m_pip_args = _find_m_pip_args(argv)
+            if m_pip_args is None:
+                return None
+            args = m_pip_args
         venv_exe = argv[0]
     else:
         return None
@@ -418,7 +471,8 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     subcmd = args[0]
     if subcmd in ("install", "i", "add", "ci"):
         packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="npm", packages=packages, ecosystem="npm")
+        is_global = "-g" in args or "--global" in args
+        return ParsedInstall(manager="npm", packages=packages, ecosystem="npm", global_install=is_global)
     if subcmd in ("update", "up", "upgrade", "dedupe"):
         return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
     if subcmd in ("uninstall", "remove", "rm", "un", "r"):

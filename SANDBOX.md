@@ -40,6 +40,77 @@ package-alert run bash                        # sandboxed interactive shell
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. |
 | `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
+## Shadow Tools (Transparent Interception)
+
+Rather than typing `package-alert run pip install …` every time, you can install shadow tools that intercept package manager commands transparently.
+
+### Shell integration (interactive use)
+
+```bash
+# Install once — appends an eval line to ~/.bashrc or ~/.zshrc
+package-alert setup shell --install
+
+# Or print the snippet and source it yourself
+eval "$(package-alert setup shell)"
+```
+
+This defines shell functions (`pip()`, `uv()`, `npm()`, etc.) that route through `package-alert run` automatically. Runtime interpreters (`python`, `node`) are intentionally excluded — they are handled by project-level shims instead.
+
+### Project shims (coding agents and subprocesses)
+
+Shell functions only intercept interactive commands. Coding agents and subprocesses that bypass the shell need project-local shims:
+
+```bash
+# Install shims in .venv/bin/ and node_modules/.bin/
+package-alert setup project
+
+# Remove shims and restore original binaries
+package-alert setup project --uninstall
+```
+
+For each managed binary (e.g. `.venv/bin/pip`), `setup project`:
+1. Renames the original to `pip.__pa_real`
+2. Writes a shim at the original path that calls `package-alert run pip "$@"`
+
+For runtime interpreters (`.venv/bin/python`, `.venv/bin/python3`), a special shim is written that:
+- Intercepts `python -m pip …` and routes it through `package-alert run pip`
+- Passes all other invocations straight to `python.__pa_real`
+
+This means `python -m pip install requests` is caught even when invoked by a coding agent that never loads the shell RC file.
+
+### Cooldown policy
+
+The cooldown policy fires before the OSV pre-flight check and delays installs of recently-published packages:
+
+| Condition | Default action |
+|-----------|---------------|
+| Package age < cooldown period, typosquat match detected | Prompt |
+| Package age < cooldown period, no typosquat match | Warn |
+| Package age ≥ cooldown period | Allow |
+| Publication date unavailable | Warn + allow |
+| Non-interactive context (no TTY) and would-prompt | Block |
+
+Risk score is derived from the typosquatting detector, which runs against the top-packages list before the sandbox executes. A score of 0 means no typosquat match; 15–20 indicates a close match to a popular package name.
+
+Configure in `config.toml`:
+
+```toml
+[sandbox.cooldown]
+period_days = 7                  # default
+on_new_medium_risk = "prompt"    # prompt | warn | block | allow
+on_new_low_risk = "warn"
+non_interactive_escalation = "block"
+```
+
+To pre-clear a package for unattended (agent) installs:
+
+```bash
+package-alert cooldown allow requests 2.32.0
+package-alert cooldown allow requests 2.32.0 --ecosystem pypi
+```
+
+Cleared records expire after `period_days` and the user is prompted again.
+
 ## Execution Flow
 
 ### Package manager commands

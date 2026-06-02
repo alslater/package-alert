@@ -23,12 +23,20 @@ from packagealert.parsers.process_args import (
 )
 from packagealert.sandbox.bwrap import available as bwrap_available
 from packagealert.sandbox.bwrap import build_cmd
+from packagealert.storage.db import (
+    get_cooldown_cleared_at,
+    get_publication_date,
+    open_db,
+    store_cooldown_cleared,
+    store_publication_date,
+)
 
 if TYPE_CHECKING:
     from packagealert.config import AppConfig
 
 log = logging.getLogger(__name__)
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+_PA_REAL_SUFFIX = ".__pa_real"
 
 _SHELL_NAMES: frozenset[str] = frozenset({
     "bash", "zsh", "sh", "fish", "dash", "ksh", "csh", "tcsh",
@@ -111,9 +119,61 @@ class SandboxRunner:
             return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change)
 
         parsed = _try_parse(argv)
+
+        # Apply any environment variables suggested by the language module (e.g.
+        # VIRTUAL_ENV derived from a venv shim path in python.py).
+        if parsed is not None:
+            for key, value in parsed.suggested_env.items():
+                os.environ.setdefault(key, value)
+
+        if parsed is None:
+            # Unrecognised command (e.g. bare `pip`, `npm --version`) — nothing to
+            # sandbox or scan, so exec the real binary directly.
+            real_argv = _resolve_real_binary(argv)
+            # Guard against infinite recursion: if the binary we are about to exec
+            # is a package-alert shim without a .__pa_real sibling (inconsistent
+            # state), exec'ing it would call back into us. Check the fingerprint.
+            tool_path = shutil.which(real_argv[0])
+            if tool_path:
+                real_sibling = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+                if not real_sibling.exists():
+                    try:
+                        content = Path(tool_path).read_text(errors="strict")
+                        if "# __pa_shim__" in content:
+                            self._console.print(
+                                f"[red]✗ {argv[0]} is a package-alert shim but "
+                                f"{argv[0]}{_PA_REAL_SUFFIX} is missing — infinite recursion prevented.[/red]"
+                            )
+                            self._console.print(
+                                f"[dim]Run 'package-alert setup project --uninstall' "
+                                f"and reinstall the package manager.[/dim]"
+                            )
+                            return 1
+                    except (UnicodeDecodeError, OSError):
+                        pass  # ELF binary — safe to exec
+            try:
+                os.execvp(real_argv[0], real_argv)
+            except FileNotFoundError:
+                self._console.print(f"[red]✗ Command not found: {real_argv[0]}[/red]")
+                return 127
+            return 0  # unreachable; satisfies type checker
+
         ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
 
-        self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
+        # Show the interception banner only when invoked through a shim or shell
+        # function — when the user types `package-alert run ...` directly they
+        # already know we're running.
+        real_argv = _resolve_real_binary(argv)
+        via_project_shim = real_argv is not argv
+        via_shim = via_project_shim or bool(os.environ.get("_PA_VIA_SHELL"))
+        is_global = parsed.global_install
+
+        if via_shim:
+            self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
+        if is_global:
+            self._console.print("[dim]Global install: pre-flight check only (not sandboxed)[/dim]")
+        elif not via_shim:
+            self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         if not self._check_venv_scope(parsed, cwd):
             return 1
@@ -125,8 +185,22 @@ class SandboxRunner:
             self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
             return 1
 
+        cooldown_result = await self._cooldown_check(ctx)
+        if cooldown_result is False:
+            return 1
+        pending_clears: list[tuple[str, str, str]] = cooldown_result  # type: ignore[assignment]
+
         if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
             return 1
+
+        if is_global:
+            real_argv = _resolve_real_binary(argv)
+            try:
+                os.execvp(real_argv[0], real_argv)
+            except FileNotFoundError:
+                self._console.print(f"[red]✗ Command not found: {real_argv[0]}[/red]")
+                return 127
+            return 0  # unreachable
 
         _resolve_targets(ctx)
 
@@ -197,6 +271,9 @@ class SandboxRunner:
         if not self._check_extra_tmpfs(extra_tmpfs):
             return 1
 
+        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+
+        argv = _resolve_real_binary(argv)
         result = subprocess.run(build_cmd(
             argv, ctx.write_dirs,
             allow_network=allow_network,
@@ -248,6 +325,14 @@ class SandboxRunner:
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
 
+        if pending_clears:
+            db = await open_db()
+            try:
+                for eco, pkg_name, ver in pending_clears:
+                    await store_cooldown_cleared(db, ecosystem=eco, package=pkg_name, version=ver)
+            finally:
+                await db.close()
+
         return 0
 
     # ------------------------------------------------------------------
@@ -290,6 +375,111 @@ class SandboxRunner:
                 self._console.print("[dim]Remove or correct the path in your config file (sandbox.extra_tmpfs).[/dim]")
                 ok = False
         return ok
+
+    async def _cooldown_check(self, ctx: _Context) -> list[tuple[str, str, str]] | bool:
+        """Check cooldown policy. Returns False if blocked, or a list of
+        (ecosystem, name, version) tuples for packages the user confirmed at the
+        prompt — to be written to cooldown_cleared after a successful install.
+        An empty list means allowed with no prompts."""
+        import sys
+        import time as _time
+
+        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_publication_date
+
+        if ctx.parsed is None or not ctx.parsed.packages:
+            return []
+
+        cfg = self._cfg.sandbox.cooldown
+        is_tty = sys.stdin.isatty()
+        db = await open_db()
+
+        from packagealert.heuristics.top_packages import TopPackagesCache
+        from packagealert.heuristics.typosquat import TyposquatDetector
+        from packagealert.languages.base import PackageSpec
+        from packagealert.parsers.process_args import parse_package_spec
+        top_cache = TopPackagesCache(db, self._cfg.heuristics)
+        detector = TyposquatDetector(top_cache)
+
+        blocked: list = []
+        pending_clears: list[tuple[str, str, str]] = []
+        warned: list = []
+
+        try:
+            for pkg_str in ctx.parsed.packages:
+                ecosystem = ctx.parsed.ecosystem.lower()
+                name, version = parse_package_spec(pkg_str, ecosystem)
+                if not version:
+                    self._console.print(
+                        f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
+                    )
+                    continue
+
+                pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
+
+                lang = lang_registry.for_ecosystem(ecosystem)
+                if lang is None:
+                    continue
+                url = lang.publication_date_url(pkg.name, pkg.version)
+                if url is None:
+                    # Ecosystem has not opted into cooldown — skip entirely.
+                    # The typosquat check is also skipped: without a publication
+                    # date there is no age to enforce a cooldown period against,
+                    # so a decision cannot be made.
+                    continue
+
+                cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
+                if cached == "miss":
+                    fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
+                    if isinstance(fetched, float):
+                        await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
+                    elif fetched == "not_found":
+                        await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=None)
+                    pub_ts = fetched if isinstance(fetched, float) else None
+                elif cached == "not_found":
+                    pub_ts = None
+                else:
+                    pub_ts = cached  # float
+
+                age_days = (_time.time() - pub_ts) / 86400 if isinstance(pub_ts, float) else None
+                cleared_at = await get_cooldown_cleared_at(db, ecosystem=ecosystem, package=name, version=version)
+
+                typo = await detector.analyze(name, ecosystem)
+                risk_score = typo.score
+
+                decision = decide_with_cleared(
+                    pkg,
+                    age_days=age_days,
+                    risk_score=risk_score,
+                    cfg=cfg,
+                    is_tty=is_tty,
+                    cleared_at=cleared_at,
+                )
+
+                if decision.action == "block":
+                    blocked.append(decision)
+                elif decision.action == "warn":
+                    warned.append(decision)
+                elif decision.action == "prompt":
+                    from rich.prompt import Confirm
+                    self._console.print(f"[yellow]  {pkg.name}=={pkg.version}: {decision.reason}[/yellow]")
+                    if not Confirm.ask("Install anyway?", default=False):
+                        blocked.append(decision)
+                    else:
+                        pending_clears.append((ecosystem, name, version))
+        finally:
+            await db.close()
+
+        for d in warned:
+            self._console.print(f"[yellow]  {d.package.name}=={d.package.version}: {d.reason}[/yellow]")
+
+        if blocked:
+            for d in blocked:
+                self._console.print(f"[red]✗ {d.package.name}=={d.package.version}: {d.reason}[/red]")
+                eco_flag = f" --ecosystem {d.package.ecosystem}" if d.package.ecosystem.lower() != "pypi" else ""
+                self._console.print(f"[dim]  To pre-clear: package-alert cooldown allow {d.package.name} {d.package.version}{eco_flag}[/dim]")
+            return False
+
+        return pending_clears
 
     async def _run_shell(
         self,
@@ -413,6 +603,8 @@ class SandboxRunner:
         extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
         if not self._check_extra_tmpfs(extra_tmpfs):
             return 1
+
+        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
         result = subprocess.run(build_cmd(
             argv, write_dirs,
@@ -1044,7 +1236,26 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         venv_exe=pi.venv_exe,
         req_files=pi.req_files,
         lockfile_hint=pi.lockfile_hint,
+        global_install=pi.global_install,
+        suggested_env=pi.suggested_env,
     )
+
+
+
+def _resolve_real_binary(argv: list[str]) -> list[str]:
+    """Replace argv[0] with its .__pa_real original if a shim is installed."""
+    if not argv:
+        return argv
+    # If argv[0] is a full path (from a shim passing $0), use it directly.
+    # Otherwise fall back to shutil.which for bare tool names.
+    p = Path(argv[0])
+    tool_path = str(p) if p.is_absolute() else shutil.which(argv[0])
+    if tool_path is None:
+        return argv
+    real = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+    if real.exists():
+        return [str(real)] + argv[1:]
+    return argv
 
 
 def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:

@@ -71,6 +71,8 @@ class ProcessInstall:
     venv_exe: str | None = None
     lockfile_hint: str | None = None
     req_files: list[str] = field(default_factory=list)
+    global_install: bool = False
+    suggested_env: dict[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -148,6 +150,47 @@ class LanguageBase(Protocol):
         """Static baseline used when the cache is empty and fetch has failed.
         Names must be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
         ...
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return None
+
+    def package_manager_names(self) -> list[str]:
+        """Executable names that are pure package managers (pip, npm, uv, etc.).
+
+        Used by setup-shell to generate shell functions. Must NOT include runtime
+        interpreters (python, node, php) — those are handled separately via
+        interpreter_names().
+        """
+        return []
+
+    def project_shim_names(self) -> list[str]:
+        """Subset of package_manager_names() to shim inside .venv/bin/ and
+        node_modules/.bin/. Defaults to package_manager_names().
+
+        Override to exclude tools that manage the venv itself (e.g. uv) or that
+        install a versioned copy of themselves into the venv — shimming those can
+        cause version mismatches or recursive invocation issues.
+        """
+        return self.package_manager_names()
+
+    def interpreter_names(self) -> list[str]:
+        """Runtime interpreter names (python, python3, node, php, etc.) that may
+        invoke package managers via `-m pip` style invocations.
+
+        setup-project writes a special shim for these that only intercepts package
+        manager sub-invocations and passes everything else through unchanged.
+        """
+        return []
+
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        """Return bin/ directories within root that contain this language's package
+        manager binaries, suitable for shimming by setup-project.
+
+        The default implementation returns an empty list — override in each
+        language module to detect the actual install locations (e.g. venv bin dirs
+        for Python, node_modules/.bin for Node).
+        """
+        return []
+
     def snapshot(self, install_root: Path) -> Snapshot: ...
     def detect_post_install(self, before: Snapshot, after: Snapshot) -> list[PackageSpec]: ...
 

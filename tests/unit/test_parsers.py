@@ -351,6 +351,58 @@ def test_python_script_pip_install():
     assert result.packages == ["opencv-python"]
 
 
+def test_python_flags_before_m_pip():
+    # python -O -m pip install foo — flags precede -m pip
+    result = parse_pip_args(["python3", "-O", "-m", "pip", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+
+def test_python_multiple_flags_before_m_pip():
+    result = parse_pip_args(["python3", "-W", "ignore", "-I", "-m", "pip", "install", "flask"])
+    assert result is not None
+    assert result.packages == ["flask"]
+
+
+def test_python_m_other_module_not_recognised():
+    # python -m something_else should not be treated as pip
+    result = parse_pip_args(["python3", "-m", "pytest", "tests/"])
+    assert result is None
+
+
+def test_python_script_args_not_misclassified():
+    # python3 myscript.py -m pip install evil  — args to the script, not to python
+    result = parse_pip_args(["python3", "myscript.py", "-m", "pip", "install", "evil"])
+    assert result is None
+
+
+def test_python_c_not_recognised():
+    # python3 -c "..." should not be treated as pip
+    result = parse_pip_args(["python3", "-c", "import pip; pip.main()"])
+    assert result is None
+
+
+def test_python_combined_short_flag_m_pip():
+    # python3 -Wd -m pip install foo  — -Wd is -W default (combined form)
+    result = parse_pip_args(["python3", "-Wd", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
+def test_python_long_option_m_pip():
+    # python3 --check-hash-based-pycs always -m pip install foo
+    result = parse_pip_args(["python3", "--check-hash-based-pycs", "always", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
+def test_python_long_option_equals_m_pip():
+    # python3 --check-hash-based-pycs=always -m pip install foo
+    result = parse_pip_args(["python3", "--check-hash-based-pycs=always", "-m", "pip", "install", "foo"])
+    assert result is not None
+    assert result.packages == ["foo"]
+
+
 # ---------------------------------------------------------------------------
 # parse_composer_args
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import tomllib
@@ -289,6 +290,21 @@ class PythonLanguage:
                 "pipenv": "Pipfile.lock",
                 "uv-lock": "uv.lock",
             }
+            # If argv[0] is inside a venv's bin/ but VIRTUAL_ENV is not set
+            # (e.g. venv not activated, called directly via shim), derive it so
+            # the sandbox runner and pip both see the correct venv.
+            suggested_env: dict[str, str] = {}
+            if result.venv_exe and not os.environ.get("VIRTUAL_ENV"):
+                venv_bin = Path(result.venv_exe).resolve().parent
+                venv_root = venv_bin.parent
+                if (venv_root / "pyvenv.cfg").exists():
+                    suggested_env["VIRTUAL_ENV"] = str(venv_root)
+
+            virtual_env = suggested_env.get("VIRTUAL_ENV") or os.environ.get("VIRTUAL_ENV")
+            global_install = (
+                result.manager == "pip"
+                and not virtual_env
+            ) or "--user" in args
             return ProcessInstall(
                 manager=result.manager,
                 packages=specs,
@@ -296,6 +312,8 @@ class PythonLanguage:
                 venv_exe=result.venv_exe,
                 lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
                 req_files=result.req_files,
+                global_install=global_install,
+                suggested_env=suggested_env,
             )
         return None
 
@@ -509,6 +527,36 @@ class PythonLanguage:
             "elasticsearch", "twisted", "werkzeug", "jinja2", "markupsafe", "itsdangerous",
             "pygments", "colorama", "tqdm", "rich", "typer", "pydantic-settings",
         ]
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return f"https://pypi.org/pypi/{name}/{version}/json"
+
+    def package_manager_names(self) -> list[str]:
+        return ["pip", "pip3", "uv", "pipenv"]
+
+    def project_shim_names(self) -> list[str]:
+        # uv installs a versioned copy of itself into .venv/bin/uv — shimming it
+        # causes version mismatches and recursive invocation issues.
+        return ["pip", "pip3", "pipenv"]
+
+    def interpreter_names(self) -> list[str]:
+        return ["python", "python3"]
+
+    def project_bin_dirs(self, root: Path) -> list[Path]:
+        dirs: list[Path] = []
+        seen: set[Path] = set()
+
+        def _add(p: Path) -> None:
+            if p.is_dir():
+                resolved = p.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    dirs.append(p)
+
+        for name in (".venv", "venv", "env", ".env"):
+            _add(root / name / "bin")
+
+        return dirs
 
     # ------------------------------------------------------------------
     # snapshot
