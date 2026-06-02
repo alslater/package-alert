@@ -193,13 +193,19 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     if cmd in ("pip", "pip3"):
         args = argv[1:]
         venv_exe = argv[0]
-    elif cmd in ("python", "python3") and len(argv) >= 3 and argv[1] == "-m" and argv[2] == "pip":
-        # python -m pip install ...
-        args = argv[3:]
-        venv_exe = argv[0]
-    elif cmd in ("python", "python3") and len(argv) >= 2 and _cmd(argv[1]) in ("pip", "pip3"):
-        # python /path/to/pip install ...
-        args = argv[2:]
+    elif cmd in ("python", "python3"):
+        if len(argv) >= 2 and _cmd(argv[1]) in ("pip", "pip3"):
+            # python /path/to/pip install ...
+            args = argv[2:]
+        else:
+            # python [-flags…] -m pip install …  — find -m pip anywhere in argv
+            try:
+                m_idx = argv.index("-m")
+            except ValueError:
+                return None
+            if m_idx + 1 >= len(argv) or argv[m_idx + 1] != "pip":
+                return None
+            args = argv[m_idx + 2:]
         venv_exe = argv[0]
     else:
         return None

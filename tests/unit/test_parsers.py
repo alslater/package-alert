@@ -351,6 +351,25 @@ def test_python_script_pip_install():
     assert result.packages == ["opencv-python"]
 
 
+def test_python_flags_before_m_pip():
+    # python -O -m pip install foo — flags precede -m pip
+    result = parse_pip_args(["python3", "-O", "-m", "pip", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+
+def test_python_multiple_flags_before_m_pip():
+    result = parse_pip_args(["python3", "-W", "ignore", "-I", "-m", "pip", "install", "flask"])
+    assert result is not None
+    assert result.packages == ["flask"]
+
+
+def test_python_m_other_module_not_recognised():
+    # python -m something_else should not be treated as pip
+    result = parse_pip_args(["python3", "-m", "pytest", "tests/"])
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # parse_composer_args
 # ---------------------------------------------------------------------------

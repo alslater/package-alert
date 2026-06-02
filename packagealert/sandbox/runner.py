@@ -124,6 +124,27 @@ class SandboxRunner:
             # Unrecognised command (e.g. bare `pip`, `npm --version`) — nothing to
             # sandbox or scan, so exec the real binary directly.
             real_argv = _resolve_real_binary(argv)
+            if real_argv is argv:
+                # _resolve_real_binary found no .__pa_real sibling. Guard against
+                # infinite recursion: if the resolved binary is itself a package-alert
+                # shim (inconsistent state — shim installed but .__pa_real missing),
+                # exec'ing it would call back into us. Detect and bail.
+                tool_path = shutil.which(argv[0])
+                if tool_path:
+                    try:
+                        content = Path(tool_path).read_text(errors="strict")
+                        if "package-alert run" in content:
+                            self._console.print(
+                                f"[red]✗ {argv[0]} is a package-alert shim but "
+                                f"{argv[0]}{_PA_REAL_SUFFIX} is missing.[/red]"
+                            )
+                            self._console.print(
+                                f"[dim]Run 'package-alert setup project --uninstall' "
+                                f"and reinstall the package manager.[/dim]"
+                            )
+                            return 1
+                    except (UnicodeDecodeError, OSError):
+                        pass  # binary — safe to exec
             os.execvp(real_argv[0], real_argv)
             return 0  # unreachable; satisfies type checker
 

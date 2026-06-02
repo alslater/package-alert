@@ -113,16 +113,13 @@ def _all_interpreter_names() -> list[str]:
 
 
 def _write_interpreter_shim(path: Path, real_name: str) -> None:
-    """Write a shim that intercepts '-m pip' but passes everything else through."""
-    real_path = path.parent / real_name
-    path.write_text(
-        "#!/bin/sh\n"
-        'case "$1 $2" in\n'
-        f'  "-m pip") shift 2; exec {PA_FINGERPRINT} pip "$@" ;;\n'
-        f'  *) exec "{real_path}" "$@" ;;\n'
-        "esac\n"
-    )
-    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    """Write a shim that delegates all invocations to package-alert run.
+
+    package-alert run detects `python -m pip` (including flags before -m) via
+    parse_pip_args in the Python language module, and execs the real interpreter
+    directly for all other invocations.
+    """
+    _write_shim(path)
 
 
 def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> None:
@@ -130,6 +127,16 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
     real = bin_dir / f"{tool}{PA_REAL_SUFFIX}"
     if real.exists():
         return  # already shimmed
+
+    if interpreter:
+        # Interpreter binaries are ELF — never try to read them for fingerprint checking.
+        # Just rename and install the shim.
+        original.rename(real)
+        _write_interpreter_shim(original, real_name=f"{tool}{PA_REAL_SUFFIX}")
+        typer.echo(f"  shimmed {original}")
+        return
+
+    # For package manager scripts: read to detect already-shimmed or unknown binaries.
     try:
         content = original.read_text(errors="strict")
     except (UnicodeDecodeError, OSError):
@@ -140,10 +147,7 @@ def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> Non
         typer.echo(f"  to fix: remove {original} and reinstall the package manager, then re-run 'package-alert setup project'", err=True)
         return
     original.rename(real)
-    if interpreter:
-        _write_interpreter_shim(original, real_name=f"{tool}{PA_REAL_SUFFIX}")
-    else:
-        _write_shim(original)
+    _write_shim(original)
     typer.echo(f"  shimmed {original}")
 
 
