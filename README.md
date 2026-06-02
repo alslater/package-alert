@@ -470,6 +470,26 @@ extra_env = []
 extra_tmpfs = []
 # Example: extra_tmpfs = ["/etc/ssh/other_config.d"]
 
+# Additional paths inside $HOME to re-expose read-only inside the sandbox.
+# Use this when a tool is installed as an editable/development install whose
+# source directory lives inside $HOME (which is hidden by default).
+extra_ro_paths = []
+# Example: extra_ro_paths = ["/home/user/dev/my-tool"]
+
+[sandbox.cooldown]
+# Packages published more recently than period_days trigger the cooldown policy.
+period_days = 7
+
+# Action when a package is within the cooldown period and matches a typosquat pattern.
+# One of: "prompt", "warn", "block", "allow"
+on_new_medium_risk = "prompt"
+
+# Action when a package is within the cooldown period and has no typosquat match.
+on_new_low_risk = "warn"
+
+# In non-interactive contexts (no TTY — coding agents, CI), escalate "prompt" to this.
+non_interactive_escalation = "block"
+
 [scheduler]
 enabled = true
 daily_hour = 2          # hour of day (0–23) to run daily scans
@@ -489,7 +509,7 @@ All persistent data lives in `~/.local/share/package-alert/`:
 
 | File | Purpose |
 |------|---------|
-| `package-alert.db` | SQLite database: OSV cache, alert history, popularity cache, top-packages cache |
+| `package-alert.db` | SQLite database: OSV cache, alert history, popularity cache, top-packages cache, publication date cache, cooldown clearances |
 | `daemon.log` | Rotating daemon log file (10 MB × 3 backups) |
 | `cli.log` | Rotating CLI command log file (10 MB × 3 backups) |
 | `daemon.pid` | PID file used to prevent duplicate daemon instances |
