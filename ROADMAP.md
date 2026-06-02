@@ -36,7 +36,7 @@
 - [ ] YARA rule integration for binary inspection
 - [ ] Webhook / Slack alert channel
 - [ ] Lightweight local web dashboard
-- [ ] CI integration (GitHub Actions action, GitLab CI component)
+- [ ] CI integration (GitHub Actions action, GitLab CI component, Bitbucket Pipelines pipe)
 
 ## Phase 3 (Continued)
 - [ ] Configuration safety audit — scan the loaded config for common misconfigurations (overly broad `editable_roots`, credential paths in `extra_ro_paths`, etc.) and warn at startup
