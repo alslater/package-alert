@@ -14,6 +14,8 @@
 - **Low latency alerts** — Rich terminal panel + `notify-send` desktop notifications
 - **Alert history** — all alerts persisted in SQLite with package name, version, advisory, and project path
 - **Sandboxed installs** — `package-alert run` wraps any package manager command in a bubblewrap sandbox with pre-flight and post-install OSV checks
+- **Shadow tools** — `setup shell` and `setup project` install transparent interceptors so `pip`, `npm`, `uv`, etc. route through package-alert automatically — no prefix needed, works for interactive use, coding agents, and `python -m pip`
+- **Cooldown policy** — blocks or prompts before installing packages published within a configurable window (default 7 days); escalates automatically in non-interactive contexts (CI, coding agents)
 - **Language introspection** — `package-alert languages list` and `package-alert languages info` show loaded language modules and their capabilities
 
 ## Supported Ecosystems
@@ -59,7 +61,14 @@ package-alert daemon --background
 # Check daemon status
 package-alert status
 
-# Run a package manager command in a sandbox
+# Install shell integration — pip, uv, npm etc. are intercepted transparently
+package-alert setup shell --install   # adds eval line to ~/.bashrc or ~/.zshrc
+source ~/.bashrc                       # activate in current shell
+
+# Install project-local shims (catches coding agents that bypass the shell)
+package-alert setup project
+
+# Run a package manager command in a sandbox explicitly
 package-alert run uv sync
 package-alert run npm install
 
@@ -74,6 +83,9 @@ package-alert query requests 2.31.0
 
 # View recent alerts
 package-alert alerts
+
+# Pre-clear a package to bypass cooldown (e.g. for unattended agent installs)
+package-alert cooldown allow requests 2.32.0
 ```
 
 ## Commands
@@ -294,6 +306,49 @@ package-alert languages info php
 ```
 
 `languages info` shows: ecosystems, process names, lockfile patterns, cache paths, and the top-packages URL used for typosquatting detection.
+
+### `setup shell`
+
+Install shell function integration so `pip`, `uv`, `npm`, etc. are intercepted transparently.
+
+```bash
+# Print the shell snippet (source it manually)
+package-alert setup shell
+
+# Append an eval line to ~/.bashrc or ~/.zshrc automatically
+package-alert setup shell --install
+
+# Print just the eval line
+package-alert setup shell --print-rc-line
+```
+
+Once installed, commands like `pip install requests` route through package-alert automatically — no `package-alert run` prefix needed.
+
+### `setup project`
+
+Install project-local shims in `.venv/bin/`, `venv/bin/`, and `node_modules/.bin/`. Shims intercept direct binary invocations from coding agents and subprocesses that bypass the shell.
+
+```bash
+# Install shims in the current project
+package-alert setup project
+
+# Remove shims and restore original binaries
+package-alert setup project --uninstall
+
+# Also append PATH_add lines to .envrc (for direnv users)
+package-alert setup project --envrc
+```
+
+### `cooldown allow`
+
+Pre-clear a package version to bypass the cooldown policy. Useful when an agent can't respond to interactive prompts.
+
+```bash
+package-alert cooldown allow requests 2.32.0
+package-alert cooldown allow lodash 4.17.21 --ecosystem npm
+```
+
+Clearances expire after `sandbox.cooldown.period_days` (default 7 days) and are recorded only after a successful install.
 
 ### `version`
 
