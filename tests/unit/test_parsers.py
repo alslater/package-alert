@@ -1093,3 +1093,88 @@ class TestScanLockfilesSubdirPattern:
 
         assert result.pinned == []
         assert result.sources == []
+
+
+# ---------------------------------------------------------------------------
+# PythonLanguage.prepare_sandbox_argv / sandbox_extra_write_paths
+# ---------------------------------------------------------------------------
+
+class TestPythonSandboxArgv:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def test_relative_editable_absolutised(self, tmp_path):
+        lang = self._lang()
+        result = lang.prepare_sandbox_argv(["pip", "install", "-e", "../../other"], tmp_path)
+        from pathlib import Path
+        assert result[3] == str((tmp_path / "../../other").resolve())
+
+    def test_extras_preserved(self, tmp_path):
+        lang = self._lang()
+        result = lang.prepare_sandbox_argv(["pip", "install", "-e", ".[dev]"], tmp_path)
+        from pathlib import Path
+        expected = str((tmp_path / ".").resolve()) + "[dev]"
+        assert result[3] == expected
+
+    def test_absolute_path_unchanged(self, tmp_path):
+        lang = self._lang()
+        abs_path = str(tmp_path / "myproject")
+        result = lang.prepare_sandbox_argv(["pip", "install", "-e", abs_path], tmp_path)
+        assert result[3] == abs_path
+
+    def test_vcs_url_unchanged(self, tmp_path):
+        lang = self._lang()
+        url = "git+https://github.com/org/repo.git"
+        result = lang.prepare_sandbox_argv(["pip", "install", "-e", url], tmp_path)
+        assert result[3] == url
+
+    def test_long_form_editable_absolutised(self, tmp_path):
+        lang = self._lang()
+        result = lang.prepare_sandbox_argv(["pip", "install", "--editable=../other"], tmp_path)
+        from pathlib import Path
+        expected = f"--editable={(tmp_path / '../other').resolve()}"
+        assert result[2] == expected
+
+
+class TestPythonSandboxWritePaths:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def test_external_editable_returned(self, tmp_path):
+        lang = self._lang()
+        external = tmp_path / "other"
+        external.mkdir()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        result = lang.sandbox_extra_write_paths(
+            ["pip", "install", "-e", str(external)], cwd
+        )
+        assert external.resolve() in result
+
+    def test_in_project_editable_excluded(self, tmp_path):
+        lang = self._lang()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        # pip install -e . — inside cwd, should not be returned
+        result = lang.sandbox_extra_write_paths(
+            ["pip", "install", "-e", str(cwd)], cwd
+        )
+        assert not result
+
+    def test_nonexistent_path_excluded(self, tmp_path):
+        lang = self._lang()
+        cwd = tmp_path / "project"
+        cwd.mkdir()
+        result = lang.sandbox_extra_write_paths(
+            ["pip", "install", "-e", str(tmp_path / "nonexistent")], cwd
+        )
+        assert not result
+
+    def test_vcs_url_excluded(self, tmp_path):
+        lang = self._lang()
+        result = lang.sandbox_extra_write_paths(
+            ["pip", "install", "-e", "git+https://github.com/org/repo.git"], tmp_path
+        )
+        assert not result

@@ -2582,3 +2582,61 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
         result = asyncio.run(runner.run(["pip", "install", "requests"]))
 
     assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# _is_safe_sandbox_path — editable-roots security boundary tests
+# ---------------------------------------------------------------------------
+
+class TestIsSafeSandboxPath:
+    def test_rejects_filesystem_root(self, tmp_path):
+        from pathlib import Path
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        assert not _is_safe_sandbox_path(Path("/"), [tmp_path])
+
+    def test_rejects_system_dirs(self, tmp_path):
+        from pathlib import Path
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        for bad in [Path("/etc"), Path("/usr"), Path("/bin"), Path("/etc/passwd")]:
+            assert not _is_safe_sandbox_path(bad, [tmp_path]), f"should reject {bad}"
+
+    def test_rejects_credential_dirs(self, tmp_path):
+        from pathlib import Path
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        home = Path.home()
+        for cred in [home / ".ssh", home / ".aws", home / ".gnupg",
+                     home / ".ssh" / "id_rsa", home / ".aws" / "credentials"]:
+            assert not _is_safe_sandbox_path(cred, [tmp_path]), f"should reject {cred}"
+
+    def test_rejects_when_editable_roots_empty(self, tmp_path):
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        # Even a safe-looking path is blocked with no editable_roots
+        assert not _is_safe_sandbox_path(tmp_path / "myproject", [])
+
+    def test_allows_path_under_editable_root(self, tmp_path):
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        project = tmp_path / "dev" / "myproject"
+        project.mkdir(parents=True)
+        assert _is_safe_sandbox_path(project, [tmp_path / "dev"])
+
+    def test_rejects_path_outside_editable_roots(self, tmp_path):
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        allowed_root = tmp_path / "dev"
+        allowed_root.mkdir()
+        outside = tmp_path / "other" / "project"
+        outside.mkdir(parents=True)
+        assert not _is_safe_sandbox_path(outside, [allowed_root])
+
+    def test_rejects_credential_dir_even_when_under_editable_root(self):
+        from pathlib import Path
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        home = Path.home()
+        # .ssh is under home, and home might be an editable root — still blocked
+        assert not _is_safe_sandbox_path(home / ".ssh", [home])
+
+    def test_relative_path_resolved_against_cwd(self, tmp_path):
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        # Absolute path under allowed root — should pass
+        project = tmp_path / "proj"
+        project.mkdir()
+        assert _is_safe_sandbox_path(project, [tmp_path])

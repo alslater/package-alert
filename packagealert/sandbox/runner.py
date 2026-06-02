@@ -476,7 +476,11 @@ class SandboxRunner:
                     if lang_for_latest is not None:
                         latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
                         if callable(latest_url_fn):
-                            latest_url = latest_url_fn(name)
+                            try:
+                                latest_url = latest_url_fn(name)
+                            except Exception:
+                                log.warning("latest_version_url raised for lang=%s pkg=%s — skipping", getattr(lang_for_latest, "name", "?"), name, exc_info=True)
+                                latest_url = None
                             if latest_url is not None:
                                 version = await fetch_latest_version(latest_url, lang_for_latest, name)
                                 if version:
