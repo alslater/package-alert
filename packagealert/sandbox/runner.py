@@ -379,6 +379,9 @@ class SandboxRunner:
                 ecosystem = ctx.parsed.ecosystem.lower()
                 name, version = parse_package_spec(pkg_str, ecosystem)
                 if not version:
+                    self._console.print(
+                        f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
+                    )
                     continue
 
                 pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
