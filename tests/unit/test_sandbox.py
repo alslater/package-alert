@@ -2558,6 +2558,7 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
     with (
         patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
         patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
+        patch.object(SandboxRunner, "_check_venv_scope", return_value=True),
         patch("packagealert.sandbox.cooldown.fetch_latest_version", new_callable=AsyncMock, return_value=None),
         patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock) as mock_open_db,
         patch("packagealert.sandbox.runner._resolve_targets"),
@@ -2567,6 +2568,7 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
         patch("packagealert.sandbox.runner._resolve_real_binary", side_effect=lambda a: a),
         patch("subprocess.run") as mock_run,
         patch("sys.stdin") as mock_stdin,
+        patch.dict("os.environ", {"VIRTUAL_ENV": "/fake/venv"}),
     ):
         mock_stdin.isatty.return_value = False
         mock_db = AsyncMock()
