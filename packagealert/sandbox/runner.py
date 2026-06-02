@@ -8,7 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -408,12 +408,14 @@ class SandboxRunner:
             for pkg_str in ctx.parsed.packages:
                 ecosystem = ctx.parsed.ecosystem.lower()
                 name, version = parse_package_spec(pkg_str, ecosystem)
+                if not name:
+                    continue  # VCS URL, local path, editable install — not a registry package
                 if not version:
                     lang_for_latest = lang_registry.for_ecosystem(ecosystem)
                     if lang_for_latest is not None:
                         latest_url = lang_for_latest.latest_version_url(name)
                         if latest_url is not None:
-                            version = await fetch_latest_version(latest_url, lang_for_latest)
+                            version = await fetch_latest_version(latest_url, lang_for_latest, name)
                             if version:
                                 self._console.print(f"[dim]Resolving latest version: {name}=={version}[/dim]")
                     if not version:
@@ -464,11 +466,9 @@ class SandboxRunner:
                 )
 
                 if typo.is_typosquat and typo.closest_match:
-                    decision = decision.__class__(
-                        action=decision.action,
+                    decision = dataclass_replace(
+                        decision,
                         reason=f"{decision.reason}; possible typosquat of '{typo.closest_match}' (distance {typo.distance})",
-                        package=decision.package,
-                        age_days=decision.age_days,
                     )
 
                 if decision.action == "block":

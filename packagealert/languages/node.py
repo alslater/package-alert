@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import subprocess
+from urllib.parse import quote
 from pathlib import Path
 
 import httpx
@@ -463,10 +464,13 @@ class NodeLanguage:
         # omits it. The full package document is the only source for the `time`
         # dict, which maps version strings to ISO timestamps. Results are cached
         # in SQLite for 30 days so this large fetch is a one-time cost per version.
-        return f"https://registry.npmjs.org/{name}"
+        # Scoped packages (@scope/pkg) must have the slash percent-encoded.
+        encoded = quote(name, safe="@")
+        return f"https://registry.npmjs.org/{encoded}"
 
     def latest_version_url(self, name: str) -> str | None:
-        return f"https://registry.npmjs.org/{name}/latest"
+        encoded = quote(name, safe="@")
+        return f"https://registry.npmjs.org/{encoded}/latest"
 
     def latest_version_parse(self, data: dict, name: str) -> str | None:
         return data.get("version") or None

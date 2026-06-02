@@ -151,7 +151,7 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
     return None
 
 
-async def fetch_latest_version(url: str, lang: object) -> str | None:
+async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
     """Fetch the latest published version of a package from its registry API.
 
     Returns the version string, or None on any error (fail open).
@@ -168,7 +168,7 @@ async def fetch_latest_version(url: str, lang: object) -> str | None:
         return None
 
     try:
-        return lang.latest_version_parse(resp.json(), "")  # type: ignore[union-attr]
+        return lang.latest_version_parse(resp.json(), name)  # type: ignore[union-attr]
     except Exception as exc:
         log.debug("Failed to parse latest version from %s: %s", url, exc)
         return None

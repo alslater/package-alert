@@ -2496,3 +2496,85 @@ def test_cooldown_blocks_non_interactive(tmp_path, monkeypatch):
         result = asyncio.run(runner.run(["pip", "install", "requests==2.31.0"]))
 
     assert result == 1  # blocked by cooldown
+
+
+def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
+    """Unpinned install: latest version is fetched and cooldown runs against it."""
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock, patch
+    from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
+    from packagealert.sandbox.runner import SandboxRunner
+    from packagealert.heuristics.typosquat import TyposquatResult
+
+    cfg = AppConfig()
+    cfg.sandbox = SandboxConfig(
+        cooldown=CooldownConfig(on_new_medium_risk="prompt", on_new_low_risk="prompt", non_interactive_escalation="block")
+    )
+    runner = SandboxRunner(cfg)
+
+    # Publication date 2 days ago — within cooldown
+    pub_ts = time.time() - 2 * 86400
+
+    with (
+        patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
+        patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
+        patch("packagealert.sandbox.runner.get_publication_date", new_callable=AsyncMock, return_value="miss"),
+        patch("packagealert.sandbox.runner.store_publication_date", new_callable=AsyncMock),
+        patch("packagealert.sandbox.runner.get_cooldown_cleared_at", new_callable=AsyncMock, return_value=None),
+        patch("packagealert.sandbox.cooldown.fetch_publication_date", new_callable=AsyncMock, return_value=pub_ts),
+        patch("packagealert.sandbox.cooldown.fetch_latest_version", new_callable=AsyncMock, return_value="2.32.0"),
+        patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock) as mock_open_db,
+        patch("packagealert.heuristics.typosquat.TyposquatDetector.analyze",
+              new_callable=AsyncMock,
+              return_value=TyposquatResult(is_typosquat=False, closest_match=None, distance=None, score=0)),
+        patch("sys.stdin") as mock_stdin,
+    ):
+        mock_stdin.isatty.return_value = False
+        mock_db = AsyncMock()
+        mock_db.close = AsyncMock()
+        mock_open_db.return_value = mock_db
+
+        # Unpinned — no version in the install spec
+        result = asyncio.run(runner.run(["pip", "install", "requests"]))
+
+    # Should be blocked: latest version resolved to 2.32.0, which is within cooldown
+    assert result == 1
+
+
+def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
+    """Unpinned install: if latest version fetch fails, cooldown is skipped gracefully."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
+    from packagealert.sandbox.runner import SandboxRunner
+
+    cfg = AppConfig()
+    cfg.sandbox = SandboxConfig(
+        cooldown=CooldownConfig(non_interactive_escalation="block")
+    )
+    runner = SandboxRunner(cfg)
+
+    with (
+        patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
+        patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
+        patch("packagealert.sandbox.cooldown.fetch_latest_version", new_callable=AsyncMock, return_value=None),
+        patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock) as mock_open_db,
+        patch("packagealert.sandbox.runner._resolve_targets"),
+        patch.object(SandboxRunner, "_scan_updated_lock_files", new_callable=AsyncMock, return_value=True),
+        patch.object(SandboxRunner, "_post_scan", new_callable=AsyncMock, return_value=True),
+        patch("packagealert.sandbox.runner.build_cmd", return_value=["true"]),
+        patch("packagealert.sandbox.runner._resolve_real_binary", side_effect=lambda a: a),
+        patch("subprocess.run") as mock_run,
+        patch("sys.stdin") as mock_stdin,
+    ):
+        mock_stdin.isatty.return_value = False
+        mock_db = AsyncMock()
+        mock_db.close = AsyncMock()
+        mock_open_db.return_value = mock_db
+        mock_run.return_value.returncode = 0
+
+        # Unpinned — version fetch returns None → cooldown skipped → install proceeds
+        result = asyncio.run(runner.run(["pip", "install", "requests"]))
+
+    assert result == 0

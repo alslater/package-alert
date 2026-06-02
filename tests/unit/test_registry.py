@@ -362,6 +362,22 @@ def test_publication_date_url_node():
     assert url == "https://registry.npmjs.org/lodash"
 
 
+def test_publication_date_url_node_scoped():
+    from packagealert.languages import registry
+    registry.load()
+    lang = registry.for_ecosystem("npm")
+    assert lang is not None
+    url = lang.publication_date_url("@scope/pkg", "1.0.0")
+    assert url == "https://registry.npmjs.org/@scope%2Fpkg"
+
+
+def test_latest_version_url_node_scoped():
+    from packagealert.languages.node import NodeLanguage
+    lang = NodeLanguage()
+    url = lang.latest_version_url("@types/node")
+    assert url == "https://registry.npmjs.org/@types%2Fnode/latest"
+
+
 def test_publication_date_url_php():
     from packagealert.languages import registry
     registry.load()

@@ -317,3 +317,106 @@ class TestFetchPublicationDate:
 
         result = asyncio.run(_run())
         assert result is None
+
+
+class TestFetchLatestVersion:
+    def _mock_client(self, mock_client_cls, response):
+        from unittest.mock import AsyncMock
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock(return_value=response)
+
+    def test_pypi_returns_latest_version(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_latest_version
+        from packagealert.languages.python import PythonLanguage
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"info": {"version": "2.32.0"}}
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                self._mock_client(mock_client_cls, mock_resp)
+                return await fetch_latest_version(
+                    "https://pypi.org/pypi/requests/json", PythonLanguage(), "requests"
+                )
+
+        assert asyncio.run(_run()) == "2.32.0"
+
+    def test_returns_none_on_non_200(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_latest_version
+        from packagealert.languages.python import PythonLanguage
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                self._mock_client(mock_client_cls, mock_resp)
+                return await fetch_latest_version(
+                    "https://pypi.org/pypi/ghost/json", PythonLanguage(), "ghost"
+                )
+
+        assert asyncio.run(_run()) is None
+
+    def test_returns_none_on_network_error(self):
+        import asyncio
+        import httpx
+        from unittest.mock import AsyncMock, patch
+        from packagealert.sandbox.cooldown import fetch_latest_version
+        from packagealert.languages.python import PythonLanguage
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                mock_client = AsyncMock()
+                mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+                mock_client.get = AsyncMock(side_effect=httpx.ConnectError("timeout"))
+                return await fetch_latest_version(
+                    "https://pypi.org/pypi/requests/json", PythonLanguage(), "requests"
+                )
+
+        assert asyncio.run(_run()) is None
+
+    def test_returns_none_on_parse_error(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_latest_version
+        from packagealert.languages.python import PythonLanguage
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {}  # missing "info" key → parse returns None
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                self._mock_client(mock_client_cls, mock_resp)
+                return await fetch_latest_version(
+                    "https://pypi.org/pypi/requests/json", PythonLanguage(), "requests"
+                )
+
+        assert asyncio.run(_run()) is None
+
+    def test_npm_returns_latest_version(self):
+        import asyncio
+        from unittest.mock import MagicMock, patch
+        from packagealert.sandbox.cooldown import fetch_latest_version
+        from packagealert.languages.node import NodeLanguage
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"version": "4.17.21"}
+
+        async def _run():
+            with patch("httpx.AsyncClient") as mock_client_cls:
+                self._mock_client(mock_client_cls, mock_resp)
+                return await fetch_latest_version(
+                    "https://registry.npmjs.org/lodash/latest", NodeLanguage(), "lodash"
+                )
+
+        assert asyncio.run(_run()) == "4.17.21"
