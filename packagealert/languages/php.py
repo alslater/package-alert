@@ -205,6 +205,9 @@ class PhpLanguage:
     def package_manager_names(self) -> list[str]:
         return ["composer"]
 
+    def project_shim_names(self) -> list[str]:
+        return self.package_manager_names()
+
     def interpreter_names(self) -> list[str]:
         return ["php", "php8", "php7"]
 

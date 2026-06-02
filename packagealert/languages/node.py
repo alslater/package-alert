@@ -447,6 +447,9 @@ class NodeLanguage:
     def package_manager_names(self) -> list[str]:
         return ["npm", "yarn", "pnpm"]
 
+    def project_shim_names(self) -> list[str]:
+        return self.package_manager_names()
+
     def interpreter_names(self) -> list[str]:
         return ["node", "nodejs"]
 

@@ -153,7 +153,6 @@ class TestSetupProject:
         assert PA_FINGERPRINT in shim.read_text()
 
     def test_interpreter_shim_intercepts_m_pip(self, tmp_path):
-        import subprocess
         from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
@@ -161,6 +160,45 @@ class TestSetupProject:
         content = shim.read_text()
         assert "-m pip" in content
         assert "package-alert run pip" in content
+        assert "shift 2" in content
+
+    def test_interpreter_shim_m_pip_argv_forwarded_correctly(self, tmp_path):
+        import subprocess
+        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+
+        # Replace the .__pa_real with a script that just prints its argv
+        real = tmp_path / ".venv" / "bin" / "python3.__pa_real"
+        real.write_text("#!/bin/sh\necho real_python: \"$@\"\n")
+        real.chmod(real.stat().st_mode | stat.S_IEXEC)
+
+        # Replace package-alert with a script that prints its argv
+        fake_pa = tmp_path / "package-alert"
+        fake_pa.write_text("#!/bin/sh\necho pa_run: \"$@\"\n")
+        fake_pa.chmod(fake_pa.stat().st_mode | stat.S_IEXEC)
+
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        env = {"PATH": f"{tmp_path}:/usr/bin:/bin"}
+
+        # python3 -m pip install requests → shift 2 → package-alert run pip install requests
+        result = subprocess.run(
+            [str(shim), "-m", "pip", "install", "requests"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result.returncode == 0
+        # package-alert receives: run pip install requests (no -m pip)
+        assert "pa_run: run pip install requests" in result.stdout
+        assert "-m" not in result.stdout.split("pa_run:")[1]
+
+        # python3 script.py → passes through to .__pa_real unchanged
+        result2 = subprocess.run(
+            [str(shim), "script.py", "--flag"],
+            capture_output=True, text=True, env=env,
+        )
+        assert result2.returncode == 0
+        assert "real_python: script.py --flag" in result2.stdout
 
     def test_interpreter_shim_passes_through_other_args(self, tmp_path):
         import subprocess

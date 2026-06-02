@@ -93,7 +93,7 @@ def _all_project_shim_names() -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
     for lang in lang_registry.all_languages():
-        for name in getattr(lang, "project_shim_names", lang.package_manager_names)():
+        for name in lang.project_shim_names():
             if name not in seen:
                 seen.add(name)
                 result.append(name)
@@ -118,7 +118,7 @@ def _write_interpreter_shim(path: Path, real_name: str) -> None:
     path.write_text(
         "#!/bin/sh\n"
         'case "$1 $2" in\n'
-        f'  "-m pip") exec {PA_FINGERPRINT} pip "$@" ;;\n'
+        f'  "-m pip") shift 2; exec {PA_FINGERPRINT} pip "$@" ;;\n'
         f'  *) exec "{real_path}" "$@" ;;\n'
         "esac\n"
     )
