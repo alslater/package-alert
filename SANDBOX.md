@@ -38,7 +38,7 @@ package-alert run bash                        # sandboxed interactive shell
 | `--env VAR` | Forward an additional environment variable into the sandbox. Repeatable. |
 | `--expose-ssh-keys` | Mount `~/.ssh` read-only inside the sandbox. Required for SSH VCS dependencies (`git+ssh://`, `git@host:org/repo`). package-alert detects these automatically and prompts if the flag is missing. |
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. |
-| `--allow-developer-packages` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
+| `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
 ## Shadow Tools (Transparent Interception)
 
