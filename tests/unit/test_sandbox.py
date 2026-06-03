@@ -1605,13 +1605,13 @@ class TestSnapshotLockFiles:
         result = _snapshot_lock_files(tmp_path)
         assert result[link] is _LOCK_UNREADABLE
 
-    def test_allow_developer_packages_reads_external_symlink(self, tmp_path):
+    def test_allow_external_lockfiles_reads_external_symlink(self, tmp_path):
         # With the flag, symlinks resolving outside cwd are still read
         target = tmp_path.parent / "external_lock"
         target.write_bytes(b"external content")
         link = tmp_path / "Pipfile.lock"
         link.symlink_to(target)
-        result = _snapshot_lock_files(tmp_path, allow_developer_packages=True)
+        result = _snapshot_lock_files(tmp_path, allow_external_lockfiles=True)
         assert result[link] == b"external content"
 
     def test_broken_symlink_recorded_as_unreadable_not_none(self, tmp_path):
@@ -1706,8 +1706,8 @@ class TestRestoreLockFiles:
         assert not link.exists() and not link.is_symlink()  # symlink removed
         assert target.read_bytes() == b"external data"  # target untouched
 
-    def test_allow_developer_packages_also_replaces_external_symlink(self, tmp_path):
-        # Even with allow_developer_packages, restore uses rename() which replaces
+    def test_allow_external_lockfiles_also_replaces_external_symlink(self, tmp_path):
+        # Even with allow_external_lockfiles, restore uses rename() which replaces
         # the directory entry without following symlinks — the external target is
         # never written to, the symlink is replaced by a regular file.
         target = tmp_path.parent / "shared_lock"
@@ -1843,7 +1843,7 @@ class TestPreflightShellContainment:
             unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(
-                runner._preflight_shell(tmp_path, allow_developer_packages=True)
+                runner._preflight_shell(tmp_path, allow_external_lockfiles=True)
             )
 
         assert result is True
@@ -1892,7 +1892,7 @@ class TestPreflightContainment:
         mock_scan.assert_not_called()
 
     def test_allows_external_symlink_with_flag(self, tmp_path):
-        """With allow_developer_packages=True, the external symlink is followed normally."""
+        """With allow_external_lockfiles=True, the external symlink is followed normally."""
         import asyncio
         target = tmp_path.parent / "external_lock"
         target.write_bytes(b"contents")
@@ -1909,7 +1909,7 @@ class TestPreflightContainment:
             unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
             unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
-            result = asyncio.run(runner._preflight(ctx, allow_developer_packages=True))
+            result = asyncio.run(runner._preflight(ctx, allow_external_lockfiles=True))
 
         assert result is True
 
@@ -2277,7 +2277,7 @@ class TestScanUpdatedLockFiles:
         mock_scan.assert_not_called()
 
     def test_symlinked_lock_file_outside_project_allowed_with_flag(self, tmp_path):
-        """With allow_developer_packages, symlinked lock files outside cwd are scanned normally."""
+        """With allow_external_lockfiles, symlinked lock files outside cwd are scanned normally."""
         import asyncio
         target = tmp_path.parent / "external_pipfile_lock"
         target.write_bytes(b"contents")
@@ -2296,7 +2296,7 @@ class TestScanUpdatedLockFiles:
             unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result),
         ):
             result = asyncio.run(
-                runner._scan_updated_lock_files(tmp_path, snapshots, allow_developer_packages=True)
+                runner._scan_updated_lock_files(tmp_path, snapshots, allow_external_lockfiles=True)
             )
 
         assert result is True

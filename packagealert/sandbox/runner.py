@@ -92,7 +92,7 @@ class SandboxRunner:
         self._console = Console()
         lang_registry.load()
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_developer_packages: bool = False, no_change: bool = False) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -116,7 +116,7 @@ class SandboxRunner:
                 return 1
 
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
 
         parsed = _try_parse(argv)
 
@@ -190,7 +190,7 @@ class SandboxRunner:
             return 1
         pending_clears: list[tuple[str, str, str]] = cooldown_result  # type: ignore[assignment]
 
-        if not await self._preflight(ctx, allow_developer_packages=allow_developer_packages):
+        if not await self._preflight(ctx, allow_external_lockfiles=allow_external_lockfiles):
             return 1
 
         if is_global:
@@ -213,7 +213,7 @@ class SandboxRunner:
 
         # Snapshot scan targets and lock files before execution
         snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
-        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
+        lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
@@ -321,7 +321,7 @@ class SandboxRunner:
             # A failing install can still write or modify lock files, so run the
             # lock-file scan and restore unconditionally — exiting non-zero must
             # not be a way to evade the check.
-            scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+            scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
             if no_change:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
             elif not scan_ok:
@@ -329,7 +329,7 @@ class SandboxRunner:
                 return 1
             return result.returncode if scan_ok else 1
 
-        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
         if no_change:
             _restore_lock_files(lock_snapshots, cwd, self._console)
         elif not scan_ok:
@@ -576,7 +576,7 @@ class SandboxRunner:
         allow_network: bool,
         extra_env: list[str] | None,
         expose_ssh_keys: bool = False,
-        allow_developer_packages: bool = False,
+        allow_external_lockfiles: bool = False,
         no_change: bool = False,
     ) -> int:
         """Run an interactive shell inside the sandbox with the project environment set up.
@@ -649,12 +649,12 @@ class SandboxRunner:
             self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
 
         # Pre-flight: scan all project lock files for known-malicious packages
-        if not await self._preflight_shell(cwd, allow_developer_packages=allow_developer_packages):
+        if not await self._preflight_shell(cwd, allow_external_lockfiles=allow_external_lockfiles):
             return 1
 
         # Snapshot install targets and lock files before the shell session opens
         snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
-        lock_snapshots = _snapshot_lock_files(cwd, allow_developer_packages=allow_developer_packages)
+        lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
 
         network_label = "allowed" if allow_network else "blocked"
         if no_change:
@@ -703,7 +703,7 @@ class SandboxRunner:
         print()
 
         # Post-exit: scan changed lock files, then any newly installed packages
-        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_developer_packages=allow_developer_packages)
+        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
         if no_change:
             _restore_lock_files(lock_snapshots, cwd, self._console)
         elif not scan_ok:
@@ -725,19 +725,19 @@ class SandboxRunner:
 
         return result.returncode
 
-    async def _preflight_shell(self, cwd: Path, *, allow_developer_packages: bool = False) -> bool:
+    async def _preflight_shell(self, cwd: Path, *, allow_external_lockfiles: bool = False) -> bool:
         """Pre-flight OSV check for shell sessions: scans all project lock files."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
         from packagealert.parsers.lockfiles import scan_project
         from packagealert.storage.db import open_db
 
-        if not allow_developer_packages:
+        if not allow_external_lockfiles:
             offender = _assert_scannable_lock_files_contained(cwd)
             if offender is not None:
                 self._console.print(
                     f"[bold red]✗ Lock file {offender} resolves outside the project directory "
-                    f"— refusing pre-flight scan. Pass --allow-developer-packages to override.[/bold red]"
+                    f"— refusing pre-flight scan. Pass --allow-external-lockfiles to override.[/bold red]"
                 )
                 log.warning(
                     "Lock file resolves outside project root, refusing pre-flight scan: %s",
@@ -793,7 +793,7 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _preflight(self, ctx: _Context, *, allow_developer_packages: bool = False) -> bool:
+    async def _preflight(self, ctx: _Context, *, allow_external_lockfiles: bool = False) -> bool:
         """Query OSV for what's about to be installed. Return False to block."""
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
@@ -839,12 +839,12 @@ class SandboxRunner:
         if not parsed.packages and not parsed.req_files:
             # Lock-file install — read lockfile for exact versions.
             # Enforce containment before scan_project() follows any symlinks.
-            if not allow_developer_packages:
+            if not allow_external_lockfiles:
                 bad = _assert_scannable_lock_files_contained(ctx.cwd)
                 if bad is not None:
                     self._console.print(
                         f"[bold red]✗ Blocked — lock file '{bad}' resolves outside the project "
-                        f"directory. Use --allow-developer-packages to override.[/bold red]"
+                        f"directory. Use --allow-external-lockfiles to override.[/bold red]"
                     )
                     return False
             if parsed.lockfile_hint:
@@ -923,7 +923,7 @@ class SandboxRunner:
         cwd: Path,
         lock_snapshots: dict[Path, bytes | None | _LockUnreadable],
         *,
-        allow_developer_packages: bool = False,
+        allow_external_lockfiles: bool = False,
     ) -> bool:
         """Scan any lock files that changed during the sandbox run for malicious packages.
 
@@ -949,7 +949,7 @@ class SandboxRunner:
                 # external symlink during the sandbox run.  p.read_bytes() follows
                 # symlinks, so an attacker-placed symlink would otherwise let the
                 # sandbox read arbitrary files outside the project.
-                if not allow_developer_packages and p.is_symlink():
+                if not allow_external_lockfiles and p.is_symlink():
                     try:
                         resolved = p.resolve()
                     except OSError:
@@ -977,12 +977,12 @@ class SandboxRunner:
         from packagealert.storage.db import open_db
 
         # Enforce symlink containment before reading any changed lock file.
-        if not allow_developer_packages:
+        if not allow_external_lockfiles:
             offender = _assert_scannable_lock_files_contained(cwd)
             if offender is not None:
                 self._console.print(
                     f"[bold red]✗ Lock file {offender} resolves outside the project directory "
-                    f"— refusing to scan. Pass --allow-developer-packages to override.[/bold red]"
+                    f"— refusing to scan. Pass --allow-external-lockfiles to override.[/bold red]"
                 )
                 log.warning(
                     "Lock file resolves outside project root, refusing scan: %s",
@@ -1608,7 +1608,7 @@ def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
 
 
 def _snapshot_lock_files(
-    cwd: Path, *, allow_developer_packages: bool = False
+    cwd: Path, *, allow_external_lockfiles: bool = False
 ) -> dict[Path, bytes | None | _LockUnreadable]:
     """Snapshot all known restorable lock files under *cwd*.
 
@@ -1622,7 +1622,7 @@ def _snapshot_lock_files(
                              to avoid data loss.
 
     Symlinks whose resolved target lies outside *cwd* are recorded as
-    ``_LOCK_UNREADABLE`` unless *allow_developer_packages* is True, which relaxes
+    ``_LOCK_UNREADABLE`` unless *allow_external_lockfiles* is True, which relaxes
     the check for monorepo / editable-install setups where lock files may
     legitimately live elsewhere.
     """
@@ -1646,7 +1646,7 @@ def _snapshot_lock_files(
             continue
         # Path has a directory entry (file, symlink, etc.).  Apply the containment
         # check before reading so we never follow external symlinks.
-        if not allow_developer_packages:
+        if not allow_external_lockfiles:
             try:
                 resolved = p.resolve()
             except OSError:
@@ -1678,7 +1678,7 @@ def _restore_lock_files(
     # the directory entry itself without following symlinks, so a containment
     # check on the parent is both necessary and sufficient.  This check is
     # unconditional because it guards the host filesystem, not the sandboxed
-    # package manager — allow_developer_packages does not apply.
+    # package manager — allow_external_lockfiles does not apply.
     project_root = cwd.resolve()
     restored = []
     for path, content in snapshots.items():

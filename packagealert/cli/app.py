@@ -900,8 +900,8 @@ def run_cmd(
         False, "--expose-ssh-keys",
         help="Expose ~/.ssh read-only inside the sandbox (required for git+ssh:// VCS dependencies).",
     ),
-    allow_developer_packages: bool = typer.Option(
-        False, "--allow-developer-packages",
+    allow_external_lockfiles: bool = typer.Option(
+        False, "--allow-external-lockfiles",
         help="Disable symlink containment checks on lock files. "
              "Without this flag, lock files that are symlinks resolving outside the project root are "
              "rejected at every stage: pre-flight scan, post-run lock-file scan, snapshot, and restore. "
@@ -950,7 +950,7 @@ def run_cmd(
     cfg = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
-    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_developer_packages=allow_developer_packages, no_change=no_change))
+    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change))
     raise typer.Exit(code)
 
 
