@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 import re
 import subprocess
 from urllib.parse import quote
@@ -17,6 +18,8 @@ from packagealert.languages.base import (
     PackageSpec,
     ProcessInstall,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
 )
 from packagealert.models.risk import RiskSignal
@@ -403,12 +406,79 @@ class NodeLanguage:
             ],
         )
 
+    # ------------------------------------------------------------------
+    # resolve_sandbox_targets
+    # ------------------------------------------------------------------
+
+    def resolve_sandbox_targets(
+        self,
+        parsed: Any,
+        cwd: Path,
+    ) -> "SandboxTargets":
+        targets = SandboxTargets()
+        # node_modules lives under cwd, already covered by the cwd bind
+        targets.scan_targets.append(cwd / "node_modules")
+        npm_cache = Path.home() / ".npm"
+        if npm_cache.exists():
+            targets.write_dirs.append(npm_cache)
+        return targets
+
     def sandbox_env(self) -> list[str]:
         return [
             "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CACHE",
             "NODE_PATH", "NODE_ENV",
             "NVM_DIR", "NVM_BIN",
         ]
+
+    # ------------------------------------------------------------------
+    # shell_environment
+    # ------------------------------------------------------------------
+
+    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+        result = ShellEnvironment()
+        nm_bin = cwd / "node_modules" / ".bin"
+        if nm_bin.is_dir():
+            result.path_prepends.append(str(nm_bin))
+            result.notes.append("node_modules/.bin in PATH")
+        if (cwd / "package.json").exists():
+            result.scan_targets.append(cwd / "node_modules")
+        npm_cache = Path.home() / ".npm"
+        if npm_cache.exists():
+            result.write_dirs.append(npm_cache)
+        return result
+
+    def detect_new_packages(
+        self,
+        new_paths: "set[Path]",
+        walk_root: Path,
+    ) -> "list[PackageSpec]":
+        results = []
+        for p in new_paths:
+            if p.name != "package.json":
+                continue
+            try:
+                rel = p.relative_to(walk_root)
+            except ValueError:
+                continue
+            # Regular pkg: pkg/package.json (2 parts)
+            # Scoped pkg:  @scope/pkg/package.json (3 parts)
+            if len(rel.parts) not in (2, 3):
+                continue
+            if p.is_symlink():
+                continue  # skip symlinks — could point outside the install target
+            try:
+                data = json.loads(p.read_text())
+                name = data.get("name")
+                version = data.get("version") or None
+                if name:
+                    results.append(PackageSpec(name=name, version=version, ecosystem="npm"))
+            except Exception:
+                pass
+        return results
+
+    def home_ro_paths(self) -> "list[Path]":
+        candidates = [Path.home() / ".npmrc"]
+        return [p for p in candidates if p.exists()]
 
     def top_packages_url(self) -> str | None:
         return "https://registry.npmjs.org/-/v1/search?text=keywords:javascript&popularity=1.0&size=250"

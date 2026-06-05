@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 import shlex
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,7 +15,7 @@ from packagealert.config import WatchConfig
 from packagealert.languages import registry as lang_registry
 from packagealert.languages.base import ProcessInstall
 from packagealert.languages.registry import _normalise_process_name
-from packagealert.models.events import PackageEvent
+from packagealert.models.events import PackageEvent, normalise_ecosystem
 from packagealert.monitors.base import AbstractMonitor
 from packagealert.parsers.process_args import derive_site_packages
 
@@ -60,7 +60,7 @@ class ProcessMonitor(AbstractMonitor):
     async def stop(self) -> None:
         self._running = False
 
-    async def events(self) -> AsyncIterator[PackageEvent]:
+    async def events(self) -> AsyncGenerator[PackageEvent, None]:
         while self._running:
             try:
                 await self._scan_processes()
@@ -135,8 +135,13 @@ class ProcessMonitor(AbstractMonitor):
                     continue
 
                 for spec in parsed.packages:
+                    try:
+                        eco = normalise_ecosystem(spec.ecosystem)
+                    except ValueError:
+                        log.debug("Skipping package with unknown ecosystem %r: %s", spec.ecosystem, spec.name)
+                        continue
                     event = PackageEvent(
-                        ecosystem=spec.ecosystem.lower(),
+                        ecosystem=eco,
                         package_name=spec.name,
                         version=spec.version,
                         source="process",
@@ -203,8 +208,13 @@ class ProcessMonitor(AbstractMonitor):
             return
         log.info("%s install finished in %s, scanning %d package(s) from lock file", pending.manager, pending.cwd, len(packages))
         for spec in packages:
+            try:
+                eco = normalise_ecosystem(spec.ecosystem)
+            except ValueError:
+                log.debug("Skipping package with unknown ecosystem %r: %s", spec.ecosystem, spec.name)
+                continue
             event = PackageEvent(
-                ecosystem=spec.ecosystem.lower(),
+                ecosystem=eco,
                 package_name=spec.name,
                 version=spec.version,
                 source="process",

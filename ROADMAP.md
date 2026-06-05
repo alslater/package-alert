@@ -43,6 +43,10 @@
 - [ ] IDE/tool install policy — detect and surface package installations triggered by background processes (VS Code extensions, language servers, IDEs) using parent process chain; optionally block or require explicit approval for non-user-initiated installs
 - [ ] Refactor sandbox target resolution — move hardcoded ecosystem logic in `_resolve_targets` and `_collect_new_packages` (runner.py) into `LanguageBase` hooks so language modules own their own scan targets and post-install package detection
 
+## Phase 4 (Near-term evaluation)
+- [ ] Install target snapshot memory usage — `FileSystemBackend` reads all files ≤ `snapshot_file_size_limit` into memory before each sandbox run. For large node_modules trees this may cause significant memory pressure or slowdowns. Gather real-world data on peak RSS during npm installs and evaluate whether streaming hashes, on-disk snapshots, or a lower default size limit are needed before recommending the filesystem backend for large ecosystems.
+- [ ] Unify `ParsedInstall` and `ProcessInstall` — the sandbox runner passes `ParsedInstall` (from `packagealert/parsers/process_args.py`, with `packages: list[str]`, `req_files`, `global_install`, `suggested_env`) to language hooks typed against `ProcessInstall` (from `packagealert/languages/base.py`, with `packages: list[PackageSpec]`). Currently bridged with `Any` annotations and docstrings. Unify into a single type so hook signatures are accurate and third-party plugins can rely on them.
+
 ## Phase 4 (Future)
 - [ ] ML-based anomaly detection on package metadata patterns
 - [ ] Behavioural sandboxing (eBPF-based syscall monitoring, Linux only)

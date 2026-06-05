@@ -198,6 +198,90 @@ class LanguageBase(Protocol):
         where egg-info or build artifacts are written.
         Default returns []."""
 
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
+        """Install targets that may have been created during the sandbox run.
+
+        Called after the sandbox exits, but only when no scan targets were detected
+        before the run (i.e. the install directory did not exist yet). Use this to
+        handle package managers that create their install directory from scratch
+        (e.g. uv creating .venv on first sync).
+
+        *parsed* is a ``ParsedInstall`` from ``packagealert.parsers.process_args``
+        (not ``ProcessInstall``). Useful fields: ``manager`` (str), ``ecosystem``
+        (str), ``packages`` (list[str]), ``venv_exe`` (str | None),
+        ``req_files`` (list[str]), ``lockfile_hint`` (str | None),
+        ``global_install`` (bool).
+
+        Return a list of paths ordered from outermost to innermost:
+        - The first path is the **rollback root** — removed entirely on rollback.
+        - The last path is the **scan target** — diffed for new packages.
+
+        If the rollback root and scan target are the same, return a single-element list.
+        Return [] if no targets were created (the default).
+
+        Example for a fresh Python venv:
+            return [Path(cwd / ".venv"), Path(cwd / ".venv/lib/python3.12/site-packages")]
+        """
+        return []
+
+    def pre_run_check(self, parsed: Any, cwd: Path, expose_ssh_keys: bool) -> str | None:
+        """Return an error message to block the run, or None to allow.
+
+        Called before the sandbox runs. The runner prints the returned string
+        with markup=False and returns exit code 1. Use embedded newlines for
+        multi-line messages (e.g. to include a remediation hint). Default None.
+
+        *parsed* is a ``ParsedInstall`` — see ``post_run_scan_targets`` for
+        the available fields."""
+
+    def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
+        """Return scan targets and extra writable dirs for this install.
+
+        Replaces the per-ecosystem if/elif branches that previously lived in the
+        runner. scan_targets are diffed for new packages; write_dirs are bound
+        writable inside the sandbox. Default returns empty SandboxTargets.
+
+        *parsed* is a ``ParsedInstall`` — see ``post_run_scan_targets`` for
+        the available fields.
+
+        **Surfacing warnings to the user:** if something goes wrong that degrades
+        scan coverage or rollback completeness (e.g. a configuration file cannot
+        be parsed, an expected directory is missing), add a human-readable message
+        to ``SandboxTargets.warnings``. The runner prints each entry to the
+        terminal in bold yellow immediately after calling this hook, regardless of
+        log level. Always combine with ``log.warning()`` so the message also
+        appears in the log file."""
+        return SandboxTargets()
+
+    def prepare_sandbox_env(self, parsed: Any, cwd: Path, env: dict[str, str]) -> list[Path]:
+        """Mutate *env* in-place and return additional write dirs.
+
+        Called just before build_cmd. Use to inject language-specific variables
+        (e.g. VIRTUAL_ENV, PATH prepends). Returned paths are bound writable
+        inside the sandbox. Default returns [].
+
+        *parsed* is a ``ParsedInstall`` — see ``post_run_scan_targets`` for
+        the available fields.
+
+        **Blocking the run:** raise ``SandboxEnvError`` with a user-visible message
+        to abort the run (e.g. no virtualenv found). The runner prints the message
+        and exits 1. Do not use ``pre_run_check`` for conditions that are only
+        detectable after env setup."""
+        return []
+
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
+        """Return the shell session environment for this language.
+
+        Called at the start of an interactive shell session. Results from all
+        registered language modules are merged by the runner. Default returns
+        empty ShellEnvironment.
+
+        **Surfacing warnings to the user:** add messages to
+        ``ShellEnvironment.warnings`` for conditions that degrade scan or rollback
+        coverage. The runner prints them to the terminal in bold yellow. See
+        ``resolve_sandbox_targets`` for the same pattern."""
+        return ShellEnvironment()
+
     def package_manager_names(self) -> list[str]:
         """Pure package manager binary names (pip, npm, uv, composer, …).
 
@@ -244,14 +328,16 @@ External plugins are auto-discovered at startup via Python entry points.
 ```python
 # my_ruby_plugin.py
 from pathlib import Path
+from typing import Any
 import httpx
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
-    ProcessInstall,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
     normalise_package_name,
 )
@@ -349,6 +435,32 @@ class RubyLanguage:
         return []
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def pre_run_check(self, parsed: Any, cwd: Path, expose_ssh_keys: bool) -> str | None:
+        # parsed is a ParsedInstall (not ProcessInstall) — see contract docs for fields.
+        # Return an error string to block, or None to allow.
+        return None
+
+    def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
+        # parsed is a ParsedInstall — see contract docs for fields.
+        # Return scan targets and writable dirs for this ecosystem's install.
+        return SandboxTargets()
+
+    def prepare_sandbox_env(self, parsed: Any, cwd: Path, env: dict[str, str]) -> list[Path]:
+        # parsed is a ParsedInstall — see contract docs for fields.
+        # Mutate env in-place; return extra paths to bind writable.
+        return []
+
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
+        # Return shell session environment for interactive shells.
+        return ShellEnvironment()
+
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
+        # parsed is a ParsedInstall — see contract docs for fields.
+        # Override if the package manager creates its install directory during the run.
+        # Return [install_root, scan_target] so rollback removes the whole tree and
+        # new-package detection diffs the right subdirectory.
         return []
 
     def snapshot(self, install_root: Path) -> Snapshot:
@@ -452,8 +564,61 @@ pip uninstall package-alert-rust
 
 ---
 
+## Surfacing Errors and Warnings to the User
+
+package-alert routes plugin output to the terminal in three ways. Choose the right one based on severity and timing.
+
+### 1. Block the run with an error — `pre_run_check`
+
+Return a non-`None` string from `pre_run_check()`. The runner prints it in **bold red** and exits 1 before the sandbox starts. Use for hard pre-conditions that cannot be satisfied (e.g. wrong virtualenv active, SSH keys required).
+
+```python
+def pre_run_check(self, parsed, cwd, expose_ssh_keys):
+    if some_problem:
+        return "✗ Cannot proceed: <reason>.\nFix: <how to fix>."
+    return None
+```
+
+### 2. Block sandbox env setup — `SandboxEnvError`
+
+Raise `SandboxEnvError` from `prepare_sandbox_env()` when a condition is only detectable after env setup (e.g. no virtualenv found for bare `pip install`). The runner prints the message in **bold red** and exits 1.
+
+```python
+from packagealert.languages.base import SandboxEnvError
+
+def prepare_sandbox_env(self, parsed, cwd, env):
+    if not can_proceed:
+        raise SandboxEnvError("✗ <reason>.\n<how to fix>.")
+    return []
+```
+
+### 3. Warn about degraded coverage — `warnings` field
+
+Add strings to `SandboxTargets.warnings` (from `resolve_sandbox_targets`) or `ShellEnvironment.warnings` (from `shell_environment`) when something goes wrong that reduces scan or rollback coverage but should not abort the run. The runner prints each message in **bold yellow** immediately after the hook returns, regardless of log level.
+
+Always pair with `log.warning()` so the message also appears in the log file.
+
+```python
+def resolve_sandbox_targets(self, parsed, cwd):
+    targets = SandboxTargets()
+    if problem_detected:
+        msg = "⚠ <what failed> — <what won't work as a result>."
+        log.warning(msg)
+        targets.warnings.append(msg)
+    return targets
+```
+
+### What NOT to use
+
+- `log.warning()` alone — only visible if the user sets an appropriate log level with `-v`.
+- `log.debug()` — invisible to users entirely; reserve for internal diagnostic detail.
+- Printing to stdout directly — bypasses Rich formatting and may not flush correctly.
+
+---
+
 ## Contract Version Changelog
 
 | Version | What changed |
 |---------|-------------|
-| 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, and `sandbox_extra_write_paths` added as optional methods with default no-op implementations (no version bump required). |
+| 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
+| 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment` added as optional hooks with default no-op implementations (no version bump required for existing plugins). |

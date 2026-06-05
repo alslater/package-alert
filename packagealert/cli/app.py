@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import Optional
@@ -180,7 +181,7 @@ async def _run_scan_cache(cfg):
     from packagealert.osv.client import OsvClient
     from packagealert.osv.cache import OsvCache
     from packagealert.storage.db import open_db
-    from packagealert.models.events import PackageEvent
+    from packagealert.models.events import PackageEvent, normalise_ecosystem
     from packagealert.alerts.terminal import alert_malicious
     from packagealert.languages import registry as lang_registry
     from datetime import datetime, timezone
@@ -229,8 +230,12 @@ async def _run_scan_cache(cfg):
                             result = results[0]
                             await osv_cache.set(metadata.ecosystem.lower(), metadata.name, metadata.version, result)
                     if result and result.has_malicious:
+                        try:
+                            _eco = normalise_ecosystem(metadata.ecosystem)
+                        except ValueError:
+                            continue
                         ev = PackageEvent(
-                            ecosystem=metadata.ecosystem.lower(),
+                            ecosystem=_eco,
                             package_name=metadata.name,
                             version=metadata.version,
                             source="cache",
@@ -449,7 +454,8 @@ async def _run_scan_project(
             fresh = await osv_client.batch_query(uncached_queries)
             for q, r in zip(uncached_queries, fresh):
                 if r:
-                    await osv_cache.set(*q, r)
+                    ecosystem, name, version = q
+                    await osv_cache.set(ecosystem, name, version, r)
 
         for osv_result in cached + fresh:
             if not osv_result or not osv_result.advisories:
@@ -518,9 +524,7 @@ async def _run_scan_project(
     malicious = 0
     vulnerable = 0
     for f in findings:
-        adv_obj = type("adv", (), f)()  # lightweight namespace for _severity_colour
-        adv_obj.is_malicious = f["is_malicious"]
-        adv_obj.severity = f["severity"]
+        adv_obj = types.SimpleNamespace(**f)
         colour = _severity_colour(adv_obj)
         label = "[MALICIOUS]" if f["is_malicious"] else "[VULN]"
         severity_tag = f" [{f['severity']}]" if f["severity"] else ""
@@ -1241,9 +1245,7 @@ async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
     malicious = 0
     vulnerable = 0
     for f in findings:
-        adv_obj = type("adv", (), f)()
-        adv_obj.is_malicious = f["is_malicious"]
-        adv_obj.severity = f["severity"]
+        adv_obj = types.SimpleNamespace(**f)
         colour = _severity_colour(adv_obj)
         label = "[MALICIOUS]" if f["is_malicious"] else "[VULN]"
         severity_tag = f" [{f['severity']}]" if f["severity"] else ""

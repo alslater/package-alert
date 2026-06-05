@@ -37,7 +37,7 @@ package-alert run bash                        # sandboxed interactive shell
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already cached locally. |
 | `--env VAR` | Forward an additional environment variable into the sandbox. Repeatable. |
 | `--expose-ssh-keys` | Mount `~/.ssh` read-only inside the sandbox. Required for SSH VCS dependencies (`git+ssh://`, `git@host:org/repo`). package-alert detects these automatically and prompts if the flag is missing. |
-| `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. |
+| `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files and install targets to their pre-run state on exit regardless of outcome. |
 | `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
 ## Shadow Tools (Transparent Interception)
@@ -119,8 +119,8 @@ For recognised package manager commands (`pip`, `uv`, `npm`, `yarn`, `pnpm`, `co
 
 1. **Pre-flight check** — identify what will be installed and query OSV before anything runs. Block immediately if a known-malicious package is found.
 2. **Sandboxed execution** — run the command inside a bubblewrap namespace.
-3. **Post-install lock file scan** — check any lock files that changed during the run against OSV. Restore lock files to their pre-run state if a malicious package is found (or always, when `--no-change` is set).
-4. **Post-install package scan** — diff the install target directories against a pre-run snapshot, identify new packages, and run another OSV check.
+3. **Post-install lock file scan** — check any lock files that changed during the run against OSV. Restore lock files and install targets to their pre-run state if a malicious package is found (or always, when `--no-change` is set).
+4. **Post-install package scan** — diff the install target directories against a pre-run snapshot, identify new packages, and run another OSV check. Restore both lock files and install targets if a malicious package is found.
 
 ### Interactive shell
 
@@ -128,12 +128,12 @@ When the command is a shell (`bash`, `zsh`, `sh`, etc.):
 
 1. **Pre-flight check** — scan project lock files for known-malicious packages and block if any are found.
 2. **Sandboxed shell** — open the shell inside the sandbox with project venvs and `node_modules/.bin` on `PATH`.
-3. **Post-exit lock file scan** — check any lock files that changed during the session. Restore if malicious (or always, when `--no-change` is set).
-4. **Post-exit package scan** — diff install targets after the shell exits and check any new packages against OSV.
+3. **Post-exit lock file scan** — check any lock files that changed during the session. Restore lock files and install targets if malicious (or always, when `--no-change` is set).
+4. **Post-exit package scan** — diff install targets after the shell exits and check any new packages against OSV. Restore both lock files and install targets if a malicious package is found.
 
 ### Dry-run mode (`--no-change`)
 
-All stages run as normal, but lock files are **always** restored to their pre-run state on exit, whether or not anything suspicious is found. The sandbox itself is already isolated by bwrap — `--no-change` only controls whether lock file changes are kept on the host. Use it to audit what a command would install or lock without committing the result.
+All stages run as normal, but lock files and install targets are **always** restored to their pre-run state on exit, whether or not anything suspicious is found. The sandbox itself is already isolated by bwrap — `--no-change` controls whether changes to lock files and install targets (site-packages, node_modules, vendor) are kept on the host. Use it to audit what a command would install or lock without committing the result.
 
 ## Pre-flight Check
 
@@ -159,9 +159,9 @@ Before the command runs, package-alert snapshots the install target directories 
 | npm | New `package.json` files at depth 2 (or 3 for scoped packages) under `node_modules` → `(name, version)` |
 | Packagist | New `composer.json` files at depth 3 under `vendor` → `(name, version)` |
 
-New packages are batch-queried against OSV. If a malicious package is found it is reported; the packages are already on disk inside the sandbox write targets and must be removed manually.
+New packages are batch-queried against OSV. If a malicious package is found, package-alert attempts a best-effort restore of the install targets and lock files to their pre-run state. Most cases are fully reversed, but some paths (permission errors, files over the snapshot size limit, or unreadable files) may require manual cleanup — the terminal will indicate if any paths could not be restored.
 
-If the install created a venv from scratch (e.g. `uv sync` on a fresh project), the scan targets are re-detected after execution before diffing.
+If the install created a venv from scratch (e.g. `uv sync` on a fresh project), the scan targets are re-detected after execution before diffing. On rollback, a freshly created venv is removed entirely.
 
 ## SSH VCS Dependencies
 
@@ -280,6 +280,9 @@ pipenv manages its own virtualenv and creates it on first run. The pipenv venvs 
 
 ```toml
 [sandbox]
+# Snapshot/restore backend. Currently only "filesystem" is available.
+backend = "filesystem"
+
 # Additional environment variable names to forward into the sandbox.
 extra_env = []
 # Example: extra_env = ["MY_PRIVATE_REGISTRY_TOKEN", "CUSTOM_CERT_PATH"]
@@ -289,6 +292,13 @@ extra_env = []
 # cause tool failures inside bwrap's user namespace.
 extra_tmpfs = []
 # Example: extra_tmpfs = ["/etc/ssh/other_config.d"]
+
+[sandbox.filesystem_backend]
+# Maximum size of an individual file to content-snapshot before each run.
+# Files larger than this limit are recorded by path only — if added during
+# the run they will be removed on rollback, but modified large files cannot
+# be restored. Default: 10 MB.
+snapshot_file_size_limit = 10485760  # 10 MB in bytes
 ```
 
 `extra_tmpfs` paths must exist on the host (bwrap cannot create mount points under a read-only bind) and must be absolute (bwrap `--tmpfs` requires an absolute target). Both constraints are validated at config-parse time.

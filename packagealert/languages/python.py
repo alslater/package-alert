@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 import re
 import subprocess
 import tomllib
@@ -17,7 +18,10 @@ from packagealert.languages.base import (
     PackageMetadata,
     PackageSpec,
     ProcessInstall,
+    SandboxEnvError,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
 )
 from packagealert.models.risk import RiskSignal
@@ -243,6 +247,165 @@ def _fingerprint_distinfo(path: Path) -> str:
     if m:
         return f"{_normalize_name(m.group(1))}-{m.group(2)}"
     return path.name
+
+
+def venv_site_packages(venv_root: Path) -> Path | None:
+    """Return the site-packages directory for a virtualenv.
+
+    Reads pyvenv.cfg to find the Python version, then constructs the exact
+    lib/pythonX.Y/site-packages path. Falls back to the first glob match if
+    pyvenv.cfg is absent or unreadable (e.g. a freshly created venv —
+    there will be exactly one match).
+    """
+    cfg = venv_root / "pyvenv.cfg"
+    if cfg.exists():
+        try:
+            for line in cfg.read_text(errors="replace").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip().lower() == "version":
+                    parts = value.strip().split(".")[:2]
+                    # Validate each component is purely numeric to prevent
+                    # path traversal via a crafted pyvenv.cfg version field.
+                    if not all(p.isdigit() for p in parts) or not parts:
+                        msg = (
+                            f"⚠ pyvenv.cfg in {venv_root} contains an invalid/unexpected "
+                            f"version value {value.strip()!r} — cannot determine site-packages path. "
+                            f"Python packages will not be scanned. This may indicate a tampered environment."
+                        )
+                        log.warning(msg)
+                        raise ValueError(msg)
+                    major_minor = ".".join(parts)
+                    sp = venv_root / "lib" / f"python{major_minor}" / "site-packages"
+                    if sp.exists():
+                        return sp
+                    break
+        except ValueError:
+            raise  # invalid version — let caller surface the warning
+        except OSError as exc:
+            msg = f"⚠ Could not read pyvenv.cfg in {venv_root}: {exc} — Python packages may not be scanned correctly."
+            log.warning(msg)
+            raise ValueError(msg) from exc
+    candidates = list(venv_root.glob("lib/python*/site-packages"))
+    return candidates[0] if candidates else None
+
+
+# Matches scp-style git@host:path — colon (not slash) after hostname distinguishes
+# this from HTTPS URLs like git+https://git@host/path which are NOT SSH.
+_SCP_SSH_RE = re.compile(r"git@[^/:]+:[^/]")
+
+
+def _is_ssh_vcs_url(s: str) -> bool:
+    return (
+        "git+ssh://" in s
+        or "ssh://" in s
+        or bool(_SCP_SSH_RE.search(s))
+    )
+
+
+def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
+    path = path.resolve()
+    if path in visited:
+        return False
+    visited.add(path)
+    try:
+        lines = path.read_text(errors="replace").splitlines()
+    except OSError:
+        return False
+    from packagealert.parsers.lockfiles import _req_include
+    base = path.parent
+    for line in lines:
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        if _is_ssh_vcs_url(line):
+            return True
+        include = _req_include(line)
+        if include:
+            if _req_file_has_ssh(base / include, visited):
+                return True
+    return False
+
+
+def _has_ssh_vcs_deps(parsed: Any, cwd: Path) -> bool:
+    if parsed is None:
+        return False
+    if any(_is_ssh_vcs_url(p if isinstance(p, str) else p.name) for p in parsed.packages):
+        return True
+    if parsed.manager == "pipenv":
+        candidates: list[Path] = [cwd / "Pipfile.lock"]
+        for path in candidates:
+            try:
+                if _is_ssh_vcs_url(path.read_text(errors="replace")):
+                    return True
+            except OSError:
+                pass
+    elif parsed.manager in ("pip", "uv"):
+        if parsed.req_files:
+            roots = [cwd / f for f in parsed.req_files]
+        elif not parsed.packages:
+            roots = sorted(cwd.glob("requirements*.txt"))
+        else:
+            roots = []
+        visited: set[Path] = set()
+        for root in roots:
+            if _req_file_has_ssh(root, visited):
+                return True
+    return False
+
+
+def _find_venv_root(scan_targets: list[Path]) -> Path | None:
+    for target in scan_targets:
+        candidate = target.parent.parent.parent
+        if (candidate / "pyvenv.cfg").exists():
+            return candidate
+    return None
+
+
+def _find_pipenv_venv(cwd: Path) -> Path | None:
+    try:
+        result = subprocess.run(
+            ["pipenv", "--venv"],
+            capture_output=True, text=True, cwd=cwd,
+        )
+        if result.returncode == 0:
+            venv = Path(result.stdout.strip())
+            if venv.exists():
+                return venv
+    except FileNotFoundError:
+        pass
+    return None
+
+
+def _pipenv_venv_dir() -> Path:
+    workon = os.environ.get("WORKON_HOME")
+    return Path(workon) if workon else Path.home() / ".local" / "share" / "virtualenvs"
+
+
+def _find_site_packages(parsed: Any, cwd: Path) -> Path | None:
+    if parsed is None:
+        return None
+    if parsed.venv_exe:
+        from packagealert.parsers.process_args import derive_site_packages
+        sp = derive_site_packages(parsed.venv_exe)
+        if sp and sp.exists():
+            return sp
+    if parsed.manager in ("pip", "pipenv"):
+        venv_env = os.environ.get("VIRTUAL_ENV")
+        if venv_env:
+            sp = venv_site_packages(Path(venv_env))
+            if sp:
+                return sp
+    if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+        pipenv_venv = _find_pipenv_venv(cwd)
+        if pipenv_venv:
+            sp = venv_site_packages(pipenv_venv)
+            if sp:
+                return sp
+    for name in (".venv", "venv"):
+        sp = venv_site_packages(cwd / name)
+        if sp:
+            return sp
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -571,6 +734,220 @@ class PythonLanguage:
                 if resolved.exists() and not resolved.is_relative_to(cwd):
                     paths.append(resolved)
         return paths
+
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
+        """Return [venv_root, site_packages] if a fresh venv was created during the run.
+
+        The runner uses the first path as the rollback root (removes the entire venv)
+        and the last path as the scan target (diffs for new packages).
+        """
+        from packagealert.parsers.process_args import derive_site_packages
+        # 1. Try the venv exe path from the parsed install
+        if parsed.venv_exe:
+            sp = derive_site_packages(parsed.venv_exe)
+            if sp and sp.exists():
+                venv_root = sp.parent.parent.parent
+                if (venv_root / "pyvenv.cfg").exists():
+                    return [venv_root, sp]
+        # 2. Fall back to project-local .venv / venv
+        for name in (".venv", "venv"):
+            venv_root = cwd / name
+            if (venv_root / "pyvenv.cfg").exists():
+                sp = venv_site_packages(venv_root)
+                if sp:
+                    return [venv_root, sp]
+        # 3. pipenv-managed venv outside the project (common on first sync).
+        #    pipenv creates the venv under WORKON_HOME, not under cwd.
+        manager = getattr(parsed, "manager", None)
+        if manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            pipenv_venv = _find_pipenv_venv(cwd)
+            if pipenv_venv:
+                sp = venv_site_packages(pipenv_venv)
+                if sp:
+                    return [pipenv_venv, sp]
+        return []
+
+    def pre_run_check(
+        self,
+        parsed: Any,
+        cwd: Path,
+        expose_ssh_keys: bool,
+    ) -> str | None:
+        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv only)
+        if parsed.manager in ("pip", "pipenv"):
+            virtual_env = os.environ.get("VIRTUAL_ENV")
+            if virtual_env:
+                venv_path = Path(virtual_env)
+                if not venv_path.is_relative_to(cwd):
+                    if not (parsed.manager == "pipenv"
+                            and not os.environ.get("PIPENV_VENV_IN_PROJECT")
+                            and venv_path.is_relative_to(_pipenv_venv_dir())):
+                        return (
+                            f"✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:\n"
+                            f"  VIRTUAL_ENV = {virtual_env}\n"
+                            f"  Project     = {cwd}\n"
+                            f"Run 'deactivate' before using package-alert run, "
+                            f"or cd to the project that owns this virtualenv."
+                        )
+
+        # 2. SSH VCS dependency check
+        if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
+            return (
+                "⚠ This install includes SSH VCS dependencies.\n"
+                "SSH keys are not exposed in the sandbox by default.\n"
+                "Re-run with --expose-ssh-keys to allow SSH key access (example):\n"
+                "  package-alert run --expose-ssh-keys <your command here>"
+            )
+
+        return None
+
+    def resolve_sandbox_targets(
+        self,
+        parsed: Any,
+        cwd: Path,
+    ) -> "SandboxTargets":
+        targets = SandboxTargets()
+
+        try:
+            site_pkgs = _find_site_packages(parsed, cwd)
+        except ValueError as exc:
+            # venv_site_packages raised — invalid pyvenv.cfg, already logged.
+            targets.warnings.append(str(exc))
+            site_pkgs = None
+        if site_pkgs:
+            targets.scan_targets.append(site_pkgs)
+            try:
+                site_pkgs.relative_to(cwd)
+            except ValueError:
+                targets.write_dirs.append(site_pkgs)
+        else:
+            if not targets.warnings:
+                # Only add the generic message if a more specific one wasn't already added.
+                msg = "⚠ Could not detect site-packages directory — Python packages will not be scanned for this install."
+                log.warning(msg)
+                targets.warnings.append(msg)
+
+        for cache in [Path.home() / ".cache" / "pip", Path.home() / ".cache" / "uv"]:
+            if cache.exists():
+                targets.write_dirs.append(cache)
+
+        if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            venv_dir = _pipenv_venv_dir()
+            venv_dir.mkdir(parents=True, exist_ok=True)
+            targets.write_dirs.append(venv_dir)
+            if not targets.scan_targets:
+                pipenv_venv = _find_pipenv_venv(cwd)
+                if pipenv_venv:
+                    sp = venv_site_packages(pipenv_venv)
+                    if sp:
+                        targets.scan_targets.append(sp)
+
+        return targets
+
+    def prepare_sandbox_env(
+        self,
+        parsed: Any,
+        cwd: Path,
+        env: "dict[str, str]",
+    ) -> "list[Path]":
+        extra_write: list[Path] = []
+
+        if parsed.manager not in ("pip", "pipenv"):
+            return extra_write
+
+        if "VIRTUAL_ENV" in env:
+            venv_path: Path | None = Path(env["VIRTUAL_ENV"])
+        elif parsed.manager == "pip":
+            venv_env = os.environ.get("VIRTUAL_ENV")
+            if venv_env:
+                venv_path = Path(venv_env)
+            else:
+                venv_path = None
+                for name in (".venv", "venv"):
+                    candidate = cwd / name
+                    if (candidate / "pyvenv.cfg").exists():
+                        venv_path = candidate
+                        break
+                if venv_path:
+                    env["VIRTUAL_ENV"] = str(venv_path)
+                    log.debug("No active virtualenv — using detected project venv: %s", venv_path)
+                else:
+                    raise SandboxEnvError(
+                        "✗ Blocked — no virtualenv found for this project.\n"
+                        "Create one first:  python -m venv .venv  &&  source .venv/bin/activate\n"
+                        "Or use uv:         package-alert run uv sync"
+                    )
+        else:
+            # pipenv manages its own virtualenv — don't inject VIRTUAL_ENV/PATH
+            # but snapshot the venv root so rollback also reverts venv/bin/ scripts.
+            venv_path = None
+            if not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+                pipenv_venv = _find_pipenv_venv(cwd)
+                if pipenv_venv and pipenv_venv.exists():
+                    extra_write.append(pipenv_venv)
+
+        if venv_path and venv_path.exists():
+            venv_bin = str(venv_path / "bin")
+            env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+            extra_write.append(venv_path)
+
+        return extra_write
+
+    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+        result = ShellEnvironment()
+
+        venv_path: Path | None = None
+        for name in (".venv", "venv"):
+            candidate = cwd / name
+            if (candidate / "pyvenv.cfg").exists():
+                venv_path = candidate
+                break
+
+        if venv_path:
+            result.env_updates["VIRTUAL_ENV"] = str(venv_path)
+            result.path_prepends.append(str(venv_path / "bin"))
+            result.write_dirs.append(venv_path)
+            result.notes.append(f"venv: {venv_path.name}")
+            sp = venv_site_packages(venv_path)
+            if sp:
+                result.scan_targets.append(sp)
+
+        if (cwd / "Pipfile").exists() and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            pipenv_dir = _pipenv_venv_dir()
+            pipenv_dir.mkdir(parents=True, exist_ok=True)
+            result.write_dirs.append(pipenv_dir)
+            result.notes.append(f"pipenv venvs: {pipenv_dir}")
+
+        for cache_path in [Path.home() / ".cache" / "pip", Path.home() / ".cache" / "uv"]:
+            if cache_path.exists():
+                result.write_dirs.append(cache_path)
+
+        return result
+
+    def detect_new_packages(
+        self,
+        new_paths: "set[Path]",
+        walk_root: Path,
+    ) -> "list[PackageSpec]":
+        results = []
+        for p in new_paths:
+            if p.is_symlink():
+                continue  # skip symlinks — could point outside the install target
+            if p.is_dir():
+                m = _DISTINFO_RE.match(p.name)
+                if m:
+                    name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
+                    results.append(PackageSpec(name=name, version=m.group(2), ecosystem="pypi"))
+        return results
+
+    def home_ro_paths(self) -> "list[Path]":
+        home = Path.home()
+        candidates = [
+            home / ".config" / "pip",
+            home / ".pip",          # legacy pip config location
+            home / ".config" / "uv",
+        ]
+        return [p for p in candidates if p.exists()]
 
     @staticmethod
     def _abs_editable(val: str, cwd: Path) -> str:

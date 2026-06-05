@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 
 from packagealert.models.events import PackageEvent
 
 
 class AbstractMonitor(ABC):
     @abstractmethod
-    async def events(self) -> AsyncIterator[PackageEvent]:
+    async def events(self) -> AsyncGenerator[PackageEvent, None]:
         """Yield PackageEvent instances as they are detected."""
         ...
 
