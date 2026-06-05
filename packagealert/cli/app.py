@@ -887,7 +887,7 @@ def update_cmd(
     raise typer.Exit(0)
 
 
-@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True, "allow_interspersed_args": False})
 def run_cmd(
     ctx: typer.Context,
     no_network: bool = typer.Option(
@@ -945,7 +945,32 @@ def run_cmd(
       package-alert run --env MY_TOKEN uv sync
 
       package-alert run -n pipenv lock          # audit without keeping the new lock file
+
+    When using shell hooks (package-alert setup shell), set PA_RUN_OPTS to pass
+    options without modifying the hook:
+
+      PA_RUN_OPTS="--no-change" pipenv install
+      export PA_RUN_OPTS="--no-network"   # applies to all subsequent hook invocations
     """
+    # Apply PA_RUN_OPTS environment variable — allows shell hook users to pass
+    # package-alert run options without modifying the hook itself, e.g.:
+    #   PA_RUN_OPTS="--no-change" pip install requests
+    #   export PA_RUN_OPTS="--no-network"
+    pa_opts_env = os.environ.get("PA_RUN_OPTS", "")
+    if pa_opts_env.strip():
+        import shlex as _shlex
+        for token in _shlex.split(pa_opts_env):
+            if token in ("--no-change", "-n"):
+                no_change = True
+            elif token == "--no-network":
+                no_network = True
+            elif token == "--expose-ssh-keys":
+                expose_ssh_keys = True
+            elif token == "--allow-external-lockfiles":
+                allow_external_lockfiles = True
+            else:
+                console.print(f"[yellow]PA_RUN_OPTS: unrecognised option {token!r} — ignored[/yellow]")
+
     command = list(ctx.args)
     if not command:
         console.print("[red]No command specified.[/red]")
