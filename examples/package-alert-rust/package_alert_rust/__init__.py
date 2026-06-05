@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 
+from typing import Any
+
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     MAX_TOP_PACKAGES,
@@ -15,6 +17,8 @@ from packagealert.languages.base import (
     PackageSpec,
     ProcessInstall,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
     normalise_package_name,
 )
@@ -222,6 +226,46 @@ class CargoLanguage:
         return []
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    # ------------------------------------------------------------------
+    # Sandbox hooks (contract version 2)
+    # ------------------------------------------------------------------
+
+    def pre_run_check(self, parsed: Any, cwd: Path, expose_ssh_keys: bool) -> str | None:
+        # No pre-run checks needed for Cargo.
+        return None
+
+    def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
+        targets = SandboxTargets()
+        # Cargo.lock lives under cwd; target/ is the build dir (not a package install target).
+        # No additional scan targets beyond what the runner picks up from lockfile diffing.
+        cargo_cache = Path.home() / ".cargo" / "registry"
+        if cargo_cache.exists():
+            targets.write_dirs.append(cargo_cache)
+        return targets
+
+    def prepare_sandbox_env(self, parsed: Any, cwd: Path, env: dict[str, str]) -> list[Path]:
+        # No environment variables need to be injected beyond sandbox_env() names.
+        return []
+
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
+        result = ShellEnvironment()
+        cargo_cache = Path.home() / ".cargo" / "registry"
+        if cargo_cache.exists():
+            result.write_dirs.append(cargo_cache)
+        return result
+
+    def home_ro_paths(self) -> list[Path]:
+        candidates = [
+            Path.home() / ".cargo" / "config.toml",
+            Path.home() / ".cargo" / "credentials.toml",
+        ]
+        return [p for p in candidates if p.exists()]
+
+    def detect_new_packages(self, new_paths: set[Path], walk_root: Path) -> list[PackageSpec]:
+        # Cargo does not install into a flat directory that _collect_new_packages
+        # can diff — new packages are detected via Cargo.lock diffing instead.
         return []
 
     # ------------------------------------------------------------------

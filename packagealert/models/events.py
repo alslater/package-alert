@@ -8,6 +8,25 @@ from typing import Literal
 from pydantic import BaseModel, field_validator
 
 
+_ECOSYSTEM_MAP: dict[str, Literal["pypi", "npm", "packagist"]] = {
+    "pypi": "pypi",
+    "npm": "npm",
+    "packagist": "packagist",
+}
+
+
+def normalise_ecosystem(raw: str) -> Literal["pypi", "npm", "packagist"]:
+    """Normalise a raw ecosystem string to the PackageEvent literal type.
+
+    Accepts case-insensitive variants (e.g. "PyPI", "NPM") and raises
+    ValueError for unknown ecosystems so callers can skip unsupported events.
+    """
+    key = raw.lower()
+    if key not in _ECOSYSTEM_MAP:
+        raise ValueError(f"Unknown ecosystem: {raw!r}")
+    return _ECOSYSTEM_MAP[key]
+
+
 class PackageEvent(BaseModel):
     ecosystem: Literal["pypi", "npm", "packagist"]
     package_name: str

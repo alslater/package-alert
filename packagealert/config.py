@@ -78,12 +78,30 @@ class CooldownConfig(BaseModel):
     non_interactive_escalation: CooldownAction = "block"
 
 
+class FileSystemBackendConfig(BaseModel):
+    snapshot_file_size_limit: int = Field(10 * 1024 * 1024, ge=0)  # 10 MB in bytes
+
+
+_KNOWN_BACKENDS: frozenset[str] = frozenset({"filesystem"})
+
+
 class SandboxConfig(BaseModel):
+    backend: str = "filesystem"
     extra_env: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
     extra_ro_paths: list[ExpandedPath] = Field(default_factory=list)
     editable_roots: list[ExpandedPath] = Field(default_factory=list)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
+    filesystem_backend: FileSystemBackendConfig = Field(default_factory=FileSystemBackendConfig)
+
+    @field_validator("backend")
+    @classmethod
+    def _backend_must_be_known(cls, v: str) -> str:
+        if v not in _KNOWN_BACKENDS:
+            raise ValueError(
+                f"unknown sandbox backend '{v}'; known backends: {', '.join(sorted(_KNOWN_BACKENDS))}"
+            )
+        return v
 
     @field_validator("extra_tmpfs", "extra_ro_paths", "editable_roots")
     @classmethod

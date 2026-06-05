@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -15,12 +14,13 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from packagealert.languages import registry as lang_registry
-from packagealert.languages.base import PackageSpec
+from packagealert.languages.base import PackageSpec, SandboxEnvError, SandboxScanError
 from packagealert.parsers.process_args import (
     ParsedInstall,
-    derive_site_packages,
     parse_package_spec,
 )
+from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
+from packagealert.sandbox.backends.registry import build_backend
 from packagealert.sandbox.bwrap import available as bwrap_available
 from packagealert.sandbox.bwrap import build_cmd
 from packagealert.storage.db import (
@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from packagealert.config import AppConfig
 
 log = logging.getLogger(__name__)
-_DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
 _PA_REAL_SUFFIX = ".__pa_real"
 
 _SHELL_NAMES: frozenset[str] = frozenset({
@@ -91,6 +90,7 @@ class SandboxRunner:
         self._cfg = cfg
         self._console = Console()
         lang_registry.load()
+        self._backend: SandboxBackend = build_backend(cfg.sandbox)
 
     async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
         if not bwrap_available():
@@ -175,15 +175,20 @@ class SandboxRunner:
         elif not via_shim:
             self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
-        if not self._check_venv_scope(parsed, cwd):
-            return 1
-
-        if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
-            self._console.print("[yellow]⚠ This install includes SSH VCS dependencies.[/yellow]")
-            self._console.print("[dim]SSH keys are not exposed in the sandbox by default.[/dim]")
-            self._console.print("[dim]Re-run with --expose-ssh-keys to allow SSH key access:[/dim]")
-            self._console.print(f"[dim]  package-alert run --expose-ssh-keys {shlex.join(argv)}[/dim]")
-            return 1
+        if parsed is not None:
+            lang = lang_registry.for_ecosystem(parsed.ecosystem)
+            if lang is not None:
+                pre_check_fn = getattr(lang, "pre_run_check", None)
+                if callable(pre_check_fn):
+                    try:
+                        error = pre_check_fn(parsed, cwd, expose_ssh_keys)
+                    except Exception:
+                        log.warning("pre_run_check raised for lang=%s — skipping",
+                                    getattr(lang, "name", "?"), exc_info=True)
+                        error = None
+                    if error:
+                        self._console.print(error, style="bold red", markup=False)
+                        return 1
 
         cooldown_result = await self._cooldown_check(ctx)
         if cooldown_result is False:
@@ -202,17 +207,25 @@ class SandboxRunner:
                 return 127
             return 0  # unreachable
 
-        _resolve_targets(ctx)
+        _resolve_targets(ctx, self._console)
 
         targets_label = ", ".join(str(t) for t in ctx.scan_targets) or "none detected"
         self._console.print(f"[dim]Scan targets: {targets_label}[/dim]")
         network_label = "allowed" if allow_network else "blocked"
         if no_change:
-            self._console.print("[dim]Mode: dry run (--no-change) — lock files will be restored after the run[/dim]")
+            self._console.print("[dim]Mode: dry run (--no-change) — lock files and install targets will be restored after the run[/dim]")
         self._console.print(f"[dim]Running in sandbox (network: {network_label})...[/dim]\n")
 
-        # Snapshot scan targets and lock files before execution
-        snapshots = {t: _snapshot(t) for t in ctx.scan_targets if t.exists()}
+        # Snapshot scan targets and lock files before execution.
+        # Abort if any snapshot fails — rollback guarantees depend on having one.
+        snapshots: dict[Path, InstallSnapshot] = {}
+        for _t in ctx.scan_targets:
+            try:
+                snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, cwd)
+            except Exception as exc:
+                self._console.print(f"✗ Cannot snapshot install target {_t}: {exc}", style="bold red", markup=False)
+                self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
+                return 1
         lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
@@ -220,37 +233,43 @@ class SandboxRunner:
             combined_extra.extend(extra_env)
         sandbox_env = _build_sandbox_env(combined_extra)
 
-        # For pip/pipenv: resolve which venv to use and give it an explicit
-        # writable bind mount.  The cwd write bind alone is not reliable for
-        # deep nested paths inside the home tmpfs; an explicit --bind for the
-        # venv root ensures pip can write to both site-packages AND venv/bin/
-        # (needed for console scripts like entry points).
-        if parsed and parsed.manager in ("pip", "pipenv"):
-            if "VIRTUAL_ENV" in sandbox_env:
-                venv_path: Path | None = Path(sandbox_env["VIRTUAL_ENV"])
-            elif parsed.manager == "pip":
-                # Auto-detect project venv for bare pip, which cannot create its own.
-                venv_path = _find_venv_root(ctx.scan_targets)
-                if venv_path:
-                    sandbox_env["VIRTUAL_ENV"] = str(venv_path)
-                    self._console.print(f"[dim]No active virtualenv — using detected project venv: {venv_path}[/dim]")
-                else:
-                    self._console.print("[bold red]✗ Blocked — no virtualenv found for this project.[/bold red]")
-                    self._console.print("[dim]Create one first:  python -m venv .venv  &&  source .venv/bin/activate[/dim]")
-                    self._console.print("[dim]Or use uv:         package-alert run uv sync[/dim]")
-                    return 1
-            else:
-                # pipenv manages its own virtualenv; don't inject VIRTUAL_ENV.
-                venv_path = None
-            if venv_path and venv_path.exists():
-                # Prepend venv/bin to PATH so the sandbox resolves `pip` to the
-                # venv's own pip.  System pip runs under system Python where
-                # sys.prefix == sys.base_prefix, causing it to ignore VIRTUAL_ENV
-                # and fall back to a user install even when VIRTUAL_ENV is set.
-                venv_bin = str(venv_path / "bin")
-                sandbox_env["PATH"] = f"{venv_bin}:{sandbox_env.get('PATH', '')}"
-                if venv_path not in ctx.write_dirs:
-                    ctx.write_dirs.append(venv_path)
+        if parsed is not None:
+            lang = lang_registry.for_ecosystem(parsed.ecosystem)
+            if lang is not None:
+                prepare_env_fn = getattr(lang, "prepare_sandbox_env", None)
+                if callable(prepare_env_fn):
+                    try:
+                        extra_write = prepare_env_fn(parsed, cwd, sandbox_env)
+                    except SandboxEnvError as exc:
+                        self._console.print(str(exc), style="bold red", markup=False)
+                        return 1
+                    except Exception:
+                        log.warning("prepare_sandbox_env raised for lang=%s — skipping",
+                                    getattr(lang, "name", "?"), exc_info=True)
+                        extra_write = []
+                    else:
+                        for p in extra_write:
+                            if p not in ctx.write_dirs:
+                                ctx.write_dirs.append(p)
+                            # Snapshot extra writable paths so rollback covers them.
+                            # These may be modified by the sandbox (e.g. venv/bin/)
+                            # but are not in ctx.scan_targets, so without a snapshot
+                            # they would not be restored on rollback.
+                            if p not in snapshots:
+                                try:
+                                    snapshots[p] = self._backend.snapshot_install_target(
+                                        p, self._console, cwd
+                                    )
+                                except Exception as exc:
+                                    self._console.print(
+                                        f"✗ Cannot snapshot extra write target {p}: {exc}",
+                                        style="bold red", markup=False,
+                                    )
+                                    self._console.print(
+                                        "Aborting — rollback cannot be guaranteed without a snapshot.",
+                                        style="dim",
+                                    )
+                                    return 1
 
         # home_ro: paths under cwd are already covered by the cwd write bind —
         # a more-specific ro-bind on any of them would silently shadow it.
@@ -324,39 +343,81 @@ class SandboxRunner:
             scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
             if no_change:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
+                restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+                return result.returncode if (scan_ok and restore_ok) else 1
             elif not scan_ok:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console)
                 return 1
             return result.returncode if scan_ok else 1
 
         scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
-        if no_change:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
-        elif not scan_ok:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
-            return 1
+        if not no_change:
+            if not scan_ok:
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console)
+                return 1
+
         if not scan_ok:
+            # no_change=True: lock file scan failed — restore everything and exit.
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
-        # Re-detect scan targets that may have been created by the install
-        # (e.g. uv sync creating .venv from scratch)
-        if parsed and parsed.ecosystem == "pypi" and not ctx.scan_targets:
-            site_pkgs = _find_site_packages(parsed, cwd)
-            if site_pkgs and site_pkgs.exists():
-                ctx.scan_targets.append(site_pkgs)
+        # Re-detect scan targets that may have been created during the run
+        # (e.g. uv sync creating .venv from scratch). Delegate to the language
+        # module so the logic stays out of the runner.
+        if parsed and not ctx.scan_targets:
+            lang = lang_registry.for_ecosystem(parsed.ecosystem)
+            if lang is not None:
+                post_run_fn = getattr(lang, "post_run_scan_targets", None)
+                if callable(post_run_fn):
+                    try:
+                        targets = post_run_fn(parsed, cwd)
+                    except Exception:
+                        log.warning(
+                            "post_run_scan_targets raised for lang=%s — skipping",
+                            getattr(lang, "name", "?"), exc_info=True,
+                        )
+                        targets = []
+                    if targets:
+                        # First path is the rollback root (e.g. venv root),
+                        # last path is the scan target (e.g. site-packages).
+                        rollback_root = targets[0]
+                        scan_target = targets[-1]
+                        if scan_target.exists():
+                            ctx.scan_targets.append(scan_target)
+                            snapshots[rollback_root] = self._backend.absent_snapshot()
 
         ecosystem = parsed.ecosystem if parsed else None
-        new_pkgs = _collect_new_packages(ctx.scan_targets, snapshots, ecosystem)
+        try:
+            new_pkgs = _collect_new_packages(
+                ctx.scan_targets,
+                snapshots,
+                ecosystem,
+            )
+        except SandboxScanError as exc:
+            self._console.print(str(exc), style="bold red", markup=False)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
+            return 1
 
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             post_ok = await self._post_scan(new_pkgs)
             if not post_ok:
-                if not no_change:
-                    _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
+
+        # --no-change: restore lock files and install targets after all checks pass.
+        if no_change:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+            if not restore_ok:
+                return 1
 
         if pending_clears:
             db = await open_db()
@@ -371,29 +432,6 @@ class SandboxRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    def _check_venv_scope(self, parsed: ParsedInstall | None, cwd: Path) -> bool:
-        """Return False (and print an error) if VIRTUAL_ENV belongs to a different project."""
-        if parsed is None or parsed.manager not in ("pip", "pipenv"):
-            return True
-        virtual_env = os.environ.get("VIRTUAL_ENV")
-        if not virtual_env:
-            return True
-        venv_path = Path(virtual_env)
-        # Inside the project tree — always fine.
-        if venv_path.is_relative_to(cwd):
-            return True
-        # pipenv stores managed venvs outside the project by default; allow any
-        # path under its venvs directory unless PIPENV_VENV_IN_PROJECT forces
-        # them in-project (in which case an outside path would be foreign).
-        if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
-            if venv_path.is_relative_to(_pipenv_venv_dir()):
-                return True
-        self._console.print("[bold red]✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:[/bold red]")
-        self._console.print(f"  [red]VIRTUAL_ENV = {virtual_env}[/red]")
-        self._console.print(f"  [dim]Project     = {cwd}[/dim]")
-        self._console.print("[dim]Run 'deactivate' before using package-alert run, or cd to the project that owns this virtualenv.[/dim]")
-        return False
 
     def _print_editable_rejection(self, p: Path, editable_roots: list[Path]) -> None:
         """Print a user-facing explanation for why an editable path was blocked."""
@@ -597,53 +635,24 @@ class SandboxRunner:
         scan_targets: list[Path] = []
         notes: list[str] = []
 
-        # Python venv — prefer .venv over venv
-        venv_path: Path | None = None
-        for name in (".venv", "venv"):
-            candidate = cwd / name
-            if (candidate / "pyvenv.cfg").exists():
-                venv_path = candidate
-                break
-
-        if venv_path:
-            sandbox_env["VIRTUAL_ENV"] = str(venv_path)
-            sandbox_env["PATH"] = f"{venv_path / 'bin'}:{sandbox_env.get('PATH', '')}"
-            write_dirs.append(venv_path)
-            notes.append(f"venv: {venv_path.name}")
-            lib_dir = venv_path / "lib"
-            if lib_dir.exists():
-                sp_candidates = sorted(lib_dir.glob("python*/site-packages"))
-                if sp_candidates:
-                    scan_targets.append(sp_candidates[0])
-
-        # Node.js — prepend node_modules/.bin if present, scan node_modules
-        nm_bin = cwd / "node_modules" / ".bin"
-        if nm_bin.is_dir():
-            sandbox_env["PATH"] = f"{nm_bin}:{sandbox_env.get('PATH', '')}"
-            notes.append("node_modules/.bin in PATH")
-        if (cwd / "package.json").exists():
-            scan_targets.append(cwd / "node_modules")
-
-        # Composer/PHP
-        if (cwd / "composer.json").exists():
-            scan_targets.append(cwd / "vendor")
-
-        # pipenv-managed virtualenvs dir (outside the project unless PIPENV_VENV_IN_PROJECT)
-        if (cwd / "Pipfile").exists() and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
-            pipenv_dir = _pipenv_venv_dir()
-            pipenv_dir.mkdir(parents=True, exist_ok=True)
-            write_dirs.append(pipenv_dir)
-            notes.append(f"pipenv venvs: {pipenv_dir}")
-
-        # Writable package-manager caches so installs work from within the shell
-        for cache_path in [
-            Path.home() / ".cache" / "pip",
-            Path.home() / ".cache" / "uv",
-            Path.home() / ".npm",
-            Path.home() / ".config" / "composer",
-        ]:
-            if cache_path.exists():
-                write_dirs.append(cache_path)
+        for lang in lang_registry.all_languages():
+            shell_env_fn = getattr(lang, "shell_environment", None)
+            if callable(shell_env_fn):
+                try:
+                    lang_shell = shell_env_fn(cwd)
+                except Exception:
+                    log.warning("shell_environment raised for lang=%s — skipping",
+                                getattr(lang, "name", "?"), exc_info=True)
+                    continue
+                write_dirs.extend(lang_shell.write_dirs)
+                scan_targets.extend(lang_shell.scan_targets)
+                for k, v in lang_shell.env_updates.items():
+                    sandbox_env[k] = v
+                for p in lang_shell.path_prepends:
+                    sandbox_env["PATH"] = f"{p}:{sandbox_env.get('PATH', '')}"
+                notes.extend(lang_shell.notes)
+                for w in lang_shell.warnings:
+                    self._console.print(w, style="bold yellow", markup=False)
 
         if notes:
             self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
@@ -652,13 +661,32 @@ class SandboxRunner:
         if not await self._preflight_shell(cwd, allow_external_lockfiles=allow_external_lockfiles):
             return 1
 
-        # Snapshot install targets and lock files before the shell session opens
-        snapshots = {t: _snapshot(t) for t in scan_targets if t.exists()}
+        # Snapshot install targets and lock files before the shell session opens.
+        # Abort if any snapshot fails — rollback guarantees depend on having one.
+        # Also snapshot write dirs that are within the project so rollback covers
+        # mutations outside the scan targets (e.g. new console scripts in venv/bin/).
+        # Exclude cwd (covered by lock file restore) and paths outside the project
+        # (e.g. package-manager caches) which are too large to snapshot usefully.
+        targets_to_snapshot: list[Path] = list(scan_targets)
+        for p in write_dirs:
+            if p == cwd or p in targets_to_snapshot:
+                continue
+            if p.is_relative_to(cwd):
+                targets_to_snapshot.append(p)
+
+        snapshots: dict[Path, InstallSnapshot] = {}
+        for _t in targets_to_snapshot:
+            try:
+                snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, cwd)
+            except Exception as exc:
+                self._console.print(f"✗ Cannot snapshot install target {_t}: {exc}", style="bold red", markup=False)
+                self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
+                return 1
         lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
 
         network_label = "allowed" if allow_network else "blocked"
         if no_change:
-            self._console.print("[dim]Mode: dry run (--no-change) — lock files will be restored after the session[/dim]")
+            self._console.print("[dim]Mode: dry run (--no-change) — lock files and install targets will be restored after the session[/dim]")
         self._console.print(f"[dim]Running sandboxed shell (network: {network_label})...[/dim]")
         self._console.print("[dim]Type 'exit' or press Ctrl-D to leave the sandbox.[/dim]\n")
 
@@ -702,26 +730,49 @@ class SandboxRunner:
         ))
         print()
 
-        # Post-exit: scan changed lock files, then any newly installed packages
+        # Post-exit: scan changed lock files, then any newly installed packages.
+        # In --no-change mode, defer restore until after post-shell scanning so
+        # new-package detection sees the actual installed state.
         scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
-        if no_change:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
-        elif not scan_ok:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
-            return 1
+        if not no_change:
+            if not scan_ok:
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console)
+                return 1
         if not scan_ok:
+            # no_change=True and lock file scan failed — restore and exit.
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
-        new_pkgs = _collect_new_packages(scan_targets, snapshots, None)
+        try:
+            new_pkgs = _collect_new_packages(
+                scan_targets,
+                snapshots,
+                None,
+            )
+        except SandboxScanError as exc:
+            self._console.print(str(exc), style="bold red", markup=False)
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
+            return 1
+
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
             post_ok = await self._post_scan(new_pkgs)
             if not post_ok:
-                if not no_change:
-                    _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
+
+        # --no-change: restore lock files and install targets after all checks pass.
+        if no_change:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+            if not restore_ok:
+                return 1
 
         return result.returncode
 
@@ -753,13 +804,13 @@ class SandboxRunner:
             return True
 
         sources = ", ".join(scan.sources) if scan.sources else "no lock file"
-        self._console.print(f"[dim]Pre-flight check: {len(queries)} packages ({sources})...[/dim]")
-
         db = await open_db()
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
 
+        status = self._console.status(f"[dim]Pre-flight: {len(queries)} packages ({sources})...[/dim]")
+        status.start()
         try:
             for i in range(0, len(queries), 50):
                 batch = queries[i:i + 50]
@@ -781,6 +832,7 @@ class SandboxRunner:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
         finally:
+            status.stop()
             await client.aclose()
             await db.close()
 
@@ -878,13 +930,13 @@ class SandboxRunner:
             self._console.print("[dim]Pre-flight: nothing to check[/dim]")
             return True
 
-        self._console.print(f"[dim]Pre-flight check: {source}...[/dim]")
-
         db = await open_db()
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
 
+        status = self._console.status(f"[dim]Pre-flight: {source}...[/dim]")
+        status.start()
         try:
             for i in range(0, len(queries), 50):
                 batch = queries[i : i + 50]
@@ -906,6 +958,7 @@ class SandboxRunner:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
         finally:
+            status.stop()
             await client.aclose()
             await db.close()
 
@@ -1084,10 +1137,6 @@ class SandboxRunner:
             self._console.print(f"[bold red]✗ Post-install: {len(malicious)} malicious package(s) detected:[/bold red]")
             for name, adv_id in malicious:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
-            self._console.print(
-                "[yellow]Packages were written to disk inside the sandbox write targets. "
-                "Remove them manually to clean up.[/yellow]"
-            )
             return False
 
         self._console.print("[green]✓ Post-install: clean[/green]")
@@ -1098,110 +1147,6 @@ class SandboxRunner:
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
 
-# Matches scp-style git@host:path — colon (not slash) after hostname distinguishes
-# this from HTTPS URLs like git+https://git@host/path which are NOT SSH.
-_SCP_SSH_RE = re.compile(r"git@[^/:]+:[^/]")
-
-
-def _is_ssh_vcs_url(s: str) -> bool:
-    """Return True if *s* contains any SSH-based Git URL pattern.
-
-    Covers:
-    - git+ssh://  (pip/uv requirements, explicit packages)
-    - ssh://      (Pipfile.lock "git" field)
-    - git@host:path  (scp-style: pip, Pipfile.lock, bare requirements)
-
-    Note: git+https://git@host/path is NOT SSH — the slash after hostname
-    distinguishes it from scp-style which uses a colon.
-    """
-    return (
-        "git+ssh://" in s
-        or "ssh://" in s
-        or bool(_SCP_SSH_RE.search(s))
-    )
-
-
-def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
-    """Recursively scan a requirements file for SSH VCS URLs.
-
-    Follows -r / --requirement include directives, resolving paths relative to
-    the directory of the including file.  *visited* prevents infinite loops.
-    """
-    path = path.resolve()
-    if path in visited:
-        return False
-    visited.add(path)
-    try:
-        lines = path.read_text(errors="replace").splitlines()
-    except OSError:
-        return False
-    from packagealert.parsers.lockfiles import _req_include
-    base = path.parent
-    for line in lines:
-        # Strip inline comments: everything from the first unquoted # onward.
-        # Requirements files don't support quoting, so a simple split is correct.
-        line = line.split("#")[0].strip()
-        if not line:
-            continue
-        # Check this line for an SSH VCS URL before inspecting it as an include.
-        if _is_ssh_vcs_url(line):
-            return True
-        include = _req_include(line)
-        if include:
-            if _req_file_has_ssh(base / include, visited):
-                return True
-    return False
-
-
-def _has_ssh_vcs_deps(parsed: ParsedInstall | None, cwd: Path) -> bool:
-    """Return True if the install involves SSH-authenticated Git VCS dependencies.
-
-    Checks explicit packages on the command line, and for lock-file installs
-    scans Pipfile.lock (pipenv) or requirements*.txt (pip) for SSH VCS URLs.
-    Both URL-style (git+ssh://, ssh://) and scp-style (git@host:org/repo)
-    patterns are detected.  Nested pip -r includes are followed recursively.
-    """
-    if parsed is None:
-        return False
-    if any(_is_ssh_vcs_url(p) for p in parsed.packages):
-        return True
-    if parsed.manager == "pipenv":
-        candidates: list[Path] = [cwd / "Pipfile.lock"]
-        for path in candidates:
-            try:
-                if _is_ssh_vcs_url(path.read_text(errors="replace")):
-                    return True
-            except OSError:
-                pass
-    elif parsed.manager in ("pip", "uv"):
-        if parsed.req_files:
-            roots = [cwd / f for f in parsed.req_files]
-        elif not parsed.packages:
-            # Bare install with no explicit packages or -r flags — treat as
-            # a lock-file-style install and scan requirements*.txt in the project.
-            roots = sorted(cwd.glob("requirements*.txt"))
-        else:
-            # Explicit packages were given; their URLs were already checked above.
-            roots = []
-        visited: set[Path] = set()
-        for root in roots:
-            if _req_file_has_ssh(root, visited):
-                return True
-    return False
-
-
-def _find_venv_root(scan_targets: list[Path]) -> Path | None:
-    """Return the virtualenv root inferred from the first pypi scan target.
-
-    site-packages sits at <venv>/lib/pythonX.Y/site-packages, so the venv
-    root is three levels up.  We confirm with pyvenv.cfg before returning.
-    """
-    for target in scan_targets:
-        candidate = target.parent.parent.parent
-        if (candidate / "pyvenv.cfg").exists():
-            return candidate
-    return None
-
 
 def _home_ro_dirs() -> list[Path]:
     """Return home-directory paths that package managers need read-only access to.
@@ -1209,6 +1154,10 @@ def _home_ro_dirs() -> list[Path]:
     The home directory is hidden with a tmpfs; only these paths are re-exposed
     so that SSH keys, cloud credentials, and secrets in other directories are
     not readable by install-time scripts.
+
+    Runtime tool paths (pyenv, nvm, uv, pipx, local bin) are listed here.
+    Package-manager config paths (pip, npmrc, etc.) are contributed by each
+    language module via the home_ro_paths() hook.
     """
     home = Path.home()
     candidates: list[Path] = [
@@ -1224,15 +1173,18 @@ def _home_ro_dirs() -> list[Path]:
         # PIPX_HOME defaults differ by install method: ~/.local/pipx or ~/.local/share/pipx
         Path(os.environ.get("PIPX_HOME", home / ".local" / "pipx")).expanduser(),
         home / ".local" / "share" / "pipx",
-        # pip configuration (index URLs, proxy, trusted hosts)
-        home / ".config" / "pip",
-        home / ".pip",                          # legacy pip config location
-        # uv configuration
-        home / ".config" / "uv",
-        # npm registry / auth config
-        home / ".npmrc",
     ]
-    return [p for p in candidates if p.exists()]
+    result = [p for p in candidates if p.exists()]
+    # Merge language-module config paths
+    for lang in lang_registry.all_languages():
+        home_ro_fn = getattr(lang, "home_ro_paths", None)
+        if callable(home_ro_fn):
+            try:
+                result.extend(p for p in home_ro_fn() if p.exists() and p not in result)
+            except Exception:
+                log.warning("home_ro_paths raised for lang=%s — skipping",
+                            getattr(lang, "name", "?"), exc_info=True)
+    return result
 
 
 def _build_sandbox_env(extra: list[str]) -> dict[str, str]:
@@ -1276,6 +1228,7 @@ def _serialise_package_spec(p: PackageSpec) -> str:
                 getattr(lang, "name", "?"), p, exc_info=True,
             )
     return f"{p.name}=={p.version}" if p.version else p.name
+
 
 
 def _try_parse(argv: list[str]) -> ParsedInstall | None:
@@ -1413,135 +1366,26 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
     return argv
 
 
-def _find_site_packages(parsed: ParsedInstall | None, cwd: Path) -> Path | None:
-    """Return the site-packages directory that will be written by this install."""
-    if parsed is None:
-        return None
-
-    # 1. Derived from the executable path (e.g. /path/to/venv/bin/pip)
-    if parsed.venv_exe:
-        sp = derive_site_packages(parsed.venv_exe)
-        if sp and sp.exists():
-            return sp
-
-    # 2. Active virtualenv — only reliable for pip/pipenv; uv ignores VIRTUAL_ENV
-    #    and always writes to the project-local .venv regardless of activation state.
-    if parsed.manager in ("pip", "pipenv"):
-        venv_env = os.environ.get("VIRTUAL_ENV")
-        if venv_env:
-            candidates = sorted(Path(venv_env).glob("lib/python*/site-packages"))
-            if candidates:
-                return candidates[0]
-
-    # 3. pipenv-managed venv under WORKON_HOME (outside the project by default)
-    if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
-        pipenv_venv = _find_pipenv_venv(cwd)
-        if pipenv_venv:
-            candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
-            if candidates:
-                return candidates[0]
-
-    # 4. .venv / venv inside the project (uv default, pipenv with PIPENV_VENV_IN_PROJECT)
-    for name in (".venv", "venv"):
-        candidates = sorted((cwd / name).glob("lib/python*/site-packages"))
-        if candidates:
-            return candidates[0]
-
-    return None
-
-
-def _find_pipenv_venv(cwd: Path) -> Path | None:
-    """Return the pipenv-managed virtualenv root for the project at *cwd*, or None.
-
-    Runs `pipenv --venv` outside the sandbox to resolve the path, which works
-    for both pre-existing venvs (pre-install snapshot) and freshly-created ones
-    (post-install scan).  Returns None if pipenv is not installed or the venv
-    does not exist yet (e.g. before the first `pipenv sync`).
-    """
-    try:
-        result = subprocess.run(
-            ["pipenv", "--venv"],
-            capture_output=True, text=True, cwd=cwd,
-        )
-        if result.returncode == 0:
-            venv = Path(result.stdout.strip())
-            if venv.exists():
-                return venv
-    except FileNotFoundError:
-        pass
-    return None
-
-
-def _pipenv_venv_dir() -> Path:
-    """Return the directory where pipenv stores its managed virtualenvs.
-
-    Respects WORKON_HOME; falls back to ~/.local/share/virtualenvs (the pipenv
-    default on Linux).  When PIPENV_VENV_IN_PROJECT is set the venv lives
-    inside the project directory instead and this directory is not needed.
-    """
-    workon = os.environ.get("WORKON_HOME")
-    return Path(workon) if workon else Path.home() / ".local" / "share" / "virtualenvs"
-
-
-def _resolve_targets(ctx: _Context) -> None:
+def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     """Populate ctx.write_dirs and ctx.scan_targets from the parsed command."""
-    parsed = ctx.parsed
-    cwd = ctx.cwd
-
-    # The project directory is always writable (lock-file updates, project files)
-    ctx.write_dirs.append(cwd)
-
-    if parsed is None:
+    ctx.write_dirs.append(ctx.cwd)
+    if ctx.parsed is None:
         return
-
-    eco = parsed.ecosystem
-
-    if eco == "pypi":
-        site_pkgs = _find_site_packages(parsed, cwd)
-        if site_pkgs:
-            ctx.scan_targets.append(site_pkgs)
-            # Only add as a separate write mount if site-packages is outside cwd
-            try:
-                site_pkgs.relative_to(cwd)
-            except ValueError:
-                ctx.write_dirs.append(site_pkgs)
-        else:
-            log.warning("Could not detect site-packages directory; Python packages will not be scanned")
-        # Cache dirs — writable so pip/uv can store wheels, but we don't scan them
-        for cache in [Path.home() / ".cache" / "pip", Path.home() / ".cache" / "uv"]:
-            if cache.exists():
-                ctx.write_dirs.append(cache)
-        # pipenv stores its managed venvs outside the project unless
-        # PIPENV_VENV_IN_PROJECT is set — make that directory writable, creating
-        # it if necessary so pipenv can write there on a fresh install.
-        if parsed.manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
-            venv_dir = _pipenv_venv_dir()
-            venv_dir.mkdir(parents=True, exist_ok=True)
-            ctx.write_dirs.append(venv_dir)
-            # If the venv already exists, add its site-packages as a scan target
-            # so the pre-install snapshot captures current state.  Fresh installs
-            # produce an empty snapshot here; the post-install fallback below
-            # then finds the newly-created venv and diffs against empty.
-            if not ctx.scan_targets:
-                pipenv_venv = _find_pipenv_venv(cwd)
-                if pipenv_venv:
-                    sp_candidates = sorted(pipenv_venv.glob("lib/python*/site-packages"))
-                    if sp_candidates:
-                        ctx.scan_targets.append(sp_candidates[0])
-
-    elif eco == "npm":
-        # node_modules lives under cwd, so it's already covered by the cwd bind
-        ctx.scan_targets.append(cwd / "node_modules")
-        npm_cache = Path.home() / ".npm"
-        if npm_cache.exists():
-            ctx.write_dirs.append(npm_cache)
-
-    elif eco == "packagist":
-        # vendor lives under cwd
-        ctx.scan_targets.append(cwd / "vendor")
-        composer_home = Path.home() / ".config" / "composer"
-        if composer_home.exists():
-            ctx.write_dirs.append(composer_home)
+    lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+    if lang is None:
+        return
+    resolve_fn = getattr(lang, "resolve_sandbox_targets", None)
+    if callable(resolve_fn):
+        try:
+            result = resolve_fn(ctx.parsed, ctx.cwd)
+            ctx.scan_targets.extend(result.scan_targets)
+            ctx.write_dirs.extend(result.write_dirs)
+            if console is not None:
+                for w in result.warnings:
+                    console.print(w, style="bold yellow", markup=False)
+        except Exception:
+            log.warning("resolve_sandbox_targets raised for lang=%s — skipping",
+                        getattr(lang, "name", "?"), exc_info=True)
 
 
 class _LockUnreadable:
@@ -1668,6 +1512,26 @@ def _snapshot_lock_files(
     return result
 
 
+def _restore_install_targets(
+    backend: SandboxBackend,
+    snapshots: dict[Path, InstallSnapshot],
+    console: Console,
+) -> bool:
+    """Restore all install targets. Returns True if all succeeded, False if any failed."""
+    ok = True
+    for path, snap in snapshots.items():
+        try:
+            target_ok = backend.restore_install_target(path, snap, console)
+            if not target_ok:
+                ok = False
+        except Exception:
+            log.warning("Failed to restore install target: %s", path, exc_info=True)
+            console.print(f"✗ Failed to restore install target: {path}", style="bold red", markup=False)
+            console.print("  The install target may be partially modified — inspect and clean up manually.", style="yellow")
+            ok = False
+    return ok
+
+
 def _restore_lock_files(
     snapshots: dict[Path, bytes | None | _LockUnreadable],
     cwd: Path,
@@ -1739,32 +1603,90 @@ def _restore_lock_files(
         console.print(f"[yellow]Restored lock file(s) to pre-install state: {', '.join(restored)}[/yellow]")
 
 
-def _snapshot(path: Path) -> set[Path]:
-    """Return the set of all paths currently under *path*."""
-    try:
-        return set(path.rglob("*"))
-    except (PermissionError, FileNotFoundError):
-        return set()
+
+
 
 
 def _collect_new_packages(
     scan_targets: list[Path],
-    snapshots: dict[Path, set[Path]],
+    snapshots: dict[Path, InstallSnapshot],
     ecosystem: str | None,
 ) -> list[tuple[str, str, str | None]]:
     """Return (ecosystem, name, version) tuples for packages that appeared since the snapshot."""
     new: list[tuple[str, str, str | None]] = []
     for target in scan_targets:
-        if not target.exists():
+        snap = snapshots.get(target)
+        before: set[Path] = snap.path_set() if snap is not None else set()
+        # For symlink-root targets the snapshot walked the real directory, so
+        # the before set uses real-dir paths. Walk the same real directory for
+        # the after set so both sets are in the same namespace.
+        walk_root = snap.scan_root(target) if snap is not None else target
+        if not walk_root.exists():
+            if snap is not None and snap.existed:
+                # Exception: a broken symlink pre-run (root_symlink set, target absent)
+                # legitimately produces a missing walk_root. If the install didn't create
+                # the target either, this is a no-op — nothing was installed.
+                was_broken_symlink = (
+                    getattr(snap, "root_symlink", None) is not None
+                    and not getattr(snap, "root_symlink_target_existed", True)
+                )
+                if not was_broken_symlink:
+                    raise SandboxScanError(
+                        f"Post-run scan target is missing after the install: {walk_root}\n"
+                        "Cannot safely scan for new packages — treating as scan failure."
+                    )
             continue
-        before = snapshots.get(target, set())
-        new_paths = set(target.rglob("*")) - before
-        if ecosystem in ("pypi", None):
-            new.extend(_new_python_packages(new_paths))
-        if ecosystem in ("npm", None):
-            new.extend(_new_npm_packages(new_paths, target))
-        if ecosystem in ("packagist", None):
-            new.extend(_new_composer_packages(new_paths, target))
+        # Guard: os.walk follows a symlink at the root even with followlinks=False.
+        # If a sandboxed install replaced walk_root with a symlink, we would
+        # traverse an attacker-controlled location. Refuse to walk symlink roots.
+        if walk_root.is_symlink():
+            raise SandboxScanError(
+                f"Post-run scan target was replaced by a symlink during the install: {walk_root}\n"
+                f"Cannot safely scan for new packages — treating as scan failure."
+            )
+        if not walk_root.is_dir():
+            # A non-directory entry (file, FIFO, socket, etc.) at the scan root
+            # causes os.walk() to yield nothing, silently bypassing detection.
+            raise SandboxScanError(
+                f"Post-run scan target is not a directory: {walk_root}\n"
+                "Cannot safely scan for new packages — treating as scan failure."
+            )
+        # Use os.walk(followlinks=False) to match the snapshot's behaviour —
+        # rglob() follows symlinks, which would cause false-positive new-package
+        # detections for paths under symlinked subdirectories that the snapshot
+        # intentionally skipped.
+        after: set[Path] = set()
+
+        def _scan_onerror(err: OSError) -> None:
+            raise SandboxScanError(
+                f"Post-run scan of {walk_root} failed: {err}\n"
+                "Cannot safely detect new packages — treating as scan failure."
+            )
+
+        for dirpath, dirnames, filenames in os.walk(walk_root, followlinks=False, onerror=_scan_onerror):
+            dp = Path(dirpath)
+            for name in dirnames:
+                after.add(dp / name)
+            for name in filenames:
+                after.add(dp / name)
+        new_paths = after - before
+        langs = (
+            [lang_registry.for_ecosystem(ecosystem)]
+            if ecosystem is not None
+            else list(lang_registry.all_languages())
+        )
+        for lang in langs:
+            if lang is None:
+                continue
+            detect_fn = getattr(lang, "detect_new_packages", None)
+            if callable(detect_fn):
+                try:
+                    pkg_specs = detect_fn(new_paths, walk_root)
+                    for ps in pkg_specs:
+                        new.append((ps.ecosystem, ps.name, ps.version))
+                except Exception:
+                    log.warning("detect_new_packages raised for lang=%s — skipping",
+                                getattr(lang, "name", "?"), exc_info=True)
     # Deduplicate preserving order
     seen: set[tuple[str, str, str | None]] = set()
     result = []
@@ -1775,59 +1697,3 @@ def _collect_new_packages(
     return result
 
 
-def _new_python_packages(new_paths: set[Path]) -> list[tuple[str, str, str | None]]:
-    results = []
-    for p in new_paths:
-        if p.is_dir():
-            m = _DISTINFO_RE.match(p.name)
-            if m:
-                name = re.sub(r"[-_.]+", "-", m.group(1)).lower()
-                results.append(("pypi", name, m.group(2)))
-    return results
-
-
-def _new_npm_packages(new_paths: set[Path], node_modules: Path) -> list[tuple[str, str, str | None]]:
-    results = []
-    for p in new_paths:
-        if p.name != "package.json":
-            continue
-        try:
-            rel = p.relative_to(node_modules)
-        except ValueError:
-            continue
-        # Regular pkg: pkg/package.json (2 parts)
-        # Scoped pkg:  @scope/pkg/package.json (3 parts)
-        if len(rel.parts) not in (2, 3):
-            continue
-        try:
-            data = json.loads(p.read_text())
-            name = data.get("name")
-            version = data.get("version")
-            if name:
-                results.append(("npm", name, version))
-        except Exception:
-            pass
-    return results
-
-
-def _new_composer_packages(new_paths: set[Path], vendor: Path) -> list[tuple[str, str, str | None]]:
-    results = []
-    for p in new_paths:
-        if p.name != "composer.json":
-            continue
-        try:
-            rel = p.relative_to(vendor)
-        except ValueError:
-            continue
-        # vendor/vendor_name/package_name/composer.json = 3 parts
-        if len(rel.parts) != 3:
-            continue
-        try:
-            data = json.loads(p.read_text())
-            name = data.get("name", "")
-            version = data.get("version", "").lstrip("v") or None
-            if name and "/" in name:
-                results.append(("packagist", name, version))
-        except Exception:
-            pass
-    return results

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 _NORMALISE_RE = re.compile(r"[-_.]+")
 MAX_TOP_PACKAGES = 500
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import httpx
     from packagealert.heuristics.base import AbstractHeuristic
 
-CURRENT_CONTRACT_VERSION = 1
+CURRENT_CONTRACT_VERSION = 2
 
 # Describes a package being requested or installed (from CLI args or lock files).
 @dataclass
@@ -41,6 +41,45 @@ class SandboxPaths:
     read_only: list[Path] = field(default_factory=list)
     writable: list[Path] = field(default_factory=list)
     hidden: list[Path] = field(default_factory=list)
+
+
+@dataclass
+class SandboxTargets:
+    """Returned by resolve_sandbox_targets() for a package-install run."""
+    scan_targets: list[Path] = field(default_factory=list)
+    write_dirs: list[Path] = field(default_factory=list)
+    # User-visible warnings to print to the console (bold yellow). Use for
+    # conditions that degrade scan coverage or rollback completeness.
+    warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ShellEnvironment:
+    """Returned by shell_environment() for an interactive shell session."""
+    scan_targets: list[Path] = field(default_factory=list)
+    write_dirs: list[Path] = field(default_factory=list)
+    env_updates: dict[str, str] = field(default_factory=dict)
+    path_prepends: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # User-visible warnings to print to the console (bold yellow).
+    warnings: list[str] = field(default_factory=list)
+
+
+class SandboxEnvError(Exception):
+    """Raised by prepare_sandbox_env() to block the run with a user-visible message.
+
+    The runner catches this, prints the message with markup=False, and returns 1.
+    Use this instead of out-of-band env key sentinels.
+    """
+
+
+class SandboxScanError(Exception):
+    """Raised by _collect_new_packages() when a scan target cannot be safely walked.
+
+    The runner catches this, treats it as a scan failure (triggers rollback and
+    returns 1) rather than silently skipping detection, so malicious installs
+    cannot evade post-install scanning by replacing a scan root with a symlink.
+    """
 
 
 @dataclass
@@ -182,6 +221,116 @@ class LanguageBase(Protocol):
         """
         return []
 
+    def post_run_scan_targets(self, parsed: Any, cwd: "Path") -> "list[Path]":
+        """Return scan targets that may have been created during the sandbox run.
+
+        Called after the sandbox exits when no scan targets were detected before
+        the run (e.g. a package manager that creates its install directory from
+        scratch). Return paths to scan for newly installed packages. The runner
+        also uses the first returned path to identify the rollback root — the
+        language module should order paths from outermost (rollback root) to
+        innermost (scan target), or return a single path if they are the same.
+        Default returns an empty list.
+
+        The *parsed* argument is a ``ParsedInstall`` from
+        ``packagealert.parsers.process_args``. It has the same ``manager``,
+        ``ecosystem``, ``venv_exe``, and ``lockfile_hint`` fields as
+        ``ProcessInstall``, plus ``packages: list[str]``, ``req_files``,
+        ``global_install``, and ``suggested_env``.
+        """
+        return []
+
+    def pre_run_check(
+        self,
+        parsed: Any,
+        cwd: "Path",
+        expose_ssh_keys: bool,
+    ) -> str | None:
+        """Return an error message to block the run, or None to proceed.
+
+        Called before the sandbox runs. The runner prints the returned string
+        with markup=False and returns exit code 1. Use embedded newlines for
+        multi-line messages. Default returns None (allow).
+
+        The *parsed* argument is a ``ParsedInstall`` from
+        ``packagealert.parsers.process_args`` (see ``post_run_scan_targets``
+        for field details).
+
+        Note: this signature will be extended with a ``flags`` parameter in a
+        future contract version.
+        """
+        return None
+
+    def resolve_sandbox_targets(
+        self,
+        parsed: Any,
+        cwd: "Path",
+    ) -> "SandboxTargets":
+        """Return scan targets and extra writable dirs for this install.
+
+        Called after cwd is appended to write_dirs. Replaces the per-ecosystem
+        if/elif branches in the runner's _resolve_targets. Default returns
+        empty SandboxTargets.
+
+        The *parsed* argument is a ``ParsedInstall`` (see
+        ``post_run_scan_targets`` for field details).
+        """
+        return SandboxTargets()
+
+    def prepare_sandbox_env(
+        self,
+        parsed: Any,
+        cwd: "Path",
+        env: "dict[str, str]",
+    ) -> "list[Path]":
+        """Mutate *env* to add language-specific variables (e.g. VIRTUAL_ENV, PATH).
+
+        Returns additional paths to bind writable inside the sandbox (e.g. the
+        venv root for pip, so entry-point scripts in venv/bin/ are writable).
+        Default returns an empty list.
+
+        The *parsed* argument is a ``ParsedInstall`` (see
+        ``post_run_scan_targets`` for field details).
+        """
+        return []
+
+    def shell_environment(self, cwd: "Path") -> "ShellEnvironment":
+        """Return the shell session environment for this language.
+
+        Called at the start of _run_shell. Results from all registered language
+        modules are merged. Default returns empty ShellEnvironment.
+        """
+        return ShellEnvironment()
+
+    def detect_new_packages(
+        self,
+        new_paths: "set[Path]",
+        walk_root: "Path",
+    ) -> "list[PackageSpec]":
+        """Return packages that appeared in *new_paths* since the pre-run snapshot.
+
+        Called after the sandbox exits with the set of paths that appeared under
+        the install target (new_paths = post_run_paths - pre_run_paths). *walk_root*
+        is the directory that was walked (equals the scan target, or the resolved
+        real directory when the scan target is an in-project symlink).
+
+        Return PackageSpec objects for each newly installed package. Results from
+        all registered language modules are merged and deduplicated by the runner.
+        Default returns an empty list.
+        """
+        return []
+
+    def home_ro_paths(self) -> "list[Path]":
+        """Return paths under $HOME to expose read-only inside the sandbox.
+
+        Called once at sandbox setup. Results from all registered language modules
+        are merged with the runner's common allowlist. Use this to expose package
+        manager configuration files that your ecosystem reads at install time
+        (e.g. ~/.config/pip, ~/.npmrc). Only return paths that actually exist.
+        Default returns an empty list.
+        """
+        return []
+
     def latest_version_url(self, name: str) -> str | None:
         """Return a registry API URL that resolves the latest published version of
         a package. The response is parsed by latest_version_parse().
@@ -247,6 +396,9 @@ __all__ = [
     "PackageSpec",
     "PackageMetadata",
     "SandboxPaths",
+    "SandboxEnvError",
+    "SandboxTargets",
+    "ShellEnvironment",
     "Snapshot",
     "ProcessInstall",
     "LanguageBase",

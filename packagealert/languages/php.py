@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Any
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from packagealert.languages.base import (
     PackageSpec,
     ProcessInstall,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
 )
 
@@ -163,10 +166,72 @@ class PhpLanguage:
             ],
         )
 
+    # ------------------------------------------------------------------
+    # resolve_sandbox_targets
+    # ------------------------------------------------------------------
+
+    def resolve_sandbox_targets(
+        self,
+        parsed: Any,
+        cwd: Path,
+    ) -> "SandboxTargets":
+        targets = SandboxTargets()
+        # vendor lives under cwd
+        targets.scan_targets.append(cwd / "vendor")
+        composer_home = Path.home() / ".config" / "composer"
+        if composer_home.exists():
+            targets.write_dirs.append(composer_home)
+        return targets
+
     def sandbox_env(self) -> list[str]:
         return [
             "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "COMPOSER_MIRROR",
         ]
+
+    # ------------------------------------------------------------------
+    # shell_environment
+    # ------------------------------------------------------------------
+
+    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+        result = ShellEnvironment()
+        if (cwd / "composer.json").exists():
+            result.scan_targets.append(cwd / "vendor")
+        composer_home = Path.home() / ".config" / "composer"
+        if composer_home.exists():
+            result.write_dirs.append(composer_home)
+        return result
+
+    def detect_new_packages(
+        self,
+        new_paths: "set[Path]",
+        walk_root: Path,
+    ) -> "list[PackageSpec]":
+        results = []
+        for p in new_paths:
+            if p.name != "composer.json":
+                continue
+            try:
+                rel = p.relative_to(walk_root)
+            except ValueError:
+                continue
+            # vendor/vendor_name/package_name/composer.json = 3 parts
+            if len(rel.parts) != 3:
+                continue
+            if p.is_symlink():
+                continue  # skip symlinks — could point outside the install target
+            try:
+                data = json.loads(p.read_text())
+                name = data.get("name", "")
+                version = data.get("version", "").lstrip("v") or None
+                if name and "/" in name:
+                    results.append(PackageSpec(name=name, version=version, ecosystem="packagist"))
+            except Exception:
+                pass
+        return results
+
+    def home_ro_paths(self) -> "list[Path]":
+        candidates = [Path.home() / ".config" / "composer"]
+        return [p for p in candidates if p.exists()]
 
     def top_packages_url(self) -> str | None:
         return "https://packagist.org/explore/popular.json?per_page=100"

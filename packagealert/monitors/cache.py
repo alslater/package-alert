@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,7 +150,7 @@ class CacheMonitor(AbstractMonitor):
             events.append(self._queue.get_nowait())
         return events
 
-    async def events(self) -> AsyncIterator[PackageEvent]:
+    async def events(self) -> AsyncGenerator[PackageEvent, None]:
         while self._running:
             try:
                 event = await asyncio.wait_for(self._queue.get(), timeout=1.0)

@@ -6,27 +6,22 @@ are pure functions (no I/O, no async, no OSV calls).
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import unittest.mock
 from pathlib import Path
 
 import pytest
 
+from packagealert.sandbox.backends.filesystem import FileSystemBackend, FileSystemSnapshot
 from packagealert.sandbox.bwrap import build_cmd
+from rich.console import Console
 from packagealert.sandbox.runner import (
     SandboxRunner,
     _collect_new_packages,
-    _find_pipenv_venv,
-    _find_site_packages,
-    _find_venv_root,
-    _has_ssh_vcs_deps,
-    _is_ssh_vcs_url,
-    _req_file_has_ssh,
     _home_ro_dirs,
-    _new_composer_packages,
-    _new_npm_packages,
-    _new_python_packages,
-    _pipenv_venv_dir,
     _resolve_targets,
+    _restore_install_targets,
     _restore_lock_files,
     _snapshot_lock_files,
     _try_parse,
@@ -41,6 +36,16 @@ from packagealert.sandbox.runner import (
     _SHELL_RC_FILES,
     _Context,
 )
+from packagealert.languages.python import (
+    _find_pipenv_venv,
+    _find_site_packages,
+    _find_venv_root,
+    _has_ssh_vcs_deps,
+    _is_ssh_vcs_url,
+    _req_file_has_ssh,
+    _pipenv_venv_dir,
+)
+from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.parsers.process_args import ParsedInstall
 
 
@@ -612,7 +617,7 @@ class TestResolveTargets:
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         with unittest.mock.patch(
-            "packagealert.sandbox.runner._find_pipenv_venv", return_value=venv
+            "packagealert.languages.python._find_pipenv_venv", return_value=venv
         ):
             _resolve_targets(ctx)
         assert site_pkgs in ctx.scan_targets
@@ -625,7 +630,7 @@ class TestResolveTargets:
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         with unittest.mock.patch(
-            "packagealert.sandbox.runner._find_pipenv_venv", return_value=None
+            "packagealert.languages.python._find_pipenv_venv", return_value=None
         ):
             _resolve_targets(ctx)
         # No scan targets yet — the post-install fallback will find them after creation
@@ -663,48 +668,52 @@ class TestFindPipenvVenv:
 # _new_python_packages
 # ---------------------------------------------------------------------------
 
-class TestNewPythonPackages:
+class TestDetectNewPythonPackages:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
     def test_detects_dist_info_dir(self, tmp_path):
         dist = tmp_path / "requests-2.31.0.dist-info"
         dist.mkdir()
-        result = _new_python_packages({dist})
-        assert ("pypi", "requests", "2.31.0") in result
+        result = self._lang().detect_new_packages({dist}, tmp_path)
+        assert any(p.name == "requests" and p.version == "2.31.0" for p in result)
 
     def test_normalises_name(self, tmp_path):
         dist = tmp_path / "Werkzeug-3.0.0.dist-info"
         dist.mkdir()
-        result = _new_python_packages({dist})
-        assert ("pypi", "werkzeug", "3.0.0") in result
+        result = self._lang().detect_new_packages({dist}, tmp_path)
+        assert any(p.name == "werkzeug" for p in result)
 
     def test_normalises_underscores(self, tmp_path):
         dist = tmp_path / "my_package-1.0.0.dist-info"
         dist.mkdir()
-        result = _new_python_packages({dist})
-        assert ("pypi", "my-package", "1.0.0") in result
+        result = self._lang().detect_new_packages({dist}, tmp_path)
+        assert any(p.name == "my-package" for p in result)
 
     def test_ignores_non_dist_info(self, tmp_path):
         f = tmp_path / "requests-2.31.0"
         f.mkdir()
-        assert _new_python_packages({f}) == []
+        assert self._lang().detect_new_packages({f}, tmp_path) == []
 
     def test_ignores_files_not_dirs(self, tmp_path):
         f = tmp_path / "requests-2.31.0.dist-info"
         f.touch()
-        assert _new_python_packages({f}) == []
+        assert self._lang().detect_new_packages({f}, tmp_path) == []
 
 
-# ---------------------------------------------------------------------------
-# _new_npm_packages
-# ---------------------------------------------------------------------------
+class TestDetectNewNpmPackages:
+    def _lang(self):
+        from packagealert.languages.node import NodeLanguage
+        return NodeLanguage()
 
-class TestNewNpmPackages:
     def test_detects_regular_package(self, tmp_path):
         pkg_dir = tmp_path / "lodash"
         pkg_dir.mkdir()
         pkg_json = pkg_dir / "package.json"
         pkg_json.write_text(json.dumps({"name": "lodash", "version": "4.17.21"}))
-        result = _new_npm_packages({pkg_json}, tmp_path)
-        assert ("npm", "lodash", "4.17.21") in result
+        result = self._lang().detect_new_packages({pkg_json}, tmp_path)
+        assert any(p.name == "lodash" and p.version == "4.17.21" for p in result)
 
     def test_detects_scoped_package(self, tmp_path):
         scope_dir = tmp_path / "@types"
@@ -712,58 +721,58 @@ class TestNewNpmPackages:
         pkg_dir.mkdir(parents=True)
         pkg_json = pkg_dir / "package.json"
         pkg_json.write_text(json.dumps({"name": "@types/node", "version": "20.0.0"}))
-        result = _new_npm_packages({pkg_json}, tmp_path)
-        assert ("npm", "@types/node", "20.0.0") in result
+        result = self._lang().detect_new_packages({pkg_json}, tmp_path)
+        assert any(p.name == "@types/node" for p in result)
 
     def test_ignores_wrong_depth(self, tmp_path):
         nested = tmp_path / "a" / "b" / "c"
         nested.mkdir(parents=True)
         pkg_json = nested / "package.json"
         pkg_json.write_text(json.dumps({"name": "deep", "version": "1.0.0"}))
-        assert _new_npm_packages({pkg_json}, tmp_path) == []
+        assert self._lang().detect_new_packages({pkg_json}, tmp_path) == []
 
     def test_ignores_corrupt_json(self, tmp_path):
         pkg_dir = tmp_path / "broken"
         pkg_dir.mkdir()
         pkg_json = pkg_dir / "package.json"
         pkg_json.write_text("{not json")
-        assert _new_npm_packages({pkg_json}, tmp_path) == []
+        assert self._lang().detect_new_packages({pkg_json}, tmp_path) == []
 
 
-# ---------------------------------------------------------------------------
-# _new_composer_packages
-# ---------------------------------------------------------------------------
+class TestDetectNewComposerPackages:
+    def _lang(self):
+        from packagealert.languages.php import PhpLanguage
+        return PhpLanguage()
 
-class TestNewComposerPackages:
     def test_detects_vendor_package(self, tmp_path):
         vendor_dir = tmp_path / "symfony" / "console"
         vendor_dir.mkdir(parents=True)
         pkg_json = vendor_dir / "composer.json"
         pkg_json.write_text(json.dumps({"name": "symfony/console", "version": "6.4.0"}))
-        result = _new_composer_packages({pkg_json}, tmp_path)
-        assert ("packagist", "symfony/console", "6.4.0") in result
+        result = self._lang().detect_new_packages({pkg_json}, tmp_path)
+        assert any(p.name == "symfony/console" and p.version == "6.4.0" for p in result)
 
     def test_strips_leading_v_from_version(self, tmp_path):
         vendor_dir = tmp_path / "vendor" / "pkg"
         vendor_dir.mkdir(parents=True)
         pkg_json = vendor_dir / "composer.json"
         pkg_json.write_text(json.dumps({"name": "vendor/pkg", "version": "v1.2.3"}))
-        result = _new_composer_packages({pkg_json}, tmp_path)
-        assert ("packagist", "vendor/pkg", "1.2.3") in result
+        result = self._lang().detect_new_packages({pkg_json}, tmp_path)
+        assert any(p.version == "1.2.3" for p in result)
 
     def test_ignores_wrong_depth(self, tmp_path):
         deep = tmp_path / "a" / "b" / "c" / "d"
         deep.mkdir(parents=True)
         pkg_json = deep / "composer.json"
         pkg_json.write_text(json.dumps({"name": "a/b", "version": "1.0"}))
-        assert _new_composer_packages({pkg_json}, tmp_path) == []
+        assert self._lang().detect_new_packages({pkg_json}, tmp_path) == []
 
     def test_ignores_name_without_slash(self, tmp_path):
         vendor_dir = tmp_path / "vendor" / "pkg"
         vendor_dir.mkdir(parents=True)
         pkg_json = vendor_dir / "composer.json"
         pkg_json.write_text(json.dumps({"name": "noslash", "version": "1.0"}))
-        assert _new_composer_packages({pkg_json}, tmp_path) == []
+        assert self._lang().detect_new_packages({pkg_json}, tmp_path) == []
 
 
 # ---------------------------------------------------------------------------
@@ -995,42 +1004,46 @@ class TestIsSshVcsUrl:
 
 
 class TestCheckVenvScope:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
     def test_allows_venv_inside_project(self, tmp_path, monkeypatch):
         venv = tmp_path / ".venv"
         venv.mkdir()
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path) is True
+        assert self._lang().pre_run_check(parsed, tmp_path, False) is None
 
     def test_blocks_venv_outside_project(self, tmp_path, monkeypatch):
         other = tmp_path / "other_project" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is False
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
 
     def test_allows_when_no_virtual_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path) is True
+        assert self._lang().pre_run_check(parsed, tmp_path, False) is None
 
     def test_allows_for_uv_regardless_of_virtual_env(self, tmp_path, monkeypatch):
         other = tmp_path / "other" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is True
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
 
-    def test_allows_for_npm(self, tmp_path, monkeypatch):
+    def test_allows_for_npm_manager(self, tmp_path, monkeypatch):
+        # PythonLanguage.pre_run_check only enforces VIRTUAL_ENV scope for pip/pipenv.
+        # When called with manager="npm" it must return None even if VIRTUAL_ENV is
+        # set to a foreign path, because npm installs are not affected by Python venvs.
         other = tmp_path / "other" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="npm", packages=[], ecosystem="npm")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is True
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
 
-    def test_allows_when_parsed_is_none(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VIRTUAL_ENV", "/some/other/venv")
-        assert _make_runner()._check_venv_scope(None, tmp_path) is True
 
     def test_allows_pipenv_venv_in_managed_dir(self, tmp_path, monkeypatch):
         # pipenv puts venvs outside the project by default — must not be blocked.
@@ -1042,7 +1055,7 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is True
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
 
     def test_blocks_pipenv_foreign_venv_outside_managed_dir(self, tmp_path, monkeypatch):
         # A venv neither in the project tree nor in the pipenv-managed dir is foreign.
@@ -1054,7 +1067,7 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(foreign))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is False
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
 
     def test_blocks_pipenv_outside_project_when_venv_in_project_set(self, tmp_path, monkeypatch):
         # When PIPENV_VENV_IN_PROJECT=1 the venv must be inside the project tree.
@@ -1066,7 +1079,7 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert _make_runner()._check_venv_scope(parsed, tmp_path / "my_project") is False
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
 
 
 class TestBuildSandboxEnv:
@@ -1139,6 +1152,9 @@ class TestBuildSandboxEnv:
 
 
 class TestCollectNewPackages:
+    def _empty_snap(self) -> FileSystemSnapshot:
+        return FileSystemSnapshot(existed=True)
+
     def test_deduplicates_results(self, tmp_path):
         site = tmp_path / "site-packages"
         site.mkdir()
@@ -1150,27 +1166,40 @@ class TestCollectNewPackages:
         assert names.count("requests") == 1
 
     def test_only_scans_ecosystem_when_specified(self, tmp_path):
-        # A dist-info dir present in an npm scan target should not be picked up
         nm = tmp_path / "node_modules"
         nm.mkdir()
-        # Stick a fake dist-info under node_modules (shouldn't happen, just ensuring filter)
         fake = nm / "requests-2.31.0.dist-info"
         fake.mkdir()
         result = _collect_new_packages([nm], {}, "npm")
         # Python scanner must not run when ecosystem is "npm"
         assert all(r[0] == "npm" for r in result)
 
+    def test_symlink_root_target_scanned_via_real_dir(self, tmp_path):
+        # A symlinked install target pointing inside the project is snapshotted
+        # by walking the real dir. _collect_new_packages must use the same real
+        # dir for the post-run walk so before/after sets are comparable.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link = tmp_path / "site-packages"
+        link.symlink_to(real_dir)
+        # Snapshot the link before install (real_dir is empty)
+        snap = FileSystemBackend().snapshot_install_target(link, Console(quiet=True), project_root=tmp_path)
+        # Install adds a new package through the symlink
+        (real_dir / "requests-2.31.0.dist-info").mkdir()
+        result = _collect_new_packages([link], {link: snap}, "pypi")
+        names = [r[1] for r in result]
+        assert "requests" in names, "new package installed through symlink must be detected"
+
     def test_before_snapshot_excludes_existing_packages(self, tmp_path):
         site = tmp_path / "site-packages"
         site.mkdir()
         old_dist = site / "flask-3.0.0.dist-info"
         old_dist.mkdir()
-        # Snapshot includes old_dist
-        snapshot = {site: set(site.rglob("*"))}
+        # Snapshot via FileSystemBackend so path_set() is populated correctly
+        snap = FileSystemBackend().snapshot_install_target(site, Console(quiet=True))
         # New package added after snapshot
-        new_dist = site / "requests-2.31.0.dist-info"
-        new_dist.mkdir()
-        result = _collect_new_packages([site], snapshot, "pypi")
+        (site / "requests-2.31.0.dist-info").mkdir()
+        result = _collect_new_packages([site], {site: snap}, "pypi")
         names = [r[1] for r in result]
         assert "requests" in names
         assert "flask" not in names
@@ -1512,6 +1541,222 @@ class TestNoChangeLockFileRestore:
 
 
 # ---------------------------------------------------------------------------
+# Install target restore integration — run() with real scan targets
+# ---------------------------------------------------------------------------
+
+class TestInstallTargetRestoreIntegration:
+    """run() must snapshot and restore install targets alongside lock files.
+
+    These tests create a real scan target on disk (node_modules), simulate the
+    sandbox run mutating it, and assert the target is restored to pre-run state
+    under each rollback trigger.
+    """
+
+    def _setup(self, monkeypatch, returncode: int, tmp_path):
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda *a, **kw: type("R", (), {"returncode": returncode})(),
+        )
+        async def _preflight_ok(*a, **kw):
+            return True
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        # npm install — scan target is node_modules
+        (tmp_path / "package.json").write_text('{"name":"test"}')
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()
+        (node_modules / "existing.js").write_bytes(b"pre-existing")
+        return node_modules
+
+    def test_no_change_restores_install_target(self, tmp_path, monkeypatch):
+        """--no-change: sandbox adds a file to node_modules; it is removed on exit."""
+        import asyncio
+        node_modules = self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+
+        async def _scan_and_mutate(*a, **kw):
+            # Simulate the sandbox adding a package during the run
+            (node_modules / "evil").mkdir()
+            (node_modules / "evil" / "package.json").write_bytes(b'{"name":"evil"}')
+            return True
+
+        async def _post_scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _scan_and_mutate)
+        monkeypatch.setattr(runner, "_post_scan", _post_scan_ok)
+
+        rc = asyncio.run(runner.run(["npm", "install"], no_change=True))
+        assert rc == 0
+        assert not (node_modules / "evil").exists()
+        assert (node_modules / "existing.js").read_bytes() == b"pre-existing"
+
+    def test_no_change_post_scan_runs_before_restore(self, tmp_path, monkeypatch):
+        """--no-change: post-install scan must run while install targets are still
+        in their post-install state, not after they have been restored."""
+        import asyncio
+        node_modules = self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        post_scan_saw_evil = []
+
+        async def _scan_and_mutate(*a, **kw):
+            (node_modules / "evil").mkdir()
+            (node_modules / "evil" / "package.json").write_bytes(b'{"name":"evil","version":"1.0.0"}')
+            return True
+
+        async def _post_scan_spy(packages, *a, **kw):
+            # Record whether the evil package was visible when post_scan ran
+            post_scan_saw_evil.append(any(name == "evil" for _, name, _ in packages))
+            return True
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _scan_and_mutate)
+        monkeypatch.setattr(runner, "_post_scan", _post_scan_spy)
+
+        rc = asyncio.run(runner.run(["npm", "install"], no_change=True))
+        assert rc == 0
+        assert post_scan_saw_evil == [True], "post_scan must see newly installed packages before restore"
+        assert not (node_modules / "evil").exists()  # restore happened after
+
+    def test_lock_file_scan_failure_restores_install_target(self, tmp_path, monkeypatch):
+        """Lock file scan failure: install target is restored alongside lock files."""
+        import asyncio
+        node_modules = self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+
+        async def _malicious_scan(*a, **kw):
+            (node_modules / "evil").mkdir()
+            (node_modules / "evil" / "package.json").write_bytes(b'{"name":"evil"}')
+            return False
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _malicious_scan)
+
+        rc = asyncio.run(runner.run(["npm", "install"]))
+        assert rc == 1
+        assert not (node_modules / "evil").exists()
+        assert (node_modules / "existing.js").read_bytes() == b"pre-existing"
+
+    def test_post_scan_failure_restores_install_target(self, tmp_path, monkeypatch):
+        """Post-install malicious package: install target is restored."""
+        import asyncio
+        node_modules = self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+
+        async def _clean_lock_scan(*a, **kw):
+            (node_modules / "evil").mkdir()
+            (node_modules / "evil" / "package.json").write_bytes(b'{"name":"evil","version":"1.0.0"}')
+            return True
+
+        async def _malicious_post(*a, **kw):
+            return False
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean_lock_scan)
+        monkeypatch.setattr(runner, "_post_scan", _malicious_post)
+
+        rc = asyncio.run(runner.run(["npm", "install"]))
+        assert rc == 1
+        assert not (node_modules / "evil").exists()
+        assert (node_modules / "existing.js").read_bytes() == b"pre-existing"
+
+
+# ---------------------------------------------------------------------------
+# sandbox.backend config key and build_backend factory
+# ---------------------------------------------------------------------------
+
+class TestSandboxBackendConfig:
+    def test_default_backend_is_filesystem(self):
+        from packagealert.config import AppConfig
+        cfg = AppConfig()
+        assert cfg.sandbox.backend == "filesystem"
+
+    def test_filesystem_backend_explicit_toml(self):
+        import tomllib
+        from packagealert.config import AppConfig
+        data = tomllib.loads(b'[sandbox]\nbackend = "filesystem"'.decode())
+        cfg = AppConfig.model_validate(data)
+        assert cfg.sandbox.backend == "filesystem"
+
+    def test_unknown_backend_rejected(self):
+        import tomllib
+        import pytest
+        from pydantic import ValidationError
+        from packagealert.config import AppConfig
+        data = tomllib.loads(b'[sandbox]\nbackend = "zfs"'.decode())
+        with pytest.raises(ValidationError, match="unknown sandbox backend"):
+            AppConfig.model_validate(data)
+
+    def test_build_backend_returns_filesystem_backend(self):
+        from packagealert.config import AppConfig
+        from packagealert.sandbox.backends.filesystem import FileSystemBackend
+        from packagealert.sandbox.backends.registry import build_backend
+        cfg = AppConfig()
+        backend = build_backend(cfg.sandbox)
+        assert isinstance(backend, FileSystemBackend)
+
+    def test_build_backend_passes_size_limit(self):
+        import tomllib
+        from packagealert.config import AppConfig
+        from packagealert.sandbox.backends.filesystem import FileSystemBackend
+        from packagealert.sandbox.backends.registry import build_backend
+        data = tomllib.loads(b'[sandbox.filesystem_backend]\nsnapshot_file_size_limit = 1048576'.decode())
+        cfg = AppConfig.model_validate(data)
+        backend = build_backend(cfg.sandbox)
+        assert isinstance(backend, FileSystemBackend)
+        assert backend._size_limit == 1024 * 1024
+
+
+# ---------------------------------------------------------------------------
+# FileSystemBackendConfig
+# ---------------------------------------------------------------------------
+
+class TestFileSystemBackendConfig:
+    def test_default_size_limit(self):
+        from packagealert.config import AppConfig
+        cfg = AppConfig()
+        assert cfg.sandbox.filesystem_backend.snapshot_file_size_limit == 10 * 1024 * 1024
+
+    def test_custom_size_limit_parsed_from_toml(self):
+        import tomllib
+        from packagealert.config import AppConfig
+        raw = b"""
+[sandbox.filesystem_backend]
+snapshot_file_size_limit = 5242880
+"""
+        data = tomllib.loads(raw.decode())
+        cfg = AppConfig.model_validate(data)
+        assert cfg.sandbox.filesystem_backend.snapshot_file_size_limit == 5 * 1024 * 1024
+
+    def test_negative_size_limit_rejected(self):
+        import pytest
+        from pydantic import ValidationError
+        from packagealert.config import AppConfig
+        import tomllib
+        raw = b"""
+[sandbox.filesystem_backend]
+snapshot_file_size_limit = -1
+"""
+        data = tomllib.loads(raw.decode())
+        with pytest.raises(ValidationError):
+            AppConfig.model_validate(data)
+
+    def test_zero_size_limit_allowed(self):
+        import tomllib
+        from packagealert.config import AppConfig
+        raw = b"""
+[sandbox.filesystem_backend]
+snapshot_file_size_limit = 0
+"""
+        data = tomllib.loads(raw.decode())
+        cfg = AppConfig.model_validate(data)
+        assert cfg.sandbox.filesystem_backend.snapshot_file_size_limit == 0
+
+
+# ---------------------------------------------------------------------------
 # _preflight — unpinned requirements included in OSV queries
 # ---------------------------------------------------------------------------
 
@@ -1668,6 +1913,77 @@ class TestRestoreLockFiles:
         # Original file unchanged because rename failed; temp file was cleaned up.
         assert lock.read_bytes() == b"current content"
         assert not list(tmp_path.glob(".pa-restore-*"))
+
+
+# ---------------------------------------------------------------------------
+# _restore_install_targets
+# ---------------------------------------------------------------------------
+
+class TestRestoreInstallTargets:
+    def test_calls_backend_restore_for_each_snapshot(self, tmp_path):
+        from packagealert.sandbox.runner import _restore_install_targets
+        from rich.console import Console
+
+        restored = []
+
+        class FakeBackend:
+            def snapshot_install_target(self, path, console):
+                return FileSystemSnapshot(existed=True)
+            def restore_install_target(self, path, snap, console):
+                restored.append(path)
+                return True
+
+        target_a = tmp_path / "site-packages"
+        target_b = tmp_path / "node_modules"
+        snap_a = FileSystemSnapshot(existed=True)
+        snap_b = FileSystemSnapshot(existed=True)
+
+        result = _restore_install_targets(FakeBackend(), {target_a: snap_a, target_b: snap_b}, Console(quiet=True))
+        assert result is True
+        assert target_a in restored
+        assert target_b in restored
+
+    def test_noop_for_empty_snapshots(self, tmp_path):
+        from packagealert.sandbox.runner import _restore_install_targets
+        from rich.console import Console
+
+        class FakeBackend:
+            def restore_install_target(self, path, token, console):
+                raise AssertionError("should not be called")
+
+        _restore_install_targets(FakeBackend(), {}, Console(quiet=True))  # no error
+
+
+# ---------------------------------------------------------------------------
+# TestRunnerUsesBackendForSnapshot
+# ---------------------------------------------------------------------------
+
+class TestRunnerUsesBackendForSnapshot:
+    def test_path_set_includes_all_entry_types(self, tmp_path):
+        f = tmp_path / "a.py"
+        d = tmp_path / "sub"
+        lnk = tmp_path / "link.py"
+        big = tmp_path / "big.bin"
+
+        snap = FileSystemSnapshot(existed=True)
+        snap.files[f] = (b"", 0o644)
+        snap.symlinks[lnk] = "/target"
+        snap.dirs[d] = 0o755
+        snap.large_files[big] = (1024, 1000000)
+
+        result = snap.path_set()
+        assert f in result
+        assert d in result
+        assert lnk in result
+        assert big in result
+
+    def test_path_set_empty_when_not_existed(self, tmp_path):
+        # existed=False must return empty set even if fields are non-empty,
+        # so a malformed snapshot never produces false-positive new-package detections.
+        snap = FileSystemSnapshot(existed=False)
+        snap.files[tmp_path / "a.py"] = (b"", 0o644)
+        snap.dirs[tmp_path / "sub"] = 0o755
+        assert snap.path_set() == set()
 
     def test_empty_snapshots_is_noop(self, tmp_path):
         _restore_lock_files({}, tmp_path, _make_runner()._console)  # no exception
@@ -2520,7 +2836,7 @@ def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
     with (
         patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
         patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
-        patch.object(SandboxRunner, "_check_venv_scope", return_value=True),
+        patch("packagealert.languages.python.PythonLanguage.pre_run_check", return_value=None),
         patch("packagealert.sandbox.runner.get_publication_date", new_callable=AsyncMock, return_value="miss"),
         patch("packagealert.sandbox.runner.store_publication_date", new_callable=AsyncMock),
         patch("packagealert.sandbox.runner.get_cooldown_cleared_at", new_callable=AsyncMock, return_value=None),
@@ -2560,7 +2876,7 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
     with (
         patch("packagealert.sandbox.runner.bwrap_available", return_value=True),
         patch.object(SandboxRunner, "_preflight", new_callable=AsyncMock, return_value=True),
-        patch.object(SandboxRunner, "_check_venv_scope", return_value=True),
+        patch("packagealert.languages.python.PythonLanguage.pre_run_check", return_value=None),
         patch("packagealert.sandbox.cooldown.fetch_latest_version", new_callable=AsyncMock, return_value=None),
         patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock) as mock_open_db,
         patch("packagealert.sandbox.runner._resolve_targets"),
@@ -2653,3 +2969,811 @@ class TestIsSafeSandboxPath:
         project = tmp_path / "proj"
         project.mkdir()
         assert _is_safe_sandbox_path(project, [tmp_path])
+
+
+# ---------------------------------------------------------------------------
+# FileSystemBackend — snapshot
+# ---------------------------------------------------------------------------
+
+class TestFileSystemBackendSnapshot:
+    def _backend(self, size_limit=10 * 1024 * 1024):
+        return FileSystemBackend(snapshot_file_size_limit=size_limit)
+
+    def _console(self):
+        return Console(quiet=True)
+
+    def test_nonexistent_target_returns_not_existed(self, tmp_path):
+        backend = self._backend()
+        snap = backend.snapshot_install_target(tmp_path / "missing", self._console())
+        assert isinstance(snap, FileSystemSnapshot)
+        assert snap.existed is False
+        assert snap.files == {}
+        assert snap.symlinks == {}
+        assert snap.dirs == {}
+        assert snap.large_files == {}
+
+    def test_symlink_root_in_project_walks_contents(self, tmp_path):
+        # A symlinked install target pointing inside the project must walk the
+        # real directory contents so rollback can restore them.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (real_dir / "pkg.py").write_bytes(b"contents")
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = self._backend().snapshot_install_target(link, self._console(), project_root=tmp_path)
+        assert snap.existed is True
+        assert snap.root_symlink == str(real_dir)
+        assert real_dir / "pkg.py" in snap.files  # contents ARE walked
+
+    def test_symlink_root_outside_project_raises(self, tmp_path):
+        # A symlinked install target pointing outside the project must raise
+        # so the runner aborts rather than silently skipping rollback.
+        outside = tmp_path.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        link = tmp_path / "pkg"
+        link.symlink_to(outside)
+        with pytest.raises(ValueError, match="outside the project"):
+            self._backend().snapshot_install_target(link, self._console(), project_root=tmp_path)
+
+    def test_symlink_root_pointing_to_file_raises(self, tmp_path):
+        # A symlink pointing to a regular file must raise — os.walk() on a file
+        # yields nothing, silently producing an empty snapshot and breaking rollback.
+        real_file = tmp_path / "not_a_dir.txt"
+        real_file.write_bytes(b"contents")
+        link = tmp_path / "pkg"
+        link.symlink_to(real_file)
+        with pytest.raises(ValueError, match="non-directory"):
+            self._backend().snapshot_install_target(link, self._console(), project_root=tmp_path)
+
+    def test_broken_symlink_root_records_symlink_target(self, tmp_path):
+        # A broken symlink at the target root: lstat succeeds but exists() is False.
+        # The snapshot should record it as a symlink (existed=True, root_symlink set).
+        link = tmp_path / "pkg"
+        link.symlink_to("/nonexistent/path")
+        snap = self._backend().snapshot_install_target(link, self._console())
+        assert snap.existed is True
+        assert snap.root_symlink == "/nonexistent/path"
+
+    def test_regular_file_at_root_raises(self, tmp_path):
+        # A regular file at the install target path must raise rather than produce
+        # an empty snapshot that would destroy the file on rollback.
+        target = tmp_path / "pkg"
+        target.write_bytes(b"not a directory")
+        with pytest.raises(ValueError, match="not a directory or symlink"):
+            self._backend().snapshot_install_target(target, self._console())
+
+    def test_empty_dir_records_existed_true(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        backend = self._backend()
+        snap = backend.snapshot_install_target(target, self._console())
+        assert snap.existed is True
+        assert snap.files == {}
+
+    def test_regular_file_content_captured(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        (target / "foo.py").write_bytes(b"hello")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        content, _mode = snap.files[target / "foo.py"]
+        assert content == b"hello"
+
+    def test_symlink_target_captured(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        link = target / "link.py"
+        link.symlink_to("/some/target")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        assert snap.symlinks[link] == "/some/target"
+        assert link not in snap.files
+
+    def test_directory_recorded_in_dirs(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        subdir = target / "sub"
+        subdir.mkdir()
+        snap = self._backend().snapshot_install_target(target, self._console())
+        assert subdir in snap.dirs
+
+    def test_large_file_not_content_snapshotted(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)
+        snap = self._backend(size_limit=50).snapshot_install_target(target, self._console())
+        assert big in snap.large_files
+        assert big not in snap.files
+
+    def test_nested_files_captured(self, tmp_path):
+        target = tmp_path / "pkg"
+        (target / "sub").mkdir(parents=True)
+        (target / "sub" / "a.py").write_bytes(b"a")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        content, _mode = snap.files[target / "sub" / "a.py"]
+        assert content == b"a"
+
+    def test_unreadable_file_recorded_in_large_files_not_dropped(self, tmp_path, monkeypatch):
+        # If read_bytes() fails, the file must be recorded in large_files (not dropped)
+        # so restore won't treat it as "added during the run" and delete it.
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "locked.py"
+        f.write_bytes(b"content")
+
+        original = Path.read_bytes
+
+        def fail_if_locked(self_path):
+            if self_path == f:
+                raise OSError("permission denied")
+            return original(self_path)
+
+        monkeypatch.setattr(Path, "read_bytes", fail_if_locked)
+
+        snap = self._backend().snapshot_install_target(target, self._console())
+        assert f not in snap.files
+        assert f in snap.large_files  # recorded by metadata, not dropped
+
+
+# ---------------------------------------------------------------------------
+# FileSystemBackend — restore
+# ---------------------------------------------------------------------------
+
+class TestFileSystemBackendRestore:
+    def _backend(self):
+        return FileSystemBackend(snapshot_file_size_limit=10 * 1024 * 1024)
+
+    def _console(self):
+        return Console(quiet=True)
+
+    def test_restores_symlink_root_unchanged(self, tmp_path):
+        # Root was a symlink before the run and remains the same symlink → no-op.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (real_dir / "pkg.py").write_bytes(b"contents")
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = self._backend().snapshot_install_target(link, self._console())
+        self._backend().restore_install_target(link, snap, self._console())
+        assert link.is_symlink()
+        assert os.readlink(link) == str(real_dir)
+        assert (real_dir / "pkg.py").read_bytes() == b"contents"
+
+    def test_restores_symlink_root_contents_on_modification(self, tmp_path):
+        # Install wrote through a symlink to the real dir — rollback must restore
+        # the real directory's contents, not just verify the symlink is intact.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (real_dir / "original.py").write_bytes(b"before")
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = self._backend().snapshot_install_target(link, self._console())
+        # Simulate install writing through the symlink
+        (real_dir / "original.py").write_bytes(b"modified by install")
+        (real_dir / "new_pkg.py").write_bytes(b"added by install")
+        self._backend().restore_install_target(link, snap, self._console())
+        assert link.is_symlink()
+        assert (real_dir / "original.py").read_bytes() == b"before"
+        assert not (real_dir / "new_pkg.py").exists()
+
+    def test_restores_symlink_root_replaced_by_directory(self, tmp_path):
+        # Root was a symlink but the run replaced it with a real directory.
+        # Restore must recreate the symlink, not leave the real directory.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = self._backend().snapshot_install_target(link, self._console())
+        link.unlink()
+        link.mkdir()
+        (link / "evil.py").write_bytes(b"bad")
+        self._backend().restore_install_target(link, snap, self._console())
+        assert link.is_symlink()
+        assert os.readlink(link) == str(real_dir)
+
+    def test_restores_symlink_root_replaced_by_different_symlink(self, tmp_path):
+        # Root was a symlink but the run changed the symlink target.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = self._backend().snapshot_install_target(link, self._console())
+        link.unlink()
+        link.symlink_to(other_dir)
+        self._backend().restore_install_target(link, snap, self._console())
+        assert link.is_symlink()
+        assert os.readlink(link) == str(real_dir)
+
+    def test_rmtree_when_target_did_not_exist(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        (target / "evil.py").write_bytes(b"bad")
+        snap = FileSystemSnapshot(existed=False)
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not target.exists()
+
+    def test_unlinks_symlink_when_target_did_not_exist(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        (real_dir / "evil.py").write_bytes(b"bad")
+        link = tmp_path / "pkg"
+        link.symlink_to(real_dir)
+        snap = FileSystemSnapshot(existed=False)
+        self._backend().restore_install_target(link, snap, self._console())
+        assert not link.exists()
+        assert not link.is_symlink()
+        assert real_dir.exists()  # symlink removed, not the target
+
+    def test_unlinks_regular_file_when_target_did_not_exist(self, tmp_path):
+        # Bug: shutil.rmtree on a regular file raises NotADirectoryError.
+        target = tmp_path / "pkg"
+        target.write_bytes(b"impostor")
+        snap = FileSystemSnapshot(existed=False)
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not target.exists()
+
+    def test_restores_when_root_replaced_by_symlink(self, tmp_path):
+        # Bug: os.walk on a symlink silently yields nothing, leaving the
+        # impostor in place. Restore must detect and fix this.
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        shutil.rmtree(target)
+        target.symlink_to("/somewhere/else")  # root replaced by symlink
+        self._backend().restore_install_target(target, snap, self._console())
+        assert target.is_dir() and not target.is_symlink()
+        assert (target / "real.py").read_bytes() == b"original"
+
+    def test_raises_when_impostor_root_cannot_be_removed(self, tmp_path, monkeypatch):
+        # If unlink() fails, _restore must raise rather than silently succeed,
+        # so the runner surfaces the failure rather than printing ✓.
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        shutil.rmtree(target)
+        target.symlink_to("/somewhere/else")
+
+        def fail_unlink(*a, **kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr("pathlib.Path.unlink", fail_unlink)
+        with pytest.raises(OSError):
+            self._backend().restore_install_target(target, snap, self._console())
+
+    def test_restores_when_root_replaced_by_regular_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        shutil.rmtree(target)
+        target.write_bytes(b"impostor")  # root replaced by regular file
+        self._backend().restore_install_target(target, snap, self._console())
+        assert target.is_dir() and not target.is_symlink()
+        assert (target / "real.py").read_bytes() == b"original"
+
+    def test_restores_when_root_deleted_entirely(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        shutil.rmtree(target)  # entire target directory removed during install
+        self._backend().restore_install_target(target, snap, self._console())
+        assert target.is_dir() and not target.is_symlink()
+        assert (target / "real.py").read_bytes() == b"original"
+
+    def test_restores_empty_dir_when_root_deleted(self, tmp_path):
+        # Edge case: existed=True but snapshot has no files (e.g. only large files
+        # or an empty directory). Root must still be recreated.
+        target = tmp_path / "pkg"
+        target.mkdir()
+        snap = self._backend().snapshot_install_target(target, self._console())
+        shutil.rmtree(target)
+        self._backend().restore_install_target(target, snap, self._console())
+        assert target.is_dir() and not target.is_symlink()
+
+    def test_restores_symlink_replaced_by_regular_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        link = target / "link.py"
+        link.symlink_to("/original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        link.unlink()
+        link.write_bytes(b"replaced")  # symlink replaced by a regular file
+        self._backend().restore_install_target(target, snap, self._console())
+        assert link.is_symlink()
+        assert os.readlink(link) == "/original"
+
+    def test_restores_symlink_replaced_by_directory(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        link = target / "link.py"
+        link.symlink_to("/original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        link.unlink()
+        link.mkdir()
+        (link / "evil.py").write_bytes(b"bad")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert link.is_symlink()
+        assert os.readlink(link) == "/original"
+
+    def test_restores_file_replaced_by_symlink(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        f.unlink()
+        f.symlink_to("/malicious")  # file replaced by a symlink during install
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not f.is_symlink()
+        assert f.read_bytes() == b"original"
+
+    def test_restores_file_replaced_by_directory(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "real.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        f.unlink()
+        f.mkdir()
+        (f / "evil.py").write_bytes(b"bad")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not f.is_dir()
+        assert f.read_bytes() == b"original"
+
+    def test_restores_directory_replaced_by_regular_file(self, tmp_path):
+        # A directory in the snapshot replaced by a regular file during the run
+        # must be restored to a directory.
+        target = tmp_path / "pkg"
+        target.mkdir()
+        subdir = target / "sub"
+        subdir.mkdir()
+        (subdir / "a.py").write_bytes(b"a")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        assert subdir in snap.dirs
+        shutil.rmtree(subdir)
+        subdir.write_bytes(b"impostor file")  # directory replaced by regular file
+        self._backend().restore_install_target(target, snap, self._console())
+        assert subdir.is_dir() and not subdir.is_file()
+        assert (subdir / "a.py").read_bytes() == b"a"
+
+    def test_removes_added_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        snap = self._backend().snapshot_install_target(target, self._console())
+        (target / "new.py").write_bytes(b"new")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not (target / "new.py").exists()
+
+    def test_restores_modified_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "mod.py"
+        f.write_bytes(b"original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        f.write_bytes(b"modified")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert f.read_bytes() == b"original"
+
+    def test_recreates_deleted_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "keep.py"
+        f.write_bytes(b"keep")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        f.unlink()
+        self._backend().restore_install_target(target, snap, self._console())
+        assert f.read_bytes() == b"keep"
+
+    def test_removes_added_subdir(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        snap = self._backend().snapshot_install_target(target, self._console())
+        new_dir = target / "malicious"
+        new_dir.mkdir()
+        (new_dir / "payload.py").write_bytes(b"bad")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert not new_dir.exists()
+
+    def test_restores_symlink_target(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        link = target / "link.py"
+        link.symlink_to("/original")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        link.unlink()
+        link.symlink_to("/changed")
+        self._backend().restore_install_target(target, snap, self._console())
+        assert os.readlink(link) == "/original"
+
+    def test_large_file_added_is_removed(self, tmp_path):
+        backend = FileSystemBackend(snapshot_file_size_limit=50)
+        target = tmp_path / "pkg"
+        target.mkdir()
+        snap = backend.snapshot_install_target(target, self._console())
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)
+        backend.restore_install_target(target, snap, self._console())
+        assert not big.exists()
+
+    def test_large_file_replaced_by_directory_is_removed(self, tmp_path):
+        # A pre-existing large file replaced by a directory must not be left in place.
+        backend = FileSystemBackend(snapshot_file_size_limit=50)
+        target = tmp_path / "pkg"
+        target.mkdir()
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)
+        snap = backend.snapshot_install_target(target, self._console())
+        assert big in snap.large_files
+        big.unlink()
+        big.mkdir()
+        (big / "evil.py").write_bytes(b"bad")
+        backend.restore_install_target(target, snap, self._console())
+        assert not big.exists()
+
+    def test_large_file_replaced_by_symlink_is_removed(self, tmp_path):
+        # A pre-existing large file replaced by a symlink must not be left in place.
+        backend = FileSystemBackend(snapshot_file_size_limit=50)
+        target = tmp_path / "pkg"
+        target.mkdir()
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)  # large file — content not snapshotted
+        snap = backend.snapshot_install_target(target, self._console())
+        assert big in snap.large_files
+        big.unlink()
+        big.symlink_to("/attacker/target")  # replaced by attacker symlink
+        backend.restore_install_target(target, snap, self._console())
+        assert not big.is_symlink()
+        assert not big.exists()
+
+    def test_modified_large_file_is_removed(self, tmp_path):
+        # A large file whose size or mtime changed during the run must be removed
+        # on rollback — content cannot be restored but leaving it in place risks
+        # keeping a tampered file.
+        backend = FileSystemBackend(snapshot_file_size_limit=50)
+        target = tmp_path / "pkg"
+        target.mkdir()
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)
+        snap = backend.snapshot_install_target(target, self._console())
+        assert big in snap.large_files
+        big.write_bytes(b"y" * 100)  # modify content — changes mtime
+        backend.restore_install_target(target, snap, self._console())
+        assert not big.exists()
+
+    def test_unmodified_large_file_left_in_place(self, tmp_path):
+        # A large file whose metadata is unchanged must be left alone.
+        backend = FileSystemBackend(snapshot_file_size_limit=50)
+        target = tmp_path / "pkg"
+        target.mkdir()
+        big = target / "big.bin"
+        big.write_bytes(b"x" * 100)
+        snap = backend.snapshot_install_target(target, self._console())
+        # No modification — metadata unchanged
+        backend.restore_install_target(target, snap, self._console())
+        assert big.exists()
+        assert big.read_bytes() == b"x" * 100
+
+    def test_unchanged_file_left_in_place(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        f = target / "same.py"
+        f.write_bytes(b"unchanged")
+        snap = self._backend().snapshot_install_target(target, self._console())
+        self._backend().restore_install_target(target, snap, self._console())
+        assert f.read_bytes() == b"unchanged"
+
+    def test_restores_file_permission_bits(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        script = target / "script.sh"
+        script.write_bytes(b"#!/bin/sh\necho hi")
+        script.chmod(0o755)  # executable
+        snap = self._backend().snapshot_install_target(target, self._console())
+        script.chmod(0o644)  # install stripped execute bit
+        self._backend().restore_install_target(target, snap, self._console())
+        assert oct(script.stat().st_mode & 0o777) == oct(0o755)
+
+    def test_restores_root_permission_bits(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        target.chmod(0o750)
+        snap = self._backend().snapshot_install_target(target, self._console())
+        target.chmod(0o755)  # install widened root permissions
+        self._backend().restore_install_target(target, snap, self._console())
+        assert oct(target.stat().st_mode & 0o777) == oct(0o750)
+
+    def test_restores_directory_permission_bits(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        subdir = target / "priv"
+        subdir.mkdir()
+        subdir.chmod(0o700)
+        snap = self._backend().snapshot_install_target(target, self._console())
+        subdir.chmod(0o755)  # install widened permissions
+        self._backend().restore_install_target(target, snap, self._console())
+        assert oct(subdir.stat().st_mode & 0o777) == oct(0o700)
+
+    def test_restores_mode_on_recreated_file(self, tmp_path):
+        target = tmp_path / "pkg"
+        target.mkdir()
+        script = target / "run.sh"
+        script.write_bytes(b"#!/bin/sh")
+        script.chmod(0o755)
+        snap = self._backend().snapshot_install_target(target, self._console())
+        script.unlink()  # deleted during install
+        self._backend().restore_install_target(target, snap, self._console())
+        assert script.read_bytes() == b"#!/bin/sh"
+        assert oct(script.stat().st_mode & 0o777) == oct(0o755)
+
+
+# ---------------------------------------------------------------------------
+# fresh venv fallback snapshot
+# ---------------------------------------------------------------------------
+
+class TestFreshVenvFallbackSnapshot:
+    def test_path_set_on_not_existed_snap_returns_empty(self):
+        snap = FileSystemSnapshot(existed=False)
+        assert snap.path_set() == set()
+
+    def test_fresh_venv_rollback_removes_entire_venv(self, tmp_path, monkeypatch):
+        """When uv creates a venv from scratch, rollback must remove the whole .venv,
+        not just site-packages — otherwise pyvenv.cfg and bin/ are left behind.
+
+        The 'fresh venv' case: .venv does not exist before the run, so
+        ctx.scan_targets is empty at snapshot time. The sandbox then creates
+        .venv; the post-run fallback detects site-packages and registers the
+        venv root (not just site-packages) as the rollback target.
+        """
+        import asyncio
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+
+        venv = tmp_path / ".venv"
+        site_pkgs = venv / "lib" / "python3.12" / "site-packages"
+
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+
+        def fake_subprocess_run(*a, **kw):
+            # Simulate the sandbox creating a fresh venv during the run
+            site_pkgs.mkdir(parents=True)
+            (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+            bin_dir = venv / "bin"
+            bin_dir.mkdir()
+            (bin_dir / "python").write_bytes(b"fake")
+            (site_pkgs / "requests-2.32.0.dist-info").mkdir()
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+
+        async def _preflight_ok(*a, **kw):
+            return True
+        async def _scan_ok(*a, **kw):
+            return True
+        async def _post_scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _scan_ok)
+        monkeypatch.setattr(runner, "_post_scan", _post_scan_ok)
+
+        rc = asyncio.run(runner.run(["uv", "sync"], no_change=True))
+        assert rc == 0
+        # The entire venv must be gone, not just site-packages
+        assert not venv.exists(), "entire .venv should be removed on rollback"
+
+
+# ---------------------------------------------------------------------------
+# LanguageBase dataclasses
+# ---------------------------------------------------------------------------
+
+class TestLanguageBaseDataclasses:
+    def test_sandbox_targets_defaults(self):
+        t = SandboxTargets()
+        assert t.scan_targets == []
+        assert t.write_dirs == []
+
+    def test_shell_environment_defaults(self):
+        e = ShellEnvironment()
+        assert e.scan_targets == []
+        assert e.write_dirs == []
+        assert e.env_updates == {}
+        assert e.path_prepends == []
+        assert e.notes == []
+
+    def test_contract_version_is_2(self):
+        from packagealert.languages.base import CURRENT_CONTRACT_VERSION
+        assert CURRENT_CONTRACT_VERSION == 2
+
+
+# ---------------------------------------------------------------------------
+# PythonLanguage hook tests
+# ---------------------------------------------------------------------------
+
+class TestPythonPreRunCheck:
+    def _make_parsed(self, manager="pip", packages=None):
+        return ParsedInstall(
+            manager=manager,
+            packages=packages or [],
+            ecosystem="pypi",
+            venv_exe=None,
+            req_files=[],
+            lockfile_hint=None,
+            global_install=False,
+            suggested_env={},
+        )
+
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def test_returns_none_for_uv(self, tmp_path):
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().pre_run_check(parsed, tmp_path, False)
+        assert result is None
+
+    def test_blocks_when_virtual_env_outside_project(self, tmp_path, monkeypatch):
+        other = tmp_path / "other_project" / ".venv"
+        other.mkdir(parents=True)
+        monkeypatch.setenv("VIRTUAL_ENV", str(other))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, tmp_path / "my_project", False)
+        assert result is not None
+        assert "VIRTUAL_ENV" in result
+
+    def test_allows_venv_inside_project(self, tmp_path, monkeypatch):
+        venv = tmp_path / ".venv"
+        venv.mkdir()
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, tmp_path, False)
+        assert result is None
+
+    def test_blocks_ssh_deps_without_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed(manager="pip", packages=["git+ssh://git@github.com/org/repo"])
+        result = self._lang().pre_run_check(parsed, tmp_path, expose_ssh_keys=False)
+        assert result is not None
+        assert "SSH" in result or "ssh" in result
+
+    def test_allows_ssh_deps_with_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed(manager="pip", packages=["git+ssh://git@github.com/org/repo"])
+        result = self._lang().pre_run_check(parsed, tmp_path, expose_ssh_keys=True)
+        assert result is None
+
+
+class TestPythonResolveSandboxTargets:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def _make_parsed(self, manager="uv"):
+        return ParsedInstall(
+            manager=manager, packages=[], ecosystem="pypi",
+            venv_exe=None, req_files=[], lockfile_hint=None,
+            global_install=False, suggested_env={},
+        )
+
+    def test_detects_venv_site_packages(self, tmp_path):
+        venv = tmp_path / ".venv"
+        sp = venv / "lib" / "python3.12" / "site-packages"
+        sp.mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("version = 3.12.0\n")
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert sp in result.scan_targets
+
+    def test_returns_empty_when_no_venv(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert result.scan_targets == []
+
+    def test_invalid_pyvenv_cfg_version_propagates_warning(self, tmp_path):
+        # A pyvenv.cfg with a non-numeric version must NOT silently fall through
+        # to the glob fallback. The warning must appear in SandboxTargets.warnings
+        # so it is printed to the console regardless of log level.
+        venv = tmp_path / ".venv"
+        venv.mkdir()
+        (venv / "pyvenv.cfg").write_text("version = ../evil\n")
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert result.scan_targets == [], "invalid version must not produce a scan target"
+        assert result.warnings, "a user-visible warning must be surfaced"
+        assert any("pyvenv.cfg" in w or "invalid" in w.lower() or "tampered" in w.lower()
+                   for w in result.warnings), (
+            f"warning should mention pyvenv.cfg or tampering, got: {result.warnings}"
+        )
+
+    def test_unreadable_pyvenv_cfg_propagates_warning(self, tmp_path, monkeypatch):
+        # An unreadable pyvenv.cfg (OSError) must also surface a warning,
+        # not silently fall through to the glob fallback.
+        venv = tmp_path / ".venv"
+        venv.mkdir()
+        cfg = venv / "pyvenv.cfg"
+        cfg.write_text("version = 3.12.0\n")
+
+        original_read_text = Path.read_text
+
+        def fail_read_text(self_path, **kwargs):
+            if self_path == cfg:
+                raise OSError("permission denied")
+            return original_read_text(self_path, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert result.warnings, "a user-visible warning must be surfaced for unreadable pyvenv.cfg"
+
+
+# ---------------------------------------------------------------------------
+# NodeLanguage hook tests
+# ---------------------------------------------------------------------------
+
+class TestNodeLanguageHooks:
+    def _lang(self):
+        from packagealert.languages.node import NodeLanguage
+        return NodeLanguage()
+
+    def _make_parsed(self):
+        return ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm",
+            venv_exe=None, req_files=[], lockfile_hint=None,
+            global_install=False, suggested_env={},
+        )
+
+    def test_resolve_includes_node_modules(self, tmp_path):
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert tmp_path / "node_modules" in result.scan_targets
+
+    def test_shell_env_adds_bin_to_path_when_present(self, tmp_path):
+        nm_bin = tmp_path / "node_modules" / ".bin"
+        nm_bin.mkdir(parents=True)
+        result = self._lang().shell_environment(tmp_path)
+        assert str(nm_bin) in result.path_prepends
+
+    def test_shell_env_no_bin_when_absent(self, tmp_path):
+        result = self._lang().shell_environment(tmp_path)
+        assert result.path_prepends == []
+
+
+# ---------------------------------------------------------------------------
+# PhpLanguage hook tests
+# ---------------------------------------------------------------------------
+
+class TestPhpLanguageHooks:
+    def _lang(self):
+        from packagealert.languages.php import PhpLanguage
+        return PhpLanguage()
+
+    def _make_parsed(self):
+        return ParsedInstall(
+            manager="composer", packages=[], ecosystem="packagist",
+            venv_exe=None, req_files=[], lockfile_hint=None,
+            global_install=False, suggested_env={},
+        )
+
+    def test_resolve_includes_vendor(self, tmp_path):
+        parsed = self._make_parsed()
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
+        assert tmp_path / "vendor" in result.scan_targets
+
+    def test_shell_env_adds_vendor_when_composer_json_present(self, tmp_path):
+        (tmp_path / "composer.json").write_text("{}")
+        result = self._lang().shell_environment(tmp_path)
+        assert tmp_path / "vendor" in result.scan_targets
+
+    def test_shell_env_no_vendor_without_composer_json(self, tmp_path):
+        result = self._lang().shell_environment(tmp_path)
+        assert tmp_path / "vendor" not in result.scan_targets
