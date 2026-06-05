@@ -40,6 +40,22 @@ package-alert run bash                        # sandboxed interactive shell
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files and install targets to their pre-run state on exit regardless of outcome. |
 | `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
+### Passing options through shell hooks
+
+When using shell hooks (`package-alert setup shell`), the intercepted commands call `package-alert run` automatically. To pass `package-alert run` options without modifying the hook, set the `PA_RUN_OPTS` environment variable:
+
+```bash
+# Single invocation
+PA_RUN_OPTS="--no-change" pipenv install
+
+# All subsequent hook invocations in this shell session
+export PA_RUN_OPTS="--no-network"
+pip install requests   # runs with --no-network
+uv sync                # also runs with --no-network
+```
+
+`PA_RUN_OPTS` supports the same flags as `package-alert run`: `--no-change` / `-n`, `--no-network`, `--expose-ssh-keys`, `--allow-external-lockfiles`. Unrecognised tokens are ignored with a warning.
+
 ## Shadow Tools (Transparent Interception)
 
 Rather than typing `package-alert run pip install …` every time, you can install shadow tools that intercept package manager commands transparently.
