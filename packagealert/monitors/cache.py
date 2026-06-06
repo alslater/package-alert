@@ -122,6 +122,7 @@ class CacheMonitor(AbstractMonitor):
         """Dynamically register a site-packages directory to watch. Idempotent."""
         if not self._observer or not path.exists():
             return
+        self._cleanup_dead_watches()
         if path in self._site_package_watches:
             return
         watch = self._observer.schedule(self._handler, str(path), recursive=False)

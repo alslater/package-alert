@@ -136,6 +136,77 @@ class TestSetupProject:
         # pip is a managed tool name — it gets shimmed regardless of content
         assert (venv / "pip.__pa_real").exists()
 
+    def test_shim_embeds_version_marker(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, PA_SHIM_VERSION_MARKER
+        self._make_venv(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        content = (tmp_path / ".venv" / "bin" / "pip").read_text()
+        assert PA_SHIM_VERSION_MARKER in content
+
+    def test_shim_embeds_pa_binary_path(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims
+        self._make_venv(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        content = (tmp_path / ".venv" / "bin" / "pip").read_text()
+        assert "# __pa_bin__/usr/local/bin/package-alert__" in content
+
+    def test_current_shim_not_reported_stale(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims
+        self._make_venv(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        assert stale_project_shims(project_root=tmp_path) == []
+
+    def test_old_version_shim_reported_stale(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims, PA_REAL_SUFFIX
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        pip = venv / "pip"
+        pip.write_text("#!/bin/sh\necho original\n")
+        pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
+        install_project_shims(project_root=tmp_path)
+        # Overwrite with a v1-style shim (fingerprint but no version marker)
+        pip.write_text(f"#!/bin/sh\n{PA_FINGERPRINT}\nexec /usr/local/bin/package-alert run \"$0\" \"$@\"\n")
+        assert stale_project_shims(project_root=tmp_path) == [pip]
+
+    def test_wrong_pa_path_shim_reported_stale(self, tmp_path):
+        from packagealert.cli.setup_cmd import (
+            install_project_shims, stale_project_shims,
+            PA_SHIM_VERSION_MARKER, PA_REAL_SUFFIX,
+        )
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        pip = venv / "pip"
+        pip.write_text("#!/bin/sh\necho original\n")
+        pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
+        install_project_shims(project_root=tmp_path)
+        # Overwrite with correct version but wrong pa path
+        pip.write_text(
+            f"#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n"
+            f"# __pa_bin__/old/path/to/package-alert__\n"
+            f"exec /old/path/to/package-alert run \"$0\" \"$@\"\n"
+        )
+        assert stale_project_shims(project_root=tmp_path) == [pip]
+
+    def test_stale_shim_updated_on_reinstall(self, tmp_path):
+        from packagealert.cli.setup_cmd import (
+            install_project_shims, stale_project_shims,
+            PA_SHIM_VERSION_MARKER,
+        )
+        venv = tmp_path / ".venv" / "bin"
+        venv.mkdir(parents=True)
+        pip = venv / "pip"
+        pip.write_text("#!/bin/sh\necho original\n")
+        pip.chmod(pip.stat().st_mode | stat.S_IEXEC)
+        install_project_shims(project_root=tmp_path)
+        # Degrade to v1-style shim
+        pip.write_text(f"#!/bin/sh\n{PA_FINGERPRINT}\nexec /usr/local/bin/package-alert run \"$0\" \"$@\"\n")
+        assert stale_project_shims(project_root=tmp_path) != []
+        # Reinstall should update it
+        install_project_shims(project_root=tmp_path)
+        assert stale_project_shims(project_root=tmp_path) == []
+        # Version marker must now be present
+        assert PA_SHIM_VERSION_MARKER in pip.read_text()
+
     def test_uninstall_restores_original(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
         self._make_venv(tmp_path)
@@ -170,27 +241,44 @@ class TestSetupProject:
         assert real.exists()
         assert PA_FINGERPRINT in shim.read_text()
 
-    def test_interpreter_shim_is_plain_passthrough(self, tmp_path):
+    def test_interpreter_shim_routes_pip_to_pa_run(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
         shim = tmp_path / ".venv" / "bin" / "python3"
         content = shim.read_text()
-        # The interpreter shim is a plain package-alert run passthrough —
-        # argument scanning happens in the runner, not the shim.
         assert PA_FINGERPRINT in content
-        assert "shift" not in content
-        assert "-m pip" not in content
+        assert "package-alert run" in content
+        # pip and uv should be intercepted
+        assert "pip" in content
+        assert "uv" in content
 
-    def test_interpreter_shim_delegates_to_pa_run(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+    def test_interpreter_shim_execs_real_for_non_pip(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
         shim = tmp_path / ".venv" / "bin" / "python3"
         content = shim.read_text()
-        # Interpreter shim is a plain package-alert run passthrough;
-        # argument routing (including -m pip detection) happens in the runner.
-        assert PA_FINGERPRINT in content
+        # Non-pip invocations must exec __pa_real directly, not go through pa run
+        assert 'exec "$real" "$@"' in content
+
+    def test_interpreter_shim_hardcodes_real_path(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims, PA_REAL_SUFFIX
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        content = shim.read_text()
+        expected_real = str(tmp_path / ".venv" / "bin" / f"python3{PA_REAL_SUFFIX}")
+        assert expected_real in content
+
+    def test_interpreter_shim_missing_real_exits_cleanly(self, tmp_path):
+        from packagealert.cli.setup_cmd import install_project_shims
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        content = shim.read_text()
+        # Must guard against missing __pa_real (e.g. venv recreated after shimming)
+        assert "is missing" in content or "not found" in content or '! -x "$real"' in content
 
     def test_binary_interpreter_is_shimmed(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
@@ -241,3 +329,77 @@ class TestSetupProject:
         # python symlink untouched
         assert (venv / "python").is_symlink()
         assert os.readlink(venv / "python") == "python3"
+
+
+class TestRunnerShimGuard:
+    """Tests for the runner's symlink-aware __pa_real guard."""
+
+    PA_SHIM_CONTENT = "#!/bin/sh\n# __pa_shim__\nexec pa run \"$0\" \"$@\"\n"
+
+    def _make_shim(self, path: Path, content: str = PA_SHIM_CONTENT) -> None:
+        path.write_text(content)
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+    def test_symlink_to_shim_finds_real_via_resolved_path(self, tmp_path):
+        """python3 -> python (shim); python.__pa_real exists — guard must not fire."""
+        from packagealert.sandbox.runner import _PA_REAL_SUFFIX
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+
+        # python is the shim; python.__pa_real is the real interpreter
+        python = bin_dir / "python"
+        self._make_shim(python)
+        real = bin_dir / f"python{_PA_REAL_SUFFIX}"
+        real.write_text("#!/bin/sh\necho real\n")
+        real.chmod(real.stat().st_mode | stat.S_IEXEC)
+
+        # python3 is a symlink to python (the shim)
+        python3 = bin_dir / "python3"
+        python3.symlink_to("python")
+
+        # Resolving python3 -> python -> finds python.__pa_real -> guard passes
+        tool_resolved = python3.resolve()
+        real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
+        assert real_sibling.exists(), (
+            "Resolved python3 -> python; python.__pa_real exists but guard would fire"
+        )
+
+    def test_missing_real_on_resolved_path_triggers_guard(self, tmp_path):
+        """python is a shim; python.__pa_real is gone — guard must fire."""
+        from packagealert.sandbox.runner import _PA_REAL_SUFFIX
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+
+        python = bin_dir / "python"
+        self._make_shim(python)
+        python3 = bin_dir / "python3"
+        python3.symlink_to("python")
+
+        # No __pa_real — broken install
+        tool_resolved = python3.resolve()
+        real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
+        assert not real_sibling.exists()
+        # And the resolved file contains the shim fingerprint
+        assert "# __pa_shim__" in tool_resolved.read_text()
+
+    def test_non_shim_binary_passes_guard(self, tmp_path):
+        """A real ELF binary (no fingerprint) must never trigger the guard."""
+        from packagealert.sandbox.runner import _PA_REAL_SUFFIX
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+
+        real_binary = bin_dir / "python"
+        real_binary.write_bytes(b"\x7fELF\x00\x00\x00\x00")
+        real_binary.chmod(real_binary.stat().st_mode | stat.S_IEXEC)
+
+        # No __pa_real sibling — but it's not a shim, so guard must not fire
+        tool_resolved = real_binary.resolve()
+        real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
+        assert not real_sibling.exists()
+        # Binary content is not text-decodable as strict UTF-8
+        try:
+            content = real_binary.read_text(errors="strict")
+            is_shim = "# __pa_shim__" in content
+        except (UnicodeDecodeError, OSError):
+            is_shim = False
+        assert not is_shim

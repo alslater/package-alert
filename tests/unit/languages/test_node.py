@@ -452,9 +452,103 @@ def test_cache_paths_returns_path_objects(lang: NodeLanguage) -> None:
     assert all(isinstance(p, Path) for p in paths)
 
 
-def test_cache_file_globs_covers_tgz(lang: NodeLanguage) -> None:
+def test_cache_paths_points_to_index_v5(lang: NodeLanguage) -> None:
+    paths = lang.cache_paths()
+    assert all("index-v5" in str(p) for p in paths)
+
+
+def test_cache_paths_does_not_watch_content_v2(lang: NodeLanguage) -> None:
+    paths = lang.cache_paths()
+    assert not any("content-v2" in str(p) for p in paths)
+
+
+def test_cache_file_globs_matches_all_files(lang: NodeLanguage) -> None:
     globs = lang.cache_file_globs()
-    assert any(".tgz" in g for g in globs)
+    assert "**/*" in globs
+
+
+# ---------------------------------------------------------------------------
+# classify_cache_file
+# ---------------------------------------------------------------------------
+
+def _make_index_entry(tmp_path: Path, key: str, subdir: str = "ab/cd") -> Path:
+    """Write a minimal npm index-v5 cache entry file."""
+    d = tmp_path / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "entry"
+    payload = json.dumps({"key": key, "integrity": "sha512-abc"})
+    f.write_text(f"deadbeef\t{payload}\n")
+    return f
+
+
+def test_classify_cache_file_plain_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "lodash"
+    assert result.version == "4.17.21"
+    assert result.ecosystem == "npm"
+
+
+def test_classify_cache_file_scoped_package_url_encoded(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40babel%2Fcore/-/core-7.22.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/core"
+    assert result.version == "7.22.0"
+
+
+def test_classify_cache_file_scoped_package_plain_url(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.example.com/npm/QA/@babel/plugin-proposal-private-methods/-/plugin-proposal-private-methods-7.18.6.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/plugin-proposal-private-methods"
+    assert result.version == "7.18.6"
+
+
+def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) -> None:
+    d = tmp_path / "ab" / "cd"
+    d.mkdir(parents=True)
+    f = d / "entry"
+    old_key = "make-fetch-happen:request-cache:https://registry.npmjs.org/old-pkg/-/old-pkg-1.0.0.tgz"
+    new_key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    f.write_text(
+        f"aaa\t{json.dumps({'key': old_key})}\n"
+        f"bbb\t{json.dumps({'key': new_key})}\n"
+    )
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "lodash"
+
+
+def test_classify_cache_file_non_tgz_key_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash"
+    f = _make_index_entry(tmp_path, key)
+    assert lang.classify_cache_file(f) is None
+
+
+def test_classify_cache_file_unreadable_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    assert lang.classify_cache_file(tmp_path / "nonexistent") is None
+
+
+def test_classify_cache_file_invalid_json_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    d = tmp_path / "ab" / "cd"
+    d.mkdir(parents=True)
+    f = d / "entry"
+    f.write_text("deadbeef\tnot-json\n")
+    assert lang.classify_cache_file(f) is None
+
+
+def test_classify_cache_file_private_registry(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://mycompany.jfrog.io/npm/read-pkg/-/read-pkg-1.1.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "read-pkg"
+    assert result.version == "1.1.0"
 
 
 # ---------------------------------------------------------------------------

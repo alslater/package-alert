@@ -135,14 +135,17 @@ class SandboxRunner:
             # state), exec'ing it would call back into us. Check the fingerprint.
             tool_path = shutil.which(real_argv[0])
             if tool_path:
-                real_sibling = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+                # Resolve symlinks first — python3 -> python means __pa_real
+                # lives next to python, not python3.
+                tool_resolved = Path(tool_path).resolve()
+                real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
                 if not real_sibling.exists():
                     try:
                         content = Path(tool_path).read_text(errors="strict")
                         if "# __pa_shim__" in content:
                             self._console.print(
-                                f"[red]✗ {argv[0]} is a package-alert shim but "
-                                f"{argv[0]}{_PA_REAL_SUFFIX} is missing — infinite recursion prevented.[/red]"
+                                f"[red]✗ {tool_resolved} is a package-alert shim but "
+                                f"{real_sibling} is missing — infinite recursion prevented.[/red]"
                             )
                             self._console.print(
                                 f"[dim]Run 'package-alert setup project --uninstall' "

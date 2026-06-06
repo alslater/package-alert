@@ -211,6 +211,13 @@ class CargoLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://crates.io/api/v1/crates/{name}/{version}"
 
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        # Cargo extracts crates into ~/.cargo/registry/src/<hash>/<name>-<version>/
+        # but the daemon doesn't have the version at this call site, so we can't
+        # reconstruct the exact path. Return None — Rust heuristics are not yet
+        # implemented anyway.
+        return None
+
     def latest_version_url(self, name: str) -> str | None:
         return f"https://crates.io/api/v1/crates/{name}"
 

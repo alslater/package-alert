@@ -10,7 +10,7 @@ All language modules must satisfy the `LanguageBase` protocol defined in [`packa
 
 ### Contract Version
 
-Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `1`). When a module is registered the registry checks this value:
+Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `2`). When a module is registered the registry checks this value:
 
 | Declared version | Behaviour |
 |-----------------|-----------|
@@ -108,6 +108,31 @@ class LanguageBase(Protocol):
     def heuristics(self) -> list[AbstractHeuristic]:
         """Heuristic instances to run against downloaded package directories.
         Return [] if this language module has no heuristics."""
+
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+    ) -> Path | None:
+        """Return the on-disk directory for an installed package, or None if not resolvable.
+
+        Called by the daemon after a process-monitor event so that file-content
+        heuristics can be run against the extracted package directory. Only called
+        for ``source="process"`` events — cache-monitor events fire while the
+        tarball is still in the download cache, before extraction.
+
+        *project_path* is the cwd of the install process (the project root for
+        npm/composer installs, or None if unknown). *site_packages_dir* is the
+        active venv's site-packages directory (set for PyPI events when detectable,
+        None otherwise).
+
+        Typical implementations:
+        - npm: ``return project_path / "node_modules" / package_name``
+        - PyPI: find the matching ``.dist-info`` dir, read ``top_level.txt``, return the importable dir
+        - Packagist: ``return project_path / "vendor" / Path(package_name)``
+
+        Return None if the path cannot be determined. Default returns None."""
 
     # ── Installed-package scanning ─────────────────────────────────────────
     def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
@@ -463,6 +488,19 @@ class RubyLanguage:
         # new-package detection diffs the right subdirectory.
         return []
 
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+    ) -> Path | None:
+        # Return the directory where package_name was extracted after install,
+        # so the daemon can run file-content heuristics against it.
+        # Return None if the path cannot be determined for this ecosystem.
+        if project_path is None:
+            return None
+        return project_path / "vendor" / "bundle" / "ruby" / package_name  # example
+
     def snapshot(self, install_root: Path) -> Snapshot:
         return Snapshot({})
 
@@ -621,4 +659,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 | Version | What changed |
 |---------|-------------|
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
-| 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment` added as optional hooks with default no-op implementations (no version bump required for existing plugins). |
+| 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir` added as optional hooks with default no-op implementations (no version bump required for existing plugins). |

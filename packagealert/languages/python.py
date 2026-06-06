@@ -966,6 +966,27 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if site_packages_dir is None or not site_packages_dir.exists():
+            return None
+        normalised = package_name.lower().replace("-", "_")
+        for entry in site_packages_dir.iterdir():
+            if not entry.is_dir() or not entry.name.endswith(".dist-info"):
+                continue
+            if not entry.name.lower().replace("-", "_").startswith(normalised):
+                continue
+            top_level = entry / "top_level.txt"
+            if top_level.exists():
+                try:
+                    pkg = top_level.read_text().strip().splitlines()[0].strip()
+                    candidate = site_packages_dir / pkg
+                    if candidate.is_dir():
+                        return candidate
+                except OSError:
+                    pass
+            return entry
+        return None
+
     def latest_version_url(self, name: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/json"
 

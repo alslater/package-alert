@@ -46,6 +46,25 @@ async def _scheduler_loop(scanner: ScheduledScanner, interval: float = 3600.0) -
 PID_FILE = _PID_FILE  # public alias
 
 
+def _resolve_package_dir(event: PackageEvent) -> Path | None:
+    """Return the on-disk directory for an installed package, or None if not resolvable.
+
+    Only meaningful for process-monitor events (source="process") where the
+    package has already been extracted to disk. Cache-monitor events fire when
+    the tarball lands in the download cache, before extraction.
+    """
+    if event.source != "process":
+        return None
+    lang = lang_registry.for_ecosystem(event.ecosystem)
+    if lang is None:
+        return None
+    try:
+        return lang.resolve_package_dir(event.package_name, event.project_path, event.site_packages_dir)
+    except Exception:
+        log.warning("resolve_package_dir raised for lang=%s — skipping heuristics", getattr(lang, "name", "?"), exc_info=True)
+        return None
+
+
 def check_already_running() -> int | None:
     """Return the PID of a running daemon, or None if no daemon is running."""
     return _check_already_running(_PID_FILE)
@@ -221,7 +240,7 @@ class Daemon:
 
         # Phase 2: heuristic risk scoring
         if self._cfg.heuristics.enabled:
-            report = await risk_engine.analyze(event, None)
+            report = await risk_engine.analyze(event, _resolve_package_dir(event))
             if report.score >= self._cfg.heuristics.warning_threshold:
                 await store_alert(
                     db,

@@ -291,25 +291,45 @@ class NodeLanguage:
     # ------------------------------------------------------------------
 
     def cache_paths(self) -> list[Path]:
-        return [Path.home() / ".npm" / "_cacache"]
+        # Watch only index-v5, not content-v2 (opaque hash blobs) or tmp.
+        # index-v5 contains parseable metadata; content-v2 adds thousands of
+        # dirs of zero classification value and exhausts inotify watch limits.
+        return [Path.home() / ".npm" / "_cacache" / "index-v5"]
 
     # ------------------------------------------------------------------
     # classify_cache_file / cache_file_globs
     # ------------------------------------------------------------------
 
     def cache_file_globs(self) -> list[str]:
-        return ["**/*.tgz"]
+        # index-v5 entries are plain files (no extension) inside two levels of
+        # two-hex-char bucket directories.
+        return ["**/*"]
+
+    # key format: "make-fetch-happen:request-cache:https://registry/…/name/-/name-version.tgz"
+    _INDEX_KEY_RE = re.compile(r"/(@[^/]+/[^/]+|[^/]+)/-/[^/]+-(\d[^/]*)\.tgz$")
 
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
-        # npm's _cacache stores content-addressed blobs, not named .tgz files,
-        # so this rarely matches. Kept for completeness and edge-case compatibility.
-        if path.suffix == ".tgz" and ".npm" in path.parts:
-            from packagealert.parsers.npm import inspect_npm_tarball
-
-            info = inspect_npm_tarball(path)
-            if info:
-                return PackageMetadata(name=info.name, version=info.version, ecosystem="npm")
-        return None
+        # index-v5 files contain newline-delimited records; the last line is the
+        # current cache entry. Each record is "<sha>\t<json>" where the JSON has
+        # a "key" field with the package URL.
+        try:
+            text = path.read_text(errors="replace")
+        except OSError:
+            return None
+        last_line = text.rstrip("\n").rsplit("\n", 1)[-1]
+        try:
+            _, _, json_part = last_line.partition("\t")
+            data = json.loads(json_part)
+            key = data.get("key", "")
+        except (ValueError, AttributeError):
+            return None
+        m = self._INDEX_KEY_RE.search(key)
+        if not m:
+            return None
+        name, version = m.group(1), m.group(2)
+        # Scoped packages appear as %40scope%2Fname in the URL
+        name = name.replace("%40", "@").replace("%2F", "/")
+        return PackageMetadata(name=name, version=version, ecosystem="npm")
 
     # ------------------------------------------------------------------
     # heuristics
@@ -537,6 +557,11 @@ class NodeLanguage:
         # Scoped packages (@scope/pkg) must have the slash percent-encoded.
         encoded = quote(name, safe="@")
         return f"https://registry.npmjs.org/{encoded}"
+
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if project_path is None:
+            return None
+        return project_path / "node_modules" / package_name
 
     def latest_version_url(self, name: str) -> str | None:
         encoded = quote(name, safe="@")

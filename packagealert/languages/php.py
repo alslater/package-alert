@@ -286,6 +286,11 @@ class PhpLanguage:
         vendor, package = name.split("/", 1)
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
 
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if project_path is None or "/" not in package_name:
+            return None
+        return project_path / "vendor" / Path(package_name)
+
     def latest_version_url(self, name: str) -> str | None:
         if "/" not in name:
             return None

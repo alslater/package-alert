@@ -387,22 +387,23 @@ def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     cmd = _cmd(argv[0])
     if cmd == "pipenv":
         args = argv[1:]
-        venv_exe = argv[0]
     elif cmd in ("python", "python3") and len(argv) > 1 and "pipenv" in _basename(argv[1]):
         args = argv[2:]
-        venv_exe = argv[0]
     else:
         return None
     if not args:
         return None
     subcmd = args[0]
+    # venv_exe is intentionally None for pipenv: argv[0] is the Python that runs
+    # the pipenv tool itself (e.g. pipx's venv), not the project venv that pipenv
+    # manages. The project venv path isn't known until pipenv resolves it at runtime.
     if subcmd in ("install", "sync"):
         packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+        return ParsedInstall(manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=None)
     if subcmd in ("create", "graph", "check", "lock", "update", "upgrade", "requirements",
                   "verify", "run", "shell", "scripts", "open", "uninstall",
                   "clean", "envs"):
-        return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+        return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=None)
     return None
 
 

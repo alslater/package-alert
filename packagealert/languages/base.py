@@ -331,6 +331,21 @@ class LanguageBase(Protocol):
         """
         return []
 
+    def resolve_package_dir(self, package_name: str, project_path: "Path | None", site_packages_dir: "Path | None") -> "Path | None":
+        """Return the on-disk directory for an installed package, or None if not resolvable.
+
+        Called by the daemon after a process-monitor event to locate the extracted
+        package directory so file-content heuristics can be run against it.
+
+        *project_path* is the cwd of the install process (e.g. the project root
+        for npm/composer, or None if unknown). *site_packages_dir* is the active
+        venv's site-packages directory (PyPI only, None for other ecosystems).
+
+        Default returns None — language modules that support file-content heuristics
+        should override this.
+        """
+        return None
+
     def latest_version_url(self, name: str) -> str | None:
         """Return a registry API URL that resolves the latest published version of
         a package. The response is parsed by latest_version_parse().

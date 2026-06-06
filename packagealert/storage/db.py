@@ -102,8 +102,9 @@ _DEFAULT_DB_PATH = DEFAULT_DB_PATH  # internal alias
 
 async def open_db(path: Path = _DEFAULT_DB_PATH) -> aiosqlite.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(path)
+    conn = await aiosqlite.connect(path, timeout=10)
     conn.row_factory = aiosqlite.Row
+    await conn.execute("PRAGMA journal_mode=WAL")
     await conn.executescript(SCHEMA)
     await _migrate(conn)
     await conn.commit()
