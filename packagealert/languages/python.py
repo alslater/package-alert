@@ -1035,14 +1035,19 @@ class PythonLanguage:
         return ["python", "python3"]
 
     def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        import shlex
         from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+        pa_s = str(pa).replace("\n", "")
+        real_s = str(real).replace("\n", "")
+        pa_q = shlex.quote(pa_s)
+        real_q = shlex.quote(real_s)
         return f'''\
 #!/bin/sh
 {PA_FINGERPRINT}
 {PA_SHIM_VERSION_MARKER}
-# __pa_bin__ {pa}
-pa="{pa}"
-real="{real}"
+# __pa_bin__ {pa_s}
+pa={pa_q}
+real={real_q}
 if [ ! -x "$real" ]; then
     printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
     printf 'Run package-alert setup project --uninstall and reinstall the package manager.\\n' >&2

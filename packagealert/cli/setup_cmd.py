@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 from pathlib import Path
@@ -80,13 +81,14 @@ def _pa_executable() -> str:
 
 
 def _write_shim(path: Path) -> None:
-    pa = _pa_executable()
+    pa = _pa_executable().replace("\n", "")  # paths must not contain newlines
+    pa_q = shlex.quote(pa)
     # Pass $0 (the full shim path) so the runner can locate the .__pa_real sibling
     # and derive VIRTUAL_ENV even when the venv is not activated.
     path.write_text(
         f'#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n'
         f'# __pa_bin__ {pa}\n'
-        f'pa="{pa}"\n'
+        f'pa={pa_q}\n'
         f'exec "$pa" run "$0" "$@"\n'
     )
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)

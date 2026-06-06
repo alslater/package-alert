@@ -394,9 +394,11 @@ class LanguageBase(Protocol):
         """Return a complete sh(1) shim script for a runtime interpreter, or None.
 
         Called by setup-project when writing an interpreter shim for any name
-        returned by interpreter_names(). The script must exec either *pa* (to
-        route through package-alert) or *real* (to bypass it) and must never
-        return without exec-ing one of them.
+        returned by interpreter_names(). The script must either exec *pa* (to
+        route through package-alert), exec *real* (to bypass it), or exit with
+        a non-zero status for guard failures such as a missing or inconsistent
+        *real* binary. It must not return silently without taking one of these
+        three actions.
 
         Return None to use the default plain passthrough shim (exec pa run "$0"
         "$@" for every invocation). Only override when the interpreter supports

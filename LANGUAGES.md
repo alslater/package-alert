@@ -330,9 +330,13 @@ class LanguageBase(Protocol):
         the Path to the renamed original binary (e.g. ``python3.__pa_real``).
         *pa* is the Path to the package-alert executable.
 
-        The script must exec either *pa* (to route through package-alert) or
-        *real* (to bypass it), and must include the package-alert fingerprint and
-        version marker so staleness detection works:
+        The script must either exec *pa* (to route through package-alert), exec
+        *real* (to bypass it), or exit with a non-zero status for guard failures
+        (e.g. *real* is missing or the install is in an inconsistent state). It
+        must not return silently without taking one of these three actions.
+
+        The script must also include the package-alert fingerprint and version
+        marker so staleness detection works:
 
             from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
 
