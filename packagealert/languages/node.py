@@ -318,7 +318,8 @@ class NodeLanguage:
         # site-packages files, or any other non-npm path the monitor may surface.
         if (path.is_dir()
                 or not self._HEX_BUCKET_RE.match(path.parent.name)
-                or not self._HEX_BUCKET_RE.match(path.parent.parent.name)):
+                or not self._HEX_BUCKET_RE.match(path.parent.parent.name)
+                or self._HEX_BUCKET_RE.match(path.parent.parent.parent.name)):
             return None
         # index-v5 files contain newline-delimited records; the last line is the
         # current cache entry. Each record is "<sha>\t<json>" where the JSON has
@@ -587,7 +588,7 @@ class NodeLanguage:
             return None
         # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
         # unscoped packages have none. Reject anything else to prevent traversal.
-        # Aligns with _is_valid_npm_bare_name: no path separators, no leading dot.
+        # Reject path separators and leading dots to prevent traversal.
         if package_name.startswith("@"):
             parts = package_name.split("/")
             if len(parts) != 2 or not parts[0] or not parts[1]:

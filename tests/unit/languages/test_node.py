@@ -558,18 +558,24 @@ def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) 
 
 
 def test_classify_cache_file_wrong_bucket_depth_skipped(lang: NodeLanguage, tmp_path: Path) -> None:
-    """Files not in a two-level hex-bucket dir are rejected before any file I/O."""
-    # One level deep (e.g. a pip cache file) — should be skipped
+    """Files not in exactly a two-level hex-bucket dir are rejected before any file I/O."""
+    # One level deep — should be skipped
     shallow = tmp_path / "ab" / "entry"
     shallow.parent.mkdir(parents=True)
     shallow.write_text("this would parse but should never be read\n")
     assert lang.classify_cache_file(shallow) is None
 
-    # Non-hex parent name (e.g. a site-packages path)
+    # Non-hex parent name
     non_hex = tmp_path / "requests" / "cd" / "entry"
     non_hex.parent.mkdir(parents=True)
     non_hex.write_text("irrelevant\n")
     assert lang.classify_cache_file(non_hex) is None
+
+    # Three levels deep — still has two hex parents but is too deep to be index-v5
+    too_deep = tmp_path / "ab" / "cd" / "ef" / "entry"
+    too_deep.parent.mkdir(parents=True)
+    too_deep.write_text("irrelevant\n")
+    assert lang.classify_cache_file(too_deep) is None
 
 
 def test_classify_cache_file_non_tgz_key_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
