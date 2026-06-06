@@ -299,9 +299,11 @@ class PhpLanguage:
         vendor_dir = (project_path / "vendor").resolve()
         try:
             candidate = (project_path / "vendor" / parts[0] / parts[1]).resolve()
-            if not str(candidate).startswith(str(vendor_dir) + "/") and candidate != vendor_dir:
+            if not candidate.is_relative_to(vendor_dir):
                 return None
         except OSError:
+            return None
+        if not candidate.is_dir():
             return None
         return candidate
 

@@ -581,9 +581,11 @@ class NodeLanguage:
         node_modules = (project_path / "node_modules").resolve()
         try:
             candidate = (project_path / "node_modules" / package_name).resolve()
-            if not str(candidate).startswith(str(node_modules) + "/") and candidate != node_modules:
+            if not candidate.is_relative_to(node_modules):
                 return None
         except OSError:
+            return None
+        if not candidate.is_dir():
             return None
         return candidate
 

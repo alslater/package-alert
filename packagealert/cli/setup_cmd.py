@@ -192,7 +192,7 @@ def _write_interpreter_shim(path: Path) -> None:
     language returns None (no special interception needed), falls back to the
     plain passthrough shim so all invocations still route through pa run.
     """
-    pa_path = Path(_pa_executable())
+    pa_path = Path(_pa_executable().replace("\n", ""))
     real = path.parent / f"{path.name}{PA_REAL_SUFFIX}"
     script = _interpreter_shim_script(path.name, real, pa_path)
     if script is None:
