@@ -755,6 +755,18 @@ def test_resolve_package_dir_hyphenated_name(lang: PythonLanguage, tmp_path: Pat
     assert result == pkg_dir
 
 
+def test_resolve_package_dir_dot_normalised(lang: PythonLanguage, tmp_path: Path) -> None:
+    """zope.interface dist-info must match event package name 'zope-interface'."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # pip installs zope.interface as "zope.interface-5.5.2.dist-info"
+    _make_dist_info(sp, "zope.interface", "5.5.2", "zope\ninterface\n")
+    pkg_dir = sp / "zope"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("zope-interface", None, sp)
+    assert result == pkg_dir
+
+
 def test_resolve_package_dir_hyphenated_not_matched_by_prefix(lang: PythonLanguage, tmp_path: Path) -> None:
     """google alone must not match google-cloud-storage."""
     sp = tmp_path / "site-packages"

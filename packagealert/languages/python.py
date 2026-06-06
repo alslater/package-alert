@@ -35,6 +35,12 @@ from packagealert.parsers.lockfiles import _find_project_root
 # Internal regex constants
 # ---------------------------------------------------------------------------
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+# PEP 503 / pip normalisation: collapse runs of [-_.] to a single underscore.
+_PKG_NORM_RE = re.compile(r"[-_.]+")
+
+
+def _norm_pkg(name: str) -> str:
+    return _PKG_NORM_RE.sub("_", name).lower()
 _VALID_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9]")
 
 # Heuristic regexes (mirrors heuristics/python.py logic)
@@ -969,7 +975,7 @@ class PythonLanguage:
     def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
         if site_packages_dir is None or not site_packages_dir.exists():
             return None
-        normalised = package_name.lower().replace("-", "_")
+        normalised = _norm_pkg(package_name)
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
@@ -979,7 +985,7 @@ class PythonLanguage:
             m = _DISTINFO_RE.match(entry.name)
             if not m:
                 continue
-            dist_name = m.group(1).lower().replace("-", "_")
+            dist_name = _norm_pkg(m.group(1))
             if dist_name != normalised:
                 continue
             top_level = entry / "top_level.txt"
