@@ -970,14 +970,16 @@ class PythonLanguage:
         if site_packages_dir is None or not site_packages_dir.exists():
             return None
         normalised = package_name.lower().replace("-", "_")
-        # dist-info dirs are named "<name>-<version>.dist-info"; extract the
-        # name portion (everything before the first "-") and compare exactly to
-        # avoid prefix false-positives (e.g. "requests" vs "requests_toolbelt").
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
-            stem = entry.name[: -len(".dist-info")]  # e.g. "requests-2.31.0"
-            dist_name = stem.split("-")[0].lower().replace("-", "_")
+            # _DISTINFO_RE captures the name portion as group 1; it splits at
+            # the last "-\d" boundary so hyphenated names like
+            # "google-cloud-storage" are matched correctly.
+            m = _DISTINFO_RE.match(entry.name)
+            if not m:
+                continue
+            dist_name = m.group(1).lower().replace("-", "_")
             if dist_name != normalised:
                 continue
             top_level = entry / "top_level.txt"

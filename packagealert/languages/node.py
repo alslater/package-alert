@@ -6,7 +6,7 @@ import logging
 from typing import Any
 import re
 import subprocess
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from pathlib import Path
 
 import httpx
@@ -326,8 +326,7 @@ class NodeLanguage:
         if not m:
             return None
         name, version = m.group(1), m.group(2)
-        # Scoped packages appear as %40scope%2Fname in the URL
-        name = name.replace("%40", "@").replace("%2F", "/")
+        name = unquote(name)
         return PackageMetadata(name=name, version=version, ecosystem="npm")
 
     # ------------------------------------------------------------------

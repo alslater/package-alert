@@ -741,3 +741,25 @@ def test_resolve_package_dir_normalises_hyphens(lang: PythonLanguage, tmp_path: 
     pkg_dir.mkdir()
     result = lang.resolve_package_dir("my-package", None, sp)
     assert result == pkg_dir
+
+
+def test_resolve_package_dir_hyphenated_name(lang: PythonLanguage, tmp_path: Path) -> None:
+    """google-cloud-storage must not be truncated to just 'google'."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # dist-info stem: "google_cloud_storage-2.10.0"
+    _make_dist_info(sp, "google_cloud_storage", "2.10.0", "google\ncloud\nstorage\n")
+    pkg_dir = sp / "google"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("google-cloud-storage", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_hyphenated_not_matched_by_prefix(lang: PythonLanguage, tmp_path: Path) -> None:
+    """google alone must not match google-cloud-storage."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "google_cloud_storage", "2.10.0", "google_cloud_storage\n")
+    (sp / "google_cloud_storage").mkdir()
+    result = lang.resolve_package_dir("google", None, sp)
+    assert result is None

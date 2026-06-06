@@ -517,6 +517,15 @@ def test_classify_cache_file_scoped_package_plain_url(lang: NodeLanguage, tmp_pa
     assert result.version == "7.18.6"
 
 
+def test_classify_cache_file_scoped_package_uppercase_encoding(lang: NodeLanguage, tmp_path: Path) -> None:
+    # %2f (lowercase) instead of %2F — old manual replace() was case-sensitive and missed this
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40babel%2fcore/-/core-7.22.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/core"
+
+
 def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) -> None:
     d = tmp_path / "ab" / "cd"
     d.mkdir(parents=True)
