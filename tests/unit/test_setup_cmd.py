@@ -280,6 +280,47 @@ class TestSetupProject:
         # Must guard against missing __pa_real (e.g. venv recreated after shimming)
         assert "is missing" in content or "not found" in content or '! -x "$real"' in content
 
+    def _patch_shim_for_routing_test(self, content: str) -> str:
+        """Replace exec lines with echo markers and bypass the real-exists guard."""
+        import re
+        # The pa path is embedded at write time — match it with a regex
+        content = re.sub(r"exec \S+ run \"\$0\" \"\$@\"", "echo ROUTE_PA_RUN", content)
+        content = content.replace('exec "$real" "$@"', 'echo ROUTE_REAL')
+        content = content.replace('if [ ! -x "$real" ]', 'if false')
+        return content
+
+    def test_interpreter_shim_routes_pip_with_u_flag(self, tmp_path):
+        """python -u -m pip install foo must still route through pa run."""
+        import subprocess
+        from packagealert.cli.setup_cmd import install_project_shims
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        script = self._patch_shim_for_routing_test(shim.read_text())
+        result = subprocess.run(
+            ["bash", "-c", script, "python3", "-u", "-m", "pip", "install", "foo"],
+            capture_output=True, text=True,
+        )
+        assert "ROUTE_PA_RUN" in result.stdout, (
+            f"Expected -u -m pip to route through pa run, got:\n{result.stdout}\n{result.stderr}"
+        )
+
+    def test_interpreter_shim_execs_real_with_u_flag_no_pip(self, tmp_path):
+        """`python -u script.py` must NOT route through pa run."""
+        import subprocess
+        from packagealert.cli.setup_cmd import install_project_shims
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        script = self._patch_shim_for_routing_test(shim.read_text())
+        result = subprocess.run(
+            ["bash", "-c", script, "python3", "-u", "script.py"],
+            capture_output=True, text=True,
+        )
+        assert "ROUTE_REAL" in result.stdout, (
+            f"Expected -u script.py to exec real, got:\n{result.stdout}\n{result.stderr}"
+        )
+
     def test_binary_interpreter_is_shimmed(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
         venv = tmp_path / ".venv" / "bin"

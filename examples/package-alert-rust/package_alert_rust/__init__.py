@@ -204,6 +204,10 @@ class CargoLanguage:
         # Rust has no interpreter that invokes cargo via -m style.
         return []
 
+    def interpreter_shim_script(self, real, pa):
+        # No custom shim needed — cargo is always invoked directly.
+        return None
+
     def project_bin_dirs(self, root: Path) -> list[Path]:
         # Cargo does not create a project-local bin/ that needs shimming.
         return []

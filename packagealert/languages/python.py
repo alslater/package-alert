@@ -970,21 +970,29 @@ class PythonLanguage:
         if site_packages_dir is None or not site_packages_dir.exists():
             return None
         normalised = package_name.lower().replace("-", "_")
+        # dist-info dirs are named "<name>-<version>.dist-info"; extract the
+        # name portion (everything before the first "-") and compare exactly to
+        # avoid prefix false-positives (e.g. "requests" vs "requests_toolbelt").
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
-            if not entry.name.lower().replace("-", "_").startswith(normalised):
+            stem = entry.name[: -len(".dist-info")]  # e.g. "requests-2.31.0"
+            dist_name = stem.split("-")[0].lower().replace("-", "_")
+            if dist_name != normalised:
                 continue
             top_level = entry / "top_level.txt"
             if top_level.exists():
                 try:
-                    pkg = top_level.read_text().strip().splitlines()[0].strip()
-                    candidate = site_packages_dir / pkg
-                    if candidate.is_dir():
-                        return candidate
+                    lines = [l.strip() for l in top_level.read_text().splitlines() if l.strip()]
+                    if lines:
+                        candidate = site_packages_dir / lines[0]
+                        if candidate.is_dir():
+                            return candidate
                 except OSError:
                     pass
-            return entry
+            # No usable top_level.txt — return None rather than the .dist-info
+            # dir, which contains only metadata and is useless for heuristics.
+            return None
         return None
 
     def latest_version_url(self, name: str) -> str | None:
@@ -1003,6 +1011,55 @@ class PythonLanguage:
 
     def interpreter_names(self) -> list[str]:
         return ["python", "python3"]
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+        return f'''\
+#!/bin/sh
+{PA_FINGERPRINT}
+{PA_SHIM_VERSION_MARKER}
+# __pa_bin__{pa}__
+real="{real}"
+if [ ! -x "$real" ]; then
+    printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
+    printf 'Run package-alert setup project --uninstall and reinstall the package manager.\\n' >&2
+    exit 1
+fi
+# Scan for -m <module> in argv, skipping leading flags
+found_m=0
+module=""
+skip_next=0
+for arg in "$@"; do
+    if [ "$skip_next" = "1" ]; then
+        skip_next=0
+        continue
+    fi
+    case "$arg" in
+        -m) found_m=1 ;;
+        -m*) found_m=1; module="${{arg#-m}}" ;;
+        -W|-X) skip_next=1 ;;
+        -u|-O|-c|-i) ;;
+        -*) ;;
+        *)
+            if [ "$found_m" = "1" ] && [ -z "$module" ]; then
+                module="$arg"
+            fi
+            break
+            ;;
+    esac
+    if [ "$found_m" = "1" ] && [ -n "$module" ]; then
+        break
+    fi
+done
+case "$module" in
+    pip|pip3|uv)
+        exec {pa} run "$0" "$@"
+        ;;
+    *)
+        exec "$real" "$@"
+        ;;
+esac
+'''
 
     def project_bin_dirs(self, root: Path) -> list[Path]:
         dirs: list[Path] = []

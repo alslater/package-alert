@@ -16,7 +16,7 @@ PA_REAL_SUFFIX = ".__pa_real"
 # Bumped whenever shim logic changes. Both _write_shim and _write_interpreter_shim
 # embed this as "# __pa_shim_v<N>__" so staleness can be detected without executing
 # the shim. Increment when the shim routing logic changes (not just the pa path).
-PA_SHIM_VERSION = 2
+PA_SHIM_VERSION = 3
 PA_SHIM_VERSION_MARKER = f"# __pa_shim_v{PA_SHIM_VERSION}__"
 
 _SHELL_RC: dict[str, str] = {
@@ -170,66 +170,31 @@ def _all_interpreter_names() -> list[str]:
     return result
 
 
+def _interpreter_shim_script(tool_name: str, real: Path, pa: Path) -> str | None:
+    """Ask the language that owns *tool_name* for its interpreter shim script."""
+    lang_registry.load()
+    for lang in lang_registry.all_languages():
+        if tool_name in lang.interpreter_names():
+            try:
+                return lang.interpreter_shim_script(real, pa)
+            except Exception:
+                return None
+    return None
+
+
 def _write_interpreter_shim(path: Path) -> None:
     """Write a shim for a runtime interpreter (python3, node, etc.).
 
-    Non-package-manager invocations (anything that isn't `-m pip`, `-m uv`, etc.)
-    exec the real binary directly without going through `pa run`, so tools like
-    autojump, shell completions, and IDE processes that use the venv interpreter
-    are not affected. Only `-m pip`-style invocations are routed through pa run.
+    Delegates to the owning language module's interpreter_shim_script(). If the
+    language returns None (no special interception needed), falls back to the
+    plain passthrough shim so all invocations still route through pa run.
     """
-    pa = _pa_executable()
-    real = f"{path}{PA_REAL_SUFFIX}"
-    # The shim passes through to the real interpreter for everything except
-    # `-m pip`/`-m uv` style invocations. Scan argv for `-m <module>` with
-    # optional flags before -m (e.g. `python -W ignore -m pip install ...`).
-    # Matches: python -m pip, python -W x -m pip, python -m uv, etc.
-    script = f'''\
-#!/bin/sh
-{PA_FINGERPRINT}
-{PA_SHIM_VERSION_MARKER}
-# __pa_bin__{pa}__
-real="{real}"
-if [ ! -x "$real" ]; then
-    printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
-    printf 'Run package-alert setup project --uninstall and reinstall the package manager.\\n' >&2
-    exit 1
-fi
-# Scan for -m <module> in argv, skipping leading flags
-args="$@"
-found_m=0
-module=""
-skip_next=0
-for arg in "$@"; do
-    if [ "$skip_next" = "1" ]; then
-        skip_next=0
-        continue
-    fi
-    case "$arg" in
-        -m) found_m=1 ;;
-        -m*) found_m=1; module="${{arg#-m}}" ;;
-        -W|-X|-u|-O|-c|-i) skip_next=1 ;;
-        -*) ;;
-        *)
-            if [ "$found_m" = "1" ] && [ -z "$module" ]; then
-                module="$arg"
-            fi
-            break
-            ;;
-    esac
-    if [ "$found_m" = "1" ] && [ -n "$module" ]; then
-        break
-    fi
-done
-case "$module" in
-    pip|pip3|uv)
-        exec {pa} run "$0" "$@"
-        ;;
-    *)
-        exec "$real" "$@"
-        ;;
-esac
-'''
+    pa_path = Path(_pa_executable())
+    real = path.parent / f"{path.name}{PA_REAL_SUFFIX}"
+    script = _interpreter_shim_script(path.name, real, pa_path)
+    if script is None:
+        _write_shim(path)
+        return
     path.write_text(script)
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 

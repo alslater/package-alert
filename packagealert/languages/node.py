@@ -301,9 +301,8 @@ class NodeLanguage:
     # ------------------------------------------------------------------
 
     def cache_file_globs(self) -> list[str]:
-        # index-v5 entries are plain files (no extension) inside two levels of
-        # two-hex-char bucket directories.
-        return ["**/*"]
+        # index-v5 entries sit at exactly two levels of two-hex-char bucket dirs.
+        return ["[0-9a-f][0-9a-f]/[0-9a-f][0-9a-f]/*"]
 
     # key format: "make-fetch-happen:request-cache:https://registry/…/name/-/name-version.tgz"
     _INDEX_KEY_RE = re.compile(r"/(@[^/]+/[^/]+|[^/]+)/-/[^/]+-(\d[^/]*)\.tgz$")

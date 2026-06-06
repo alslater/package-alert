@@ -671,3 +671,73 @@ def test_top_packages_fallback_contains_known_packages(lang: PythonLanguage) -> 
     assert "requests" in fb
     assert "numpy" in fb
     assert "flask" in fb
+
+
+# ---------------------------------------------------------------------------
+# resolve_package_dir
+# ---------------------------------------------------------------------------
+
+def _make_dist_info(site_packages: Path, name: str, version: str, top_level: str | None) -> Path:
+    dist_info = site_packages / f"{name}-{version}.dist-info"
+    dist_info.mkdir()
+    if top_level is not None:
+        (dist_info / "top_level.txt").write_text(top_level)
+    return dist_info
+
+
+def test_resolve_package_dir_returns_package_dir(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "requests", "2.31.0", "requests\n")
+    pkg_dir = sp / "requests"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("requests", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_no_prefix_false_positive(lang: PythonLanguage, tmp_path: Path) -> None:
+    """requests must not match requests_toolbelt."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "requests_toolbelt", "1.0.0", "requests_toolbelt\n")
+    (sp / "requests_toolbelt").mkdir()
+    result = lang.resolve_package_dir("requests", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_empty_top_level_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """Empty top_level.txt must not raise IndexError and must return None."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", "")
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_missing_top_level_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """No top_level.txt should return None, not the .dist-info dir."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", None)
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_candidate_not_dir_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """top_level.txt names a file, not a directory — return None."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", "mypackage\n")
+    (sp / "mypackage").write_text("not a dir")
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_normalises_hyphens(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "my_package", "1.0.0", "my_package\n")
+    pkg_dir = sp / "my_package"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("my-package", None, sp)
+    assert result == pkg_dir

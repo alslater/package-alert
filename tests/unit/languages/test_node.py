@@ -462,9 +462,17 @@ def test_cache_paths_does_not_watch_content_v2(lang: NodeLanguage) -> None:
     assert not any("content-v2" in str(p) for p in paths)
 
 
-def test_cache_file_globs_matches_all_files(lang: NodeLanguage) -> None:
+def test_cache_file_globs_targets_fixed_depth(lang: NodeLanguage) -> None:
+    # index-v5 entries live at exactly two bucket levels — the glob must not
+    # recurse deeper (avoid classifying directories or unrelated nested paths).
     globs = lang.cache_file_globs()
-    assert "**/*" in globs
+    assert len(globs) == 1
+    glob = globs[0]
+    # Must match an entry at the two-bucket-level path
+    from pathlib import PurePosixPath
+    assert PurePosixPath("ab/cd/somehashfile").match(glob)
+    # Must not use an open-ended recursive pattern
+    assert "**" not in glob
 
 
 # ---------------------------------------------------------------------------

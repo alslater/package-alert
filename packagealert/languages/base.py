@@ -390,6 +390,26 @@ class LanguageBase(Protocol):
         """
         return []
 
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        """Return a complete sh(1) shim script for a runtime interpreter, or None.
+
+        Called by setup-project when writing an interpreter shim for any name
+        returned by interpreter_names(). The script must exec either *pa* (to
+        route through package-alert) or *real* (to bypass it) and must never
+        return without exec-ing one of them.
+
+        Return None to use the default plain passthrough shim (exec pa run "$0"
+        "$@" for every invocation). Only override when the interpreter supports
+        a sub-command style that needs selective interception — e.g. Python's
+        `-m pip`, Ruby's `-S gem`, etc.
+
+        The script must include the package-alert fingerprint and version marker
+        so staleness detection works:
+
+            from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+        """
+        return None
+
     def project_bin_dirs(self, root: Path) -> list[Path]:
         """Return bin/ directories within root that contain this language's package
         manager binaries, suitable for shimming by setup-project.

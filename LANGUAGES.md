@@ -318,10 +318,29 @@ class LanguageBase(Protocol):
     def interpreter_names(self) -> list[str]:
         """Runtime interpreter names (python, python3, node, php, …).
 
-        `setup project` writes a special shim for these that intercepts
-        `-m pip`-style invocations and routes them through package-alert,
-        while passing all other arguments straight to the real interpreter.
+        `setup project` installs a shim for each name returned here. The shim
+        script is provided by interpreter_shim_script() — if that returns None
+        a plain passthrough shim is used instead.
         Default implementation returns []."""
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        """Return a complete sh(1) shim script for a runtime interpreter, or None.
+
+        Called by `setup project` when writing an interpreter shim. *real* is
+        the Path to the renamed original binary (e.g. ``python3.__pa_real``).
+        *pa* is the Path to the package-alert executable.
+
+        The script must exec either *pa* (to route through package-alert) or
+        *real* (to bypass it), and must include the package-alert fingerprint and
+        version marker so staleness detection works:
+
+            from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+
+        Return None to use the default plain passthrough shim, which routes all
+        invocations through `pa run`. Only override when the interpreter supports
+        a sub-command style that needs selective routing — e.g. Python's `-m pip`,
+        or a future Ruby plugin intercepting `-S gem`.
+        Default implementation returns None."""
 
     # ── Snapshots ──────────────────────────────────────────────────────────
     def snapshot(self, install_root: Path) -> Snapshot:
@@ -660,3 +679,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 |---------|-------------|
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
 | 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir` added as optional hooks with default no-op implementations (no version bump required for existing plugins). |
+| 2 | `interpreter_shim_script(real, pa)` added as an optional hook. Languages that need selective interpreter interception (e.g. Python's `-m pip`) now return the full sh(1) shim script from this method rather than relying on a hardcoded template in `setup_cmd.py`. Default returns None (plain passthrough shim). Existing plugins require no changes. |
