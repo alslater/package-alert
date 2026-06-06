@@ -813,3 +813,17 @@ def test_resolve_package_dir_tries_all_top_level_entries(lang: PythonLanguage, t
     pkg_dir.mkdir()
     result = lang.resolve_package_dir("mypkg", None, sp)
     assert result == pkg_dir
+
+
+def test_resolve_package_dir_duplicate_dist_info_falls_through(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A leftover dist-info with no top_level.txt must not block a later one that has it."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # Old dist-info with no top_level.txt
+    _make_dist_info(sp, "mypkg", "0.9.0", None)
+    # Current dist-info with a valid top_level.txt
+    _make_dist_info(sp, "mypkg", "1.0.0", "mypkg\n")
+    pkg_dir = sp / "mypkg"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("mypkg", None, sp)
+    assert result == pkg_dir

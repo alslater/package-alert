@@ -1013,9 +1013,8 @@ class PythonLanguage:
                             return candidate
                 except OSError:
                     pass
-            # No usable top_level.txt — return None rather than the .dist-info
-            # dir, which contains only metadata and is useless for heuristics.
-            return None
+            # No usable top_level.txt in this dist-info dir — continue in case
+            # a duplicate dist-info from a previous install has a usable one.
         return None
 
     def latest_version_url(self, name: str) -> str | None:
