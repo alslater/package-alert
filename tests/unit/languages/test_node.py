@@ -950,3 +950,40 @@ def test_top_packages_fallback_contains_known_packages(lang: NodeLanguage) -> No
     assert "lodash" in fb
     assert "express" in fb
     assert "react" in fb
+
+
+# ---------------------------------------------------------------------------
+# resolve_package_dir
+# ---------------------------------------------------------------------------
+
+def test_resolve_package_dir_plain_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "node_modules" / "lodash"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("lodash", tmp_path, None)
+    assert result == pkg_dir.resolve()
+
+
+def test_resolve_package_dir_scoped_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "node_modules" / "@babel" / "core"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("@babel/core", tmp_path, None)
+    assert result == pkg_dir.resolve()
+
+
+def test_resolve_package_dir_rejects_traversal(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("../../etc/passwd", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_traversal_in_scoped(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("@scope/../../../etc", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_extra_slashes(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("a/b/c", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_no_project_path(lang: NodeLanguage) -> None:
+    assert lang.resolve_package_dir("lodash", None, None) is None

@@ -148,7 +148,7 @@ class TestSetupProject:
         self._make_venv(tmp_path)
         install_project_shims(project_root=tmp_path)
         content = (tmp_path / ".venv" / "bin" / "pip").read_text()
-        assert "# __pa_bin__/usr/local/bin/package-alert__" in content
+        assert "# __pa_bin__ /usr/local/bin/package-alert" in content
 
     def test_current_shim_not_reported_stale(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims
@@ -182,7 +182,7 @@ class TestSetupProject:
         # Overwrite with correct version but wrong pa path
         pip.write_text(
             f"#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n"
-            f"# __pa_bin__/old/path/to/package-alert__\n"
+            f"# __pa_bin__ /old/path/to/package-alert\n"
             f"exec /old/path/to/package-alert run \"$0\" \"$@\"\n"
         )
         assert stale_project_shims(project_root=tmp_path) == [pip]
@@ -225,7 +225,7 @@ class TestSetupProject:
         # Write a shim as if installed via the 'pa' entry point
         shim.write_text(
             f"#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n"
-            f"# __pa_bin__{alt_bin}__\n"
+            f"# __pa_bin__ {alt_bin}\n"
             f'pa="{alt_bin}"\n'
             f'exec "$pa" run "$0" "$@"\n'
         )

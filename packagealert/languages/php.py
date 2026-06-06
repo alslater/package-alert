@@ -287,9 +287,23 @@ class PhpLanguage:
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
 
     def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
-        if project_path is None or "/" not in package_name:
+        if project_path is None:
             return None
-        return project_path / "vendor" / Path(package_name)
+        # Packagist names are always "vendor/package" — exactly one slash,
+        # no traversal components.
+        parts = package_name.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        if any(p in (".", "..") or p.startswith("..") for p in parts):
+            return None
+        vendor_dir = (project_path / "vendor").resolve()
+        try:
+            candidate = (project_path / "vendor" / parts[0] / parts[1]).resolve()
+            if not str(candidate).startswith(str(vendor_dir) + "/") and candidate != vendor_dir:
+                return None
+        except OSError:
+            return None
+        return candidate
 
     def latest_version_url(self, name: str) -> str | None:
         if "/" not in name:

@@ -246,3 +246,38 @@ def test_top_packages_fallback_contains_known_packages(lang):
     assert "symfony/console" in fb
     assert "monolog/monolog" in fb
     assert "guzzlehttp/guzzle" in fb
+
+
+# ---------------------------------------------------------------------------
+# resolve_package_dir
+# ---------------------------------------------------------------------------
+
+def test_resolve_package_dir_valid(lang, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "vendor" / "guzzlehttp" / "guzzle"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("guzzlehttp/guzzle", tmp_path, None)
+    assert result == pkg_dir.resolve()
+
+
+def test_resolve_package_dir_rejects_traversal(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("../../etc/passwd", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_dotdot_component(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("../evil/pkg", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_extra_slashes(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("a/b/c", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_no_slash(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("novendor", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_no_project_path(lang) -> None:
+    assert lang.resolve_package_dir("vendor/pkg", None, None) is None

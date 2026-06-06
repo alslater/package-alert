@@ -307,15 +307,23 @@ class NodeLanguage:
     # key format: "make-fetch-happen:request-cache:https://registry/…/name/-/name-version.tgz"
     _INDEX_KEY_RE = re.compile(r"/(@[^/]+/[^/]+|[^/]+)/-/[^/]+-(\d[^/]*)\.tgz$")
 
+    # Tail buffer large enough for any realistic index-v5 last line (~200 B typical).
+    _TAIL_BYTES = 4096
+
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
         # index-v5 files contain newline-delimited records; the last line is the
         # current cache entry. Each record is "<sha>\t<json>" where the JSON has
-        # a "key" field with the package URL.
+        # a "key" field with the package URL. Only the last line is needed, so
+        # tail-read to avoid loading the full file.
         try:
-            text = path.read_text(errors="replace")
+            with path.open("rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - self._TAIL_BYTES))
+                tail = fh.read().decode("utf-8", errors="replace")
         except OSError:
             return None
-        last_line = text.rstrip("\n").rsplit("\n", 1)[-1]
+        last_line = tail.rstrip("\n").rsplit("\n", 1)[-1]
         try:
             _, _, json_part = last_line.partition("\t")
             data = json.loads(json_part)
@@ -559,7 +567,25 @@ class NodeLanguage:
     def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
         if project_path is None:
             return None
-        return project_path / "node_modules" / package_name
+        # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
+        # unscoped packages have none. Reject anything else to prevent traversal.
+        if package_name.startswith("@"):
+            parts = package_name.split("/")
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                return None
+            if ".." in parts or any(p.startswith(".") for p in parts):
+                return None
+        else:
+            if "/" in package_name or "\\" in package_name or ".." in package_name:
+                return None
+        node_modules = (project_path / "node_modules").resolve()
+        try:
+            candidate = (project_path / "node_modules" / package_name).resolve()
+            if not str(candidate).startswith(str(node_modules) + "/") and candidate != node_modules:
+                return None
+        except OSError:
+            return None
+        return candidate
 
     def latest_version_url(self, name: str) -> str | None:
         encoded = quote(name, safe="@")

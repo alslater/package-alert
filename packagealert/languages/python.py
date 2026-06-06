@@ -992,8 +992,23 @@ class PythonLanguage:
             if top_level.exists():
                 try:
                     lines = [l.strip() for l in top_level.read_text().splitlines() if l.strip()]
-                    if lines:
-                        candidate = site_packages_dir / lines[0]
+                    for name in lines:
+                        # Reject anything that could escape site-packages:
+                        # absolute paths, entries containing a path separator,
+                        # or '.' / '..' components.
+                        if (name.startswith("/")
+                                or os.sep in name
+                                or "/" in name
+                                or name in (".", "..")):
+                            continue
+                        candidate = site_packages_dir / name
+                        # Resolve and confirm the result is still inside
+                        # site_packages_dir to guard against symlink traversal.
+                        try:
+                            if candidate.resolve().parent != site_packages_dir.resolve():
+                                continue
+                        except OSError:
+                            continue
                         if candidate.is_dir():
                             return candidate
                 except OSError:
@@ -1026,7 +1041,7 @@ class PythonLanguage:
 #!/bin/sh
 {PA_FINGERPRINT}
 {PA_SHIM_VERSION_MARKER}
-# __pa_bin__{pa}__
+# __pa_bin__ {pa}
 pa="{pa}"
 real="{real}"
 if [ ! -x "$real" ]; then

@@ -16,7 +16,7 @@ PA_REAL_SUFFIX = ".__pa_real"
 # Bumped whenever shim logic changes. Both _write_shim and _write_interpreter_shim
 # embed this as "# __pa_shim_v<N>__" so staleness can be detected without executing
 # the shim. Increment when the shim routing logic changes (not just the pa path).
-PA_SHIM_VERSION = 3
+PA_SHIM_VERSION = 4
 PA_SHIM_VERSION_MARKER = f"# __pa_shim_v{PA_SHIM_VERSION}__"
 
 _SHELL_RC: dict[str, str] = {
@@ -85,7 +85,7 @@ def _write_shim(path: Path) -> None:
     # and derive VIRTUAL_ENV even when the venv is not activated.
     path.write_text(
         f'#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n'
-        f'# __pa_bin__{pa}__\n'
+        f'# __pa_bin__ {pa}\n'
         f'pa="{pa}"\n'
         f'exec "$pa" run "$0" "$@"\n'
     )
@@ -223,7 +223,7 @@ def _shim_is_current(path: Path) -> bool:
     # "pa" and shims written via "package-alert" are not considered stale when
     # both entry points resolve to the same underlying file.
     import re as _re
-    m = _re.search(r"# __pa_bin__(.+?)__", content)
+    m = _re.search(r"# __pa_bin__ (.+)$", content, _re.MULTILINE)
     if not m:
         return False
     try:

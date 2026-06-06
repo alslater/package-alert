@@ -775,3 +775,41 @@ def test_resolve_package_dir_hyphenated_not_matched_by_prefix(lang: PythonLangua
     (sp / "google_cloud_storage").mkdir()
     result = lang.resolve_package_dir("google", None, sp)
     assert result is None
+
+
+def test_resolve_package_dir_rejects_absolute_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "/etc/passwd\n")
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_dotdot_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "../outside\n")
+    (tmp_path / "outside").mkdir()
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_separator_in_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "sub/dir\n")
+    (sp / "sub").mkdir()
+    (sp / "sub" / "dir").mkdir()
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_tries_all_top_level_entries(lang: PythonLanguage, tmp_path: Path) -> None:
+    """If the first top_level.txt entry doesn't exist, try subsequent ones."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypkg", "1.0.0", "missing_first\nmypkg\n")
+    pkg_dir = sp / "mypkg"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("mypkg", None, sp)
+    assert result == pkg_dir
