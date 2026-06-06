@@ -248,7 +248,7 @@ class TestSetupProject:
         shim = tmp_path / ".venv" / "bin" / "python3"
         content = shim.read_text()
         assert PA_FINGERPRINT in content
-        assert "package-alert run" in content
+        assert '"$pa" run' in content
         # pip and uv should be intercepted
         assert "pip" in content
         assert "uv" in content

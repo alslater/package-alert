@@ -86,7 +86,8 @@ def _write_shim(path: Path) -> None:
     path.write_text(
         f'#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n'
         f'# __pa_bin__{pa}__\n'
-        f'exec {pa} run "$0" "$@"\n'
+        f'pa="{pa}"\n'
+        f'exec "$pa" run "$0" "$@"\n'
     )
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 

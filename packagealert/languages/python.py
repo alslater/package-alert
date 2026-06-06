@@ -1021,6 +1021,7 @@ class PythonLanguage:
 {PA_FINGERPRINT}
 {PA_SHIM_VERSION_MARKER}
 # __pa_bin__{pa}__
+pa="{pa}"
 real="{real}"
 if [ ! -x "$real" ]; then
     printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
@@ -1055,7 +1056,7 @@ for arg in "$@"; do
 done
 case "$module" in
     pip|pip3|uv)
-        exec {pa} run "$0" "$@"
+        exec "$pa" run "$0" "$@"
         ;;
     *)
         exec "$real" "$@"
