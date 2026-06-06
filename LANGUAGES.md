@@ -63,6 +63,14 @@ class Snapshot:
 
 ### Contract Methods
 
+#### Method Reference
+
+| Signature | Required | Description |
+|-----------|----------|-------------|
+| `popularity_ecosystem() -> str | None` | Optional | Return the deps.dev system name for this ecosystem (e.g. `"PYPI"`, `"NPM"`), or `None` if unsupported. Used by `PopularityClient` to look up adoption metrics for risk score dampening. Third-party plugins implement this to participate in popularity dampening without patching core. Defaults to `None`. |
+
+#### Full Protocol Definition
+
 ```python
 class LanguageBase(Protocol):
     # ── Identity ──────────────────────────────────────────────────────────
@@ -683,3 +691,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 |---------|-------------|
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
 | 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir`, and `interpreter_shim_script` added as optional hooks with default no-op implementations (no version bump required for existing plugins). `interpreter_shim_script(real, pa)` lets language modules supply their own interpreter shim script; the default returns None (plain passthrough shim). |
+| 3 | Added `popularity_ecosystem() -> str | None` optional hook. Plugins returning `None` (the default) are unaffected; implement to enable popularity dampening for your ecosystem. |

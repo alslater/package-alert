@@ -974,6 +974,9 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def popularity_ecosystem(self) -> str | None:
+        return "PYPI"
+
     def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
         if site_packages_dir is None or not site_packages_dir.exists():
             return None

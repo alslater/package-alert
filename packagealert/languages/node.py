@@ -584,6 +584,9 @@ class NodeLanguage:
         encoded = quote(name, safe="@")
         return f"https://registry.npmjs.org/{encoded}"
 
+    def popularity_ecosystem(self) -> str | None:
+        return "NPM"
+
     def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
         if project_path is None:
             return None
