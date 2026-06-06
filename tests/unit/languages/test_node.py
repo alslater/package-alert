@@ -452,9 +452,163 @@ def test_cache_paths_returns_path_objects(lang: NodeLanguage) -> None:
     assert all(isinstance(p, Path) for p in paths)
 
 
-def test_cache_file_globs_covers_tgz(lang: NodeLanguage) -> None:
+def test_cache_paths_points_to_index_v5(lang: NodeLanguage) -> None:
+    paths = lang.cache_paths()
+    assert all("index-v5" in str(p) for p in paths)
+
+
+def test_cache_paths_does_not_watch_content_v2(lang: NodeLanguage) -> None:
+    paths = lang.cache_paths()
+    assert not any("content-v2" in str(p) for p in paths)
+
+
+def test_cache_file_globs_targets_fixed_depth(lang: NodeLanguage) -> None:
+    # index-v5 entries live at exactly two bucket levels — the glob must not
+    # recurse deeper (avoid classifying directories or unrelated nested paths).
     globs = lang.cache_file_globs()
-    assert any(".tgz" in g for g in globs)
+    assert len(globs) == 1
+    glob = globs[0]
+    # Must match an entry at the two-bucket-level path
+    from pathlib import PurePosixPath
+    assert PurePosixPath("ab/cd/somehashfile").match(glob)
+    # Must not use an open-ended recursive pattern
+    assert "**" not in glob
+
+
+# ---------------------------------------------------------------------------
+# classify_cache_file
+# ---------------------------------------------------------------------------
+
+def _make_index_entry(tmp_path: Path, key: str, subdir: str = "ab/cd") -> Path:
+    """Write a minimal npm index-v5 cache entry file."""
+    d = tmp_path / subdir
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / "entry"
+    payload = json.dumps({"key": key, "integrity": "sha512-abc"})
+    f.write_text(f"deadbeef\t{payload}\n")
+    return f
+
+
+def test_classify_cache_file_plain_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "lodash"
+    assert result.version == "4.17.21"
+    assert result.ecosystem == "npm"
+
+
+def test_classify_cache_file_scoped_package_url_encoded(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40babel%2Fcore/-/core-7.22.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/core"
+    assert result.version == "7.22.0"
+
+
+def test_classify_cache_file_scoped_package_plain_url(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.example.com/npm/QA/@babel/plugin-proposal-private-methods/-/plugin-proposal-private-methods-7.18.6.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/plugin-proposal-private-methods"
+    assert result.version == "7.18.6"
+
+
+def test_classify_cache_file_scoped_package_uppercase_encoding(lang: NodeLanguage, tmp_path: Path) -> None:
+    # %2f (lowercase) instead of %2F — old manual replace() was case-sensitive and missed this
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40babel%2fcore/-/core-7.22.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "@babel/core"
+
+
+def test_classify_cache_file_encoded_slash_in_unscoped_name_rejected(lang: NodeLanguage, tmp_path: Path) -> None:
+    # 'evil%2Fpkg' decodes to 'evil/pkg' — not a valid unscoped name; must return None
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/evil%2Fpkg/-/pkg-1.0.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is None
+
+
+def test_classify_cache_file_encoded_slash_in_scoped_name_extra_slash_rejected(lang: NodeLanguage, tmp_path: Path) -> None:
+    # '@scope%2Fextra/pkg' decodes to '@scope/extra/pkg' — two slashes, invalid scoped name
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40scope%2Fextra%2Fpkg/-/pkg-1.0.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is None
+
+
+def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) -> None:
+    d = tmp_path / "ab" / "cd"
+    d.mkdir(parents=True)
+    f = d / "entry"
+    old_key = "make-fetch-happen:request-cache:https://registry.npmjs.org/old-pkg/-/old-pkg-1.0.0.tgz"
+    new_key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz"
+    f.write_text(
+        f"aaa\t{json.dumps({'key': old_key})}\n"
+        f"bbb\t{json.dumps({'key': new_key})}\n"
+    )
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "lodash"
+
+
+def test_classify_cache_file_wrong_bucket_depth_skipped(lang: NodeLanguage, tmp_path: Path) -> None:
+    """Files not in exactly a two-level hex-bucket dir are rejected before any file I/O."""
+    # One level deep — should be skipped
+    shallow = tmp_path / "ab" / "entry"
+    shallow.parent.mkdir(parents=True)
+    shallow.write_text("this would parse but should never be read\n")
+    assert lang.classify_cache_file(shallow) is None
+
+    # Non-hex parent name
+    non_hex = tmp_path / "requests" / "cd" / "entry"
+    non_hex.parent.mkdir(parents=True)
+    non_hex.write_text("irrelevant\n")
+    assert lang.classify_cache_file(non_hex) is None
+
+    # Three levels deep — still has two hex parents but is too deep to be index-v5
+    too_deep = tmp_path / "ab" / "cd" / "ef" / "entry"
+    too_deep.parent.mkdir(parents=True)
+    too_deep.write_text("irrelevant\n")
+    assert lang.classify_cache_file(too_deep) is None
+
+    # File with an extension (e.g. a wheel or tarball in another cache)
+    with_ext = tmp_path / "ab" / "cd" / "some-package.whl"
+    with_ext.parent.mkdir(parents=True, exist_ok=True)
+    with_ext.write_text("irrelevant\n")
+    assert lang.classify_cache_file(with_ext) is None
+
+
+def test_classify_cache_file_non_tgz_key_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash"
+    f = _make_index_entry(tmp_path, key)
+    assert lang.classify_cache_file(f) is None
+
+
+def test_classify_cache_file_unreadable_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    assert lang.classify_cache_file(tmp_path / "nonexistent") is None
+
+
+def test_classify_cache_file_invalid_json_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    d = tmp_path / "ab" / "cd"
+    d.mkdir(parents=True)
+    f = d / "entry"
+    f.write_text("deadbeef\tnot-json\n")
+    assert lang.classify_cache_file(f) is None
+
+
+def test_classify_cache_file_private_registry(lang: NodeLanguage, tmp_path: Path) -> None:
+    key = "make-fetch-happen:request-cache:https://mycompany.jfrog.io/npm/read-pkg/-/read-pkg-1.1.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is not None
+    assert result.name == "read-pkg"
+    assert result.version == "1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -839,3 +993,48 @@ def test_top_packages_fallback_contains_known_packages(lang: NodeLanguage) -> No
     assert "lodash" in fb
     assert "express" in fb
     assert "react" in fb
+
+
+# ---------------------------------------------------------------------------
+# resolve_package_dir
+# ---------------------------------------------------------------------------
+
+def test_resolve_package_dir_plain_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "node_modules" / "lodash"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("lodash", tmp_path, None)
+    assert result == pkg_dir.resolve()
+
+
+def test_resolve_package_dir_scoped_package(lang: NodeLanguage, tmp_path: Path) -> None:
+    pkg_dir = tmp_path / "node_modules" / "@babel" / "core"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("@babel/core", tmp_path, None)
+    assert result == pkg_dir.resolve()
+
+
+def test_resolve_package_dir_rejects_traversal(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("../../etc/passwd", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_traversal_in_scoped(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("@scope/../../../etc", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_extra_slashes(lang: NodeLanguage, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("a/b/c", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_no_project_path(lang: NodeLanguage) -> None:
+    assert lang.resolve_package_dir("lodash", None, None) is None
+
+
+def test_resolve_package_dir_dotdot_without_separator_accepted(lang: NodeLanguage, tmp_path: Path) -> None:
+    """'some..pkg' contains '..' but no separator — not a traversal risk, must not be rejected."""
+    pkg_dir = tmp_path / "node_modules" / "some..pkg"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("some..pkg", tmp_path, None)
+    assert result == pkg_dir.resolve()

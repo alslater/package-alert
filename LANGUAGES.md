@@ -10,14 +10,14 @@ All language modules must satisfy the `LanguageBase` protocol defined in [`packa
 
 ### Contract Version
 
-Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `1`). When a module is registered the registry checks this value:
+Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `2`). When a module is registered the registry checks this value:
 
 | Declared version | Behaviour |
 |-----------------|-----------|
 | Equal to current | Registered normally. |
-| Older than current | Warning logged; safe no-op shims applied for missing methods. Module remains functional. |
+| Older than current | Warning logged. Call sites use `getattr`/`callable` guards before invoking optional methods, so plugins that don't implement them continue to work. For methods that require a non-trivial default (not just "skip if absent"), a shim entry should be added to `_VERSION_SHIMS` in `registry.py` — the shim is injected onto the plugin instance at registration time. Note: `LanguageBase` is a `Protocol`, so its method bodies are **not** automatically inherited by plugins that duck-type it rather than subclassing it. |
 | Newer than current | Warning logged; registered, but newer methods will not be called by this version of package-alert. |
-| Absent | Treated as version 1 (current); warning logged. |
+| Absent | Treated as version 1; warning logged. |
 
 When you add a new method to the contract: increment `CURRENT_CONTRACT_VERSION`, add a safe-default entry to `_VERSION_SHIMS` in [`registry.py`](packagealert/languages/registry.py), and document the change in the changelog at the bottom of this file.
 
@@ -108,6 +108,31 @@ class LanguageBase(Protocol):
     def heuristics(self) -> list[AbstractHeuristic]:
         """Heuristic instances to run against downloaded package directories.
         Return [] if this language module has no heuristics."""
+
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+    ) -> Path | None:
+        """Return the on-disk directory for an installed package, or None if not resolvable.
+
+        Called by the daemon after a process-monitor event so that file-content
+        heuristics can be run against the extracted package directory. Only called
+        for ``source="process"`` events — cache-monitor events fire while the
+        tarball is still in the download cache, before extraction.
+
+        *project_path* is the cwd of the install process (the project root for
+        npm/composer installs, or None if unknown). *site_packages_dir* is the
+        active venv's site-packages directory (set for PyPI events when detectable,
+        None otherwise).
+
+        Typical implementations:
+        - npm: ``return project_path / "node_modules" / package_name``
+        - PyPI: find the matching ``.dist-info`` dir, read ``top_level.txt``, return the importable dir
+        - Packagist: ``return project_path / "vendor" / Path(package_name)``
+
+        Return None if the path cannot be determined. Default returns None."""
 
     # ── Installed-package scanning ─────────────────────────────────────────
     def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
@@ -293,10 +318,33 @@ class LanguageBase(Protocol):
     def interpreter_names(self) -> list[str]:
         """Runtime interpreter names (python, python3, node, php, …).
 
-        `setup project` writes a special shim for these that intercepts
-        `-m pip`-style invocations and routes them through package-alert,
-        while passing all other arguments straight to the real interpreter.
+        `setup project` installs a shim for each name returned here. The shim
+        script is provided by interpreter_shim_script() — if that returns None
+        a plain passthrough shim is used instead.
         Default implementation returns []."""
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        """Return a complete sh(1) shim script for a runtime interpreter, or None.
+
+        Called by `setup project` when writing an interpreter shim. *real* is
+        the Path to the renamed original binary (e.g. ``python3.__pa_real``).
+        *pa* is the Path to the package-alert executable.
+
+        The script must either exec *pa* (to route through package-alert), exec
+        *real* (to bypass it), or exit with a non-zero status for guard failures
+        (e.g. *real* is missing or the install is in an inconsistent state). It
+        must not return silently without taking one of these three actions.
+
+        The script must also include the package-alert fingerprint and version
+        marker so staleness detection works:
+
+            from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+
+        Return None to use the default plain passthrough shim, which routes all
+        invocations through `pa run`. Only override when the interpreter supports
+        a sub-command style that needs selective routing — e.g. Python's `-m pip`,
+        or a future Ruby plugin intercepting `-S gem`.
+        Default implementation returns None."""
 
     # ── Snapshots ──────────────────────────────────────────────────────────
     def snapshot(self, install_root: Path) -> Snapshot:
@@ -463,6 +511,19 @@ class RubyLanguage:
         # new-package detection diffs the right subdirectory.
         return []
 
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+    ) -> Path | None:
+        # Return the directory where package_name was extracted after install,
+        # so the daemon can run file-content heuristics against it.
+        # Return None if the path cannot be determined for this ecosystem.
+        if project_path is None:
+            return None
+        return project_path / "vendor" / "bundle" / "ruby" / package_name  # example
+
     def snapshot(self, install_root: Path) -> Snapshot:
         return Snapshot({})
 
@@ -621,4 +682,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 | Version | What changed |
 |---------|-------------|
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
-| 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment` added as optional hooks with default no-op implementations (no version bump required for existing plugins). |
+| 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir`, and `interpreter_shim_script` added as optional hooks with default no-op implementations (no version bump required for existing plugins). `interpreter_shim_script(real, pa)` lets language modules supply their own interpreter shim script; the default returns None (plain passthrough shim). |

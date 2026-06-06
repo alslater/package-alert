@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 import subprocess
@@ -285,6 +286,27 @@ class PhpLanguage:
             return None
         vendor, package = name.split("/", 1)
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
+
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if project_path is None:
+            return None
+        # Packagist names are always "vendor/package" — exactly one slash,
+        # no traversal components, no OS path separators in either component.
+        parts = package_name.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        if any(p.startswith(".") or "\\" in p or os.sep in p for p in parts):
+            return None
+        vendor_dir = (project_path / "vendor").resolve()
+        try:
+            candidate = (project_path / "vendor" / parts[0] / parts[1]).resolve()
+            if not candidate.is_relative_to(vendor_dir):
+                return None
+        except OSError:
+            return None
+        if not candidate.is_dir():
+            return None
+        return candidate
 
     def latest_version_url(self, name: str) -> str | None:
         if "/" not in name:

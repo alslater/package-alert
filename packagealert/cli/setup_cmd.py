@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import stat
 from pathlib import Path
@@ -13,6 +14,11 @@ PA_FINGERPRINT = "# __pa_shim__"  # sentinel written into every shim by _write_s
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
 PA_BLOCK_END = "# END package-alert shell integration"
 PA_REAL_SUFFIX = ".__pa_real"
+# Bumped whenever shim logic changes. Both _write_shim and _write_interpreter_shim
+# embed this as "# __pa_shim_v<N>__" so staleness can be detected without executing
+# the shim. Increment when the shim routing logic changes (not just the pa path).
+PA_SHIM_VERSION = 4
+PA_SHIM_VERSION_MARKER = f"# __pa_shim_v{PA_SHIM_VERSION}__"
 
 _SHELL_RC: dict[str, str] = {
     "bash": "~/.bashrc",
@@ -75,10 +81,16 @@ def _pa_executable() -> str:
 
 
 def _write_shim(path: Path) -> None:
-    pa = _pa_executable()
+    pa = _pa_executable().replace("\n", "")  # paths must not contain newlines
+    pa_q = shlex.quote(pa)
     # Pass $0 (the full shim path) so the runner can locate the .__pa_real sibling
     # and derive VIRTUAL_ENV even when the venv is not activated.
-    path.write_text(f'#!/bin/sh\n{PA_FINGERPRINT}\nexec {pa} run "$0" "$@"\n')
+    path.write_text(
+        f'#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n'
+        f'# __pa_bin__ {pa}\n'
+        f'pa={pa_q}\n'
+        f'exec "$pa" run "$0" "$@"\n'
+    )
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
@@ -161,21 +173,81 @@ def _all_interpreter_names() -> list[str]:
     return result
 
 
-def _write_interpreter_shim(path: Path) -> None:
-    """Write a shim that delegates all invocations to package-alert run.
+def _interpreter_shim_script(tool_name: str, real: Path, pa: Path) -> str | None:
+    """Ask the language that owns *tool_name* for its interpreter shim script."""
+    lang_registry.load()
+    for lang in lang_registry.all_languages():
+        if tool_name in lang.interpreter_names():
+            try:
+                return lang.interpreter_shim_script(real, pa)
+            except Exception:
+                return None
+    return None
 
-    package-alert run detects `python -m pip` (including flags before -m) via
-    parse_pip_args in the Python language module, and execs the real interpreter
-    directly for all other invocations.
+
+def _write_interpreter_shim(path: Path) -> None:
+    """Write a shim for a runtime interpreter (python3, node, etc.).
+
+    Delegates to the owning language module's interpreter_shim_script(). If the
+    language returns None (no special interception needed), falls back to the
+    plain passthrough shim so all invocations still route through pa run.
     """
-    _write_shim(path)
+    pa_path = Path(_pa_executable().replace("\n", ""))
+    real = path.parent / f"{path.name}{PA_REAL_SUFFIX}"
+    script = _interpreter_shim_script(path.name, real, pa_path)
+    if script is None:
+        _write_shim(path)
+        return
+    path.write_text(script)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _pa_resolved() -> Path | None:
+    """Return the resolved (symlink-free) path of the current pa executable, or None."""
+    p = Path(_pa_executable().replace("\n", ""))
+    try:
+        return p.resolve()
+    except OSError:
+        return None
+
+
+def _shim_is_current(path: Path) -> bool:
+    """Return True if *path* is a shim written by the current pa binary and version."""
+    try:
+        content = path.read_text(errors="strict")
+    except (UnicodeDecodeError, OSError):
+        return True  # not a text shim — leave it alone
+    if PA_FINGERPRINT not in content:
+        return True  # not our shim
+    if PA_SHIM_VERSION_MARKER not in content:
+        return False
+    # Extract the embedded pa path and resolve it so that shims written via
+    # "pa" and shims written via "package-alert" are not considered stale when
+    # both entry points resolve to the same underlying file.
+    import re as _re
+    m = _re.search(r"# __pa_bin__ (.+)$", content, _re.MULTILINE)
+    if not m:
+        return False
+    try:
+        embedded = Path(m.group(1)).resolve()
+    except OSError:
+        return False
+    current = _pa_resolved()
+    return current is not None and embedded == current
 
 
 def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> None:
     original = bin_dir / tool
     real = bin_dir / f"{tool}{PA_REAL_SUFFIX}"
     if real.exists():
-        return  # already shimmed
+        # Already shimmed — check if the shim needs updating.
+        if not _shim_is_current(original):
+            if interpreter:
+                _write_interpreter_shim(original)
+            else:
+                _write_shim(original)
+            typer.echo(f"  updated shim {original}")
+        return
 
     if interpreter:
         # If this interpreter entry is a symlink pointing to another file in the
@@ -251,6 +323,23 @@ def uninstall_project_shims(*, project_root: Path) -> None:
             _uninstall_shim(bin_dir, tool)
 
 
+def stale_project_shims(*, project_root: Path) -> list[Path]:
+    """Return paths of installed shims that are out of date.
+
+    A shim is stale if it was written by a different pa binary or an older
+    shim version. Call ``install_project_shims`` to update them in place.
+    """
+    all_names = _all_project_shim_names() + _all_interpreter_names()
+    stale: list[Path] = []
+    for bin_dir in _tool_dirs(project_root):
+        for tool in _tools_in_dir(bin_dir, all_names):
+            shim = bin_dir / tool
+            real = bin_dir / f"{tool}{PA_REAL_SUFFIX}"
+            if real.exists() and not _shim_is_current(shim):
+                stale.append(shim)
+    return stale
+
+
 # CLI commands
 
 @setup_app.command("shell")
@@ -288,9 +377,19 @@ def setup_project(
     uninstall: bool = typer.Option(False, "--uninstall"),
     envrc: bool = typer.Option(False, "--envrc"),
     dry_run: bool = typer.Option(False, "--dry-run", "-n"),
+    check: bool = typer.Option(False, "--check", help="Report stale shims without modifying them. Exits 1 if any are found."),
 ) -> None:
     """Install or remove package manager shims in the project."""
     root = project_root.resolve()
+    if check:
+        stale = stale_project_shims(project_root=root)
+        if stale:
+            typer.echo(f"  {len(stale)} stale shim(s) found — run 'package-alert setup project' to update:")
+            for p in stale:
+                typer.echo(f"    {p}")
+            raise typer.Exit(1)
+        typer.echo("  All shims are up to date.")
+        return
     if dry_run:
         typer.echo(f"[dry-run] Would {'uninstall' if uninstall else 'install'} shims in {root}")
         return

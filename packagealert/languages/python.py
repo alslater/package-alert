@@ -35,6 +35,14 @@ from packagealert.parsers.lockfiles import _find_project_root
 # Internal regex constants
 # ---------------------------------------------------------------------------
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+# Dist-info normalisation: collapse runs of [-_.] to a single underscore for
+# comparison. PEP 503 uses hyphens, but dist-info stems use underscores, so
+# we normalise to underscores to match the filesystem representation.
+_PKG_NORM_RE = re.compile(r"[-_.]+")
+
+
+def _norm_pkg(name: str) -> str:
+    return _PKG_NORM_RE.sub("_", name).lower()
 _VALID_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9]")
 
 # Heuristic regexes (mirrors heuristics/python.py logic)
@@ -966,6 +974,55 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if site_packages_dir is None or not site_packages_dir.exists():
+            return None
+        normalised = _norm_pkg(package_name)
+        try:
+            sp_resolved = site_packages_dir.resolve()
+        except OSError:
+            return None
+        for entry in site_packages_dir.iterdir():
+            if not entry.is_dir() or not entry.name.endswith(".dist-info"):
+                continue
+            # _DISTINFO_RE captures the name portion as group 1; it splits at
+            # the last "-\d" boundary so hyphenated names like
+            # "google-cloud-storage" are matched correctly.
+            m = _DISTINFO_RE.match(entry.name)
+            if not m:
+                continue
+            dist_name = _norm_pkg(m.group(1))
+            if dist_name != normalised:
+                continue
+            top_level = entry / "top_level.txt"
+            if top_level.exists():
+                try:
+                    lines = [l.strip() for l in top_level.read_text().splitlines() if l.strip()]
+                    for name in lines:
+                        # Reject anything that could escape site-packages:
+                        # absolute paths, entries containing a path separator,
+                        # or '.' / '..' components.
+                        if (name.startswith("/")
+                                or os.sep in name
+                                or "/" in name
+                                or name in (".", "..")):
+                            continue
+                        candidate = site_packages_dir / name
+                        # Resolve and confirm the result is still within
+                        # site_packages_dir to guard against symlink traversal.
+                        try:
+                            if not candidate.resolve().is_relative_to(sp_resolved):
+                                continue
+                        except OSError:
+                            continue
+                        if candidate.is_dir():
+                            return candidate
+                except OSError:
+                    pass
+            # No usable top_level.txt in this dist-info dir — continue in case
+            # a duplicate dist-info from a previous install has a usable one.
+        return None
+
     def latest_version_url(self, name: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/json"
 
@@ -982,6 +1039,62 @@ class PythonLanguage:
 
     def interpreter_names(self) -> list[str]:
         return ["python", "python3"]
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        import shlex
+        from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+        pa_s = str(pa).replace("\n", "")
+        real_s = str(real).replace("\n", "")
+        pa_q = shlex.quote(pa_s)
+        real_q = shlex.quote(real_s)
+        return f'''\
+#!/bin/sh
+{PA_FINGERPRINT}
+{PA_SHIM_VERSION_MARKER}
+# __pa_bin__ {pa_s}
+pa={pa_q}
+real={real_q}
+if [ ! -x "$real" ]; then
+    printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
+    printf 'The virtual environment may have been recreated. Run package-alert setup project to reinstall shims.\\n' >&2
+    exit 1
+fi
+# Scan for -m <module> in argv, skipping leading flags
+found_m=0
+module=""
+skip_next=0
+for arg in "$@"; do
+    if [ "$skip_next" = "1" ]; then
+        skip_next=0
+        continue
+    fi
+    case "$arg" in
+        --|-c|-c*) break ;;
+        -m) found_m=1 ;;
+        -m*) found_m=1; module="${{arg#-m}}" ;;
+        -W|-X) skip_next=1 ;;
+        -u|-O|-i) ;;
+        -*) ;;
+        *)
+            if [ "$found_m" = "1" ] && [ -z "$module" ]; then
+                module="$arg"
+            fi
+            break
+            ;;
+    esac
+    if [ "$found_m" = "1" ] && [ -n "$module" ]; then
+        break
+    fi
+done
+case "$module" in
+    pip|pip3|uv)
+        exec "$pa" run "$0" "$@"
+        ;;
+    *)
+        exec "$real" "$@"
+        ;;
+esac
+'''
 
     def project_bin_dirs(self, root: Path) -> list[Path]:
         dirs: list[Path] = []

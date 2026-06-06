@@ -6,7 +6,7 @@ import logging
 from typing import Any
 import re
 import subprocess
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from pathlib import Path
 
 import httpx
@@ -291,25 +291,71 @@ class NodeLanguage:
     # ------------------------------------------------------------------
 
     def cache_paths(self) -> list[Path]:
-        return [Path.home() / ".npm" / "_cacache"]
+        # Watch only index-v5, not content-v2 (opaque hash blobs) or tmp.
+        # index-v5 contains parseable metadata; content-v2 adds thousands of
+        # dirs of zero classification value and exhausts inotify watch limits.
+        return [Path.home() / ".npm" / "_cacache" / "index-v5"]
 
     # ------------------------------------------------------------------
     # classify_cache_file / cache_file_globs
     # ------------------------------------------------------------------
 
     def cache_file_globs(self) -> list[str]:
-        return ["**/*.tgz"]
+        # index-v5 entries sit at exactly two levels of two-hex-char bucket dirs.
+        return ["[0-9a-f][0-9a-f]/[0-9a-f][0-9a-f]/*"]
+
+    # key format: "make-fetch-happen:request-cache:https://registry/…/name/-/name-version.tgz"
+    _INDEX_KEY_RE = re.compile(r"/(@[^/]+/[^/]+|[^/]+)/-/[^/]+-(\d[^/]*)\.tgz$")
+    _HEX_BUCKET_RE = re.compile(r"^[0-9a-f]{2}$")
+
+    # Tail buffer large enough for any realistic index-v5 last line (~200 B typical).
+    _TAIL_BYTES = 4096
 
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
-        # npm's _cacache stores content-addressed blobs, not named .tgz files,
-        # so this rarely matches. Kept for completeness and edge-case compatibility.
-        if path.suffix == ".tgz" and ".npm" in path.parts:
-            from packagealert.parsers.npm import inspect_npm_tarball
-
-            info = inspect_npm_tarball(path)
-            if info:
-                return PackageMetadata(name=info.name, version=info.version, ecosystem="npm")
-        return None
+        # Cheap structural guard: index-v5 entries are plain files (not dirs)
+        # nested exactly two hex-bucket levels deep.  Skip anything that doesn't
+        # match before doing any I/O — this avoids reading pip/uv cache files,
+        # site-packages files, or any other non-npm path the monitor may surface.
+        if (path.is_dir()
+                or path.suffix                # index-v5 entries have no extension
+                or not self._HEX_BUCKET_RE.match(path.parent.name)
+                or not self._HEX_BUCKET_RE.match(path.parent.parent.name)
+                or self._HEX_BUCKET_RE.match(path.parent.parent.parent.name)):
+            return None
+        # index-v5 files contain newline-delimited records; the last line is the
+        # current cache entry. Each record is "<sha>\t<json>" where the JSON has
+        # a "key" field with the package URL. Only the last line is needed, so
+        # tail-read to avoid loading the full file.
+        try:
+            with path.open("rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(0, size - self._TAIL_BYTES))
+                tail = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        last_line = tail.rstrip("\n").rsplit("\n", 1)[-1]
+        try:
+            _, _, json_part = last_line.partition("\t")
+            data = json.loads(json_part)
+            key = data.get("key", "")
+        except (ValueError, AttributeError):
+            return None
+        m = self._INDEX_KEY_RE.search(key)
+        if not m:
+            return None
+        name, version = m.group(1), m.group(2)
+        name = unquote(name)
+        # After decoding, validate: scoped names must be @scope/pkg (exactly one
+        # '/'), unscoped names must contain no '/'. A percent-encoded '/' in the
+        # unscoped branch would otherwise produce an inconsistent name.
+        if name.startswith("@"):
+            if name.count("/") != 1:
+                return None
+        else:
+            if "/" in name:
+                return None
+        return PackageMetadata(name=name, version=version, ecosystem="npm")
 
     # ------------------------------------------------------------------
     # heuristics
@@ -537,6 +583,36 @@ class NodeLanguage:
         # Scoped packages (@scope/pkg) must have the slash percent-encoded.
         encoded = quote(name, safe="@")
         return f"https://registry.npmjs.org/{encoded}"
+
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+        if project_path is None:
+            return None
+        # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
+        # unscoped packages have none. Reject anything else to prevent traversal.
+        # Reject path separators and leading dots to prevent traversal.
+        if package_name.startswith("@"):
+            parts = package_name.split("/")
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                return None
+            if any(p.startswith(".") for p in parts):
+                return None
+            if any(c in parts[1] for c in "/:+\\"):
+                return None
+        else:
+            if not package_name or package_name[0] == ".":
+                return None
+            if any(c in package_name for c in "/:+\\"):
+                return None
+        node_modules = (project_path / "node_modules").resolve()
+        try:
+            candidate = (project_path / "node_modules" / package_name).resolve()
+            if not candidate.is_relative_to(node_modules):
+                return None
+        except OSError:
+            return None
+        if not candidate.is_dir():
+            return None
+        return candidate
 
     def latest_version_url(self, name: str) -> str | None:
         encoded = quote(name, safe="@")

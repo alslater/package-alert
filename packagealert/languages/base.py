@@ -331,6 +331,21 @@ class LanguageBase(Protocol):
         """
         return []
 
+    def resolve_package_dir(self, package_name: str, project_path: "Path | None", site_packages_dir: "Path | None") -> "Path | None":
+        """Return the on-disk directory for an installed package, or None if not resolvable.
+
+        Called by the daemon after a process-monitor event to locate the extracted
+        package directory so file-content heuristics can be run against it.
+
+        *project_path* is the cwd of the install process (e.g. the project root
+        for npm/composer, or None if unknown). *site_packages_dir* is the active
+        venv's site-packages directory (PyPI only, None for other ecosystems).
+
+        Default returns None — language modules that support file-content heuristics
+        should override this.
+        """
+        return None
+
     def latest_version_url(self, name: str) -> str | None:
         """Return a registry API URL that resolves the latest published version of
         a package. The response is parsed by latest_version_parse().
@@ -374,6 +389,28 @@ class LanguageBase(Protocol):
         manager sub-invocations and passes everything else through unchanged.
         """
         return []
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        """Return a complete sh(1) shim script for a runtime interpreter, or None.
+
+        Called by setup-project when writing an interpreter shim for any name
+        returned by interpreter_names(). The script must either exec *pa* (to
+        route through package-alert), exec *real* (to bypass it), or exit with
+        a non-zero status for guard failures such as a missing or inconsistent
+        *real* binary. It must not return silently without taking one of these
+        three actions.
+
+        Return None to use the default plain passthrough shim (exec pa run "$0"
+        "$@" for every invocation). Only override when the interpreter supports
+        a sub-command style that needs selective interception — e.g. Python's
+        `-m pip`, Ruby's `-S gem`, etc.
+
+        The script must include the package-alert fingerprint and version marker
+        so staleness detection works:
+
+            from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
+        """
+        return None
 
     def project_bin_dirs(self, root: Path) -> list[Path]:
         """Return bin/ directories within root that contain this language's package

@@ -135,18 +135,25 @@ class SandboxRunner:
             # state), exec'ing it would call back into us. Check the fingerprint.
             tool_path = shutil.which(real_argv[0])
             if tool_path:
-                real_sibling = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+                # Resolve symlinks first — python3 -> python means __pa_real
+                # lives next to python, not python3. Fall back to the unresolved
+                # path if resolve() fails (permission error, broken symlink, etc.)
+                try:
+                    tool_resolved = Path(tool_path).resolve()
+                except OSError:
+                    tool_resolved = Path(tool_path)
+                real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
                 if not real_sibling.exists():
                     try:
                         content = Path(tool_path).read_text(errors="strict")
                         if "# __pa_shim__" in content:
                             self._console.print(
-                                f"[red]✗ {argv[0]} is a package-alert shim but "
-                                f"{argv[0]}{_PA_REAL_SUFFIX} is missing — infinite recursion prevented.[/red]"
+                                f"[red]✗ {tool_resolved} is a package-alert shim but "
+                                f"{real_sibling} is missing — infinite recursion prevented.[/red]"
                             )
                             self._console.print(
                                 f"[dim]Run 'package-alert setup project --uninstall' "
-                                f"and reinstall the package manager.[/dim]"
+                                f"and reinstall the tool.[/dim]"
                             )
                             return 1
                     except (UnicodeDecodeError, OSError):
@@ -1360,7 +1367,14 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
     tool_path = str(p) if p.is_absolute() else shutil.which(argv[0])
     if tool_path is None:
         return argv
-    real = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+    # Resolve symlinks before constructing the .__pa_real sibling — a layout
+    # like python3 -> python (shim) has python.__pa_real, not python3.__pa_real.
+    # Fall back to the unresolved path if resolve() raises (broken symlink, etc.)
+    try:
+        tool_resolved = Path(tool_path).resolve()
+    except OSError:
+        tool_resolved = Path(tool_path)
+    real = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
     if real.exists():
         return [str(real)] + argv[1:]
     return argv

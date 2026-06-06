@@ -102,8 +102,13 @@ _DEFAULT_DB_PATH = DEFAULT_DB_PATH  # internal alias
 
 async def open_db(path: Path = _DEFAULT_DB_PATH) -> aiosqlite.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(path)
+    conn = await aiosqlite.connect(path, timeout=10)
     conn.row_factory = aiosqlite.Row
+    try:
+        async with conn.execute("PRAGMA journal_mode=WAL"):
+            pass
+    except Exception:
+        log.warning("Could not enable WAL journal mode — falling back to default; concurrent access may be limited", exc_info=True)
     await conn.executescript(SCHEMA)
     await _migrate(conn)
     await conn.commit()

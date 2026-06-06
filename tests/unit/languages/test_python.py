@@ -671,3 +671,159 @@ def test_top_packages_fallback_contains_known_packages(lang: PythonLanguage) -> 
     assert "requests" in fb
     assert "numpy" in fb
     assert "flask" in fb
+
+
+# ---------------------------------------------------------------------------
+# resolve_package_dir
+# ---------------------------------------------------------------------------
+
+def _make_dist_info(site_packages: Path, name: str, version: str, top_level: str | None) -> Path:
+    dist_info = site_packages / f"{name}-{version}.dist-info"
+    dist_info.mkdir()
+    if top_level is not None:
+        (dist_info / "top_level.txt").write_text(top_level)
+    return dist_info
+
+
+def test_resolve_package_dir_returns_package_dir(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "requests", "2.31.0", "requests\n")
+    pkg_dir = sp / "requests"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("requests", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_no_prefix_false_positive(lang: PythonLanguage, tmp_path: Path) -> None:
+    """requests must not match requests_toolbelt."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "requests_toolbelt", "1.0.0", "requests_toolbelt\n")
+    (sp / "requests_toolbelt").mkdir()
+    result = lang.resolve_package_dir("requests", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_empty_top_level_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """Empty top_level.txt must not raise IndexError and must return None."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", "")
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_missing_top_level_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """No top_level.txt should return None, not the .dist-info dir."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", None)
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_candidate_not_dir_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    """top_level.txt names a file, not a directory — return None."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypackage", "1.0.0", "mypackage\n")
+    (sp / "mypackage").write_text("not a dir")
+    result = lang.resolve_package_dir("mypackage", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_normalises_hyphens(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "my_package", "1.0.0", "my_package\n")
+    pkg_dir = sp / "my_package"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("my-package", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_hyphenated_name(lang: PythonLanguage, tmp_path: Path) -> None:
+    """google-cloud-storage must not be truncated to just 'google'."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # dist-info stem: "google_cloud_storage-2.10.0"
+    _make_dist_info(sp, "google_cloud_storage", "2.10.0", "google\ncloud\nstorage\n")
+    pkg_dir = sp / "google"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("google-cloud-storage", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_dot_normalised(lang: PythonLanguage, tmp_path: Path) -> None:
+    """zope.interface dist-info must match event package name 'zope-interface'."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # pip installs zope.interface as "zope.interface-5.5.2.dist-info"
+    _make_dist_info(sp, "zope.interface", "5.5.2", "zope\ninterface\n")
+    pkg_dir = sp / "zope"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("zope-interface", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_hyphenated_not_matched_by_prefix(lang: PythonLanguage, tmp_path: Path) -> None:
+    """google alone must not match google-cloud-storage."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "google_cloud_storage", "2.10.0", "google_cloud_storage\n")
+    (sp / "google_cloud_storage").mkdir()
+    result = lang.resolve_package_dir("google", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_absolute_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "/etc/passwd\n")
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_dotdot_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "../outside\n")
+    (tmp_path / "outside").mkdir()
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_separator_in_top_level(lang: PythonLanguage, tmp_path: Path) -> None:
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "evil", "1.0.0", "sub/dir\n")
+    (sp / "sub").mkdir()
+    (sp / "sub" / "dir").mkdir()
+    result = lang.resolve_package_dir("evil", None, sp)
+    assert result is None
+
+
+def test_resolve_package_dir_tries_all_top_level_entries(lang: PythonLanguage, tmp_path: Path) -> None:
+    """If the first top_level.txt entry doesn't exist, try subsequent ones."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    _make_dist_info(sp, "mypkg", "1.0.0", "missing_first\nmypkg\n")
+    pkg_dir = sp / "mypkg"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("mypkg", None, sp)
+    assert result == pkg_dir
+
+
+def test_resolve_package_dir_duplicate_dist_info_falls_through(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A leftover dist-info with no top_level.txt must not block a later one that has it."""
+    sp = tmp_path / "site-packages"
+    sp.mkdir()
+    # Old dist-info with no top_level.txt
+    _make_dist_info(sp, "mypkg", "0.9.0", None)
+    # Current dist-info with a valid top_level.txt
+    _make_dist_info(sp, "mypkg", "1.0.0", "mypkg\n")
+    pkg_dir = sp / "mypkg"
+    pkg_dir.mkdir()
+    result = lang.resolve_package_dir("mypkg", None, sp)
+    assert result == pkg_dir

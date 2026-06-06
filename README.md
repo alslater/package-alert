@@ -28,6 +28,16 @@
 
 ## Installation
 
+### System requirements
+
+**inotify watch limit** — the daemon watches npm/pip/uv cache directories with inotify. The default Linux limit (8,192–65,536 watches depending on distro) is often exhausted by VS Code, JetBrains, or other tools running alongside the daemon. Raise it to the value VS Code itself recommends:
+
+```bash
+echo fs.inotify.max_user_watches=524288 | sudo tee /etc/sysctl.d/99-package-alert.conf && sudo sysctl --system
+```
+
+This persists across reboots. Without it you may see `ENOSPC: System limit for number of file watchers reached` errors in file watchers after the daemon has been running for a while.
+
 **Recommended — pipx (isolated environment, `package-alert` available system-wide):**
 
 ```bash
