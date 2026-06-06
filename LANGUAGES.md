@@ -15,7 +15,7 @@ Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (
 | Declared version | Behaviour |
 |-----------------|-----------|
 | Equal to current | Registered normally. |
-| Older than current | Warning logged. Methods added since the declared version are covered by their `LanguageBase` default implementations (typically no-ops), so the module remains functional. If a new method requires a non-trivial default, a shim entry should be added to `_VERSION_SHIMS` in `registry.py`. |
+| Older than current | Warning logged. Call sites use `getattr`/`callable` guards before invoking optional methods, so plugins that don't implement them continue to work. For methods that require a non-trivial default (not just "skip if absent"), a shim entry should be added to `_VERSION_SHIMS` in `registry.py` — the shim is injected onto the plugin instance at registration time. Note: `LanguageBase` is a `Protocol`, so its method bodies are **not** automatically inherited by plugins that duck-type it rather than subclassing it. |
 | Newer than current | Warning logged; registered, but newer methods will not be called by this version of package-alert. |
 | Absent | Treated as version 1; warning logged. |
 

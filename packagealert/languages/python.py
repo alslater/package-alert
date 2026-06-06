@@ -35,7 +35,9 @@ from packagealert.parsers.lockfiles import _find_project_root
 # Internal regex constants
 # ---------------------------------------------------------------------------
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
-# PEP 503 / pip normalisation: collapse runs of [-_.] to a single underscore.
+# Dist-info normalisation: collapse runs of [-_.] to a single underscore for
+# comparison. PEP 503 uses hyphens, but dist-info stems use underscores, so
+# we normalise to underscores to match the filesystem representation.
 _PKG_NORM_RE = re.compile(r"[-_.]+")
 
 
