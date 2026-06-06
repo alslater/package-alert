@@ -355,6 +355,22 @@ class TestSetupProject:
             f"Expected -u script.py to exec real, got:\n{result.stdout}\n{result.stderr}"
         )
 
+    def test_interpreter_shim_double_dash_stops_scan(self, tmp_path):
+        """`python -- -m pip install foo` must NOT route through pa run."""
+        import subprocess
+        from packagealert.cli.setup_cmd import install_project_shims
+        self._make_venv_with_python(tmp_path)
+        install_project_shims(project_root=tmp_path)
+        shim = tmp_path / ".venv" / "bin" / "python3"
+        script = self._patch_shim_for_routing_test(shim.read_text())
+        result = subprocess.run(
+            ["bash", "-c", script, "python3", "--", "-m", "pip", "install", "foo"],
+            capture_output=True, text=True,
+        )
+        assert "ROUTE_REAL" in result.stdout, (
+            f"Expected -- to stop scan and exec real, got:\n{result.stdout}\n{result.stderr}"
+        )
+
     def test_binary_interpreter_is_shimmed(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
         venv = tmp_path / ".venv" / "bin"

@@ -1067,6 +1067,7 @@ for arg in "$@"; do
         continue
     fi
     case "$arg" in
+        --) break ;;
         -m) found_m=1 ;;
         -m*) found_m=1; module="${{arg#-m}}" ;;
         -W|-X) skip_next=1 ;;
