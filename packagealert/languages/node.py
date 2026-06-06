@@ -569,14 +569,19 @@ class NodeLanguage:
             return None
         # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
         # unscoped packages have none. Reject anything else to prevent traversal.
+        # Aligns with _is_valid_npm_bare_name: no path separators, no leading dot.
         if package_name.startswith("@"):
             parts = package_name.split("/")
             if len(parts) != 2 or not parts[0] or not parts[1]:
                 return None
-            if ".." in parts or any(p.startswith(".") for p in parts):
+            if any(p.startswith(".") for p in parts):
+                return None
+            if any(c in parts[1] for c in "/:+\\"):
                 return None
         else:
-            if "/" in package_name or "\\" in package_name or ".." in package_name:
+            if not package_name or package_name[0] == ".":
+                return None
+            if any(c in package_name for c in "/:+\\"):
                 return None
         node_modules = (project_path / "node_modules").resolve()
         try:

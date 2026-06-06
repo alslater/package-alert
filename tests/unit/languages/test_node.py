@@ -987,3 +987,11 @@ def test_resolve_package_dir_rejects_extra_slashes(lang: NodeLanguage, tmp_path:
 
 def test_resolve_package_dir_no_project_path(lang: NodeLanguage) -> None:
     assert lang.resolve_package_dir("lodash", None, None) is None
+
+
+def test_resolve_package_dir_dotdot_without_separator_accepted(lang: NodeLanguage, tmp_path: Path) -> None:
+    """'some..pkg' contains '..' but no separator — not a traversal risk, must not be rejected."""
+    pkg_dir = tmp_path / "node_modules" / "some..pkg"
+    pkg_dir.mkdir(parents=True)
+    result = lang.resolve_package_dir("some..pkg", tmp_path, None)
+    assert result == pkg_dir.resolve()
