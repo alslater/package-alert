@@ -93,10 +93,17 @@ class Daemon:
         db = await open_db()
         osv_client = OsvClient(self._cfg.osv)
         osv_cache = OsvCache(db, self._cfg.osv)
-        pop_client = PopularityClient()
+        pop_client = PopularityClient(lang_registry.popularity_ecosystem_map())
         pop_cache = PopularityCache(db)
         top_packages_cache = TopPackagesCache(db=db, cfg=self._cfg.heuristics)
-        risk_engine = RiskEngine(self._cfg.heuristics, pop_client=pop_client, pop_cache=pop_cache, top_packages_cache=top_packages_cache)
+        risk_engine = RiskEngine(
+            self._cfg.heuristics,
+            pop_client=pop_client,
+            pop_cache=pop_cache,
+            top_packages_cache=top_packages_cache,
+            db=db,
+            cooldown_period_days=self._cfg.sandbox.cooldown.period_days,
+        )
 
         process_monitor: ProcessMonitor | None = None
         cache_monitor: CacheMonitor | None = None
@@ -174,6 +181,18 @@ class Daemon:
                     if next_event.source == "process" and next_event.site_packages_dir and cache_monitor:
                         cache_monitor.add_site_packages_watch(next_event.site_packages_dir)
                     batch.append(next_event)
+
+            # Deduplicate by (ecosystem, package, version, project_path) — a lockfile
+            # scan can emit the same transitive dep once per dependent package, but two
+            # different projects installing the same package each need their own alert.
+            seen: set[tuple[str, str, str | None, str | None]] = set()
+            deduped = []
+            for e in batch:
+                key = (e.ecosystem, e.package_name, e.version, e.project_path)
+                if key not in seen:
+                    seen.add(key)
+                    deduped.append(e)
+            batch = deduped
 
             # Pre-populate cache with a single batch OSV query for all uncached events
             await self._batch_prefetch(batch, osv_client, osv_cache)

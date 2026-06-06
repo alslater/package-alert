@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import httpx
     from packagealert.heuristics.base import AbstractHeuristic
 
-CURRENT_CONTRACT_VERSION = 2
+CURRENT_CONTRACT_VERSION = 3
 
 # Describes a package being requested or installed (from CLI args or lock files).
 @dataclass
@@ -190,6 +190,9 @@ class LanguageBase(Protocol):
         Names must be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
         ...
     def publication_date_url(self, name: str, version: str) -> str | None:
+        return None
+
+    def popularity_ecosystem(self) -> str | None:
         return None
 
     def prepare_sandbox_argv(self, argv: list[str], cwd: "Path") -> list[str]:

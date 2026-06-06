@@ -145,6 +145,39 @@ def for_lockfile(path: str | Path) -> LanguageBase | None:
     return None
 
 
+def popularity_ecosystem_map() -> dict[str, str]:
+    """Build a map from ecosystem name to deps.dev system name.
+
+    Returns a dict[ecosystem_name_lowercase] -> system_name (e.g. "pypi" -> "PYPI").
+    Only ecosystems that have a corresponding deps.dev system are included.
+    """
+    result: dict[str, str] = {}
+    for lang in _registry.values():
+        method = getattr(lang, "popularity_ecosystem", None)
+        if not callable(method):
+            continue
+        try:
+            system = method()
+        except Exception:
+            log.warning(
+                "popularity_ecosystem() raised for lang=%s — skipping",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+            continue
+        if system is not None:
+            try:
+                ecosystems = lang.ecosystems
+            except Exception:
+                log.warning(
+                    "ecosystems raised for lang=%s — skipping popularity map entry",
+                    getattr(lang, "name", "?"), exc_info=True,
+                )
+                continue
+            for eco in ecosystems:
+                result[eco.lower()] = system
+    return result
+
+
 def _load_plugins() -> None:
     for ep in importlib.metadata.entry_points(group="package_alert.languages"):
         try:

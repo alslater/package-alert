@@ -143,6 +143,7 @@ async def store_alert(
 
 
 _PUBLICATION_CACHE_TTL = 30 * 24 * 3600  # 30 days
+_PUBLICATION_FETCH_FAILED_SENTINEL = -1.0
 
 
 async def store_publication_date(
@@ -166,6 +167,29 @@ async def store_publication_date(
     await db.commit()
 
 
+async def store_age_failure_sentinel(
+    db: aiosqlite.Connection,
+    *,
+    ecosystem: str,
+    package: str,
+    version: str,
+    ttl_minutes: int,
+) -> None:
+    ttl_seconds = min(ttl_minutes * 60, _PUBLICATION_CACHE_TTL)
+    effective_fetched_at = time.time() - (_PUBLICATION_CACHE_TTL - ttl_seconds)
+    await db.execute(
+        """
+        INSERT INTO publication_cache (ecosystem, package, version, fetched_at, published_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(ecosystem, package, version) DO UPDATE SET
+            fetched_at=excluded.fetched_at,
+            published_at=excluded.published_at
+        """,
+        (ecosystem, package, version, effective_fetched_at, _PUBLICATION_FETCH_FAILED_SENTINEL),
+    )
+    await db.commit()
+
+
 async def get_publication_date(
     db: aiosqlite.Connection,
     *,
@@ -173,7 +197,8 @@ async def get_publication_date(
     package: str,
     version: str,
 ) -> float | str:
-    """Return published_at timestamp, 'not_found' (cached 404), or 'miss' (not in cache/expired)."""
+    """Return published_at timestamp, 'not_found' (cached 404), 'fetch_failed'
+    (transient failure sentinel), or 'miss' (not in cache/expired)."""
     async with db.execute(
         "SELECT fetched_at, published_at FROM publication_cache WHERE ecosystem=? AND package=? AND version=?",
         (ecosystem, package, version),
@@ -184,9 +209,12 @@ async def get_publication_date(
     fetched_at: float = row["fetched_at"]
     if time.time() - fetched_at > _PUBLICATION_CACHE_TTL:
         return "miss"
-    if row["published_at"] is None:
+    published_at = row["published_at"]
+    if published_at is None:
         return "not_found"
-    return float(row["published_at"])
+    if float(published_at) == _PUBLICATION_FETCH_FAILED_SENTINEL:
+        return "fetch_failed"
+    return float(published_at)
 
 
 async def store_cooldown_cleared(

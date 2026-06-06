@@ -3590,9 +3590,9 @@ class TestLanguageBaseDataclasses:
         assert e.path_prepends == []
         assert e.notes == []
 
-    def test_contract_version_is_2(self):
+    def test_contract_version_is_3(self):
         from packagealert.languages.base import CURRENT_CONTRACT_VERSION
-        assert CURRENT_CONTRACT_VERSION == 2
+        assert CURRENT_CONTRACT_VERSION == 3
 
 
 # ---------------------------------------------------------------------------

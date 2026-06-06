@@ -66,6 +66,17 @@ class HeuristicsConfig(BaseModel):
     warning_threshold: int = 40
     critical_threshold: int = 70
     top_packages_refresh_days: int = Field(7, ge=1)
+    # Popularity damper
+    high_dependent_count: int = Field(1000, ge=1)
+    high_version_count: int = Field(50, ge=1)
+    popularity_floor: float = Field(0.25, ge=0.0, le=1.0)
+    popularity_failure_ttl_minutes: int = Field(60, ge=1)
+    # Age damper
+    age_failure_ttl_minutes: int = Field(60, ge=1)
+    max_damping_age_days: int = Field(90, ge=1)
+    age_floor: float = Field(0.25, ge=0.0, le=1.0)
+    # Combined
+    combined_damping_floor: float = Field(0.1, ge=0.0, le=1.0)
 
 
 CooldownAction = Literal["allow", "warn", "prompt", "block"]
