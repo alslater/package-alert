@@ -1050,7 +1050,7 @@ pa={pa_q}
 real={real_q}
 if [ ! -x "$real" ]; then
     printf '\\n✗ %s is a package-alert shim but %s is missing — infinite recursion prevented.\\n' "$0" "$real" >&2
-    printf 'Run package-alert setup project --uninstall and reinstall the package manager.\\n' >&2
+    printf 'The virtual environment may have been recreated. Run package-alert setup project to reinstall shims.\\n' >&2
     exit 1
 fi
 # Scan for -m <module> in argv, skipping leading flags

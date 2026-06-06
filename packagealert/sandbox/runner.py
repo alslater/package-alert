@@ -149,7 +149,7 @@ class SandboxRunner:
                             )
                             self._console.print(
                                 f"[dim]Run 'package-alert setup project --uninstall' "
-                                f"and reinstall the package manager.[/dim]"
+                                f"and reinstall the tool.[/dim]"
                             )
                             return 1
                     except (UnicodeDecodeError, OSError):

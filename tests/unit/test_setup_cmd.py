@@ -157,7 +157,7 @@ class TestSetupProject:
         assert stale_project_shims(project_root=tmp_path) == []
 
     def test_old_version_shim_reported_stale(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims, PA_REAL_SUFFIX
+        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
         pip = venv / "pip"
@@ -171,7 +171,7 @@ class TestSetupProject:
     def test_wrong_pa_path_shim_reported_stale(self, tmp_path):
         from packagealert.cli.setup_cmd import (
             install_project_shims, stale_project_shims,
-            PA_SHIM_VERSION_MARKER, PA_REAL_SUFFIX,
+            PA_SHIM_VERSION_MARKER,
         )
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
