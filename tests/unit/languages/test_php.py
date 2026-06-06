@@ -269,6 +269,16 @@ def test_resolve_package_dir_rejects_dotdot_component(lang, tmp_path: Path) -> N
     assert result is None
 
 
+def test_resolve_package_dir_rejects_leading_dot(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir(".hidden/pkg", tmp_path, None)
+    assert result is None
+
+
+def test_resolve_package_dir_rejects_backslash_in_component(lang, tmp_path: Path) -> None:
+    result = lang.resolve_package_dir("vendor\\evil/pkg", tmp_path, None)
+    assert result is None
+
+
 def test_resolve_package_dir_rejects_extra_slashes(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("a/b/c", tmp_path, None)
     assert result is None

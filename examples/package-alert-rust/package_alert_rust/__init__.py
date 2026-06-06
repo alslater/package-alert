@@ -204,7 +204,7 @@ class CargoLanguage:
         # Rust has no interpreter that invokes cargo via -m style.
         return []
 
-    def interpreter_shim_script(self, real, pa):
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
         # No custom shim needed — cargo is always invoked directly.
         return None
 

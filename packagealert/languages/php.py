@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any
 import subprocess
@@ -290,11 +291,11 @@ class PhpLanguage:
         if project_path is None:
             return None
         # Packagist names are always "vendor/package" — exactly one slash,
-        # no traversal components.
+        # no traversal components, no OS path separators in either component.
         parts = package_name.split("/")
         if len(parts) != 2 or not parts[0] or not parts[1]:
             return None
-        if any(p in (".", "..") or p.startswith("..") for p in parts):
+        if any(p.startswith(".") or "\\" in p or os.sep in p for p in parts):
             return None
         vendor_dir = (project_path / "vendor").resolve()
         try:
