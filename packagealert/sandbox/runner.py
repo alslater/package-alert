@@ -136,8 +136,12 @@ class SandboxRunner:
             tool_path = shutil.which(real_argv[0])
             if tool_path:
                 # Resolve symlinks first — python3 -> python means __pa_real
-                # lives next to python, not python3.
-                tool_resolved = Path(tool_path).resolve()
+                # lives next to python, not python3. Fall back to the unresolved
+                # path if resolve() fails (permission error, broken symlink, etc.)
+                try:
+                    tool_resolved = Path(tool_path).resolve()
+                except OSError:
+                    tool_resolved = Path(tool_path)
                 real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
                 if not real_sibling.exists():
                     try:
@@ -1365,7 +1369,11 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
         return argv
     # Resolve symlinks before constructing the .__pa_real sibling — a layout
     # like python3 -> python (shim) has python.__pa_real, not python3.__pa_real.
-    tool_resolved = Path(tool_path).resolve()
+    # Fall back to the unresolved path if resolve() raises (broken symlink, etc.)
+    try:
+        tool_resolved = Path(tool_path).resolve()
+    except OSError:
+        tool_resolved = Path(tool_path)
     real = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
     if real.exists():
         return [str(real)] + argv[1:]

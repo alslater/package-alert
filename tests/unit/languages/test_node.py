@@ -557,6 +557,21 @@ def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) 
     assert result.name == "lodash"
 
 
+def test_classify_cache_file_wrong_bucket_depth_skipped(lang: NodeLanguage, tmp_path: Path) -> None:
+    """Files not in a two-level hex-bucket dir are rejected before any file I/O."""
+    # One level deep (e.g. a pip cache file) — should be skipped
+    shallow = tmp_path / "ab" / "entry"
+    shallow.parent.mkdir(parents=True)
+    shallow.write_text("this would parse but should never be read\n")
+    assert lang.classify_cache_file(shallow) is None
+
+    # Non-hex parent name (e.g. a site-packages path)
+    non_hex = tmp_path / "requests" / "cd" / "entry"
+    non_hex.parent.mkdir(parents=True)
+    non_hex.write_text("irrelevant\n")
+    assert lang.classify_cache_file(non_hex) is None
+
+
 def test_classify_cache_file_non_tgz_key_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
     key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash"
     f = _make_index_entry(tmp_path, key)

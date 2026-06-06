@@ -17,7 +17,7 @@ Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (
 | Equal to current | Registered normally. |
 | Older than current | Warning logged; safe no-op shims applied for missing methods. Module remains functional. |
 | Newer than current | Warning logged; registered, but newer methods will not be called by this version of package-alert. |
-| Absent | Treated as version 1 (current); warning logged. |
+| Absent | Treated as version 1; warning logged. |
 
 When you add a new method to the contract: increment `CURRENT_CONTRACT_VERSION`, add a safe-default entry to `_VERSION_SHIMS` in [`registry.py`](packagealert/languages/registry.py), and document the change in the changelog at the bottom of this file.
 
