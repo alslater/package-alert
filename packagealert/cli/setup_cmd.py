@@ -204,7 +204,7 @@ def _write_interpreter_shim(path: Path) -> None:
 
 def _pa_resolved() -> Path | None:
     """Return the resolved (symlink-free) path of the current pa executable, or None."""
-    p = Path(_pa_executable())
+    p = Path(_pa_executable().replace("\n", ""))
     try:
         return p.resolve()
     except OSError:
