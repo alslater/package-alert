@@ -200,6 +200,15 @@ def _write_interpreter_shim(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _pa_resolved() -> Path | None:
+    """Return the resolved (symlink-free) path of the current pa executable, or None."""
+    p = Path(_pa_executable())
+    try:
+        return p.resolve()
+    except OSError:
+        return None
+
+
 def _shim_is_current(path: Path) -> bool:
     """Return True if *path* is a shim written by the current pa binary and version."""
     try:
@@ -208,8 +217,21 @@ def _shim_is_current(path: Path) -> bool:
         return True  # not a text shim — leave it alone
     if PA_FINGERPRINT not in content:
         return True  # not our shim
-    pa = _pa_executable()
-    return PA_SHIM_VERSION_MARKER in content and f"# __pa_bin__{pa}__" in content
+    if PA_SHIM_VERSION_MARKER not in content:
+        return False
+    # Extract the embedded pa path and resolve it so that shims written via
+    # "pa" and shims written via "package-alert" are not considered stale when
+    # both entry points resolve to the same underlying file.
+    import re as _re
+    m = _re.search(r"# __pa_bin__(.+?)__", content)
+    if not m:
+        return False
+    try:
+        embedded = Path(m.group(1)).resolve()
+    except OSError:
+        return False
+    current = _pa_resolved()
+    return current is not None and embedded == current
 
 
 def _install_shim(bin_dir: Path, tool: str, *, interpreter: bool = False) -> None:

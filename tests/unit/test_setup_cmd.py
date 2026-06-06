@@ -207,6 +207,40 @@ class TestSetupProject:
         # Version marker must now be present
         assert PA_SHIM_VERSION_MARKER in pip.read_text()
 
+    def test_alternate_entry_point_not_reported_stale(self, tmp_path):
+        """Shim written via 'pa' must not be stale when checked via 'package-alert' (same inode)."""
+        from packagealert.cli.setup_cmd import (
+            _shim_is_current, PA_FINGERPRINT, PA_SHIM_VERSION_MARKER,
+        )
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        # Simulate two entry-point symlinks pointing at the same real binary
+        real_bin = bin_dir / "package-alert"
+        real_bin.write_text("#!/bin/sh\necho pa\n")
+        real_bin.chmod(real_bin.stat().st_mode | stat.S_IEXEC)
+        alt_bin = bin_dir / "pa"
+        alt_bin.symlink_to(real_bin)
+
+        shim = tmp_path / "pip"
+        # Write a shim as if installed via the 'pa' entry point
+        shim.write_text(
+            f"#!/bin/sh\n{PA_FINGERPRINT}\n{PA_SHIM_VERSION_MARKER}\n"
+            f"# __pa_bin__{alt_bin}__\n"
+            f'pa="{alt_bin}"\n'
+            f'exec "$pa" run "$0" "$@"\n'
+        )
+
+        # Patch _pa_executable to return the 'package-alert' path (different name, same file)
+        import packagealert.cli.setup_cmd as sc
+        original = sc._pa_executable
+        try:
+            sc._pa_executable = lambda: str(real_bin)
+            assert _shim_is_current(shim), (
+                "Shim written via 'pa' should not be stale when checked via 'package-alert' (same inode)"
+            )
+        finally:
+            sc._pa_executable = original
+
     def test_uninstall_restores_original(self, tmp_path):
         from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
         self._make_venv(tmp_path)
