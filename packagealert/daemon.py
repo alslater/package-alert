@@ -58,8 +58,11 @@ def _resolve_package_dir(event: PackageEvent) -> Path | None:
     lang = lang_registry.for_ecosystem(event.ecosystem)
     if lang is None:
         return None
+    method = getattr(lang, "resolve_package_dir", None)
+    if not callable(method):
+        return None
     try:
-        return lang.resolve_package_dir(event.package_name, event.project_path, event.site_packages_dir)
+        return method(event.package_name, event.project_path, event.site_packages_dir)
     except Exception:
         log.warning("resolve_package_dir raised for lang=%s — skipping heuristics", getattr(lang, "name", "?"), exc_info=True)
         return None
