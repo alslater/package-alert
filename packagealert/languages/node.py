@@ -335,6 +335,15 @@ class NodeLanguage:
             return None
         name, version = m.group(1), m.group(2)
         name = unquote(name)
+        # After decoding, validate: scoped names must be @scope/pkg (exactly one
+        # '/'), unscoped names must contain no '/'. A percent-encoded '/' in the
+        # unscoped branch would otherwise produce an inconsistent name.
+        if name.startswith("@"):
+            if name.count("/") != 1:
+                return None
+        else:
+            if "/" in name:
+                return None
         return PackageMetadata(name=name, version=version, ecosystem="npm")
 
     # ------------------------------------------------------------------

@@ -478,3 +478,42 @@ class TestRunnerShimGuard:
         except (UnicodeDecodeError, OSError):
             is_shim = False
         assert not is_shim
+
+
+class TestResolveRealBinary:
+    """Tests for _resolve_real_binary symlink-aware .__pa_real resolution."""
+
+    def _make_shim(self, path: Path) -> None:
+        path.write_text("#!/bin/sh\n# __pa_shim__\nexec pa run \"$0\" \"$@\"\n")
+        path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+    def test_symlink_to_shim_resolved_to_real(self, tmp_path):
+        """python3 -> python (shim); python.__pa_real exists — must return python.__pa_real."""
+        from packagealert.sandbox.runner import _resolve_real_binary, _PA_REAL_SUFFIX
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+
+        python = bin_dir / "python"
+        self._make_shim(python)
+        real = bin_dir / f"python{_PA_REAL_SUFFIX}"
+        real.write_text("#!/bin/sh\necho real\n")
+        real.chmod(real.stat().st_mode | stat.S_IEXEC)
+
+        python3 = bin_dir / "python3"
+        python3.symlink_to("python")
+
+        result = _resolve_real_binary([str(python3), "-m", "pip", "install", "foo"])
+        assert result[0] == str(real)
+        assert result[1:] == ["-m", "pip", "install", "foo"]
+
+    def test_no_real_sibling_returns_argv_unchanged(self, tmp_path):
+        """If no .__pa_real exists, argv is returned unchanged."""
+        from packagealert.sandbox.runner import _resolve_real_binary
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        python = bin_dir / "python"
+        python.write_text("#!/bin/sh\necho real\n")
+        python.chmod(python.stat().st_mode | stat.S_IEXEC)
+
+        result = _resolve_real_binary([str(python), "script.py"])
+        assert result == [str(python), "script.py"]

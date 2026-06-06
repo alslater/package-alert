@@ -526,6 +526,22 @@ def test_classify_cache_file_scoped_package_uppercase_encoding(lang: NodeLanguag
     assert result.name == "@babel/core"
 
 
+def test_classify_cache_file_encoded_slash_in_unscoped_name_rejected(lang: NodeLanguage, tmp_path: Path) -> None:
+    # 'evil%2Fpkg' decodes to 'evil/pkg' — not a valid unscoped name; must return None
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/evil%2Fpkg/-/pkg-1.0.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is None
+
+
+def test_classify_cache_file_encoded_slash_in_scoped_name_extra_slash_rejected(lang: NodeLanguage, tmp_path: Path) -> None:
+    # '@scope%2Fextra/pkg' decodes to '@scope/extra/pkg' — two slashes, invalid scoped name
+    key = "make-fetch-happen:request-cache:https://registry.npmjs.org/%40scope%2Fextra%2Fpkg/-/pkg-1.0.0.tgz"
+    f = _make_index_entry(tmp_path, key)
+    result = lang.classify_cache_file(f)
+    assert result is None
+
+
 def test_classify_cache_file_uses_last_line(lang: NodeLanguage, tmp_path: Path) -> None:
     d = tmp_path / "ab" / "cd"
     d.mkdir(parents=True)

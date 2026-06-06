@@ -1363,7 +1363,10 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
     tool_path = str(p) if p.is_absolute() else shutil.which(argv[0])
     if tool_path is None:
         return argv
-    real = Path(tool_path).parent / f"{Path(tool_path).name}{_PA_REAL_SUFFIX}"
+    # Resolve symlinks before constructing the .__pa_real sibling — a layout
+    # like python3 -> python (shim) has python.__pa_real, not python3.__pa_real.
+    tool_resolved = Path(tool_path).resolve()
+    real = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
     if real.exists():
         return [str(real)] + argv[1:]
     return argv
