@@ -976,6 +976,10 @@ class PythonLanguage:
         if site_packages_dir is None or not site_packages_dir.exists():
             return None
         normalised = _norm_pkg(package_name)
+        try:
+            sp_resolved = site_packages_dir.resolve()
+        except OSError:
+            return None
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
@@ -1002,10 +1006,10 @@ class PythonLanguage:
                                 or name in (".", "..")):
                             continue
                         candidate = site_packages_dir / name
-                        # Resolve and confirm the result is still inside
+                        # Resolve and confirm the result is still within
                         # site_packages_dir to guard against symlink traversal.
                         try:
-                            if candidate.resolve().parent != site_packages_dir.resolve():
+                            if not candidate.resolve().is_relative_to(sp_resolved):
                                 continue
                         except OSError:
                             continue

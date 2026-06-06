@@ -306,11 +306,20 @@ class NodeLanguage:
 
     # key format: "make-fetch-happen:request-cache:https://registry/…/name/-/name-version.tgz"
     _INDEX_KEY_RE = re.compile(r"/(@[^/]+/[^/]+|[^/]+)/-/[^/]+-(\d[^/]*)\.tgz$")
+    _HEX_BUCKET_RE = re.compile(r"^[0-9a-f]{2}$")
 
     # Tail buffer large enough for any realistic index-v5 last line (~200 B typical).
     _TAIL_BYTES = 4096
 
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
+        # Cheap structural guard: index-v5 entries are plain files (not dirs)
+        # nested exactly two hex-bucket levels deep.  Skip anything that doesn't
+        # match before doing any I/O — this avoids reading pip/uv cache files,
+        # site-packages files, or any other non-npm path the monitor may surface.
+        if (path.is_dir()
+                or not self._HEX_BUCKET_RE.match(path.parent.name)
+                or not self._HEX_BUCKET_RE.match(path.parent.parent.name)):
+            return None
         # index-v5 files contain newline-delimited records; the last line is the
         # current cache entry. Each record is "<sha>\t<json>" where the JSON has
         # a "key" field with the package URL. Only the last line is needed, so
