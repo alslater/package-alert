@@ -1067,11 +1067,11 @@ for arg in "$@"; do
         continue
     fi
     case "$arg" in
-        --) break ;;
+        --|-c|-c*) break ;;
         -m) found_m=1 ;;
         -m*) found_m=1; module="${{arg#-m}}" ;;
         -W|-X) skip_next=1 ;;
-        -u|-O|-c|-i) ;;
+        -u|-O|-i) ;;
         -*) ;;
         *)
             if [ "$found_m" = "1" ] && [ -z "$module" ]; then

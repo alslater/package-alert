@@ -317,6 +317,7 @@ class NodeLanguage:
         # match before doing any I/O — this avoids reading pip/uv cache files,
         # site-packages files, or any other non-npm path the monitor may surface.
         if (path.is_dir()
+                or path.suffix                # index-v5 entries have no extension
                 or not self._HEX_BUCKET_RE.match(path.parent.name)
                 or not self._HEX_BUCKET_RE.match(path.parent.parent.name)
                 or self._HEX_BUCKET_RE.match(path.parent.parent.parent.name)):

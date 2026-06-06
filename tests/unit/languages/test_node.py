@@ -577,6 +577,12 @@ def test_classify_cache_file_wrong_bucket_depth_skipped(lang: NodeLanguage, tmp_
     too_deep.write_text("irrelevant\n")
     assert lang.classify_cache_file(too_deep) is None
 
+    # File with an extension (e.g. a wheel or tarball in another cache)
+    with_ext = tmp_path / "ab" / "cd" / "some-package.whl"
+    with_ext.parent.mkdir(parents=True, exist_ok=True)
+    with_ext.write_text("irrelevant\n")
+    assert lang.classify_cache_file(with_ext) is None
+
 
 def test_classify_cache_file_non_tgz_key_returns_none(lang: NodeLanguage, tmp_path: Path) -> None:
     key = "make-fetch-happen:request-cache:https://registry.npmjs.org/lodash"
