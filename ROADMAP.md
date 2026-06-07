@@ -32,8 +32,7 @@
 - [x] Score–signal consistency — the final score is computed as `floor(Σ(score × factor))` (single floor after summing fractional products, per spec). Displayed per-signal scores are reconciled to the same total using the largest-remainder method so `sum(signal.score) == report.score` in all cases, including when the 100-cap bites.
 - [x] Third-party plugin popularity ecosystem support — `popularity_ecosystem()` hook on `LanguageBase`; registry builds the `PopularityClient` ecosystem map from all registered plugins; covered by a `DistributionFinder`-based integration test.
 - [x] Batch deduplication fixed — co-arriving events are deduplicated by `(ecosystem, package, version, project_path)` so two different projects installing the same package version in the same drain window each receive their own alert.
-- [ ] Typosquatting and heuristic risk analysis during `scan-project` and `package-alert run` pre-flight
-  - Typosquatting already runs pre-sandbox as part of the cooldown policy decision; full heuristic pre-flight (blocking/warning independent of cooldown) is not yet implemented
+- [ ] Typosquatting and heuristic risk scoring in `scan-project` output and `pa run` pre-flight — both currently report OSV advisories only; `scan-project` should surface risk scores for lock file packages, and `pa run` should warn/block on typosquat matches and high risk scores independently of the cooldown policy
 - [ ] poetry + pdm support
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)
 - [ ] macOS support (sandbox alternative to bwrap, macOS desktop notifications, Homebrew; platform-specific cache paths e.g. `~/Library/Caches/pip`; cache monitoring already works via watchdog's FSEvents backend)
@@ -48,6 +47,7 @@
 - [ ] Configuration safety audit — scan the loaded config for common misconfigurations (overly broad `editable_roots`, credential paths in `extra_ro_paths`, etc.) and warn at startup
 - [ ] IDE/tool install policy — detect and surface package installations triggered by background processes (VS Code extensions, language servers, IDEs) using parent process chain; optionally block or require explicit approval for non-user-initiated installs
 - [ ] Refactor sandbox target resolution — move hardcoded ecosystem logic in `_resolve_targets` and `_collect_new_packages` (runner.py) into `LanguageBase` hooks so language modules own their own scan targets and post-install package detection
+- [ ] `pa config upgrade` command — append missing config keys (commented, with defaults) to the installed config file after an upgrade, so users are not silently missing new options; `--dry-run` prints a diff without writing
 
 ## Phase 4 (Near-term evaluation)
 - [ ] Install target snapshot memory usage — `FileSystemBackend` reads all files ≤ `snapshot_file_size_limit` into memory before each sandbox run. For large node_modules trees this may cause significant memory pressure or slowdowns. Gather real-world data on peak RSS during npm installs and evaluate whether streaming hashes, on-disk snapshots, or a lower default size limit are needed before recommending the filesystem backend for large ecosystems.

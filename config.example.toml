@@ -40,6 +40,26 @@ warning_threshold = 40
 critical_threshold = 70
 # top_packages_refresh_days = 7   # how often to refresh top-packages lists from each registry (default: 7 days)
 
+# --- Risk score dampening ---
+# Heuristic signal scores are multiplied by a combined popularity × age factor,
+# reducing false positives for well-established packages.
+
+# Popularity dampening (via deps.dev dependent_count / version_count).
+# Packages at or above high_dependent_count receive the minimum popularity_factor.
+# high_dependent_count = 1000     # dependents at which popularity factor reaches its floor
+# high_version_count = 50         # version count proxy when dependent_count is unavailable
+# popularity_floor = 0.25         # minimum popularity multiplier (0.0–1.0)
+# popularity_failure_ttl_minutes = 60   # how long to cache a transient deps.dev failure before retrying
+
+# Age dampening (uses publication date from the package registry).
+# Packages older than max_damping_age_days receive the minimum age_factor.
+# max_damping_age_days = 90       # age at which age factor reaches its floor
+# age_floor = 0.25                # minimum age multiplier (0.0–1.0)
+# age_failure_ttl_minutes = 60    # how long to cache a transient publication-date fetch failure
+
+# Combined floor applied to popularity_factor × age_factor.
+# combined_damping_floor = 0.1    # prevents the combined multiplier from reaching zero
+
 [sandbox]
 # extra_env = []      # additional environment variable names to pass into the bubblewrap sandbox
 # extra_tmpfs = []    # paths to mount as empty tmpfs inside the sandbox, in addition to the

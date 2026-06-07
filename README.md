@@ -468,6 +468,16 @@ warning_threshold = 40
 critical_threshold = 70
 # top_packages_refresh_days = 7   # how often to refresh top-packages lists from each registry (default: 7 days)
 
+# Risk score dampening — reduces false positives for well-established packages.
+# high_dependent_count = 1000     # dependents at which popularity factor reaches its floor
+# high_version_count = 50         # version count proxy when dependent_count is unavailable
+# popularity_floor = 0.25         # minimum popularity multiplier (0.0–1.0)
+# popularity_failure_ttl_minutes = 60
+# max_damping_age_days = 90       # age in days at which age factor reaches its floor
+# age_floor = 0.25                # minimum age multiplier (0.0–1.0)
+# age_failure_ttl_minutes = 60
+# combined_damping_floor = 0.1    # floor for popularity_factor × age_factor
+
 [sandbox]
 # Additional environment variable names to forward into the sandbox beyond
 # the built-in allowlist (PATH, HOME, proxy vars, registry URLs, etc.).
