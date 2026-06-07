@@ -258,17 +258,44 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
     args = list(args)
     if not args:
         return None
-    subcmd = args[0]
-    # Read-only subcommands: recognise so venv injection fires, but no packages to scan.
-    if subcmd in ("show", "list", "freeze", "check", "inspect", "debug", "config",
-                  "cache", "download", "wheel", "hash", "completion", "help"):
-        return ParsedInstall(manager="pip", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+
+    # pip accepts global options before the subcommand (e.g. `pip -q install ...`).
+    # Skip leading flags to find the subcommand — it is always a bare word.
+    # Flags that consume the next token as a separate value must be skipped as a pair
+    # so the value is not mistaken for the subcommand (e.g. `--cache-dir /tmp install`).
+    # Flags using `--flag=value` form are safe to skip as a single token.
+    _PIP_GLOBAL_VALUE_FLAGS = frozenset({
+        "--log", "--proxy", "--retries", "--timeout", "--exists-action",
+        "--trusted-host", "--cert", "--client-cert", "--cache-dir",
+        "--index-url", "-i", "--extra-index-url", "--find-links", "-f",
+        "--no-binary", "--only-binary", "--python",
+    })
+    subcmd_idx = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if not tok.startswith("-"):
+            subcmd_idx = i
+            break
+        if tok in _PIP_GLOBAL_VALUE_FLAGS and "=" not in tok:
+            i += 2  # skip flag and its value token
+        else:
+            i += 1
+    if subcmd_idx is None:
+        return None  # only flags, no subcommand
+
+    subcmd = args[subcmd_idx]
+    # Only sandbox subcommands that introduce new code into the environment.
+    # `uninstall` is intentionally excluded — removing a package cannot introduce
+    # malicious code, so sandboxing it provides no security benefit.
+    # Anything else (list, show, freeze, uninstall, unknown future subcommands)
+    # passes through directly.
     if subcmd != "install":
         return None
     packages: list[str] = []
     req_files: list[str] = []
     skip_value_for: str | None = None
-    for arg in args[1:]:
+    for arg in args[subcmd_idx + 1:]:
         if skip_value_for is not None:
             if skip_value_for in ("-r", "--requirement"):
                 req_files.append(arg)

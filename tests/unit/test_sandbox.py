@@ -274,17 +274,12 @@ class TestTryParse:
         assert result is not None
         assert result.ecosystem == "packagist"
 
-    def test_recognises_pip_show(self):
-        result = _try_parse(["pip", "show", "requests"])
-        assert result is not None
-        assert result.manager == "pip"
-        assert result.packages == []
+    def test_pip_show_passthrough(self):
+        # Only install is sandboxed — everything else passes through directly.
+        assert _try_parse(["pip", "show", "requests"]) is None
 
-    def test_recognises_pip_list(self):
-        result = _try_parse(["pip", "list"])
-        assert result is not None
-        assert result.manager == "pip"
-        assert result.packages == []
+    def test_pip_list_passthrough(self):
+        assert _try_parse(["pip", "list"]) is None
 
     def test_recognises_pipenv_sync(self):
         result = _try_parse(["pipenv", "sync"])

@@ -897,7 +897,14 @@ class PythonLanguage:
         if venv_path and venv_path.exists():
             venv_bin = str(venv_path / "bin")
             env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
-            extra_write.append(venv_path)
+            # Snapshot venv/bin so rollback reverts console scripts added during install.
+            # Avoid snapshotting the entire venv root — site-packages is already a
+            # scan_target and snapshotting the parent would duplicate ~71 MB of work.
+            bin_path = venv_path / "bin"
+            if bin_path.exists():
+                extra_write.append(bin_path)
+            else:
+                extra_write.append(venv_path)
 
         return extra_write
 
@@ -914,7 +921,8 @@ class PythonLanguage:
         if venv_path:
             result.env_updates["VIRTUAL_ENV"] = str(venv_path)
             result.path_prepends.append(str(venv_path / "bin"))
-            result.write_dirs.append(venv_path)
+            bin_path = venv_path / "bin"
+            result.write_dirs.append(bin_path if bin_path.exists() else venv_path)
             result.notes.append(f"venv: {venv_path.name}")
             sp = venv_site_packages(venv_path)
             if sp:

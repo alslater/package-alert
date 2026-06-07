@@ -31,15 +31,52 @@ def test_pip_install_multiple():
     assert len(result.packages) == 3
 
 
-def test_pip_non_install_recognised():
-    # Non-install subcommands are recognised (so venv injection fires) but carry no packages.
-    result = parse_pip_args(["pip", "list"])
-    assert result is not None
-    assert result.packages == []
+def test_pip_non_install_passthrough():
+    # Only install modifies the package set — everything else passes through directly.
+    assert parse_pip_args(["pip", "list"]) is None
+    assert parse_pip_args(["pip", "show", "requests"]) is None
+    assert parse_pip_args(["pip", "freeze"]) is None
+    assert parse_pip_args(["pip", "some-future-subcommand"]) is None
 
-    result = parse_pip_args(["pip", "show", "requests"])
+
+def test_pip_global_flags_before_install_subcommand():
+    # Global flags before the subcommand must not prevent install detection.
+    result = parse_pip_args(["pip", "-q", "install", "requests"])
     assert result is not None
-    assert result.packages == []
+    assert result.packages == ["requests"]
+
+    result = parse_pip_args(["pip", "--disable-pip-version-check", "install", "flask"])
+    assert result is not None
+    assert result.packages == ["flask"]
+
+    result = parse_pip_args(["pip", "-q", "--no-input", "install", "-r", "requirements.txt"])
+    assert result is not None
+    assert result.req_files == ["requirements.txt"]
+
+    # Value-consuming flags must not cause the value to be mistaken for the subcommand.
+    result = parse_pip_args(["pip", "--cache-dir", "/tmp/sjsh", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+    result = parse_pip_args(["pip", "--cache-dir=/tmp/sjsh", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+    # Boolean global flags must not consume the next token (which is the subcommand).
+    result = parse_pip_args(["pip", "--isolated", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+    result = parse_pip_args(["pip", "--no-deps", "install", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+
+def test_pip_global_flags_before_non_install_subcommand():
+    # Global flags before a non-install subcommand still pass through.
+    assert parse_pip_args(["pip", "-q", "list"]) is None
+    assert parse_pip_args(["pip", "--disable-pip-version-check", "show", "requests"]) is None
+    assert parse_pip_args(["pip", "--cache-dir", "/tmp", "list"]) is None
 
 
 def test_pip_install_from_requirements_parses_req_files():
