@@ -45,6 +45,14 @@ def register(lang: LanguageBase) -> None:
         declared = 1
 
     if declared < CURRENT_CONTRACT_VERSION:
+        import warnings
+        warnings.warn(
+            f"Language plugin '{getattr(lang, 'name', '?')}' uses contract version {declared}, "
+            f"current is {CURRENT_CONTRACT_VERSION}. Support for older contract versions will be "
+            f"removed in a future release. Update the plugin to contract version {CURRENT_CONTRACT_VERSION}.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         log.warning(
             "Language module '%s' uses contract version %d, current is %d — "
             "some features may be unavailable.",

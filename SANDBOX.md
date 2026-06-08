@@ -36,7 +36,8 @@ package-alert run bash                        # sandboxed interactive shell
 |--------|-------------|
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already cached locally. |
 | `--env VAR` | Forward an additional environment variable into the sandbox. Repeatable. |
-| `--expose-ssh-keys` | Mount `~/.ssh` read-only inside the sandbox. Required for SSH VCS dependencies (`git+ssh://`, `git@host:org/repo`). package-alert detects these automatically and prompts if the flag is missing. |
+| `--flags CAPABILITY[,CAPABILITY…]` | Enable named capabilities for this run. Each capability is `namespace:name`, e.g. `--flags python:ssh-keys`. Capabilities are passed to language plugins via `pre_run_check` and `configure_sandbox`. Multiple capabilities can be combined with a comma: `--flags python:ssh-keys,python:other-cap`. |
+| `--expose-ssh-keys` | *(Deprecated — use `--flags python:ssh-keys` instead.)* |
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files and install targets to their pre-run state on exit regardless of outcome. |
 | `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks resolving outside the project root. |
 
@@ -54,7 +55,7 @@ pip install requests   # runs with --no-network
 uv sync                # also runs with --no-network
 ```
 
-`PA_RUN_OPTS` supports the same flags as `package-alert run`: `--no-change` / `-n`, `--no-network`, `--expose-ssh-keys`, `--allow-external-lockfiles`. Unrecognised tokens are ignored with a warning.
+`PA_RUN_OPTS` supports the same flags as `package-alert run`: `--no-change` / `-n`, `--no-network`, `--flags`, `--expose-ssh-keys` (deprecated), `--allow-external-lockfiles`. Unrecognised tokens are ignored with a warning.
 
 ## Shadow Tools (Transparent Interception)
 
@@ -187,7 +188,9 @@ package-alert scans explicit package arguments and project requirements/lock fil
 - `ssh://git@host/org/repo`
 - `git@host:org/repo` (scp-style)
 
-If any are found and `--expose-ssh-keys` is not set, the command is blocked with a suggestion to re-run with the flag. When `--expose-ssh-keys` is used, a confirmation prompt is shown (SSH keys are accessible to install-time scripts inside the sandbox), and `GIT_SSH_COMMAND` is set to use only `~/.ssh/config` and bypass system SSH config that may have broken permissions inside the user namespace.
+If any are found and neither `--flags python:ssh-keys` nor `--expose-ssh-keys` is set, the command is blocked with a suggestion to re-run with `--flags python:ssh-keys`. When SSH key access is granted and stdin is a TTY, a confirmation prompt is shown before proceeding (SSH keys are accessible to install-time scripts inside the sandbox). In non-interactive use (piped stdin, CI, or shell mode), a warning is printed to stderr and execution continues automatically. When `~/.ssh` exists, it is mounted read-only and `GIT_SSH_COMMAND` is set to use `~/.ssh/config` explicitly, bypassing any system SSH config that may have broken permissions inside the user namespace. If `~/.ssh/config` does not exist, `GIT_SSH_COMMAND` is set to `-F /dev/null` to prevent ssh from falling back to system config. If `~/.ssh` does not exist at all, nothing is mounted and `GIT_SSH_COMMAND` is left unset.
+
+> **Note:** `--expose-ssh-keys` is deprecated. Use `--flags python:ssh-keys` instead. Both are accepted and have identical behaviour; `--expose-ssh-keys` will be removed in a future release.
 
 ## Filesystem Isolation
 

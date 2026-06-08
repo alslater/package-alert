@@ -113,7 +113,7 @@ def test_pa_run_opts_multiple_flags():
 def test_pa_run_opts_expose_ssh_keys():
     _, call = _invoke(["run", "pip", "install", "requests"],
                       env={"PA_RUN_OPTS": "--expose-ssh-keys"})
-    assert call.kwargs["expose_ssh_keys"] is True
+    assert "ssh-keys" in call.kwargs["flags"].get("python", frozenset())
 
 
 def test_pa_run_opts_allow_external_lockfiles():
@@ -161,3 +161,45 @@ def test_package_manager_short_n_flag_passed_through():
     _, call = _invoke(["run", "npm", "install", "-n"])
     args, _ = call
     assert "-n" in args[0]
+
+
+# ---------------------------------------------------------------------------
+# --flags option
+# ---------------------------------------------------------------------------
+
+class TestFlagsOption:
+    def test_flags_forwarded_to_runner(self, monkeypatch):
+        """--flags is parsed and passed as a dict to runner.run()."""
+        calls = []
+
+        async def fake_run(self_runner, argv, *, allow_network=True, extra_env=None, expose_ssh_keys=False, flags=None, allow_external_lockfiles=False, no_change=False):
+            calls.append({"flags": flags})
+            return 0
+
+        from unittest.mock import patch
+        from typer.testing import CliRunner
+        from packagealert.cli.app import app
+
+        with patch("packagealert.sandbox.runner.SandboxRunner.run", fake_run):
+            runner = CliRunner()
+            result = runner.invoke(app, ["run", "--flags", "python:ssh-keys", "uv", "sync"])
+        assert result.exit_code == 0, result.output
+        assert calls[0]["flags"] == {"python": frozenset({"ssh-keys"})}
+
+    def test_expose_ssh_keys_deprecated_warning(self, monkeypatch):
+        """--expose-ssh-keys prints a deprecation warning."""
+        calls = []
+
+        async def fake_run(self_runner, argv, *, allow_network=True, extra_env=None, expose_ssh_keys=False, flags=None, allow_external_lockfiles=False, no_change=False):
+            calls.append({"flags": flags})
+            return 0
+
+        from unittest.mock import patch
+        from typer.testing import CliRunner
+        from packagealert.cli.app import app
+
+        with patch("packagealert.sandbox.runner.SandboxRunner.run", fake_run):
+            runner = CliRunner()
+            result = runner.invoke(app, ["run", "--expose-ssh-keys", "uv", "sync"])
+        assert result.exit_code == 0, result.output
+        assert "deprecated" in result.output.lower() or "python:ssh-keys" in result.output

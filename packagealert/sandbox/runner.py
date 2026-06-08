@@ -92,7 +92,7 @@ class SandboxRunner:
         lang_registry.load()
         self._backend: SandboxBackend = build_backend(cfg.sandbox)
 
-    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, expose_ssh_keys: bool = False, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
+    async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, flags: dict[str, frozenset[str]] | None = None, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -100,23 +100,13 @@ class SandboxRunner:
             self._console.print("[dim]  Arch:          sudo pacman -S bubblewrap[/dim]")
             return 1
 
+        if flags is None:
+            flags = {}
+
         cwd = Path.cwd()
 
-        if expose_ssh_keys:
-            from rich.prompt import Confirm
-            self._console.print(
-                "[yellow]⚠  --expose-ssh-keys: your ~/.ssh directory will be mounted "
-                "read-only inside the sandbox.[/yellow]"
-            )
-            self._console.print(
-                "[dim]Install-time scripts will be able to read your private keys "
-                "and SSH config. Only proceed if you trust the packages being installed.[/dim]"
-            )
-            if not Confirm.ask("Continue with SSH keys exposed?", default=False):
-                return 1
-
         if argv and Path(argv[0]).name in _SHELL_NAMES:
-            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, expose_ssh_keys=expose_ssh_keys, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
+            return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, flags=flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
 
         parsed = _try_parse(argv)
 
@@ -182,20 +172,113 @@ class SandboxRunner:
         elif not via_shim:
             self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
+        import inspect as _inspect
+        from packagealert.languages.base import PreRunResult as _PreRunResult
+
+        def _run_pre_check(lang, parsed_arg, lang_flags):
+            """Invoke pre_run_check on *lang*, handling legacy signatures.
+
+            *parsed_arg* is None when the language is not the primary ecosystem
+            (mirrors configure_sandbox behaviour for cross-namespace flags).
+            Returns 1 if the check blocked, 0 to continue.
+            """
+            pre_check_fn = getattr(lang, "pre_run_check", None)
+            if not callable(pre_check_fn):
+                return 0
+            _lang_name = getattr(lang, "name", "?")
+            try:
+                _sig = _inspect.signature(pre_check_fn)
+                _params = _sig.parameters
+                _has_flags_param = "flags" in _params or any(
+                    p.kind == _inspect.Parameter.VAR_KEYWORD
+                    for p in _params.values()
+                )
+                # expose_ssh_keys was in the old LanguageBase signature, so any
+                # plugin overriding pre_run_check before contract v3 will have it.
+                # Only Python ever acted on it — and the built-in Python plugin is
+                # already on v3, so this path is only hit by third-party legacy
+                # plugins that never used the value. Always pass False.
+                _has_legacy_expose = "expose_ssh_keys" in _params
+            except (ValueError, TypeError):
+                _has_flags_param = True
+                _has_legacy_expose = False
+            try:
+                if _has_legacy_expose:
+                    # expose_ssh_keys is always False here. The parameter existed in the
+                    # old LanguageBase signature so every pre-v3 plugin declared it, but
+                    # only the built-in Python plugin ever read it — and that plugin is
+                    # already on contract v3 (no expose_ssh_keys in its signature), so
+                    # it will never reach this branch. No third-party plugin shipped that
+                    # acted on this value; passing False is safe and correct.
+                    if _has_flags_param:
+                        result = pre_check_fn(parsed_arg, cwd, False, flags=lang_flags)
+                    else:
+                        result = pre_check_fn(parsed_arg, cwd, False)
+                elif _has_flags_param:
+                    result = pre_check_fn(parsed_arg, cwd, flags=lang_flags)
+                else:
+                    result = pre_check_fn(parsed_arg, cwd)
+            except Exception:
+                log.warning("pre_run_check raised for lang=%s — skipping",
+                            _lang_name, exc_info=True)
+                result = None
+            if isinstance(result, str):
+                # Legacy v1/v2 contract: non-empty string = error message (block);
+                # empty string or None = allow. Truthy non-string = block (old sentinel).
+                if result:
+                    result = _PreRunResult(ok=False, message=result)
+                else:
+                    result = _PreRunResult(ok=True)
+            elif result is None:
+                result = _PreRunResult(ok=True)
+            elif not isinstance(result, _PreRunResult):
+                # Any other truthy value was a legacy block sentinel; falsy = allow.
+                if result:
+                    log.warning(
+                        "pre_run_check for lang=%s returned unexpected truthy type %s — blocking",
+                        _lang_name, type(result).__name__,
+                    )
+                    result = _PreRunResult(ok=False, message="Run blocked by language plugin.")
+                else:
+                    log.warning(
+                        "pre_run_check for lang=%s returned unexpected falsy type %s — allowing",
+                        _lang_name, type(result).__name__,
+                    )
+                    result = _PreRunResult(ok=True)
+            if not result.ok:
+                self._console.print(result.message, style="bold red", markup=False)
+                if result.required_flag:
+                    self._console.print(
+                        f"Re-run with --flags {result.required_flag} to grant this capability.",
+                        style="dim",
+                        markup=False,
+                    )
+                return 1
+            return 0
+
+        # Run pre_run_check for the primary ecosystem language.
+        _primary_lang_name: str | None = None
         if parsed is not None:
             lang = lang_registry.for_ecosystem(parsed.ecosystem)
             if lang is not None:
-                pre_check_fn = getattr(lang, "pre_run_check", None)
-                if callable(pre_check_fn):
-                    try:
-                        error = pre_check_fn(parsed, cwd, expose_ssh_keys)
-                    except Exception:
-                        log.warning("pre_run_check raised for lang=%s — skipping",
-                                    getattr(lang, "name", "?"), exc_info=True)
-                        error = None
-                    if error:
-                        self._console.print(error, style="bold red", markup=False)
-                        return 1
+                _primary_lang_name = getattr(lang, "name", None)
+                lang_flags = flags.get(_primary_lang_name or "", frozenset())
+                if _run_pre_check(lang, parsed, lang_flags):
+                    return 1
+
+        # Also run pre_run_check for any other flagged namespace so that e.g.
+        # --flags python:ssh-keys during `npm install` still triggers the Python
+        # confirmation prompt before configure_sandbox mounts ~/.ssh.
+        for _ns, _ns_flags in flags.items():
+            if not _ns_flags:
+                continue
+            _lang = lang_registry.get(_ns)
+            if _lang is None:
+                continue
+            if getattr(_lang, "name", _ns) == _primary_lang_name:
+                continue  # already handled above
+            if _run_pre_check(_lang, None, _ns_flags):
+                return 1
 
         cooldown_result = await self._cooldown_check(ctx)
         if cooldown_result is False:
@@ -281,17 +364,45 @@ class SandboxRunner:
         # home_ro: paths under cwd are already covered by the cwd write bind —
         # a more-specific ro-bind on any of them would silently shadow it.
         home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
-        if expose_ssh_keys:
-            ssh_dir = Path.home() / ".ssh"
-            if ssh_dir.exists():
-                home_ro.append(ssh_dir)
-            # Bypass system SSH config (which may have broken permissions on
-            # some systemd setups) and use only the user's ~/.ssh/config.
-            ssh_config = ssh_dir / "config"
-            if ssh_config.exists():
-                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
-            else:
-                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
+
+        from packagealert.languages.base import SandboxTargets as _SandboxTargets
+        _cs_targets = _SandboxTargets(
+            scan_targets=list(ctx.scan_targets),
+            write_dirs=list(ctx.write_dirs),
+        )
+        _primary_lang_name: str | None = None
+        if ctx.parsed is not None:
+            lang_for_cs = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+            if lang_for_cs is not None:
+                configure_fn = getattr(lang_for_cs, "configure_sandbox", None)
+                if callable(configure_fn):
+                    _primary_lang_name = getattr(lang_for_cs, "name", None)
+                    lang_flags_cs = flags.get(_primary_lang_name or "", frozenset())
+                    try:
+                        configure_fn(ctx.parsed, cwd, lang_flags_cs, _cs_targets, home_ro, sandbox_env)
+                    except Exception:
+                        log.warning("configure_sandbox raised for lang=%s — skipping",
+                                    _primary_lang_name, exc_info=True)
+
+        # Also invoke configure_sandbox for any other language namespace that has
+        # active flags — so e.g. --flags python:ssh-keys mounts ~/.ssh even when
+        # running npm install (node ecosystem, not python).
+        for _ns, _ns_flags in flags.items():
+            if not _ns_flags:
+                continue
+            _lang = lang_registry.get(_ns)
+            if _lang is None:
+                continue
+            _ns_name = getattr(_lang, "name", _ns)
+            if _ns_name == _primary_lang_name:
+                continue  # already handled above
+            _configure_fn = getattr(_lang, "configure_sandbox", None)
+            if callable(_configure_fn):
+                try:
+                    _configure_fn(None, cwd, _ns_flags, _cs_targets, home_ro, sandbox_env)
+                except Exception:
+                    log.warning("configure_sandbox raised for lang=%s — skipping",
+                                _ns_name, exc_info=True)
 
         extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
         if not self._check_extra_tmpfs(extra_tmpfs):
@@ -620,7 +731,7 @@ class SandboxRunner:
         cwd: Path,
         allow_network: bool,
         extra_env: list[str] | None,
-        expose_ssh_keys: bool = False,
+        flags: dict[str, frozenset[str]] | None = None,
         allow_external_lockfiles: bool = False,
         no_change: bool = False,
     ) -> int:
@@ -637,6 +748,34 @@ class SandboxRunner:
         if extra_env:
             combined_extra.extend(extra_env)
         sandbox_env = _build_sandbox_env(combined_extra)
+
+        # Propagate active flags into PA_RUN_OPTS so shim-invoked package managers
+        # inside the shell inherit them (e.g. pipenv lock picking up python:ssh-keys).
+        shell_flags = flags or {}
+        if shell_flags:
+            flags_str = ",".join(
+                f"{ns}:{cap}"
+                for ns, caps in sorted(shell_flags.items())
+                for cap in sorted(caps)
+            )
+            existing_opts = sandbox_env.get("PA_RUN_OPTS", "").strip()
+            sandbox_env["PA_RUN_OPTS"] = f"{existing_opts} --flags {shlex.quote(flags_str)}".strip()
+
+        if "ssh-keys" in shell_flags.get("python", frozenset()):
+            from rich.console import Console as _Console
+            _ssh_dir = Path.home() / ".ssh"
+            if _ssh_dir.exists():
+                _Console(stderr=True).print(
+                    "⚠  SSH keys (python:ssh-keys): ~/.ssh mounted read-only inside the sandbox.",
+                    style="yellow",
+                    markup=False,
+                )
+            else:
+                _Console(stderr=True).print(
+                    "⚠  SSH keys (python:ssh-keys): ~/.ssh not found — flag has no effect.",
+                    style="yellow",
+                    markup=False,
+                )
 
         write_dirs: list[Path] = [cwd]
         scan_targets: list[Path] = []
@@ -712,15 +851,24 @@ class SandboxRunner:
             p for p in _home_ro_dirs() + rc_paths
             if not p.is_relative_to(cwd)
         ]
-        if expose_ssh_keys:
-            ssh_dir = Path.home() / ".ssh"
-            if ssh_dir.exists():
-                home_ro.append(ssh_dir)
-            ssh_config = ssh_dir / "config"
-            if ssh_config.exists():
-                sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
-            else:
-                sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
+        shell_flags = flags or {}
+        for lang in lang_registry.all_languages():
+            lang_name_sh = getattr(lang, "name", "?")
+            lang_flags_sh = shell_flags.get(lang_name_sh, frozenset())
+            if not lang_flags_sh:
+                continue
+            configure_fn = getattr(lang, "configure_sandbox", None)
+            if callable(configure_fn):
+                from packagealert.languages.base import SandboxTargets
+                _sh_targets = SandboxTargets(
+                    scan_targets=list(scan_targets),
+                    write_dirs=list(write_dirs),
+                )
+                try:
+                    configure_fn(None, cwd, lang_flags_sh, _sh_targets, home_ro, sandbox_env)
+                except Exception:
+                    log.warning("configure_sandbox raised for lang=%s in shell mode — skipping",
+                                lang_name_sh, exc_info=True)
 
         extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
         if not self._check_extra_tmpfs(extra_tmpfs):
@@ -1212,6 +1360,36 @@ def _build_sandbox_env(extra: list[str]) -> dict[str, str]:
             )
     allowed = _SANDBOX_ENV_COMMON | lang_env | set(extra)
     return {k: v for k, v in os.environ.items() if k in allowed}
+
+
+_FLAG_TOKEN_RE = re.compile(r'^[a-z0-9_-]+$')
+
+
+def _parse_flags(flags_str: str) -> dict[str, frozenset[str]]:
+    """Parse a comma-separated flags string into a per-namespace dict.
+
+    "python:ssh-keys,ruby:gem-credentials" ->
+        {"python": frozenset({"ssh-keys"}), "ruby": frozenset({"gem-credentials"})}
+
+    Entries without a colon are silently ignored. Namespace and capability tokens
+    must match ``[a-z0-9_-]+``; invalid tokens (including uppercase) are silently
+    dropped. Callers are responsible for producing user-facing diagnostics before
+    calling this function.
+    """
+    result: dict[str, list[str]] = {}
+    for token in flags_str.split(","):
+        token = token.strip()
+        if ":" not in token:
+            continue
+        namespace, _, capability = token.partition(":")
+        namespace = namespace.strip()
+        capability = capability.strip()
+        if not namespace or not capability:
+            continue
+        if not _FLAG_TOKEN_RE.match(namespace) or not _FLAG_TOKEN_RE.match(capability):
+            continue
+        result.setdefault(namespace, []).append(capability)
+    return {k: frozenset(v) for k, v in result.items()}
 
 
 def _serialise_package_spec(p: PackageSpec) -> str:
