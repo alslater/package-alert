@@ -203,7 +203,7 @@ class LanguageBase(Protocol):
     def popularity_ecosystem(self) -> str | None:
         return None
 
-    def prepare_sandbox_argv(self, argv: list[str], cwd: "Path") -> list[str]:
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
         """Pre-process argv before it is passed to the sandbox.
 
         Called by the sandbox runner just before build_cmd. Language modules can
@@ -212,7 +212,7 @@ class LanguageBase(Protocol):
         """
         return argv
 
-    def sandbox_extra_ro_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Return additional paths to expose read-only inside the sandbox.
 
         Called with the prepared argv (after prepare_sandbox_argv) and cwd. Use this
@@ -222,7 +222,7 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def sandbox_extra_write_paths(self, argv: list[str], cwd: "Path") -> "list[Path]":
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Return additional paths to bind writable inside the sandbox.
 
         Called with the prepared argv (after prepare_sandbox_argv) and cwd. Use this
@@ -232,7 +232,7 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def post_run_scan_targets(self, parsed: Any, cwd: "Path") -> "list[Path]":
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
         """Return scan targets that may have been created during the sandbox run.
 
         Called after the sandbox exits when no scan targets were detected before
@@ -253,10 +253,10 @@ class LanguageBase(Protocol):
 
     def pre_run_check(
         self,
-        parsed: "Any | None",
-        cwd: "Path",
-        flags: "frozenset[str]" = frozenset(),
-    ) -> "PreRunResult":
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str] = frozenset(),
+    ) -> PreRunResult:
         """Return PreRunResult(ok=True) to allow, or (ok=False, message, required_flag) to block.
 
         *flags* contains only this module's flags (namespace already stripped by the runner).
@@ -271,12 +271,12 @@ class LanguageBase(Protocol):
 
     def configure_sandbox(
         self,
-        parsed: "Any | None",
-        cwd: "Path",
-        flags: "frozenset[str]",
-        targets: "SandboxTargets",
-        home_ro: "list[Path]",
-        sandbox_env: "dict[str, str]",
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+        home_ro: list[Path],
+        sandbox_env: dict[str, str],
     ) -> None:
         """Adjust sandbox mounts and env based on granted flags.
 
@@ -296,8 +296,8 @@ class LanguageBase(Protocol):
     def resolve_sandbox_targets(
         self,
         parsed: Any,
-        cwd: "Path",
-    ) -> "SandboxTargets":
+        cwd: Path,
+    ) -> SandboxTargets:
         """Return scan targets and extra writable dirs for this install.
 
         Called after cwd is appended to write_dirs. Replaces the per-ecosystem
@@ -312,9 +312,9 @@ class LanguageBase(Protocol):
     def prepare_sandbox_env(
         self,
         parsed: Any,
-        cwd: "Path",
-        env: "dict[str, str]",
-    ) -> "list[Path]":
+        cwd: Path,
+        env: dict[str, str],
+    ) -> list[Path]:
         """Mutate *env* to add language-specific variables (e.g. VIRTUAL_ENV, PATH).
 
         Returns additional paths to bind writable inside the sandbox (e.g. the
@@ -326,7 +326,7 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def shell_environment(self, cwd: "Path") -> "ShellEnvironment":
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
         """Return the shell session environment for this language.
 
         Called at the start of _run_shell. Results from all registered language
@@ -336,9 +336,9 @@ class LanguageBase(Protocol):
 
     def detect_new_packages(
         self,
-        new_paths: "set[Path]",
-        walk_root: "Path",
-    ) -> "list[PackageSpec]":
+        new_paths: set[Path],
+        walk_root: Path,
+    ) -> list[PackageSpec]:
         """Return packages that appeared in *new_paths* since the pre-run snapshot.
 
         Called after the sandbox exits with the set of paths that appeared under
@@ -352,7 +352,7 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def home_ro_paths(self) -> "list[Path]":
+    def home_ro_paths(self) -> list[Path]:
         """Return paths under $HOME to expose read-only inside the sandbox.
 
         Called once at sandbox setup. Results from all registered language modules
@@ -363,7 +363,7 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def resolve_package_dir(self, package_name: str, project_path: "Path | None", site_packages_dir: "Path | None") -> "Path | None":
+    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
         """Return the on-disk directory for an installed package, or None if not resolvable.
 
         Called by the daemon after a process-monitor event to locate the extracted

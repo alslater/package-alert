@@ -495,7 +495,7 @@ class NodeLanguage:
 
     def detect_new_packages(
         self,
-        new_paths: "set[Path]",
+        new_paths: set[Path],
         walk_root: Path,
     ) -> "list[PackageSpec]":
         results = []
