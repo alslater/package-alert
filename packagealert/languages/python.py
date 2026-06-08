@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 from typing import Any
 import re
 import subprocess
@@ -17,6 +18,7 @@ from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     PackageMetadata,
     PackageSpec,
+    PreRunResult,
     ProcessInstall,
     SandboxEnvError,
     SandboxPaths,
@@ -777,12 +779,12 @@ class PythonLanguage:
 
     def pre_run_check(
         self,
-        parsed: Any,
+        parsed: "Any | None",
         cwd: Path,
-        expose_ssh_keys: bool,
-    ) -> str | None:
-        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv only)
-        if parsed.manager in ("pip", "pipenv"):
+        flags: frozenset[str] = frozenset(),
+    ) -> PreRunResult:
+        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv only, skipped in cross-namespace calls)
+        if parsed is not None and parsed.manager in ("pip", "pipenv"):
             virtual_env = os.environ.get("VIRTUAL_ENV")
             if virtual_env:
                 venv_path = Path(virtual_env)
@@ -790,24 +792,78 @@ class PythonLanguage:
                     if not (parsed.manager == "pipenv"
                             and not os.environ.get("PIPENV_VENV_IN_PROJECT")
                             and venv_path.is_relative_to(_pipenv_venv_dir())):
-                        return (
-                            f"✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:\n"
-                            f"  VIRTUAL_ENV = {virtual_env}\n"
-                            f"  Project     = {cwd}\n"
-                            f"Run 'deactivate' before using package-alert run, "
-                            f"or cd to the project that owns this virtualenv."
+                        return PreRunResult(
+                            ok=False,
+                            message=(
+                                f"✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:\n"
+                                f"  VIRTUAL_ENV = {virtual_env}\n"
+                                f"  Project     = {cwd}\n"
+                                f"Run 'deactivate' before using package-alert run, "
+                                f"or cd to the project that owns this virtualenv."
+                            ),
+                            required_flag="",
                         )
 
         # 2. SSH VCS dependency check
-        if _has_ssh_vcs_deps(parsed, cwd) and not expose_ssh_keys:
-            return (
-                "⚠ This install includes SSH VCS dependencies.\n"
-                "SSH keys are not exposed in the sandbox by default.\n"
-                "Re-run with --expose-ssh-keys to allow SSH key access (example):\n"
-                "  package-alert run --expose-ssh-keys <your command here>"
+        ssh_granted = "ssh-keys" in flags
+        has_ssh_deps = _has_ssh_vcs_deps(parsed, cwd) if parsed is not None else False
+        if has_ssh_deps and not ssh_granted:
+            return PreRunResult(
+                ok=False,
+                message=(
+                    "⚠ This install includes SSH VCS dependencies.\n"
+                    "SSH keys are not exposed in the sandbox by default.\n"
+                    "Re-run with --flags python:ssh-keys to allow SSH key access (example):\n"
+                    "  package-alert run --flags python:ssh-keys <your command here>"
+                ),
+                required_flag="python:ssh-keys",
             )
 
-        return None
+        # SSH keys granted — confirm interactively before proceeding.
+        # Only warn/prompt when ~/.ssh actually exists; configure_sandbox only
+        # mounts it conditionally, so there is nothing to warn about otherwise.
+        if ssh_granted and (Path.home() / ".ssh").exists():
+            import sys
+            from rich.console import Console
+            _con = Console(stderr=True)
+            if sys.stdin.isatty():
+                from rich.prompt import Confirm
+                _con.print(
+                    "[yellow]⚠  SSH keys (python:ssh-keys): your ~/.ssh directory will be mounted "
+                    "read-only inside the sandbox.[/yellow]"
+                )
+                _con.print(
+                    "[dim]Install-time scripts will be able to read your private keys "
+                    "and SSH config. Only proceed if you trust the packages being installed.[/dim]"
+                )
+                if not Confirm.ask("Continue with SSH keys exposed?", default=False):
+                    return PreRunResult(ok=False, message="Aborted by user.", required_flag="")
+            else:
+                _con.print(
+                    "[yellow]⚠  SSH keys (python:ssh-keys): ~/.ssh mounted read-only inside the sandbox "
+                    "(non-interactive, proceeding automatically).[/yellow]"
+                )
+
+        return PreRunResult(ok=True)
+
+    def configure_sandbox(
+        self,
+        parsed: "Any | None",
+        cwd: Path,
+        flags: frozenset[str],
+        targets: "SandboxTargets",
+        home_ro: "list[Path]",
+        sandbox_env: "dict[str, str]",
+    ) -> None:
+        if "ssh-keys" in flags:
+            ssh_dir = Path.home() / ".ssh"
+            if ssh_dir.exists():
+                home_ro.append(ssh_dir)
+                ssh_config = ssh_dir / "config"
+                if ssh_config.exists():
+                    sandbox_env["GIT_SSH_COMMAND"] = f"ssh -F {shlex.quote(str(ssh_config))}"
+                else:
+                    sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
     def resolve_sandbox_targets(
         self,

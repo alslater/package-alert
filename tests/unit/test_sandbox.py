@@ -55,6 +55,44 @@ def _make_runner():
 
 
 # ---------------------------------------------------------------------------
+# _parse_flags
+# ---------------------------------------------------------------------------
+
+class TestFlagParsing:
+    def test_parse_flags_empty(self):
+        from packagealert.sandbox.runner import _parse_flags
+        assert _parse_flags("") == {}
+
+    def test_parse_flags_single(self):
+        from packagealert.sandbox.runner import _parse_flags
+        result = _parse_flags("python:ssh-keys")
+        assert result == {"python": frozenset({"ssh-keys"})}
+
+    def test_parse_flags_comma_separated(self):
+        from packagealert.sandbox.runner import _parse_flags
+        result = _parse_flags("python:ssh-keys,python:other-cap")
+        assert result == {"python": frozenset({"ssh-keys", "other-cap"})}
+
+    def test_parse_flags_multiple_namespaces(self):
+        from packagealert.sandbox.runner import _parse_flags
+        result = _parse_flags("python:ssh-keys,ruby:gem-credentials")
+        assert result == {
+            "python": frozenset({"ssh-keys"}),
+            "ruby": frozenset({"gem-credentials"}),
+        }
+
+    def test_parse_flags_ignores_malformed_no_colon(self):
+        from packagealert.sandbox.runner import _parse_flags
+        result = _parse_flags("nocolon")
+        assert result == {}
+
+    def test_parse_flags_strips_whitespace(self):
+        from packagealert.sandbox.runner import _parse_flags
+        result = _parse_flags(" python:ssh-keys , python:other ")
+        assert result == {"python": frozenset({"ssh-keys", "other"})}
+
+
+# ---------------------------------------------------------------------------
 # bwrap.build_cmd
 # ---------------------------------------------------------------------------
 
@@ -1008,26 +1046,26 @@ class TestCheckVenvScope:
         venv.mkdir()
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path, False) is None
+        assert self._lang().pre_run_check(parsed, tmp_path).ok is True
 
     def test_blocks_venv_outside_project(self, tmp_path, monkeypatch):
         other = tmp_path / "other_project" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
 
     def test_allows_when_no_virtual_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path, False) is None
+        assert self._lang().pre_run_check(parsed, tmp_path).ok is True
 
     def test_allows_for_uv_regardless_of_virtual_env(self, tmp_path, monkeypatch):
         other = tmp_path / "other" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
 
     def test_allows_for_npm_manager(self, tmp_path, monkeypatch):
         # PythonLanguage.pre_run_check only enforces VIRTUAL_ENV scope for pip/pipenv.
@@ -1037,7 +1075,7 @@ class TestCheckVenvScope:
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="npm", packages=[], ecosystem="npm")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
 
 
     def test_allows_pipenv_venv_in_managed_dir(self, tmp_path, monkeypatch):
@@ -1050,7 +1088,7 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
 
     def test_blocks_pipenv_foreign_venv_outside_managed_dir(self, tmp_path, monkeypatch):
         # A venv neither in the project tree nor in the pipenv-managed dir is foreign.
@@ -1062,7 +1100,7 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(foreign))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
 
     def test_blocks_pipenv_outside_project_when_venv_in_project_set(self, tmp_path, monkeypatch):
         # When PIPENV_VENV_IN_PROJECT=1 the venv must be inside the project tree.
@@ -1074,7 +1112,162 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project", False) is not None
+        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
+
+
+class TestPreRunResult:
+    def test_default_ok(self):
+        from packagealert.languages.base import PreRunResult
+        r = PreRunResult(ok=True)
+        assert r.ok is True
+        assert r.message == ""
+        assert r.required_flag == ""
+
+    def test_blocking_with_flag(self):
+        from packagealert.languages.base import PreRunResult
+        r = PreRunResult(ok=False, message="needs ssh", required_flag="python:ssh-keys")
+        assert r.ok is False
+        assert r.required_flag == "python:ssh-keys"
+
+
+class TestPythonPreRunCheckWithFlags:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def _make_parsed(self, manager="pip", packages=None):
+        from packagealert.parsers.process_args import ParsedInstall
+        return ParsedInstall(
+            manager=manager, packages=packages or [], ecosystem="pypi",
+            venv_exe=None, req_files=[], lockfile_hint=None,
+            global_install=False, suggested_env={},
+        )
+
+    def test_blocks_ssh_deps_without_flag_returns_PreRunResult(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed(packages=["git+ssh://git@github.com/org/repo"])
+        from packagealert.languages.base import PreRunResult
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset())
+        assert isinstance(result, PreRunResult)
+        assert result.ok is False
+        assert "ssh" in result.message.lower() or "SSH" in result.message
+        assert result.required_flag == "python:ssh-keys"
+
+    def test_allows_ssh_deps_with_flag(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed(packages=["git+ssh://git@github.com/org/repo"])
+        from packagealert.languages.base import PreRunResult
+        monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset({"ssh-keys"}))
+        assert isinstance(result, PreRunResult)
+        assert result.ok is True
+
+    def test_tty_prompt_abort_blocks_run(self, tmp_path, monkeypatch):
+        """TTY stdin + user declines prompt → PreRunResult.ok is False with abort message."""
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        fake_home = tmp_path / "home"
+        (fake_home / ".ssh").mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+        parsed = self._make_parsed(packages=["git+ssh://git@github.com/org/repo"])
+        from packagealert.languages.base import PreRunResult
+        monkeypatch.setattr("sys.stdin", type("TTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: False)
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset({"ssh-keys"}))
+        assert isinstance(result, PreRunResult)
+        assert result.ok is False
+        assert "abort" in result.message.lower()
+
+    def test_tty_prompt_accept_allows_run(self, tmp_path, monkeypatch):
+        """TTY stdin + user accepts prompt → PreRunResult.ok is True."""
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        fake_home = tmp_path / "home"
+        (fake_home / ".ssh").mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: fake_home)
+        parsed = self._make_parsed(packages=["git+ssh://git@github.com/org/repo"])
+        from packagealert.languages.base import PreRunResult
+        monkeypatch.setattr("sys.stdin", type("TTY", (), {"isatty": lambda self: True})())
+        monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset({"ssh-keys"}))
+        assert isinstance(result, PreRunResult)
+        assert result.ok is True
+
+    def test_no_ssh_deps_returns_ok(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        parsed = self._make_parsed(packages=["requests"])
+        from packagealert.languages.base import PreRunResult
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset())
+        assert isinstance(result, PreRunResult)
+        assert result.ok is True
+
+    def test_venv_scope_block_returns_PreRunResult(self, tmp_path, monkeypatch):
+        other = tmp_path / "other_project" / ".venv"
+        other.mkdir(parents=True)
+        monkeypatch.setenv("VIRTUAL_ENV", str(other))
+        parsed = self._make_parsed(manager="pip")
+        from packagealert.languages.base import PreRunResult
+        result = self._lang().pre_run_check(parsed, tmp_path / "my_project", flags=frozenset())
+        assert isinstance(result, PreRunResult)
+        assert result.ok is False
+        assert result.required_flag == ""
+
+
+class TestPythonConfigureSandbox:
+    def _lang(self):
+        from packagealert.languages.python import PythonLanguage
+        return PythonLanguage()
+
+    def test_ssh_keys_flag_mounts_ssh_dir(self, tmp_path, monkeypatch):
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"ssh-keys"}), targets, home_ro, sandbox_env)
+        assert ssh_dir in home_ro
+
+    def test_ssh_keys_flag_sets_git_ssh_command_with_config(self, tmp_path, monkeypatch):
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        ssh_config = ssh_dir / "config"
+        ssh_config.write_text("Host github.com\n  IdentityFile ~/.ssh/id_rsa\n")
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"ssh-keys"}), targets, home_ro, sandbox_env)
+        assert "GIT_SSH_COMMAND" in sandbox_env
+        assert str(ssh_config) in sandbox_env["GIT_SSH_COMMAND"]
+
+    def test_ssh_keys_flag_sets_git_ssh_command_without_config(self, tmp_path, monkeypatch):
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"ssh-keys"}), targets, home_ro, sandbox_env)
+        assert sandbox_env.get("GIT_SSH_COMMAND") == "ssh -F /dev/null"
+
+    def test_no_flag_is_noop(self, tmp_path, monkeypatch):
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset(), targets, home_ro, sandbox_env)
+        assert home_ro == []
+        assert sandbox_env == {}
 
 
 class TestBuildSandboxEnv:
@@ -1341,31 +1534,25 @@ class TestRunShell:
 
 
 class TestExposeSSHKeysConfirmation:
+    """The interactive SSH-keys confirmation prompt now lives in
+    PythonLanguage.pre_run_check (Task 2). run() itself no longer shows it —
+    these tests verify that run() no longer emits a Confirm.ask prompt."""
+
     def _setup(self, monkeypatch):
         import subprocess
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
 
-    def test_confirms_before_proceeding(self, tmp_path, monkeypatch):
+    def test_no_prompt_emitted_by_run_with_ssh_keys_flag(self, tmp_path, monkeypatch):
+        """run() must not emit a Confirm.ask prompt — the prompt is in PythonLanguage.pre_run_check."""
         self._setup(monkeypatch)
         monkeypatch.chdir(tmp_path)
         import asyncio
-        import packagealert.sandbox.runner as runner_mod
-        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=True) as mock_ask:
+        with unittest.mock.patch("rich.prompt.Confirm.ask") as mock_ask:
             runner = _make_runner()
-            asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
-        mock_ask.assert_called_once()
-        assert "SSH" in mock_ask.call_args[0][0] or "ssh" in mock_ask.call_args[0][0].lower()
-
-    def test_aborts_when_user_declines(self, tmp_path, monkeypatch):
-        self._setup(monkeypatch)
-        monkeypatch.chdir(tmp_path)
-        import asyncio
-        with unittest.mock.patch("rich.prompt.Confirm.ask", return_value=False):
-            runner = _make_runner()
-            rc = asyncio.run(runner.run(["bash"], expose_ssh_keys=True))
-        assert rc == 1
+            asyncio.run(runner.run(["bash"], flags={"python": frozenset({"ssh-keys"})}))
+        mock_ask.assert_not_called()
 
     def test_no_prompt_without_flag(self, tmp_path, monkeypatch):
         self._setup(monkeypatch)
@@ -1373,7 +1560,7 @@ class TestExposeSSHKeysConfirmation:
         import asyncio
         with unittest.mock.patch("rich.prompt.Confirm.ask") as mock_ask:
             runner = _make_runner()
-            asyncio.run(runner.run(["bash"], expose_ssh_keys=False))
+            asyncio.run(runner.run(["bash"]))
         mock_ask.assert_not_called()
 
 
@@ -3613,38 +3800,39 @@ class TestPythonPreRunCheck:
 
     def test_returns_none_for_uv(self, tmp_path):
         parsed = self._make_parsed(manager="uv")
-        result = self._lang().pre_run_check(parsed, tmp_path, False)
-        assert result is None
+        result = self._lang().pre_run_check(parsed, tmp_path)
+        assert result.ok is True
 
     def test_blocks_when_virtual_env_outside_project(self, tmp_path, monkeypatch):
         other = tmp_path / "other_project" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = self._make_parsed(manager="pip")
-        result = self._lang().pre_run_check(parsed, tmp_path / "my_project", False)
-        assert result is not None
-        assert "VIRTUAL_ENV" in result
+        result = self._lang().pre_run_check(parsed, tmp_path / "my_project")
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
 
     def test_allows_venv_inside_project(self, tmp_path, monkeypatch):
         venv = tmp_path / ".venv"
         venv.mkdir()
         monkeypatch.setenv("VIRTUAL_ENV", str(venv))
         parsed = self._make_parsed(manager="pip")
-        result = self._lang().pre_run_check(parsed, tmp_path, False)
-        assert result is None
+        result = self._lang().pre_run_check(parsed, tmp_path)
+        assert result.ok is True
 
     def test_blocks_ssh_deps_without_flag(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = self._make_parsed(manager="pip", packages=["git+ssh://git@github.com/org/repo"])
-        result = self._lang().pre_run_check(parsed, tmp_path, expose_ssh_keys=False)
-        assert result is not None
-        assert "SSH" in result or "ssh" in result
+        result = self._lang().pre_run_check(parsed, tmp_path)
+        assert result.ok is False
+        assert "SSH" in result.message or "ssh" in result.message
 
     def test_allows_ssh_deps_with_flag(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = self._make_parsed(manager="pip", packages=["git+ssh://git@github.com/org/repo"])
-        result = self._lang().pre_run_check(parsed, tmp_path, expose_ssh_keys=True)
-        assert result is None
+        monkeypatch.setattr("rich.prompt.Confirm.ask", lambda *a, **kw: True)
+        result = self._lang().pre_run_check(parsed, tmp_path, flags=frozenset({"ssh-keys"}))
+        assert result.ok is True
 
 
 class TestPythonResolveSandboxTargets:

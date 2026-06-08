@@ -159,7 +159,8 @@ package-alert run bash                          # interactive sandboxed shell
 |--------|-------------|
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already in the local cache. |
 | `--env VAR` | Pass an additional environment variable through into the sandbox. Repeatable: `--env MY_TOKEN --env CUSTOM_URL`. |
-| `--expose-ssh-keys` | Expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
+| `--flags CAPABILITY[,…]` | Enable named capabilities for this run, e.g. `--flags python:ssh-keys` to expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
+| `--expose-ssh-keys` | *(Deprecated — use `--flags python:ssh-keys` instead.)* Equivalent to `--flags python:ssh-keys`. Will be removed in a future release. |
 | `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks pointing outside the project root. Without this flag, lock files that resolve outside the project are rejected at every stage — pre-flight scan, post-run lock-file scan, snapshot, and restore — to prevent a malicious install from reading or writing arbitrary paths via a redirected lock file symlink. |
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. Useful for auditing what a command would install without committing changes to the project. |
 | `--config PATH` | Path to config TOML file. |
@@ -190,7 +191,7 @@ Paths re-exposed inside the home tmpfs (read-only):
 | `~/.cache/pip`, `~/.cache/uv`, `~/.npm` | Package manager caches (writable) |
 | `~/.config/composer` | Composer home (writable, when present) |
 
-Paths that are **not** accessible inside the sandbox by default: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.netrc`, `~/.git-credentials`, and everything else in `$HOME` not listed above. Pass `--expose-ssh-keys` to re-expose `~/.ssh` read-only when SSH-authenticated VCS dependencies are needed.
+Paths that are **not** accessible inside the sandbox by default: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.netrc`, `~/.git-credentials`, and everything else in `$HOME` not listed above. Pass `--flags python:ssh-keys` to re-expose `~/.ssh` read-only when SSH-authenticated VCS dependencies are needed.
 
 **Environment isolation:**
 

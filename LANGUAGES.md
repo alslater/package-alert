@@ -10,7 +10,7 @@ All language modules must satisfy the `LanguageBase` protocol defined in [`packa
 
 ### Contract Version
 
-Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `2`). When a module is registered the registry checks this value:
+Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `3`). When a module is registered the registry checks this value:
 
 | Declared version | Behaviour |
 |-----------------|-----------|
@@ -57,6 +57,13 @@ class SandboxPaths:
 @dataclass
 class Snapshot:
     data: dict[str, str]   # path → fingerprint; format is opaque and language-defined
+
+@dataclass
+class PreRunResult:
+    ok: bool               # True = allow the run; False = block it
+    message: str = ""      # user-visible error message (printed in bold red when ok=False)
+    required_flag: str = "" # the flag the user should pass to unblock (e.g. "python:ssh-keys");
+                            # informational only — the runner does not re-prompt automatically
 ```
 
 ---
@@ -257,15 +264,69 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def pre_run_check(self, parsed: Any, cwd: Path, expose_ssh_keys: bool) -> str | None:
-        """Return an error message to block the run, or None to allow.
+    def pre_run_check(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str] = frozenset(),
+    ) -> PreRunResult:
+        """Return a PreRunResult indicating whether to allow or block the run.
 
-        Called before the sandbox runs. The runner prints the returned string
-        with markup=False and returns exit code 1. Use embedded newlines for
-        multi-line messages (e.g. to include a remediation hint). Default None.
+        Called before the sandbox runs. When ok=False the runner prints
+        message with markup=False and exits 1. Use embedded newlines in
+        message for multi-line output (e.g. to include a remediation hint).
+        Default returns PreRunResult(ok=True).
 
-        *parsed* is a ``ParsedInstall`` — see ``post_run_scan_targets`` for
-        the available fields."""
+        *flags* is the set of capability names for this module, with the
+        namespace prefix already stripped by the runner (e.g. if the user
+        passes ``--flags python:ssh-keys``, the Python module receives
+        ``frozenset({"ssh-keys"})``).
+
+        *parsed* is a ``ParsedInstall`` when this is the primary ecosystem
+        language, or ``None`` when invoked for a cross-namespace flag (e.g.
+        ``--flags python:ssh-keys`` during ``npm install``). Always guard
+        access with ``if parsed is not None``.
+
+        **Legacy plugins:** if your plugin still declares ``expose_ssh_keys``
+        as a positional parameter, the runner detects this via
+        ``inspect.signature`` and passes ``False``. This is safe because
+        ``expose_ssh_keys`` was only ever declared by plugins because the old
+        ``LanguageBase`` had it — no third-party plugin ever read or acted on
+        the value. The runner emits a ``DeprecationWarning`` on load. Remove
+        ``expose_ssh_keys`` from your signature and use ``flags`` instead."""
+
+    def configure_sandbox(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+        home_ro: list[Path],
+        sandbox_env: dict[str, str],
+    ) -> None:
+        """Mutate sandbox configuration in-place based on active flags.
+
+        Called after pre_run_check passes, before the sandbox is built.
+        Override to expose additional paths or inject environment variables
+        when specific capability flags are active. *flags* contains only the
+        stripped capability names for this module (e.g. ``"ssh-keys"``, not
+        ``"python:ssh-keys"``).
+
+        *parsed* is ``None`` in two situations: shell mode
+        (``package-alert shell`` / ``package-alert run bash``), and when this
+        plugin's namespace has active flags but its ecosystem is not the primary
+        one for the current install (e.g. ``--flags python:ssh-keys`` during
+        ``npm install`` invokes the Python plugin with ``parsed=None``). Always
+        guard access with ``if parsed is not None``.
+
+        *targets* — read-only context: the SandboxTargets already resolved and
+        snapshotted by resolve_sandbox_targets. Mutations are ignored.
+        *home_ro* — list of home-directory paths to expose read-only; append
+        to this list to re-expose paths hidden by the home tmpfs.
+        *sandbox_env* — environment dict forwarded into the sandbox; mutate
+        in-place to inject variables.
+
+        Default is a no-op."""
 
     def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
         """Return scan targets and extra writable dirs for this install.
@@ -391,6 +452,7 @@ from packagealert.languages.base import (
     MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
+    PreRunResult,
     SandboxPaths,
     SandboxTargets,
     ShellEnvironment,
@@ -493,10 +555,11 @@ class RubyLanguage:
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         return []
 
-    def pre_run_check(self, parsed: Any, cwd: Path, expose_ssh_keys: bool) -> str | None:
+    def pre_run_check(self, parsed: Any, cwd: Path, flags: frozenset[str] = frozenset()) -> PreRunResult:
         # parsed is a ParsedInstall (not ProcessInstall) — see contract docs for fields.
-        # Return an error string to block, or None to allow.
-        return None
+        # Return PreRunResult(ok=False, message=...) to block, or PreRunResult(ok=True) to allow.
+        # flags contains namespace-stripped capability names (e.g. "ssh-keys", not "ruby:ssh-keys").
+        return PreRunResult(ok=True)
 
     def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
         # parsed is a ParsedInstall — see contract docs for fields.
@@ -639,14 +702,24 @@ package-alert routes plugin output to the terminal in three ways. Choose the rig
 
 ### 1. Block the run with an error — `pre_run_check`
 
-Return a non-`None` string from `pre_run_check()`. The runner prints it in **bold red** and exits 1 before the sandbox starts. Use for hard pre-conditions that cannot be satisfied (e.g. wrong virtualenv active, SSH keys required).
+Return a `PreRunResult(ok=False, message=...)` from `pre_run_check()`. The runner prints `message` in **bold red** and exits 1 before the sandbox starts. Use for hard pre-conditions that cannot be satisfied (e.g. wrong virtualenv active, a required capability flag is missing).
+
+If blocking because a specific flag is needed, populate `required_flag` with the flag name (e.g. `"python:ssh-keys"`) — this is included in diagnostics.
 
 ```python
-def pre_run_check(self, parsed, cwd, expose_ssh_keys):
-    if some_problem:
-        return "✗ Cannot proceed: <reason>.\nFix: <how to fix>."
-    return None
+from packagealert.languages.base import PreRunResult
+
+def pre_run_check(self, parsed, cwd, flags=frozenset()):
+    if "ssh-keys" not in flags:
+        return PreRunResult(
+            ok=False,
+            message="✗ Cannot proceed: SSH keys required.\nFix: re-run with --flags python:ssh-keys.",
+            required_flag="python:ssh-keys",
+        )
+    return PreRunResult(ok=True)
 ```
+
+> **Legacy plugins**: older contract v1/v2 plugins may declare `expose_ssh_keys` as a positional parameter. The runner detects this via `inspect.signature` and passes it accordingly, but emits a `DeprecationWarning` on load. Remove `expose_ssh_keys` from your signature and use `flags` instead.
 
 ### 2. Block sandbox env setup — `SandboxEnvError`
 
@@ -691,4 +764,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 |---------|-------------|
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
 | 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir`, and `interpreter_shim_script` added as optional hooks with default no-op implementations (no version bump required for existing plugins). `interpreter_shim_script(real, pa)` lets language modules supply their own interpreter shim script; the default returns None (plain passthrough shim). |
-| 3 | Added `popularity_ecosystem() -> str | None` optional hook. Plugins returning `None` (the default) are unaffected; implement to enable popularity dampening for your ecosystem. |
+| 3 | Added `popularity_ecosystem() -> str | None` optional hook. Plugins returning `None` (the default) are unaffected; implement to enable popularity dampening for your ecosystem. Added `PreRunResult` dataclass (`ok`, `message`, `required_flag`). `pre_run_check` now accepts a `flags: frozenset[str]` parameter and returns `PreRunResult` instead of `str | None`; the `expose_ssh_keys: bool` parameter is deprecated. Added `configure_sandbox(parsed, cwd, flags, targets, home_ro, sandbox_env) -> None` hook for flag-driven sandbox configuration; default is a no-op. |

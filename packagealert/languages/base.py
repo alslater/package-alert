@@ -83,6 +83,14 @@ class SandboxScanError(Exception):
 
 
 @dataclass
+class PreRunResult:
+    """Returned by pre_run_check()."""
+    ok: bool
+    message: str = ""
+    required_flag: str = ""
+
+
+@dataclass
 class Snapshot:
     data: dict[str, str]  # path -> metadata fingerprint
 
@@ -245,24 +253,45 @@ class LanguageBase(Protocol):
 
     def pre_run_check(
         self,
-        parsed: Any,
+        parsed: "Any | None",
         cwd: "Path",
-        expose_ssh_keys: bool,
-    ) -> str | None:
-        """Return an error message to block the run, or None to proceed.
+        flags: "frozenset[str]" = frozenset(),
+    ) -> "PreRunResult":
+        """Return PreRunResult(ok=True) to allow, or (ok=False, message, required_flag) to block.
 
-        Called before the sandbox runs. The runner prints the returned string
-        with markup=False and returns exit code 1. Use embedded newlines for
-        multi-line messages. Default returns None (allow).
+        *flags* contains only this module's flags (namespace already stripped by the runner).
+        Default returns PreRunResult(ok=True).
 
-        The *parsed* argument is a ``ParsedInstall`` from
-        ``packagealert.parsers.process_args`` (see ``post_run_scan_targets``
-        for field details).
-
-        Note: this signature will be extended with a ``flags`` parameter in a
-        future contract version.
+        *parsed* is ``None`` when this plugin's namespace has active flags but its
+        ecosystem is not the primary one for the current install (e.g. ``--flags
+        python:ssh-keys`` during ``npm install``). Guard any access with
+        ``if parsed is not None``.
         """
-        return None
+        return PreRunResult(ok=True)
+
+    def configure_sandbox(
+        self,
+        parsed: "Any | None",
+        cwd: "Path",
+        flags: "frozenset[str]",
+        targets: "SandboxTargets",
+        home_ro: "list[Path]",
+        sandbox_env: "dict[str, str]",
+    ) -> None:
+        """Adjust sandbox mounts and env based on granted flags.
+
+        Mutates *home_ro* and *sandbox_env* in-place to expose paths or inject
+        environment variables. *targets* is read-only context (scan and write
+        dirs already resolved and snapshotted); mutations to it are ignored.
+        Called after pre_run_check passes in run mode. In shell mode it is
+        called without a preceding pre_run_check. Default is a no-op.
+
+        *parsed* is ``None`` in two situations: shell mode (``package-alert shell``),
+        and when this plugin's namespace has active flags but its ecosystem is not
+        the primary one for the current install (e.g. ``--flags python:ssh-keys``
+        during ``npm install`` calls the Python plugin with ``parsed=None``).
+        Always guard access with ``if parsed is not None``.
+        """
 
     def resolve_sandbox_targets(
         self,
@@ -435,6 +464,7 @@ __all__ = [
     "normalise_package_name",
     "PackageSpec",
     "PackageMetadata",
+    "PreRunResult",
     "SandboxPaths",
     "SandboxEnvError",
     "SandboxTargets",

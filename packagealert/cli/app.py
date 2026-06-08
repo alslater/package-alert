@@ -910,9 +910,18 @@ def run_cmd(
         help="Extra environment variable names to pass through into the sandbox. "
              "Repeatable: --env MY_TOKEN --env CUSTOM_REGISTRY_URL",
     ),
+    flags: str = typer.Option(
+        "", "--flags",
+        help=(
+            "Grant named capabilities to language modules. Comma-separated list of "
+            "'namespace:capability' tokens, e.g. --flags python:ssh-keys. "
+            "Modules ignore capabilities they don't recognise."
+        ),
+    ),
     expose_ssh_keys: bool = typer.Option(
         False, "--expose-ssh-keys",
-        help="Expose ~/.ssh read-only inside the sandbox (required for git+ssh:// VCS dependencies).",
+        help="Deprecated: use --flags python:ssh-keys instead.",
+        hidden=True,
     ),
     allow_external_lockfiles: bool = typer.Option(
         False, "--allow-external-lockfiles",
@@ -967,9 +976,13 @@ def run_cmd(
     #   PA_RUN_OPTS="--no-change" pip install requests
     #   export PA_RUN_OPTS="--no-network"
     pa_opts_env = os.environ.get("PA_RUN_OPTS", "")
+    _env_flags_list: list[str] = []
     if pa_opts_env.strip():
         import shlex as _shlex
-        for token in _shlex.split(pa_opts_env):
+        _tokens = _shlex.split(pa_opts_env)
+        _i = 0
+        while _i < len(_tokens):
+            token = _tokens[_i]
             if token in ("--no-change", "-n"):
                 no_change = True
             elif token == "--no-network":
@@ -978,8 +991,47 @@ def run_cmd(
                 expose_ssh_keys = True
             elif token == "--allow-external-lockfiles":
                 allow_external_lockfiles = True
+            elif token == "--flags" and _i + 1 < len(_tokens):
+                _i += 1
+                _env_flags_list.append(_tokens[_i])
+            elif token == "--flags":
+                console.print("[yellow]PA_RUN_OPTS: --flags requires a value (e.g. --flags python:ssh-keys) — ignored[/yellow]")
+            elif token.startswith("--flags="):
+                _env_flags_list.append(token[len("--flags="):])
             else:
                 console.print(f"[yellow]PA_RUN_OPTS: unrecognised option {token!r} — ignored[/yellow]")
+            _i += 1
+
+    from packagealert.sandbox.runner import _parse_flags, _FLAG_TOKEN_RE
+
+    def _warn_invalid_flag_tokens(flags_str: str, source: str) -> None:
+        for _token in flags_str.split(","):
+            _token = _token.strip()
+            if ":" not in _token:
+                continue
+            _ns, _, _cap = _token.partition(":")
+            if not _FLAG_TOKEN_RE.match(_ns.strip()) or not _FLAG_TOKEN_RE.match(_cap.strip()):
+                console.print(
+                    f"[yellow]⚠ {source}: {_token!r} ignored — namespace and capability must be "
+                    f"lowercase letters, digits, hyphens, or underscores (e.g. python:ssh-keys)[/yellow]"
+                )
+
+    if flags:
+        _warn_invalid_flag_tokens(flags, "--flags")
+    parsed_flags = _parse_flags(flags)
+    for _env_flags in _env_flags_list:
+        _warn_invalid_flag_tokens(_env_flags, "PA_RUN_OPTS --flags")
+        for ns, caps in _parse_flags(_env_flags).items():
+            parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
+
+    if expose_ssh_keys:
+        console.print(
+            "[yellow]⚠ --expose-ssh-keys is deprecated. Use --flags python:ssh-keys instead.[/yellow]"
+        )
+        parsed_flags = {
+            **parsed_flags,
+            "python": parsed_flags.get("python", frozenset()) | {"ssh-keys"},
+        }
 
     command = list(ctx.args)
     if not command:
@@ -989,7 +1041,7 @@ def run_cmd(
     cfg = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
-    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, expose_ssh_keys=expose_ssh_keys, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change))
+    code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, flags=parsed_flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change))
     raise typer.Exit(code)
 
 
