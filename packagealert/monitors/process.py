@@ -66,9 +66,9 @@ class ProcessMonitor(AbstractMonitor):
                 await self._scan_processes()
             except Exception:
                 log.exception("Error scanning processes")
-            await asyncio.sleep(self._cfg.process_poll_interval_seconds)
             while not self._queue.empty():
                 yield self._queue.get_nowait()
+            await asyncio.sleep(self._cfg.process_poll_interval_seconds)
 
     async def _scan_processes(self) -> None:
         current_pids: set[int] = set()
