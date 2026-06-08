@@ -108,6 +108,44 @@ async def test_emit_from_lockfile_returns_on_lockfile_patterns_exception(tmp_pat
     assert monitor._queue.empty()
 
 
+@pytest.mark.asyncio
+async def test_events_yields_before_sleep():
+    """Queued events must be yielded before asyncio.sleep(), not after."""
+    from packagealert.models.events import PackageEvent
+    from datetime import datetime, timezone
+
+    monitor = _make_monitor()
+    dummy = PackageEvent(
+        ecosystem="pypi", package_name="dummy", version="1.0", source="process",
+        manager="pip", project_path=None, timestamp=datetime.now(timezone.utc),
+    )
+    await monitor._queue.put(dummy)
+
+    sleep_called = False
+    real_sleep = asyncio.sleep
+
+    async def tracking_sleep(t):
+        nonlocal sleep_called
+        sleep_called = True
+        await real_sleep(0)
+
+    async def fake_scan():
+        pass
+
+    gen = monitor.events()
+    with patch.object(monitor, "_scan_processes", fake_scan), \
+         patch("asyncio.sleep", tracking_sleep):
+        await monitor.start()
+        event = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+        yielded_before_sleep = not sleep_called
+
+    await monitor.stop()
+    await gen.aclose()
+
+    assert event.package_name == "dummy"
+    assert yielded_before_sleep, "sleep was called before the queued event was yielded"
+
+
 def test_package_managers_skips_buggy_plugin():
     """A plugin that raises accessing process_names must not abort _package_managers()."""
     from packagealert.monitors.process import _package_managers
