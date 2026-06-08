@@ -779,7 +779,7 @@ class PythonLanguage:
 
     def pre_run_check(
         self,
-        parsed: "Any | None",
+        parsed: Any | None,
         cwd: Path,
         flags: frozenset[str] = frozenset(),
     ) -> PreRunResult:
@@ -848,12 +848,12 @@ class PythonLanguage:
 
     def configure_sandbox(
         self,
-        parsed: "Any | None",
+        parsed: Any | None,
         cwd: Path,
         flags: frozenset[str],
-        targets: "SandboxTargets",
-        home_ro: "list[Path]",
-        sandbox_env: "dict[str, str]",
+        targets: SandboxTargets,
+        home_ro: list[Path],
+        sandbox_env: dict[str, str],
     ) -> None:
         if "ssh-keys" in flags:
             ssh_dir = Path.home() / ".ssh"
@@ -869,7 +869,7 @@ class PythonLanguage:
         self,
         parsed: Any,
         cwd: Path,
-    ) -> "SandboxTargets":
+    ) -> SandboxTargets:
         targets = SandboxTargets()
 
         try:
@@ -912,8 +912,8 @@ class PythonLanguage:
         self,
         parsed: Any,
         cwd: Path,
-        env: "dict[str, str]",
-    ) -> "list[Path]":
+        env: dict[str, str],
+    ) -> list[Path]:
         extra_write: list[Path] = []
 
         if parsed.manager not in ("pip", "pipenv"):
@@ -964,7 +964,7 @@ class PythonLanguage:
 
         return extra_write
 
-    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
         result = ShellEnvironment()
 
         venv_path: Path | None = None
@@ -998,9 +998,9 @@ class PythonLanguage:
 
     def detect_new_packages(
         self,
-        new_paths: "set[Path]",
+        new_paths: set[Path],
         walk_root: Path,
-    ) -> "list[PackageSpec]":
+    ) -> list[PackageSpec]:
         results = []
         for p in new_paths:
             if p.is_symlink():
@@ -1012,7 +1012,7 @@ class PythonLanguage:
                     results.append(PackageSpec(name=name, version=m.group(2), ecosystem="pypi"))
         return results
 
-    def home_ro_paths(self) -> "list[Path]":
+    def home_ro_paths(self) -> list[Path]:
         home = Path.home()
         candidates = [
             home / ".config" / "pip",
