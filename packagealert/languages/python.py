@@ -391,6 +391,37 @@ def _pipenv_venv_dir() -> Path:
     return Path(workon) if workon else Path.home() / ".local" / "share" / "virtualenvs"
 
 
+def _pipx_venvs_dir() -> Path:
+    from packagealert.parsers.process_args import _pipx_home
+    return _pipx_home() / "venvs"
+
+
+def _safe_tool_name(name: str) -> bool:
+    """Return True if *name* is a safe single-component directory name.
+
+    Rejects anything containing path separators or traversal sequences so that
+    ``venvs_dir / name`` cannot escape the intended venvs directory.
+    """
+    if not name or name in (".", ".."):
+        return False
+    p = Path(name)
+    return p.name == name
+
+
+def _tool_name_from_spec(spec: str, ecosystem: str) -> str | None:
+    """Extract the bare tool/package name from a raw spec string.
+
+    Strips version pins (``==3.2.1``), extras (``[dev]``), and other PEP 508
+    decorations so that ``pipx install httpie==3.2.1`` maps to the venv name
+    ``httpie`` rather than the non-existent ``httpie==3.2.1``.
+
+    Returns None for empty or unparseable specs.
+    """
+    from packagealert.parsers.process_args import parse_package_spec
+    name, _ = parse_package_spec(spec, ecosystem)
+    return name or None
+
+
 def _find_site_packages(parsed: Any, cwd: Path) -> Path | None:
     if parsed is None:
         return None
@@ -427,7 +458,7 @@ class PythonLanguage:
 
     name: str = "python"
     ecosystems: list[str] = ["PyPI"]
-    process_names: list[str] = ["pip", "pip3", "uv", "pipenv", "python", "python3"]
+    process_names: list[str] = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -447,10 +478,11 @@ class PythonLanguage:
         from packagealert.parsers.process_args import (
             parse_pip_args,
             parse_pipenv_args,
+            parse_pipx_args,
             parse_uv_args,
         )
 
-        for parser in (parse_pip_args, parse_uv_args, parse_pipenv_args):
+        for parser in (parse_pip_args, parse_uv_args, parse_pipenv_args, parse_pipx_args):
             result = parser(args)
             if result is None:
                 continue
@@ -487,6 +519,8 @@ class PythonLanguage:
                 req_files=result.req_files,
                 global_install=global_install,
                 suggested_env=suggested_env,
+                extra_write_home_dirs=result.extra_write_home_dirs,
+                target_env_name=result.target_env_name,
             )
         return None
 
@@ -669,6 +703,10 @@ class PythonLanguage:
             "PYENV_ROOT", "PYENV_VERSION", "PYENV_VERSION_FILE",
             "PIPENV_VENV_IN_PROJECT", "PIPENV_IGNORE_VIRTUALENVS", "PIPENV_VERBOSITY",
             "WORKON_HOME",
+            # Forward PIPX_HOME so _build_sandbox_env includes it; configure_sandbox
+            # then overwrites it with the sanitised _pipx_home() result and drops
+            # XDG_DATA_HOME, so the sandbox process always sees the resolved value.
+            "PIPX_HOME",
         ]
 
     # ------------------------------------------------------------------
@@ -751,6 +789,43 @@ class PythonLanguage:
         The runner uses the first path as the rollback root (removes the entire venv)
         and the last path as the scan target (diffs for new packages).
         """
+        # Tool installs (uv tool, pipx) — venv created inside a tool venvs directory.
+        # extra_write_home_dirs carries the venvs parent; derive the tool venv from it.
+        extra_write_home_dirs: list[Path] = getattr(parsed, "extra_write_home_dirs", [])
+        tool_venvs_dirs = [
+            Path.home() / ".local" / "share" / "uv" / "tools",
+            _pipx_venvs_dir(),
+        ]
+        is_tool_manager_cmd = False
+        for venvs_dir in tool_venvs_dirs:
+            if any(p == venvs_dir or p.is_relative_to(venvs_dir) for p in extra_write_home_dirs):
+                is_tool_manager_cmd = True
+                _raw_spec = parsed.packages[0] if parsed.packages else None
+                tool_name = getattr(parsed, "target_env_name", None) or (
+                    _tool_name_from_spec(_raw_spec, parsed.ecosystem) if _raw_spec else None
+                )
+                if tool_name and not _safe_tool_name(tool_name):
+                    log.warning(
+                        "post_run_scan_targets: tool name %r is an unsafe path component — ignoring",
+                        tool_name,
+                    )
+                    tool_name = None
+                if tool_name:
+                    tool_venv = venvs_dir / tool_name
+                    if (tool_venv / "pyvenv.cfg").exists():
+                        try:
+                            sp = venv_site_packages(tool_venv)
+                        except ValueError:
+                            # Invalid/tampered pyvenv.cfg — still return the venv
+                            # root so the runner has a rollback target.
+                            return [tool_venv]
+                        if sp:
+                            return [tool_venv, sp]
+        # Tool-manager commands must never fall back to project-local venvs — doing
+        # so would cause the runner to delete an unrelated .venv on rollback.
+        if is_tool_manager_cmd:
+            return []
+
         from packagealert.parsers.process_args import derive_site_packages
         # 1. Try the venv exe path from the parsed install
         if parsed.venv_exe:
@@ -865,6 +940,19 @@ class PythonLanguage:
                 else:
                     sandbox_env["GIT_SSH_COMMAND"] = "ssh -F /dev/null"
 
+        # Normalise PIPX_HOME so the sandboxed process uses the same install
+        # location that resolve_sandbox_targets() snapshotted/bind-mounted.
+        # _pipx_home() rejects unsafe overrides (traversal, credential dirs) and
+        # falls back to the platform default — setting it explicitly here ensures
+        # the sandbox never honours a raw unsafe host env var that we already
+        # rejected on the host side.  XDG_DATA_HOME is removed afterwards because
+        # pipx derives its data dir from PIPX_HOME when that is set, so forwarding
+        # a potentially unsafe XDG_DATA_HOME alongside a corrected PIPX_HOME would
+        # have no effect on pipx but could confuse other tools.
+        from packagealert.parsers.process_args import _pipx_home
+        sandbox_env["PIPX_HOME"] = str(_pipx_home())
+        sandbox_env.pop("XDG_DATA_HOME", None)
+
     def resolve_sandbox_targets(
         self,
         parsed: Any,
@@ -872,24 +960,83 @@ class PythonLanguage:
     ) -> SandboxTargets:
         targets = SandboxTargets()
 
-        try:
-            site_pkgs = _find_site_packages(parsed, cwd)
-        except ValueError as exc:
-            # venv_site_packages raised — invalid pyvenv.cfg, already logged.
-            targets.warnings.append(str(exc))
-            site_pkgs = None
-        if site_pkgs:
-            targets.scan_targets.append(site_pkgs)
-            try:
-                site_pkgs.relative_to(cwd)
-            except ValueError:
-                targets.write_dirs.append(site_pkgs)
+        extra_write_home_dirs: list[Path] = getattr(parsed, "extra_write_home_dirs", [])
+        if extra_write_home_dirs:
+            _home = Path.home()
+            tool_venvs_dirs = [
+                _home / ".local" / "share" / "uv" / "tools",
+                _pipx_venvs_dir(),
+            ]
+            for p in extra_write_home_dirs:
+                targets.write_dirs.append(p)
+                matched_venvs_dir = next(
+                    (vd for vd in tool_venvs_dirs if p == vd or p.is_relative_to(vd)),
+                    None,
+                )
+                if matched_venvs_dir is not None:
+                    # Derive site-packages for upgrade (venv already exists).
+                    # For a fresh install the venv won't exist yet —
+                    # post_run_scan_targets() discovers it after the install.
+                    _raw_spec = parsed.packages[0] if parsed.packages else None
+                    tool_name = getattr(parsed, "target_env_name", None) or (
+                        _tool_name_from_spec(_raw_spec, parsed.ecosystem) if _raw_spec else None
+                    )
+                    if tool_name and not _safe_tool_name(tool_name):
+                        msg = f"⚠ Tool name {tool_name!r} is an unsafe path component (separators or traversal sequences) — ignoring."
+                        log.warning("resolve_sandbox_targets: %s", msg)
+                        targets.warnings.append(msg)
+                        tool_name = None
+                    if tool_name:
+                        tool_venv = matched_venvs_dir / tool_name
+                        try:
+                            site_pkgs = venv_site_packages(tool_venv)
+                        except ValueError as exc:
+                            msg = str(exc)
+                            log.warning("resolve_sandbox_targets: %s", msg)
+                            targets.warnings.append(msg)
+                            site_pkgs = None
+                        if site_pkgs:
+                            targets.scan_targets.append(site_pkgs)
+                            targets.write_dirs.append(site_pkgs)
+                            # Snapshot tool_venv/bin so rollback reverts entry-point
+                            # scripts added/modified by an upgrade.  Mirrors the
+                            # venv/bin handling in prepare_sandbox_env().
+                            tool_bin = tool_venv / "bin"
+                            if tool_bin.exists():
+                                targets.write_dirs.append(tool_bin)
+                                targets.snapshot_only_dirs.append(tool_bin)
+                        else:
+                            # Venv absent (fresh install) — pre-register it with an
+                            # absent snapshot so rollback can remove a partially-created
+                            # venv if the install exits non-zero before post_run_scan_targets
+                            # fires.  The backend records existed=False; restore() then
+                            # calls shutil.rmtree if the path was created during the run.
+                            targets.snapshot_only_dirs.append(tool_venv)
+                    else:
+                        # No single tool name (e.g. pipx upgrade-all) — snapshot the
+                        # entire venvs directory so rollback can revert all mutations.
+                        targets.snapshot_only_dirs.append(matched_venvs_dir)
+                else:
+                    targets.snapshot_only_dirs.append(p)
         else:
-            if not targets.warnings:
-                # Only add the generic message if a more specific one wasn't already added.
-                msg = "⚠ Could not detect site-packages directory — Python packages will not be scanned for this install."
-                log.warning(msg)
-                targets.warnings.append(msg)
+            try:
+                site_pkgs = _find_site_packages(parsed, cwd)
+            except ValueError as exc:
+                # venv_site_packages raised — invalid pyvenv.cfg, already logged.
+                targets.warnings.append(str(exc))
+                site_pkgs = None
+            if site_pkgs:
+                targets.scan_targets.append(site_pkgs)
+                try:
+                    site_pkgs.relative_to(cwd)
+                except ValueError:
+                    targets.write_dirs.append(site_pkgs)
+            else:
+                if not targets.warnings:
+                    # Only add the generic message if a more specific one wasn't already added.
+                    msg = "⚠ Could not detect site-packages directory — Python packages will not be scanned for this install."
+                    log.warning(msg)
+                    targets.warnings.append(msg)
 
         for cache in [Path.home() / ".cache" / "pip", Path.home() / ".cache" / "uv"]:
             if cache.exists():
@@ -1097,7 +1244,7 @@ class PythonLanguage:
         return data.get("info", {}).get("version") or None
 
     def package_manager_names(self) -> list[str]:
-        return ["pip", "pip3", "uv", "pipenv"]
+        return ["pip", "pip3", "uv", "pipenv", "pipx"]
 
     def project_shim_names(self) -> list[str]:
         # uv installs a versioned copy of itself into .venv/bin/uv — shimming it

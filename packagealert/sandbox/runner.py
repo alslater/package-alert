@@ -83,6 +83,8 @@ class _Context:
     write_dirs: list[Path] = field(default_factory=list)
     # Directories to snapshot before and diff after to detect new packages
     scan_targets: list[Path] = field(default_factory=list)
+    # Directories to snapshot+restore for rollback but not scanned for new packages
+    snapshot_only_dirs: list[Path] = field(default_factory=list)
 
 
 class SandboxRunner:
@@ -316,6 +318,19 @@ class SandboxRunner:
                 self._console.print(f"✗ Cannot snapshot install target {_t}: {exc}", style="bold red", markup=False)
                 self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                 return 1
+        for _t in ctx.snapshot_only_dirs:
+            if _t not in snapshots:
+                try:
+                    # Use $HOME as the containment root for home-local dirs (e.g. pipx/uv
+                    # tool venvs under ~/.local/share/) so that symlinks relocated elsewhere
+                    # under $HOME are accepted.  Dirs under cwd keep the tighter cwd root.
+                    _home = Path.home()
+                    _snap_root = _home if _t.is_relative_to(_home) else cwd
+                    snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, _snap_root)
+                except Exception as exc:
+                    self._console.print(f"✗ Cannot snapshot rollback target {_t}: {exc}", style="bold red", markup=False)
+                    self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
+                    return 1
         lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
@@ -559,7 +574,7 @@ class SandboxRunner:
             resolved = p
         # Check if it's a credential/system directory violation — including ancestors
         # (e.g. $HOME would expose ~/.ssh as a subdirectory of the bind mount).
-        for cred in _credential_dirs():
+        for cred in credential_dirs():
             if resolved == cred or resolved.is_relative_to(cred) or cred.is_relative_to(resolved):
                 if cred.is_relative_to(resolved):
                     self._console.print(f"✗  Editable path blocked — would expose {cred.name} inside the sandbox: {p}", style="red bold", markup=False)
@@ -1463,6 +1478,8 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         lockfile_hint=pi.lockfile_hint,
         global_install=pi.global_install,
         suggested_env=pi.suggested_env,
+        extra_write_home_dirs=list(getattr(pi, "extra_write_home_dirs", [])),
+        target_env_name=getattr(pi, "target_env_name", None),
     )
 
 
@@ -1482,7 +1499,7 @@ _UNSAFE_PREFIXES: tuple[Path, ...] = (
 
 # Credential and secret directories inside $HOME that the sandbox deliberately
 # hides. Plugin-supplied extra paths must not re-expose these.
-def _credential_dirs() -> tuple[Path, ...]:
+def credential_dirs() -> tuple[Path, ...]:
     home = Path.home()
     return (
         home / ".ssh",
@@ -1508,7 +1525,9 @@ def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> 
     When non-empty, the path must be under one of those roots.
     """
     try:
-        resolved = p.resolve()
+        # strict=False so non-existent paths (e.g. pre-registered absent rollback
+        # targets for fresh installs) are normalised rather than raising OSError.
+        resolved = p.resolve(strict=False)
     except OSError:
         return False
     if resolved == Path("/"):
@@ -1516,7 +1535,7 @@ def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> 
     for prefix in _UNSAFE_PREFIXES:
         if resolved == prefix or resolved.is_relative_to(prefix):
             return False
-    for cred in _credential_dirs():
+    for cred in credential_dirs():
         # Reject both the credential dir itself and any ancestor of it — mounting
         # a parent (e.g. $HOME or ~/.config) would re-expose the credential dir
         # as a subdirectory, defeating the sandbox's home tmpfs isolation.
@@ -1570,8 +1589,51 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     if callable(resolve_fn):
         try:
             result = resolve_fn(ctx.parsed, ctx.cwd)
-            ctx.scan_targets.extend(result.scan_targets)
-            ctx.write_dirs.extend(result.write_dirs)
+            # Validate ALL paths returned by the language plugin before accepting
+            # them — a malicious or buggy plugin could otherwise cause the runner
+            # to expose credential dirs, snapshot sensitive data, or bind-mount
+            # locations outside the legitimate editable roots.
+            _safe_roots = [ctx.cwd, Path.home()]
+            _lang_name = getattr(lang, "name", "?")
+            for p in result.scan_targets:
+                if _is_safe_sandbox_path(p, editable_roots=_safe_roots):
+                    ctx.scan_targets.append(p)
+                else:
+                    log.warning(
+                        "_resolve_targets: dropping unsafe scan_target %r from lang=%s",
+                        str(p), _lang_name,
+                    )
+                    if console is not None:
+                        console.print(
+                            f"⚠ Unsafe scan path blocked: {p}",
+                            style="bold yellow", markup=False,
+                        )
+            for p in result.write_dirs:
+                if _is_safe_sandbox_path(p, editable_roots=_safe_roots):
+                    ctx.write_dirs.append(p)
+                else:
+                    log.warning(
+                        "_resolve_targets: dropping unsafe write_dir %r from lang=%s",
+                        str(p), _lang_name,
+                    )
+                    if console is not None:
+                        console.print(
+                            f"⚠ Unsafe write path blocked: {p}",
+                            style="bold yellow", markup=False,
+                        )
+            for p in getattr(result, "snapshot_only_dirs", []):
+                if _is_safe_sandbox_path(p, editable_roots=_safe_roots):
+                    ctx.snapshot_only_dirs.append(p)
+                else:
+                    log.warning(
+                        "_resolve_targets: dropping unsafe snapshot_only_dir %r from lang=%s",
+                        str(p), _lang_name,
+                    )
+                    if console is not None:
+                        console.print(
+                            f"⚠ Unsafe snapshot path blocked: {p}",
+                            style="bold yellow", markup=False,
+                        )
             if console is not None:
                 for w in result.warnings:
                     console.print(w, style="bold yellow", markup=False)

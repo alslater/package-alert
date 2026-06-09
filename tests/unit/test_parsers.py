@@ -150,6 +150,356 @@ def test_uv_non_install_recognised():
     assert result.packages == []
 
 
+def test_uv_tool_install_recognised():
+    from pathlib import Path
+    result = parse_uv_args(["uv", "tool", "install", "ruff"])
+    assert result is not None
+    assert result.packages == ["ruff"]
+    uv_tools = Path.home() / ".local" / "share" / "uv" / "tools"
+    assert any(p == uv_tools or p.is_relative_to(uv_tools) for p in result.extra_write_home_dirs)
+
+
+def test_uv_tool_upgrade_recognised():
+    from pathlib import Path
+    result = parse_uv_args(["uv", "tool", "upgrade", "ruff"])
+    assert result is not None
+    uv_tools = Path.home() / ".local" / "share" / "uv" / "tools"
+    assert any(p == uv_tools or p.is_relative_to(uv_tools) for p in result.extra_write_home_dirs)
+
+
+def test_uv_tool_install_skips_python_flag_value():
+    result = parse_uv_args(["uv", "tool", "install", "--python", "3.12", "ruff"])
+    assert result is not None
+    assert result.packages == ["ruff"]
+
+
+def test_uv_tool_install_skips_short_python_flag_value():
+    result = parse_uv_args(["uv", "tool", "install", "-p", "3.12", "ruff"])
+    assert result is not None
+    assert result.packages == ["ruff"]
+
+
+def test_uv_tool_install_skips_with_flag_value():
+    result = parse_uv_args(["uv", "tool", "install", "--with", "httpx", "ruff"])
+    assert result is not None
+    assert result.packages == ["ruff"]
+
+
+def test_uv_tool_run_recognised():
+    result = parse_uv_args(["uv", "tool", "run", "ruff", "check", "."])
+    assert result is not None
+    assert result.extra_write_home_dirs == []
+
+
+def test_uv_tool_list_not_sandboxed():
+    # uv tool list is a read-only query — must not be sandboxed.
+    result = parse_uv_args(["uv", "tool", "list"])
+    assert result is None
+
+
+def test_uv_tool_dir_not_sandboxed():
+    result = parse_uv_args(["uv", "tool", "dir"])
+    assert result is None
+
+
+def test_uv_tool_uninstall_not_sandboxed():
+    result = parse_uv_args(["uv", "tool", "uninstall", "ruff"])
+    assert result is None
+
+
+def test_pipx_install_recognised():
+    from pathlib import Path
+    from packagealert.parsers.process_args import parse_pipx_args, _pipx_home
+    result = parse_pipx_args(["pipx", "install", "httpie"])
+    assert result is not None
+    assert result.manager == "pipx"
+    assert result.packages == ["httpie"]
+    pipx_venvs = _pipx_home() / "venvs"
+    assert any(p == pipx_venvs or p.is_relative_to(pipx_venvs) for p in result.extra_write_home_dirs)
+    assert Path.home() / ".local" / "bin" in result.extra_write_home_dirs
+
+
+def test_pipx_upgrade_recognised():
+    from packagealert.parsers.process_args import parse_pipx_args, _pipx_home
+    from pathlib import Path
+    result = parse_pipx_args(["pipx", "upgrade", "httpie"])
+    assert result is not None
+    assert result.packages == ["httpie"]
+    pipx_venvs = _pipx_home() / "venvs"
+    assert any(p == pipx_venvs or p.is_relative_to(pipx_venvs) for p in result.extra_write_home_dirs)
+
+
+def test_pipx_reinstall_recognised():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "reinstall", "httpie"])
+    assert result is not None
+    assert result.packages == ["httpie"]
+
+
+def test_pipx_install_skips_python_flag_value():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "install", "--python", "3.12", "httpie"])
+    assert result is not None
+    assert result.packages == ["httpie"]
+
+
+def test_pipx_inject_skips_python_flag_value():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "inject", "--python", "3.12", "httpie", "httpx"])
+    assert result is not None
+    assert result.target_env_name == "httpie"
+    assert result.packages == ["httpx"]
+
+
+def test_pipx_inject_recognised():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "inject", "httpie", "httpx"])
+    assert result is not None
+    assert result.packages == ["httpx"]
+    assert result.target_env_name == "httpie"
+
+
+def test_pipx_install_skips_spec_flag_value():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "install", "--spec", "httpie==3.2.1", "httpie"])
+    assert result is not None
+    assert result.packages == ["httpie"]
+
+
+def test_pipx_list_not_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "list"])
+    assert result is None
+
+
+def test_pipx_run_not_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "run", "cowsay", "hello"])
+    assert result is None
+
+
+def test_pipx_uninstall_not_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "uninstall", "httpie"])
+    assert result is None
+
+
+def test_pipx_uninstall_all_not_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "uninstall-all"])
+    assert result is None
+
+
+def test_pipx_upgrade_all_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "upgrade-all"])
+    assert result is not None
+    assert result.manager == "pipx"
+    assert result.packages == []
+    assert result.extra_write_home_dirs  # venvs dir and bin are writable
+
+
+def test_pipx_reinstall_all_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "reinstall-all"])
+    assert result is not None
+    assert result.packages == []
+    assert result.extra_write_home_dirs
+
+
+def test_pipx_install_all_sandboxed():
+    from packagealert.parsers.process_args import parse_pipx_args
+    result = parse_pipx_args(["pipx", "install-all"])
+    assert result is not None
+    assert result.packages == []
+    assert result.extra_write_home_dirs
+
+
+# --- _pipx_home() resolution ---
+
+class TestPipxHomeResolution:
+    def test_pipx_home_env_var_honoured(self, tmp_path, monkeypatch):
+        from packagealert.parsers.process_args import _pipx_home
+        target = tmp_path / ".local" / "mypipx"
+        target.mkdir(parents=True)
+        monkeypatch.setenv("PIPX_HOME", str(target))
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        assert _pipx_home() == target
+
+    def test_pipx_home_env_var_honoured_when_not_yet_created(self, tmp_path, monkeypatch):
+        """$PIPX_HOME that doesn't exist yet (first-use) must still be accepted if safe."""
+        from packagealert.parsers.process_args import _pipx_home
+        target = tmp_path / ".local" / "pipx-new"
+        # Intentionally NOT created — pipx creates it on first use.
+        monkeypatch.setenv("PIPX_HOME", str(target))
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        assert _pipx_home() == target
+
+    def test_pipx_home_relative_env_var_returns_absolute(self, tmp_path, monkeypatch):
+        """A relative $PIPX_HOME that resolves under $HOME must be returned as an absolute path."""
+        import os
+        from packagealert.parsers.process_args import _pipx_home
+        # Put cwd inside tmp_path so the relative path resolves to a safe location.
+        local_pipx = tmp_path / ".local" / "mypipx"
+        local_pipx.mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("PIPX_HOME", ".local/mypipx")
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result.is_absolute()
+
+    def test_legacy_path_used_when_exists(self, tmp_path, monkeypatch):
+        """~/.local/pipx exists → use it even if the XDG default is different."""
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        legacy = tmp_path / ".local" / "pipx"
+        legacy.mkdir(parents=True)
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result == legacy
+
+    def test_xdg_default_when_no_legacy(self, tmp_path, monkeypatch):
+        """No $PIPX_HOME, no legacy ~/.local/pipx → Linux default is XDG_DATA_HOME/pipx."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    def test_xdg_data_home_respected(self, tmp_path, monkeypatch):
+        """XDG_DATA_HOME overrides the default data dir."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        xdg = tmp_path / "xdgdata"
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result == xdg / "pipx"
+
+    def test_xdg_data_home_relative_falls_back_to_default(self, tmp_path, monkeypatch):
+        """Relative XDG_DATA_HOME must be rejected — it would resolve relative to cwd."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", "relative/xdg")
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    def test_xdg_data_home_relative_under_home_still_rejected(self, tmp_path, monkeypatch):
+        """Relative XDG_DATA_HOME must be rejected even when cwd is under $HOME.
+
+        resolve(strict=False) turns relative paths into absolute ones (relative to cwd).
+        If cwd happens to be under $HOME the resolved path would pass is_relative_to($HOME),
+        so we must check is_absolute() on the *raw* value before resolving.
+        """
+        import sys
+        import os
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        # "local/share" is relative — if cwd == tmp_path (our fake $HOME),
+        # resolve() would produce tmp_path/"local"/"share", which IS under $HOME.
+        monkeypatch.setenv("XDG_DATA_HOME", "local/share")
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = _pipx_home()
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    def test_xdg_data_home_outside_home_falls_back_to_default(self, tmp_path, monkeypatch):
+        """XDG_DATA_HOME pointing outside $HOME must be rejected."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", "/tmp/attacker-xdg")
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    def test_pipx_home_dotdot_traversal_rejected(self, tmp_path, monkeypatch):
+        """$PIPX_HOME with '..' that escapes home after normalisation must be rejected."""
+        import sys
+        from packagealert.parsers.process_args import _pipx_home
+        # ~/.local/../.ssh/pipx passes is_relative_to(home/".local") lexically but
+        # normalises to ~/.ssh/pipx — outside all safe prefixes.
+        traversal = str(tmp_path / ".local" / ".." / ".ssh" / "pipx")
+        monkeypatch.setenv("PIPX_HOME", traversal)
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        result = _pipx_home()
+        assert ".ssh" not in str(result)
+
+    def test_xdg_data_home_dotdot_traversal_rejected(self, tmp_path, monkeypatch):
+        """XDG_DATA_HOME with '..' that escapes home after normalisation must be rejected."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        # /home/user/../etc passes is_relative_to($HOME) lexically but resolves outside $HOME
+        traversal = str(tmp_path) + "/../etc"
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", traversal)
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert "etc" not in str(result).split("/")[-3:]
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    def test_dangerous_pipx_home_falls_back_to_default(self, tmp_path, monkeypatch):
+        """$PIPX_HOME pointing outside ~/.local should be rejected and fall back."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.setenv("PIPX_HOME", "/etc/malicious")
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        result = _pipx_home()
+        assert str(result) != "/etc/malicious"
+        assert "malicious" not in str(result)
+
+    @pytest.mark.parametrize("cred_dir", [".ssh", ".aws", ".gnupg", ".kube", ".docker"])
+    def test_xdg_data_home_credential_dir_rejected(self, tmp_path, monkeypatch, cred_dir):
+        """XDG_DATA_HOME pointing at a credential directory must be rejected."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / cred_dir))
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("packagealert.sandbox.runner.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert cred_dir not in result.parts
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+    @pytest.mark.parametrize("cred_dir", [".ssh", ".aws", ".gnupg"])
+    def test_xdg_data_home_subdir_of_credential_dir_rejected(self, tmp_path, monkeypatch, cred_dir):
+        """XDG_DATA_HOME pointing inside a credential directory must also be rejected."""
+        import sys
+        if not sys.platform.startswith("linux"):
+            pytest.skip("Linux-specific XDG default")
+        from packagealert.parsers.process_args import _pipx_home
+        monkeypatch.delenv("PIPX_HOME", raising=False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / cred_dir / "subdir"))
+        monkeypatch.setattr("packagealert.parsers.process_args.Path.home", lambda: tmp_path)
+        monkeypatch.setattr("packagealert.sandbox.runner.Path.home", lambda: tmp_path)
+        result = _pipx_home()
+        assert cred_dir not in result.parts
+        assert result == tmp_path / ".local" / "share" / "pipx"
+
+
 def test_npm_install_package():
     result = parse_npm_args(["npm", "install", "lodash"])
     assert result is not None

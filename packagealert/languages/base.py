@@ -48,6 +48,10 @@ class SandboxTargets:
     """Returned by resolve_sandbox_targets() for a package-install run."""
     scan_targets: list[Path] = field(default_factory=list)
     write_dirs: list[Path] = field(default_factory=list)
+    # Paths to snapshot+restore for rollback but NOT scanned for new packages.
+    # Use for writable paths that must be rolled back (e.g. entry-point dirs)
+    # but that don't contain package metadata.
+    snapshot_only_dirs: list[Path] = field(default_factory=list)
     # User-visible warnings to print to the console (bold yellow). Use for
     # conditions that degrade scan coverage or rollback completeness.
     warnings: list[str] = field(default_factory=list)
@@ -120,6 +124,13 @@ class ProcessInstall:
     req_files: list[str] = field(default_factory=list)
     global_install: bool = False
     suggested_env: dict[str, str] = field(default_factory=dict)
+    # Extra home-directory paths this install will write to (e.g. tool venv dirs,
+    # entry-point dirs). The runner snapshots and restores these for rollback.
+    extra_write_home_dirs: list[Path] = field(default_factory=list)
+    # Name of the target environment receiving the packages when it differs from
+    # packages[0] (e.g. pipx inject httpie httpx → target_env_name="httpie").
+    # None means the environment name is derived from packages[0] as normal.
+    target_env_name: str | None = None
 
 
 @runtime_checkable
