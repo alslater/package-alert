@@ -15,6 +15,53 @@ _PIP_VALUE_FLAGS = frozenset({
     "--prefix", "--root",
     "--config-settings", "--config-setting", "-C",  # pip 22.1+ / uv: build-system config
 })
+# Flags that consume the next argument as their value for `uv tool install/upgrade`.
+_UV_TOOL_VALUE_FLAGS = frozenset({
+    "-p", "--python",
+    "--with", "--with-requirements", "--with-editable", "--with-executables-from",
+    "-c", "--constraints", "--overrides", "--excludes",
+    "-b", "--build-constraints",
+    "--index", "--default-index", "-i", "--index-url", "--extra-index-url",
+    "-f", "--find-links",
+    "--index-strategy", "--keyring-provider",
+    "-P", "--upgrade-package", "--upgrade-group",
+    "--resolution", "--prerelease", "--fork-strategy",
+    "--exclude-newer", "--exclude-newer-package",
+    "--python-platform", "--torch-backend",
+})
+
+# Flags that consume the next argument as their value for `pipx install/inject/etc`.
+_PIPX_VALUE_FLAGS = frozenset({
+    "--python", "-p",
+    "--suffix",
+    "--preinstall",
+    "--index-url", "-i",
+    "--pip-args",
+    "--spec",
+})
+
+def _positionals(args: list[str], value_flags: frozenset[str]) -> list[str]:
+    """Return all positional arguments, skipping flags and their values."""
+    result: list[str] = []
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in value_flags:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        result.append(arg)
+    return result
+
+
+def _first_positional(args: list[str], value_flags: frozenset[str]) -> str | None:
+    """Return the first positional argument, skipping flags and their values."""
+    positionals = _positionals(args, value_flags)
+    return positionals[0] if positionals else None
+
 # Matches scp-style VCS refs: git@host:path (colon, not slash, after hostname).
 _SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
 
@@ -43,6 +90,11 @@ class ParsedInstall:
     lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
     global_install: bool = False
     suggested_env: dict[str, str] = field(default_factory=dict)
+    extra_write_home_dirs: list[Path] = field(default_factory=list)
+    # Name of the target environment receiving the packages when it differs from
+    # packages[0] (e.g. pipx inject httpie httpx → target_env_name="httpie").
+    # None means the environment name is derived from packages[0] as normal.
+    target_env_name: str | None = None
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -380,10 +432,160 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
             if not arg.startswith("-"):
                 packages.append(arg)
         return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
-    if subcmd in ("run", "python", "tool", "init", "build", "publish", "export",
+    if subcmd == "tool":
+        tool_subcmd = args[1] if len(args) > 1 else None
+        if tool_subcmd in ("install", "upgrade"):
+            tool_name = _first_positional(args[2:], _UV_TOOL_VALUE_FLAGS)
+            packages = [tool_name] if tool_name else []
+            home = Path.home()
+            return ParsedInstall(
+                manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe,
+                extra_write_home_dirs=[
+                    home / ".local" / "share" / "uv" / "tools",
+                    home / ".local" / "bin",
+                ],
+            )
+        if tool_subcmd == "run":
+            return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+        return None
+    if subcmd in ("run", "python", "init", "build", "publish", "export",
                   "cache", "version", "generate-shell-completion", "self",
                   "pip", "venv", "remove"):
         return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+    return None
+
+
+def _pipx_home() -> Path:
+    """Return the pipx home directory, mirroring pipx's own resolution order.
+
+    Resolution (matches pipx ≥ 1.4 on each platform):
+      1. $PIPX_HOME if set
+      2. Legacy ~/.local/pipx if it exists (migration fallback on Linux/macOS)
+      3. Platform default: ~/.local/share/pipx on Linux (XDG user_data_dir),
+         ~/pipx on Windows, ~/.local/pipx on macOS/other
+
+    The result is validated against credential dirs and unsafe system paths.
+    If PIPX_HOME points at something dangerous, fall back to the platform
+    default so we fail safe rather than exposing sensitive directories.
+    """
+    import os
+    import sys
+
+    home = Path.home()
+
+    # Use the same credential-dir list as the sandbox runner so both enforce a
+    # consistent boundary.  Imported lazily to avoid a circular dependency.
+    from packagealert.sandbox.runner import credential_dirs
+
+    def is_credential_dir(p: Path) -> bool:
+        return any(p == c or p.is_relative_to(c) for c in credential_dirs())
+
+    override = os.environ.get("PIPX_HOME")
+    if override:
+        candidate = Path(override).expanduser()
+        # resolve(strict=False) normalises ".." without requiring the path to exist,
+        # preventing traversal bypasses like ~/.local/../.ssh/pipx passing a prefix check.
+        resolved = candidate.resolve(strict=False)
+        # Reject paths that land inside system dirs or credential dirs.
+        _SAFE_PREFIXES = (home / ".local", home / "pipx", home / ".local" / "pipx")
+        safe = any(
+            resolved == p or resolved.is_relative_to(p)
+            for p in _SAFE_PREFIXES
+        )
+        if safe and not is_credential_dir(resolved):
+            return resolved
+        # Fall through to platform default — log at debug level to avoid noise.
+        import logging
+        logging.getLogger(__name__).debug(
+            "PIPX_HOME=%r is outside expected locations; using platform default", override
+        )
+
+    # Legacy path (created by older pipx or explicit prior install).
+    legacy = home / ".local" / "pipx"
+    if legacy.exists():
+        return legacy
+
+    # Platform default matching pipx's own logic (platformdirs user_data_dir).
+    if sys.platform.startswith("linux"):
+        _xdg_raw = os.environ.get("XDG_DATA_HOME", "")
+        _xdg_default = home / ".local" / "share"
+        if _xdg_raw:
+            _xdg_candidate = Path(_xdg_raw)
+            # Check is_absolute() on the raw value before resolve() — resolve(strict=False)
+            # makes relative paths absolute (relative to cwd), which would bypass this check
+            # when cwd happens to be under $HOME.
+            # resolve(strict=False) then normalises ".." so "/home/user/../etc" is rejected.
+            if _xdg_candidate.is_absolute():
+                _xdg_resolved = _xdg_candidate.resolve(strict=False)
+            else:
+                _xdg_resolved = None
+            # Require absolute path under $HOME, not inside a credential directory.
+            if (
+                _xdg_resolved is not None
+                and _xdg_resolved.is_relative_to(home)
+                and not is_credential_dir(_xdg_resolved)
+            ):
+                xdg_data = _xdg_resolved
+            else:
+                import logging
+                logging.getLogger(__name__).debug(
+                    "XDG_DATA_HOME=%r is not a safe absolute path under $HOME; using default", _xdg_raw
+                )
+                xdg_data = _xdg_default
+        else:
+            xdg_data = _xdg_default
+        return xdg_data / "pipx"
+    if sys.platform == "win32":
+        return home / "pipx"
+    # macOS and other Unix
+    return home / ".local" / "pipx"
+
+
+def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
+    if not argv or _cmd(argv[0]) != "pipx":
+        return None
+    args = argv[1:]
+    if not args:
+        return None
+    subcmd = args[0]
+    if subcmd in ("install", "upgrade", "reinstall"):
+        tool_name = _first_positional(args[1:], _PIPX_VALUE_FLAGS)
+        packages = [tool_name] if tool_name else []
+        home = Path.home()
+        return ParsedInstall(
+            manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
+            extra_write_home_dirs=[
+                _pipx_home() / "venvs",
+                home / ".local" / "bin",
+            ],
+        )
+    if subcmd in ("inject",):
+        positionals = _positionals(args[1:], _PIPX_VALUE_FLAGS)
+        venv_name = positionals[0] if positionals else None
+        packages = positionals[1:]
+        home = Path.home()
+        return ParsedInstall(
+            manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
+            extra_write_home_dirs=[
+                _pipx_home() / "venvs",
+                home / ".local" / "bin",
+            ],
+            target_env_name=venv_name,
+        )
+    if subcmd in ("upgrade-all", "reinstall-all", "install-all"):
+        # Packages are unknown but the command installs/upgrades tool venvs —
+        # sandbox it with the full venvs dir writable so no install escapes.
+        home = Path.home()
+        return ParsedInstall(
+            manager="pipx", packages=[], ecosystem="pypi", venv_exe=argv[0],
+            extra_write_home_dirs=[
+                _pipx_home() / "venvs",
+                home / ".local" / "bin",
+            ],
+        )
+    if subcmd in ("run", "uninstall", "uninstall-all", "list", "environment",
+                  "ensurepath", "completions"):
+        return None
     return None
 
 

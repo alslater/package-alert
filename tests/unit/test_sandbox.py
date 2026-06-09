@@ -286,6 +286,23 @@ class TestHomeRoDirs:
         assert "PYENV_ROOT" in PythonLanguage().sandbox_env()
         assert "NVM_DIR" in NodeLanguage().sandbox_env()
 
+    def test_sandbox_env_forwards_pipx_home(self):
+        # PIPX_HOME is forwarded so _build_sandbox_env includes it; configure_sandbox
+        # then overwrites it with the sanitised _pipx_home() result.  XDG_DATA_HOME
+        # is intentionally NOT forwarded — configure_sandbox removes it after setting
+        # PIPX_HOME explicitly so no unsafe raw value can reach the sandbox.
+        from packagealert.languages.python import PythonLanguage
+        env = PythonLanguage().sandbox_env()
+        assert "PIPX_HOME" in env
+        assert "XDG_DATA_HOME" not in env
+
+    def test_build_sandbox_env_forwards_pipx_home_when_set(self, monkeypatch):
+        # When PIPX_HOME is set in the host environment, _build_sandbox_env must
+        # include it so the sandbox process matches the snapshotted pipx directory.
+        monkeypatch.setenv("PIPX_HOME", "/home/user/.local/pipx")
+        result = _build_sandbox_env([])
+        assert result.get("PIPX_HOME") == "/home/user/.local/pipx"
+
 
 # ---------------------------------------------------------------------------
 # _try_parse
@@ -668,6 +685,143 @@ class TestResolveTargets:
             _resolve_targets(ctx)
         # No scan targets yet — the post-install fallback will find them after creation
         assert ctx.scan_targets == []
+
+    def test_write_dir_symlink_to_credential_dir_blocked_by_runner(self, tmp_path):
+        """A write_dir that resolves to ~/.ssh must be dropped by the runner, not passed to bwrap."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        ssh_dir = fake_home / ".ssh"
+        ssh_dir.mkdir()
+        uv_tools = fake_home / ".local" / "share" / "uv" / "tools"
+        uv_tools.mkdir(parents=True)
+        # Symlink inside uv_tools that resolves to ~/.ssh
+        evil_link = fake_home / ".local" / "share" / "uv" / "evil"
+        evil_link.symlink_to(ssh_dir)
+
+        parsed = ParsedInstall(
+            manager="uv", packages=["evil"], ecosystem="pypi",
+            extra_write_home_dirs=[uv_tools, evil_link],
+        )
+        ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
+        with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python._pipx_venvs_dir",
+                                 return_value=fake_home / ".local" / "pipx" / "venvs"):
+            _resolve_targets(ctx)
+
+        for p in ctx.write_dirs:
+            assert not p.resolve().is_relative_to(ssh_dir), f"{p} resolves into ~/.ssh"
+
+    def test_write_dir_outside_home_blocked_by_runner(self, tmp_path):
+        """A write_dir outside $HOME must be dropped by the runner."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        uv_tools = fake_home / ".local" / "share" / "uv" / "tools"
+        uv_tools.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        parsed = ParsedInstall(
+            manager="uv", packages=["sometool"], ecosystem="pypi",
+            extra_write_home_dirs=[uv_tools, outside],
+        )
+        ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
+        with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python._pipx_venvs_dir",
+                                 return_value=fake_home / ".local" / "pipx" / "venvs"):
+            _resolve_targets(ctx)
+
+        assert outside not in ctx.write_dirs
+        assert uv_tools in ctx.write_dirs  # legitimate path still accepted
+
+    def test_absent_snapshot_only_dir_accepted_for_fresh_install_rollback(self, tmp_path):
+        """Pre-registered absent tool venv (fresh install rollback target) must survive
+        _resolve_targets — resolve(strict=True) would silently drop it, breaking rollback."""
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        uv_tools = fake_home / ".local" / "share" / "uv" / "tools"
+        uv_tools.mkdir(parents=True)
+        absent_venv = uv_tools / "mytool"  # does not exist yet
+        assert not absent_venv.exists()
+
+        parsed = ParsedInstall(
+            manager="uv", packages=["mytool"], ecosystem="pypi",
+            extra_write_home_dirs=[uv_tools, fake_home / ".local" / "bin"],
+        )
+        ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
+        with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.languages.python._pipx_venvs_dir",
+                                 return_value=fake_home / ".local" / "pipx" / "venvs"):
+            _resolve_targets(ctx)
+
+        assert absent_venv in ctx.snapshot_only_dirs
+
+    def test_snapshot_only_dir_credential_path_blocked_by_runner(self, tmp_path):
+        """snapshot_only_dirs pointing at a credential dir must be dropped by the runner."""
+        from packagealert.languages.base import SandboxTargets
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        ssh_dir = fake_home / ".ssh"
+        ssh_dir.mkdir()
+        uv_tools = fake_home / ".local" / "share" / "uv" / "tools"
+        uv_tools.mkdir(parents=True)
+
+        # Fake language plugin that returns ~/.ssh as a snapshot_only_dir
+        class MaliciousLang:
+            name = "malicious"
+            def ecosystems(self): return ["pypi"]
+            def process_names(self): return []
+            def contract_version(self): return 3
+            def resolve_sandbox_targets(self, parsed, cwd):
+                t = SandboxTargets()
+                t.write_dirs.append(uv_tools)
+                t.snapshot_only_dirs.append(ssh_dir)   # attacker-controlled
+                return t
+
+        parsed = ParsedInstall(manager="uv", packages=["tool"], ecosystem="pypi",
+                               extra_write_home_dirs=[uv_tools])
+        ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
+
+        import packagealert.languages.registry as reg_module
+        with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.sandbox.runner.lang_registry") as mock_reg:
+            mock_reg.for_ecosystem.return_value = MaliciousLang()
+            _resolve_targets(ctx)
+
+        assert ssh_dir not in ctx.snapshot_only_dirs
+        assert uv_tools in ctx.write_dirs  # legitimate write dir still accepted
+
+    def test_scan_target_credential_path_blocked_by_runner(self, tmp_path):
+        """scan_targets pointing at a credential dir must be dropped by the runner."""
+        from packagealert.languages.base import SandboxTargets
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        ssh_dir = fake_home / ".ssh"
+        ssh_dir.mkdir()
+
+        class MaliciousLang:
+            name = "malicious"
+            def ecosystems(self): return ["pypi"]
+            def process_names(self): return []
+            def contract_version(self): return 3
+            def resolve_sandbox_targets(self, parsed, cwd):
+                t = SandboxTargets()
+                t.scan_targets.append(ssh_dir)
+                return t
+
+        parsed = ParsedInstall(manager="uv", packages=["tool"], ecosystem="pypi")
+        ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
+
+        with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
+             unittest.mock.patch("packagealert.sandbox.runner.lang_registry") as mock_reg:
+            mock_reg.for_ecosystem.return_value = MaliciousLang()
+            _resolve_targets(ctx)
+
+        assert ssh_dir not in ctx.scan_targets
 
 
 class TestFindPipenvVenv:
@@ -1258,7 +1412,10 @@ class TestPythonConfigureSandbox:
         self._lang().configure_sandbox(parsed, tmp_path, frozenset({"ssh-keys"}), targets, home_ro, sandbox_env)
         assert sandbox_env.get("GIT_SSH_COMMAND") == "ssh -F /dev/null"
 
-    def test_no_flag_is_noop(self, tmp_path, monkeypatch):
+    def test_no_flag_sets_pipx_home_but_not_ssh(self, tmp_path, monkeypatch):
+        # Without any flags, configure_sandbox must not mount ssh-keys or set
+        # GIT_SSH_COMMAND, but it always normalises PIPX_HOME so the sandbox
+        # process uses the same install location as resolve_sandbox_targets().
         from packagealert.languages.base import SandboxTargets
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
@@ -1267,7 +1424,25 @@ class TestPythonConfigureSandbox:
         sandbox_env: dict = {}
         self._lang().configure_sandbox(parsed, tmp_path, frozenset(), targets, home_ro, sandbox_env)
         assert home_ro == []
-        assert sandbox_env == {}
+        assert "GIT_SSH_COMMAND" not in sandbox_env
+        assert "PIPX_HOME" in sandbox_env
+        assert "XDG_DATA_HOME" not in sandbox_env
+
+    def test_configure_sandbox_overwrites_unsafe_pipx_home(self, tmp_path, monkeypatch):
+        # An unsafe raw PIPX_HOME already present in sandbox_env (forwarded by
+        # _build_sandbox_env) must be replaced with the sanitised _pipx_home() value
+        # so the sandbox process never sees the dangerous override.
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        parsed = ParsedInstall(manager="pipx", packages=["httpie"], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        # Simulate _build_sandbox_env forwarding a raw unsafe PIPX_HOME
+        sandbox_env: dict = {"PIPX_HOME": "/etc/malicious", "XDG_DATA_HOME": str(tmp_path / ".ssh")}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset(), targets, home_ro, sandbox_env)
+        assert sandbox_env["PIPX_HOME"] != "/etc/malicious"
+        assert "malicious" not in sandbox_env["PIPX_HOME"]
+        assert "XDG_DATA_HOME" not in sandbox_env
 
 
 class TestBuildSandboxEnv:
@@ -3152,6 +3327,15 @@ class TestIsSafeSandboxPath:
         project.mkdir()
         assert _is_safe_sandbox_path(project, [tmp_path])
 
+    def test_accepts_nonexistent_path_under_editable_root(self, tmp_path):
+        # Absent rollback targets (e.g. pre-registered tool venvs for fresh installs)
+        # must pass — strict resolve() would raise OSError and drop them, breaking
+        # rollback coverage for installs that haven't run yet.
+        from packagealert.sandbox.runner import _is_safe_sandbox_path
+        absent = tmp_path / "tools" / "nonexistent-venv"
+        assert not absent.exists()
+        assert _is_safe_sandbox_path(absent, [tmp_path])
+
 
 # ---------------------------------------------------------------------------
 # FileSystemBackend — snapshot
@@ -3196,6 +3380,40 @@ class TestFileSystemBackendSnapshot:
         link.symlink_to(outside)
         with pytest.raises(ValueError, match="outside the project"):
             self._backend().snapshot_install_target(link, self._console(), project_root=tmp_path)
+
+    def test_symlink_root_inside_home_accepted_with_home_containment_root(self, tmp_path):
+        # Simulate a home-local tool dir (e.g. ~/.local/share/uv/tools/myapp) that is
+        # a symlink pointing elsewhere under $HOME (user relocated the venvs dir).
+        # project_root=$HOME should accept it; project_root=cwd would have rejected it.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        cwd = fake_home / "projects" / "myapp"
+        cwd.mkdir(parents=True)
+        real_target = fake_home / ".local" / "relocated-venvs" / "myapp"
+        real_target.mkdir(parents=True)
+        (real_target / "pyvenv.cfg").write_bytes(b"home = /usr/bin\n")
+        tool_dir = fake_home / ".local" / "share" / "uv" / "tools"
+        tool_dir.mkdir(parents=True)
+        link = tool_dir / "myapp"
+        link.symlink_to(real_target)
+        # With home as containment root: accepted (symlink points inside $HOME)
+        snap = self._backend().snapshot_install_target(link, self._console(), project_root=fake_home)
+        assert snap.existed is True
+        assert snap.root_symlink is not None
+
+    def test_symlink_root_outside_home_rejected_with_home_containment_root(self, tmp_path):
+        # A tool dir symlink pointing entirely outside $HOME must still be rejected
+        # even when project_root=$HOME is used.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        outside = tmp_path / "external-venvs" / "myapp"
+        outside.mkdir(parents=True)
+        tool_dir = fake_home / ".local" / "share" / "uv" / "tools"
+        tool_dir.mkdir(parents=True)
+        link = tool_dir / "myapp"
+        link.symlink_to(outside)
+        with pytest.raises(ValueError, match="outside the project"):
+            self._backend().snapshot_install_target(link, self._console(), project_root=fake_home)
 
     def test_symlink_root_pointing_to_file_raises(self, tmp_path):
         # A symlink pointing to a regular file must raise — os.walk() on a file
