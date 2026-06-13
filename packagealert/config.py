@@ -5,7 +5,7 @@ import tomllib
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
 
 
 def _expand(v: object) -> object:
@@ -87,6 +87,7 @@ class CooldownConfig(BaseModel):
     on_new_medium_risk: CooldownAction = "prompt"
     on_new_low_risk: CooldownAction = "warn"
     non_interactive_escalation: CooldownAction = "block"
+    allow_cooldown_allow: bool = True
 
 
 class FileSystemBackendConfig(BaseModel):
@@ -134,6 +135,21 @@ class SchedulerConfig(BaseModel):
     max_scan_history: int = Field(5, ge=1)
 
 
+class CentralPluginConfig(BaseModel):
+    api_key: str = ""
+    server_url: str = ""
+    heartbeat_interval_seconds: int = Field(300, ge=60)
+    config_fetch_interval_seconds: int = Field(3600, ge=60)
+    allow_http: bool = False
+
+
+class PluginsConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    enabled: list[str] = Field(default_factory=list)
+    pa_central: CentralPluginConfig = Field(default_factory=CentralPluginConfig)
+
+
 class AppConfig(BaseModel):
     osv: OsvConfig = OsvConfig()
     watch: WatchConfig = WatchConfig()
@@ -143,6 +159,7 @@ class AppConfig(BaseModel):
     heuristics: HeuristicsConfig = HeuristicsConfig()
     sandbox: SandboxConfig = SandboxConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "package-alert" / "config.toml"
@@ -174,6 +191,49 @@ def _check_cache_dir(path: Path, _default: Path, tool: str) -> None:
         log.info("%s cache dir not found (%s) — %s cache monitoring disabled", tool, path, tool)
 
 
+_OVERLAY_PATH = _SHARE_DIR / "central-overlay.toml"
+
+
+def read_enabled_plugins(path: Path | None = None) -> list[str]:
+    """Return the plugins.enabled list from config without full validation.
+
+    Used at CLI import time to restrict which plugin entry points are loaded,
+    so that unenabled plugins cannot execute code during startup.
+    """
+    if path is None and _DEFAULT_CONFIG.exists():
+        path = _DEFAULT_CONFIG
+    if path is None or not path.exists():
+        return []
+    try:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+        enabled = data.get("plugins", {}).get("enabled", [])
+        if not isinstance(enabled, list):
+            return []
+        return [x for x in enabled if isinstance(x, str)]
+    except Exception:
+        return []
+
+
+def load_config_without_overlay(path: Path | None) -> AppConfig:
+    """Load and validate the base config file, skipping any persisted fleet overlay.
+
+    Used to capture a clean pre-overlay baseline at plugin setup time so that
+    clearing an overlay can restore the true pre-overlay state.
+    """
+    if path is None and _DEFAULT_CONFIG.exists():
+        path = _DEFAULT_CONFIG
+    data: dict[str, Any] = {}
+    if path is not None:
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+    if not isinstance(data.get("plugins"), dict):
+        data.pop("plugins", None)
+    if "pa-central" in data.get("plugins", {}):
+        data["plugins"]["pa_central"] = data["plugins"].pop("pa-central")
+    return AppConfig.model_validate(data)
+
+
 def load_config(path: Path | None) -> AppConfig:
     if path is None and _DEFAULT_CONFIG.exists():
         path = _DEFAULT_CONFIG
@@ -181,4 +241,29 @@ def load_config(path: Path | None) -> AppConfig:
     if path is not None:
         with open(path, "rb") as f:
             data = tomllib.load(f)
-    return AppConfig.model_validate(data)
+    # Coerce a non-table plugins value to an empty dict so the remap and
+    # fleet_enabled check below don't crash on malformed config files.
+    if not isinstance(data.get("plugins"), dict):
+        data.pop("plugins", None)
+    # Remap [plugins.pa-central] (TOML hyphen) -> pa_central (Python identifier)
+    if "pa-central" in data.get("plugins", {}):
+        data["plugins"]["pa_central"] = data["plugins"].pop("pa-central")
+    cfg = AppConfig.model_validate(data)
+    # Merge persisted fleet overlay only when pa-central is enabled.
+    # Validated separately so a bad overlay never prevents the base config loading.
+    plugins_table = data.get("plugins", {})
+    enabled = plugins_table.get("enabled", [])
+    fleet_enabled = isinstance(enabled, list) and "pa-central" in enabled
+    if fleet_enabled and _OVERLAY_PATH.exists():
+        try:
+            with open(_OVERLAY_PATH, "rb") as f:
+                overlay = tomllib.load(f)
+            from packagealert.plugins.central.state import strip_overlay_unsafe_keys
+            from packagealert.plugins.overlay import deep_merge
+            strip_overlay_unsafe_keys(overlay)
+            merged = data.copy()
+            deep_merge(merged, overlay)
+            cfg = AppConfig.model_validate(merged)
+        except Exception:
+            log.warning("Could not apply fleet overlay %s — using base config", _OVERLAY_PATH)
+    return cfg

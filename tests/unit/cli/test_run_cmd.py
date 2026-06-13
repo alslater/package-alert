@@ -23,7 +23,9 @@ def _make_mock_runner(return_code: int = 0):
 
 def _invoke(args: list[str], env: dict[str, str] | None = None):
     """Invoke the CLI with optional environment overrides."""
-    with patch("packagealert.cli.app._load"), \
+    from unittest.mock import MagicMock
+    mock_cfg = MagicMock()
+    with patch("packagealert.cli.app._load", return_value=(mock_cfg, None)), \
          patch("packagealert.sandbox.runner.SandboxRunner") as MockRunner:
         MockRunner.return_value.run = AsyncMock(return_value=0)
         result = runner.invoke(app, args, env=env)

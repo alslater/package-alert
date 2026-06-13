@@ -201,6 +201,38 @@ class TestScheduledScanner:
         await db.close()
 
 
+    @pytest.mark.asyncio
+    async def test_plugin_scan_store_skips_save_and_prune(self, tmp_path):
+        """When a plugin handles scan storage, no row is written and existing history is not pruned."""
+        from packagealert.config import AppConfig
+        from packagealert.storage.db import open_db
+        from packagealert.scheduler.db import add_project, save_scan_result, list_scan_results
+
+        db = await open_db(tmp_path / "test.db")
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+        (project_dir / "requirements.txt").write_text("requests==2.31.0\n")
+
+        await add_project(db, path=str(project_dir), schedule="daily", scan_type="project")
+        # Pre-populate rows that should survive untouched
+        for _ in range(3):
+            await save_scan_result(db, project_path=str(project_dir),
+                                   schedule="daily", scan_type="project", findings=[], sources=[])
+
+        cfg = AppConfig()
+        scanner = ScheduledScanner(cfg, db)
+
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"]))), \
+             patch("packagealert.plugins.registry.plugin_registry.fire_on_scan_complete", new=AsyncMock()), \
+             patch("packagealert.plugins.registry.plugin_registry.has_scan_store", return_value=True):
+            await scanner.run_due_scans()
+
+        results = await list_scan_results(db, str(project_dir), scan_type="project")
+        # Existing 3 rows must be intact — no new row added, no prune run
+        assert len(results) == 3
+        await db.close()
+
+
 @pytest.mark.asyncio
 async def test_scheduler_loop_calls_run_due_scans():
     """_scheduler_loop calls run_due_scans repeatedly until cancelled."""

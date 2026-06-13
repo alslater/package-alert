@@ -21,6 +21,7 @@ from rich.table import Table
 from packagealert.config import load_config
 from packagealert.logging_setup import configure_logging
 from packagealert.daemon_pid import check_already_running, is_started_by_systemd, PID_FILE
+from packagealert.plugins.registry import plugin_registry
 
 log = logging.getLogger(__name__)
 
@@ -83,15 +84,72 @@ from packagealert.cli.setup_cmd import cooldown_app, setup_app  # noqa: E402
 app.add_typer(setup_app, name="setup")
 app.add_typer(cooldown_app, name="cooldown")
 
+from packagealert.cli.plugins import central_app  # noqa: E402
+app.add_typer(central_app, name="central")
+
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
 _verbose: bool = False
+_plugin_commands_registered: bool = False
+
+
+def _config_path_from_argv() -> "Path | None":
+    """Extract --config / -c <path> from sys.argv without a full parse.
+
+    Used during early plugin registration so that plugins enabled via
+    ``pa --config <path> <cmd>`` have their CLI sub-apps registered.
+    Handles all three forms: ``--config PATH``, ``--config=PATH``, ``-c PATH``,
+    and ``-cPATH``.
+    """
+    import sys
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):
+        if arg in ("--config", "-c"):
+            if i + 1 < len(args):
+                return Path(args[i + 1])
+        elif arg.startswith("--config="):
+            value = arg[len("--config="):]
+            if value:
+                return Path(value)
+        elif arg.startswith("-c") and len(arg) > 2:
+            return Path(arg[2:])
+    return None
+
+
+def _register_plugin_commands() -> None:
+    """Load enabled plugin entry points and register their CLI sub-apps.
+
+    Called once from the Typer callback so that config I/O and plugin imports
+    happen at command invocation time, not at module import time.  Reads
+    --config / -c from sys.argv so that plugins enabled via a non-default
+    config file also get their commands registered.
+    """
+    global _plugin_commands_registered
+    if _plugin_commands_registered:
+        return
+    _plugin_commands_registered = True
+    import logging as _logging
+    from packagealert.config import read_enabled_plugins as _read_enabled_plugins
+    from packagealert.plugins.registry import _load_entry_points as _lep
+    argv_config = _config_path_from_argv()
+    if argv_config is not None:
+        argv_config = _apply_config_veto(argv_config, _read_enabled_plugins, _lep, warn=False)
+    _enabled_plugin_names = set(_read_enabled_plugins(argv_config))
+    for _name, _cls in plugin_registry.load_classes(only=_enabled_plugin_names).items():
+        try:
+            for _plugin_app in _cls.get_cli_commands():
+                app.add_typer(_plugin_app)
+        except Exception:
+            _logging.getLogger(__name__).warning(
+                "Failed to register CLI commands for plugin %r", _name, exc_info=True
+            )
 
 
 @app.callback()
 def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log output on the console.")):
     global _verbose, _update_thread, _atexit_registered
     _verbose = verbose
+    _register_plugin_commands()
 
     if not _is_interactive():
         return
@@ -119,10 +177,69 @@ def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log 
             _atexit_registered = True
 
 
+def _apply_config_veto(
+    config: Path,
+    read_enabled_plugins,
+    load_entry_points,
+    *,
+    warn: bool = True,
+) -> Path | None:
+    """Return config if no enabled plugin vetoes it, None if vetoed.
+
+    Two-pass strategy to ensure default-config veto plugins are checked before
+    any candidate-config-only plugin code is imported:
+    1. Resolve default-config enabled plugins; if any veto, return None immediately
+       without importing anything from the candidate config.
+    2. Only if pass 1 is clear: resolve plugins newly introduced by the candidate
+       and check those for vetoes too.
+    """
+    default_enabled = set(read_enabled_plugins(None))
+    default_classes = load_entry_points(only=default_enabled)
+    for name, cls in default_classes.items():
+        try:
+            vetoes = cls.refuses_config_override()
+        except Exception:
+            log.warning("Plugin %r raised in refuses_config_override — treating as veto", name, exc_info=True)
+            vetoes = True
+        if vetoes:
+            if warn:
+                Console(stderr=True).print(
+                    f"Warning: --config ignored because plugin '{name}' "
+                    "enforces central policy.",
+                    style="yellow",
+                )
+            return None
+
+    candidate_only = set(read_enabled_plugins(config)) - default_enabled
+    candidate_classes = load_entry_points(only=candidate_only)
+    for name, cls in candidate_classes.items():
+        try:
+            vetoes = cls.refuses_config_override()
+        except Exception:
+            log.warning("Plugin %r raised in refuses_config_override — treating as veto", name, exc_info=True)
+            vetoes = True
+        if vetoes:
+            if warn:
+                Console(stderr=True).print(
+                    f"Warning: --config ignored because plugin '{name}' "
+                    "enforces central policy.",
+                    style="yellow",
+                )
+            return None
+
+    return config
+
+
 def _load(config: Optional[Path], *, daemon: bool = False):
+    if config is not None:
+        from packagealert.config import read_enabled_plugins as _rep
+        from packagealert.plugins.registry import _load_entry_points as _lep
+        config = _apply_config_veto(config, _rep, _lep)
     cfg = load_config(config)
     configure_logging(cfg.log if daemon else cfg.cli_log, verbose=_verbose)
-    return cfg
+    if not daemon:
+        plugin_registry.load(cfg, config_path=config)
+    return cfg, config
 
 
 @app.command()
@@ -153,8 +270,8 @@ def daemon(
             os.dup2(devnull, fd)
         os.close(devnull)
 
-    cfg = _load(config, daemon=True)
-    d = Daemon(cfg)
+    cfg, effective_config_path = _load(config, daemon=True)
+    d = Daemon(cfg, config_path=effective_config_path)
     asyncio.run(d.run())
 
 
@@ -173,7 +290,7 @@ def status(
 @app.command("scan-cache")
 def scan_cache(config: Optional[Path] = _cfg_option):
     """Scan package manager caches for malicious packages."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     asyncio.run(_run_scan_cache(cfg))
 
 
@@ -259,7 +376,7 @@ def query(
     config: Optional[Path] = _cfg_option,
 ):
     """Query OSV for a specific package."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     asyncio.run(_run_query(cfg, ecosystem, package, version))
 
 
@@ -308,7 +425,7 @@ def alerts(
     config: Optional[Path] = _cfg_option,
 ):
     """Show recent alerts from the database."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     asyncio.run(_run_alerts(cfg, limit))
 
 
@@ -390,7 +507,7 @@ def scan_project(
         if not requirements.is_file():
             console.print(f"[red]--requirements must be a file, not a directory: {requirements}[/red]")
             raise typer.Exit(1)
-    cfg = _load(config)
+    cfg, _ = _load(config)
     asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements))
 
 
@@ -477,6 +594,18 @@ async def _run_scan_project(
     await osv_client.aclose()
     await db.close()
 
+    from packagealert.models.scans import ScanResult
+    from datetime import datetime, timezone
+    scan = ScanResult(
+        project_path=str(root),
+        scan_type="installed" if installed else "project",
+        finding_count=len(findings),
+        findings=findings,
+        sources=result.sources,
+        scanned_at=datetime.now(timezone.utc),
+    )
+    await plugin_registry.fire_on_scan_complete(scan)
+
     unpinned_list = [{"name": p.name, "ecosystem": p.ecosystem} for p in result.unpinned]
 
     if fmt == "json":
@@ -491,15 +620,7 @@ async def _run_scan_project(
     if fmt in ("html", "browser"):
         html = _render_html(root, result.sources, unpinned_list, findings)
         if fmt == "browser":
-            import tempfile
-            import webbrowser
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".html", prefix="package-alert-", dir="/tmp", delete=False
-            ) as f:
-                f.write(html)
-                tmp_path = f.name
-            webbrowser.open(f"file://{tmp_path}")
-            console.print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
+            open_html_in_browser(html)
         else:
             print(html)
         return
@@ -545,7 +666,21 @@ async def _run_scan_project(
                   f"[yellow]{len(result.unpinned)} unpinned[/yellow] ({len(to_query)} packages checked)")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list) -> str:
+def open_html_in_browser(html: str) -> None:
+    """Write *html* to a temp file and open it in the default browser."""
+    import tempfile
+    import webbrowser
+    from rich.console import Console
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".html", prefix="package-alert-", dir="/tmp", delete=False
+    ) as f:
+        f.write(html)
+        tmp_path = f.name
+    webbrowser.open(f"file://{tmp_path}")
+    Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
+
+
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, scanned_at: str = "") -> str:
     from html import escape
     malicious = sum(1 for f in findings if f["is_malicious"])
     vulnerable = len(findings) - malicious
@@ -598,6 +733,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list) -> s
 <div class="meta">
   <div>Project: <strong>{escape(str(root))}</strong></div>
   <div>Sources: {escape(', '.join(sources))}</div>
+  {"<div>Scanned: " + escape(scanned_at) + "</div>" if scanned_at else ""}
 </div>
 <div class="summary">
   <span class="malicious">{malicious} malicious</span>
@@ -619,7 +755,7 @@ def clear_cache(
     config: Optional[Path] = _cfg_option,
 ):
     """Clear the OSV query cache, optionally filtered by ecosystem."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     asyncio.run(_run_clear_cache(cfg, ecosystem))
 
 
@@ -776,8 +912,32 @@ def daemon_install_cmd():
         raise typer.Exit(1)
 
     if not _DEFAULT_CONFIG_FILE.exists():
+        import os, stat, tempfile
         _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        _DEFAULT_CONFIG_FILE.write_text(_DEFAULT_CONFIG_CONTENT)
+        fd, tmp = tempfile.mkstemp(dir=_CONFIG_DIR, suffix=".tmp")
+        try:
+            os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)
+            with os.fdopen(fd, "w") as f:
+                fd = -1  # fdopen takes ownership; don't close twice
+                f.write(_DEFAULT_CONFIG_CONTENT)
+            os.replace(tmp, _DEFAULT_CONFIG_FILE)
+        except Exception:
+            if fd != -1:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        # os.replace preserves the temp file's mode on Linux but not on all platforms;
+        # chmod the destination explicitly so the config is always 0600.
+        try:
+            os.chmod(_DEFAULT_CONFIG_FILE, stat.S_IRUSR | stat.S_IWUSR)
+        except OSError:
+            pass
         console.print(f"[dim]Wrote default config to {_DEFAULT_CONFIG_FILE}[/dim]")
     else:
         console.print(f"[dim]Config already exists at {_DEFAULT_CONFIG_FILE} — leaving it unchanged.[/dim]")
@@ -1038,7 +1198,7 @@ def run_cmd(
         console.print("[red]No command specified.[/red]")
         console.print("[dim]Usage: package-alert run [OPTIONS] <command> [args...][/dim]")
         raise typer.Exit(1)
-    cfg = _load(config)
+    cfg, _ = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
     code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, flags=parsed_flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change))
@@ -1054,7 +1214,7 @@ def schedule_add(
     config: Optional[Path] = _cfg_option,
 ):
     """Add the project to the scheduled scan list."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     root = (path or Path.cwd()).resolve()
     if not root.is_dir():
         console.print(f"[red]Not a directory: {root}[/red]")
@@ -1088,7 +1248,7 @@ def schedule_remove(
     """Remove the project from the scheduled scan list.
 
     Without --installed or --project, removes all scan entries for the project."""
-    cfg = _load(config)
+    cfg, _ = _load(config)
     root = (path or Path.cwd()).resolve()
     if installed and project:
         console.print("[red]Specify --installed or --project, not both.[/red]")
@@ -1115,7 +1275,7 @@ async def _schedule_remove(path: str, scan_type: Optional[str]) -> bool:
 @schedule_app.command("list")
 def schedule_list(config: Optional[Path] = _cfg_option):
     """List all projects registered for scheduled scans."""
-    _load(config)
+    _load(config)  # validates config; return value unused
     asyncio.run(_schedule_list())
 
 
@@ -1158,15 +1318,21 @@ def scans_list(
     config: Optional[Path] = _cfg_option,
 ):
     """List completed scheduled scans for a project."""
-    _load(config)
+    _load(config)  # validates config; return value unused
     root = (path or Path.cwd()).resolve()
     asyncio.run(_scans_list(str(root), limit))
 
 
 async def _scans_list(project_path: str, limit: int) -> None:
     import datetime
+    import socket
+    from packagealert.plugins.registry import plugin_registry
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import list_scan_results
+
+    hostname = socket.gethostname()
+    if await plugin_registry.try_scans_list(project_path, hostname, limit):
+        return
 
     db = await open_db()
     try:
@@ -1210,14 +1376,20 @@ def scans_listall(
     config: Optional[Path] = _cfg_option,
 ):
     """List completed scheduled scans across all projects."""
-    _load(config)
+    _load(config)  # validates config; return value unused
     asyncio.run(_scans_listall(limit))
 
 
 async def _scans_listall(limit: int) -> None:
     import datetime
+    import socket
+    from packagealert.plugins.registry import plugin_registry
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import list_all_scan_results
+
+    hostname = socket.gethostname()
+    if await plugin_registry.try_scans_listall(hostname, limit):
+        return
 
     db = await open_db()
     try:
@@ -1265,15 +1437,19 @@ def scans_show(
     config: Optional[Path] = _cfg_option,
 ):
     """Show findings from a completed scheduled scan."""
-    _load(config)
+    _load(config)  # validates config; return value unused
     asyncio.run(_scans_show(scan_id, fmt, details))
 
 
 async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
     import datetime
     import json as jsonlib
+    from packagealert.plugins.registry import plugin_registry
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import get_scan_result
+
+    if await plugin_registry.try_scans_show(scan_id, fmt, show_details):
+        return
 
     db = await open_db()
     try:
@@ -1303,17 +1479,9 @@ async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
         return
 
     if fmt in ("html", "browser"):
-        html = _render_html(Path(root_str), sources, [], findings)
+        html = _render_html(Path(root_str), sources, [], findings, scanned_at=date_str)
         if fmt == "browser":
-            import tempfile
-            import webbrowser
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".html", prefix="package-alert-", dir="/tmp", delete=False
-            ) as f:
-                f.write(html)
-                tmp_path = f.name
-            webbrowser.open(f"file://{tmp_path}")
-            console.print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
+            open_html_in_browser(html)
         else:
             print(html)
         return

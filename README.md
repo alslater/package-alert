@@ -427,6 +427,109 @@ package-alert scans show 42 --format browser
 package-alert scans show 42 --details
 ```
 
+## PA Central (Fleet Integration)
+
+PA Central is an optional built-in plugin that connects a local package-alert agent to a central fleet server. When enabled:
+
+- The daemon sends periodic **heartbeats** to the server so you can see which agents are alive.
+- The daemon fetches a **config overlay** from the server (TOML) and applies it on top of the local config. This lets a fleet admin push heuristic thresholds, cooldown policy, or allowlists to all agents without touching individual machines.
+- The daemon **reports alerts** and scan findings to the server.
+- The daemon syncs **cooldown clearances** pushed by the fleet admin.
+- `pa scans list/listall/show` fetch results from the fleet server instead of local SQLite, so you can see scans from all enrolled hosts.
+
+### Enabling PA Central
+
+```bash
+# Enable the plugin
+pa central enable
+
+# Set your API key and server URL
+pa central configure --api-key sk-abc123 --server-url https://fleet.example.com
+
+# If the daemon is already running, these commands restart it automatically.
+```
+
+If your fleet server uses HTTP (not HTTPS), add `allow_http = true` to `[plugins.pa-central]` in your config file:
+
+```toml
+[plugins.pa-central]
+allow_http = true
+```
+
+### Disabling PA Central
+
+```bash
+pa central disable
+```
+
+This removes the plugin from `plugins.enabled` and deletes the locally cached config overlay.
+
+### Configuration
+
+```toml
+[plugins]
+enabled = ["pa-central"]
+
+[plugins.pa-central]
+server_url = "https://fleet.example.com"   # fleet server base URL
+api_key = "sk-abc123"                      # agent API key
+# heartbeat_interval_seconds = 300         # how often to send heartbeats
+# config_fetch_interval_seconds = 3600     # how often to pull the config overlay
+# allow_http = false                       # set true to allow non-TLS server URLs
+```
+
+The `api_key` and `server_url` can never be overridden by the fleet server's config overlay — they are stripped before the overlay is applied.
+
+### `pa central` commands
+
+| Command | Description |
+|---------|-------------|
+| `pa central list` | List all installed plugins and whether they are enabled |
+| `pa central enable [PLUGIN]` | Enable a plugin (default: `pa-central`) |
+| `pa central disable [PLUGIN]` | Disable a plugin |
+| `pa central configure [PLUGIN] --KEY VALUE …` | Set plugin config values |
+| `pa central status [PLUGIN]` | Show plugin status, config, and last heartbeat state |
+
+### `pa status` — Central section
+
+When PA Central is enabled, `pa status` shows a **Central** section:
+
+```
+Central
+  Server:       https://fleet.example.com
+  Heartbeat:    2026-06-11 14:22:01  ok
+  Config sync:  2026-06-11 14:20:00  ok
+```
+
+Timestamps are shown in local time. If a heartbeat or config fetch has not succeeded, the last error message is shown.
+
+### `pa scans` with PA Central
+
+When PA Central is enabled **and configured** (server URL and API key set), scan results are stored on the fleet server rather than in local SQLite. The `pa scans list`, `pa scans listall`, and `pa scans show` commands automatically query the fleet server. If the plugin is enabled but not yet configured, scan results continue to be stored locally until credentials are provided.
+
+```bash
+# Scans for the current project on this host
+pa scans list
+
+# All scans for this host across all projects
+pa scans listall
+
+# Show findings from a specific scan
+pa scans show 42
+pa scans show 42 --format json
+pa scans show 42 --details
+```
+
+### Config override policy
+
+PA Central sets `refuses_config_override = True`, which means the `--config` flag is blocked whenever PA Central is enabled. This prevents a user from bypassing fleet-managed settings by pointing to a custom config file.
+
+### Integrating with a different backend
+
+PA Central is built on a documented `AgentPlugin` interface. If you want to integrate package-alert with your own SIEM, alerting pipeline, or scan store instead of PA Central, see [CENTRAL.md](CENTRAL.md).
+
+---
+
 ## Configuration
 
 Config is loaded from `~/.config/package-alert/config.toml` automatically if it exists. Override with `--config PATH` on any command.
@@ -567,7 +670,11 @@ package-alert daemon-remove
 ## Language Support & Plugins
 
 See [LANGUAGES.md](LANGUAGES.md) for the full language module contract, how to write
-an external plugin, and the incomplete Rust/Cargo example plugin.
+an external language plugin, and the incomplete Rust/Cargo example plugin.
+
+See [CENTRAL.md](CENTRAL.md) for the `AgentPlugin` interface — how to write a plugin
+that integrates package-alert with an alternative backend, how to register it via
+entry points, and the security invariants the runtime enforces.
 
 ## Architecture
 

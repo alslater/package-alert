@@ -1846,9 +1846,17 @@ def _restore_lock_files(
                     # and closes it, guaranteeing all bytes are written (no partial
                     # write) before we rename into place.
                     with os.fdopen(fd, "wb") as fobj:
+                        fd = -1  # fdopen takes ownership; don't close twice
                         fobj.write(content)
                     tmp.rename(path)
                     restored.append(path.name)
+                except Exception:
+                    if fd != -1:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    raise
                 finally:
                     tmp.unlink(missing_ok=True)
         except OSError:

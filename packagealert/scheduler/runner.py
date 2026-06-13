@@ -83,19 +83,34 @@ class ScheduledScanner:
             except Exception:
                 log.exception("Scheduled scan failed for %s", project.path)
                 continue
-            scanned_at = time.time()
-            await save_scan_result(
-                self._db,
+            from packagealert.models.scans import ScanResult
+            from packagealert.plugins.registry import plugin_registry
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            scanned_at = now_utc.timestamp()
+            scan = ScanResult(
                 project_path=project.path,
-                schedule=project.schedule,
                 scan_type=project.scan_type,
+                finding_count=len(findings),
                 findings=findings,
                 sources=sources,
+                scanned_at=now_utc,
             )
+            plugin_stores_scans = plugin_registry.has_scan_store()
+            if not plugin_stores_scans:
+                await save_scan_result(
+                    self._db,
+                    project_path=project.path,
+                    schedule=project.schedule,
+                    scan_type=project.scan_type,
+                    findings=findings,
+                    sources=sources,
+                )
+            await plugin_registry.fire_on_scan_complete(scan)
             await update_last_scanned(self._db, project.path, project.scan_type, scanned_at)
-            await prune_scan_results(
-                self._db, project.path, project.scan_type, keep=self._cfg.scheduler.max_scan_history
-            )
+            if not plugin_stores_scans:
+                await prune_scan_results(
+                    self._db, project.path, project.scan_type, keep=self._cfg.scheduler.max_scan_history
+                )
             log.info(
                 "Scheduled scan complete for %s: %d finding(s)", project.path, len(findings)
             )

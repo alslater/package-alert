@@ -6,10 +6,13 @@ import os
 import signal
 from pathlib import Path
 
+from datetime import datetime, timezone
+
 from packagealert.alerts.desktop import notify_malicious, notify_risk
 from packagealert.alerts.terminal import alert_malicious, alert_risk
 from packagealert.analyzers.risk import RiskEngine
 from packagealert.config import AppConfig, warn_missing_paths
+from packagealert.plugins.registry import plugin_registry
 from packagealert.daemon_pid import PID_FILE as _PID_FILE
 from packagealert.daemon_pid import check_already_running as _check_already_running
 from packagealert.heuristics.top_packages import TopPackagesCache
@@ -74,8 +77,9 @@ def check_already_running() -> int | None:
 
 
 class Daemon:
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, config_path: Path | None = None) -> None:
         self._cfg = cfg
+        self._config_path = config_path
         self._running = False
 
     async def run(self) -> None:
@@ -88,6 +92,7 @@ class Daemon:
             _PID_FILE.unlink(missing_ok=True)
 
     async def _run(self) -> None:
+        plugin_registry.load(self._cfg, self._config_path)
         lang_registry.load()
         warn_missing_paths(self._cfg)
         db = await open_db()
@@ -138,6 +143,7 @@ class Daemon:
         loop.add_signal_handler(signal.SIGTERM, _handle_signal)
 
         log.info("package-alert daemon started (%d monitor(s))", len(monitors))
+        await plugin_registry.fire_on_daemon_start(datetime.now(timezone.utc))
         consumer_tasks: list[asyncio.Task] = []
         try:
             consumer_tasks = [
@@ -156,6 +162,8 @@ class Daemon:
             await asyncio.gather(*background_tasks + consumer_tasks, return_exceptions=True)
             await osv_client.aclose()
             await pop_client.aclose()
+            await plugin_registry.drain_alert_tasks()
+            await plugin_registry.fire_on_daemon_stop()
             await db.close()
             log.info("package-alert daemon stopped")
 
@@ -254,6 +262,7 @@ class Daemon:
                 risk_score=None,
                 project_path=event.project_path,
             )
+            plugin_registry.schedule_alert(event, osv_result)
             if self._cfg.alerts.terminal_notifications:
                 alert_malicious(event, osv_result)
             if self._cfg.alerts.desktop_notifications:
@@ -273,6 +282,7 @@ class Daemon:
                     risk_score=report.score,
                     project_path=event.project_path,
                 )
+                plugin_registry.schedule_alert(event, report)
                 if self._cfg.alerts.terminal_notifications:
                     alert_risk(event, report)
                 if self._cfg.alerts.desktop_notifications:
