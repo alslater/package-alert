@@ -427,7 +427,15 @@ def cooldown_allow(
     from packagealert.config import load_config
     from packagealert.storage.db import open_db, store_cooldown_cleared
 
+    if config is not None:
+        from packagealert.config import read_enabled_plugins
+        from packagealert.plugins.registry import _load_entry_points
+        from packagealert.cli.app import _apply_config_veto
+        config = _apply_config_veto(config, read_enabled_plugins, _load_entry_points)
     cfg = load_config(config)
+    if not cfg.sandbox.cooldown.allow_cooldown_allow:
+        typer.echo("cooldown allow is disabled by policy.", err=True)
+        raise typer.Exit(1)
     ecosystem = ecosystem.lower()
 
     async def _run():

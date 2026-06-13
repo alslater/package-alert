@@ -616,9 +616,17 @@ def _atomic_write(path: Path, content: bytes, mode: int | None = None) -> None:
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "wb") as fobj:
+            fd = -1  # fdopen takes ownership; don't close twice
             fobj.write(content)
         if mode is not None:
             os.chmod(tmp, mode & 0o7777)
         tmp.rename(path)
+    except Exception:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
     finally:
         tmp.unlink(missing_ok=True)

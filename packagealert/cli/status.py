@@ -10,7 +10,7 @@ from pathlib import Path
 import psutil
 
 from packagealert.config import load_config, DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
-from packagealert.daemon_pid import check_already_running, is_started_by_systemd, PID_FILE as _PID_FILE
+from packagealert.daemon_pid import find_daemon_pid, is_started_by_systemd, PID_FILE as _PID_FILE
 from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
 
 
@@ -25,6 +25,19 @@ class AlertRow:
     risk_score: int | None
     severity: str
     alerted_at: float  # unix timestamp
+
+
+@dataclass
+class CentralStatus:
+    enabled: bool
+    plugin_name: str
+    server_url: str
+    last_heartbeat_at: str | None
+    last_heartbeat_ok: bool | None
+    last_heartbeat_error: str | None
+    last_config_fetch_at: str | None
+    last_config_fetch_ok: bool | None
+    last_config_fetch_error: str | None
 
 
 @dataclass
@@ -53,6 +66,7 @@ class StatusData:
     log_exists: bool = False
     cli_log_path: str = ""
     cli_log_exists: bool = False
+    central: CentralStatus | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -86,6 +100,17 @@ class StatusData:
                 ],
             },
             "scheduled_projects_count": self.scheduled_projects_count,
+            "central": {
+                "enabled": self.central.enabled,
+                "plugin_name": self.central.plugin_name,
+                "server_url": self.central.server_url,
+                "last_heartbeat_at": self.central.last_heartbeat_at,
+                "last_heartbeat_ok": self.central.last_heartbeat_ok,
+                "last_heartbeat_error": self.central.last_heartbeat_error,
+                "last_config_fetch_at": self.central.last_config_fetch_at,
+                "last_config_fetch_ok": self.central.last_config_fetch_ok,
+                "last_config_fetch_error": self.central.last_config_fetch_error,
+            } if self.central else None,
             "paths": {
                 "pid_file": {"path": self.pid_file_path, "exists": self.pid_file_exists},
                 "database": {"path": self.db_path, "exists": self.db_exists},
@@ -194,13 +219,13 @@ def render_status(
 
     def _log_line(label: str, path: str, exists: bool) -> None:
         if not path:
-            console.print(f"  {label}: [dim]disabled[/dim]")
+            console.print(f"  {label + ':':<8} [dim]disabled[/dim]")
         else:
             indicator = "[green]✓[/green]" if exists else "[dim]✗ not yet created[/dim]"
-            console.print(f"  {label}: {escape(path)}  {indicator}")
+            console.print(f"  {label + ':':<8} {escape(path)}  {indicator}")
 
     _log_line("Daemon", data.log_path, data.log_exists)
-    _log_line("CLI   ", data.cli_log_path, data.cli_log_exists)
+    _log_line("CLI", data.cli_log_path, data.cli_log_exists)
 
     console.print()
 
@@ -213,6 +238,41 @@ def render_status(
     else:
         console.print("  [dim]No projects scheduled.[/dim]")
 
+    if data.central is not None:
+        console.print()
+        console.print(f"[bold]Central[/bold]  [dim]({escape(data.central.plugin_name)})[/dim]")
+
+        def _fmt_ts(at: str) -> str:
+            try:
+                from datetime import datetime
+                dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                return at
+
+        def _central_line(label: str, value: str) -> None:
+            console.print(f"  {label + ':':<13} {value}")
+
+        server_val = escape(data.central.server_url) if data.central.server_url else "[dim](not set)[/dim]"
+        _central_line("Server", server_val)
+
+        def _conn_line(label: str, at: str | None, ok: bool | None, err: str | None) -> None:
+            if at is None:
+                _central_line(label, "[dim]never[/dim]")
+                return
+            if ok is True:
+                status_str = "[green]ok[/green]"
+            elif ok is False:
+                status_str = f"[red]failed[/red] ({escape(err or '')})"
+            else:
+                status_str = "[dim]unknown[/dim]"
+            _central_line(label, f"{_fmt_ts(at)}  {status_str}")
+
+        _conn_line("Heartbeat", data.central.last_heartbeat_at,
+                   data.central.last_heartbeat_ok, data.central.last_heartbeat_error)
+        _conn_line("Config sync", data.central.last_config_fetch_at,
+                   data.central.last_config_fetch_ok, data.central.last_config_fetch_error)
+
 
 async def gather_status(
     config_path: Path | None,
@@ -222,28 +282,22 @@ async def gather_status(
     """Collect all status information."""
     from packagealert.storage.db import open_db
 
-    cfg = load_config(config_path)
+    effective_config_path = config_path
     if config_path is not None:
-        resolved_cfg_path = str(config_path)
+        from packagealert.config import read_enabled_plugins
+        from packagealert.plugins.registry import _load_entry_points
+        from packagealert.cli.app import _apply_config_veto
+        effective_config_path = _apply_config_veto(config_path, read_enabled_plugins, _load_entry_points)
+    cfg = load_config(effective_config_path)
+    if effective_config_path is not None:
+        resolved_cfg_path = str(effective_config_path)
     elif _DEFAULT_CONFIG.exists():
         resolved_cfg_path = str(_DEFAULT_CONFIG)
     else:
         resolved_cfg_path = "(defaults)"
 
     # ── Daemon ────────────────────────────────────────────────────────────────
-    pid = check_already_running()
-
-    # Fallback: PID file may be absent (e.g. older install, crash before write).
-    # Scan running processes for a `package-alert daemon` invocation.
-    if pid is None:
-        for proc in psutil.process_iter(["pid", "cmdline"]):
-            try:
-                cmdline = proc.info["cmdline"] or []
-                if "daemon" in cmdline and any("package-alert" in c for c in cmdline):
-                    pid = proc.info["pid"]
-                    break
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
+    pid = find_daemon_pid()
 
     managed_by_systemd = is_started_by_systemd(pid) if pid is not None else False
     uptime: float | None = None
@@ -326,6 +380,23 @@ async def gather_status(
     pid_file_str = str(_PID_FILE)
     pid_file_exists = _PID_FILE.exists()
 
+    # ── Central ─────────────────────────────────────────────────────────────────
+    central_status: CentralStatus | None = None
+    if "pa-central" in cfg.plugins.enabled:
+        from packagealert.plugins.central.state import read_state, _STATE_PATH
+        state = read_state(_STATE_PATH)
+        central_status = CentralStatus(
+            enabled=True,
+            plugin_name="pa-central",
+            server_url=cfg.plugins.pa_central.server_url,
+            last_heartbeat_at=state.get("last_heartbeat_at"),
+            last_heartbeat_ok=state.get("last_heartbeat_ok"),
+            last_heartbeat_error=state.get("last_heartbeat_error"),
+            last_config_fetch_at=state.get("last_config_fetch_at"),
+            last_config_fetch_ok=state.get("last_config_fetch_ok"),
+            last_config_fetch_error=state.get("last_config_fetch_error"),
+        )
+
     return StatusData(
         daemon_running=pid is not None,
         daemon_pid=pid,
@@ -346,4 +417,5 @@ async def gather_status(
         log_exists=log_exists,
         cli_log_path=cli_log_path_str,
         cli_log_exists=cli_log_exists,
+        central=central_status,
     )

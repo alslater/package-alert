@@ -27,3 +27,28 @@ def check_already_running(pid_file: Path | None = None) -> int | None:
         return pid
     except (ValueError, ProcessLookupError, PermissionError):
         return None
+
+
+def find_daemon_pid() -> int | None:
+    """Return the PID of a running daemon using PID file then psutil fallback."""
+    pid = check_already_running()
+    if pid is not None:
+        return pid
+    try:
+        import psutil
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                raw = proc.info["cmdline"] or []
+                cmdline = [str(c) for c in raw if c is not None]
+                if not cmdline or "daemon" not in cmdline:
+                    continue
+                exe = Path(cmdline[0]).name
+                if exe in ("package-alert", "pa") or any(
+                    "package-alert" in c or "packagealert" in c for c in cmdline
+                ):
+                    return proc.info["pid"]
+            except Exception:
+                continue
+    except ImportError:
+        pass
+    return None

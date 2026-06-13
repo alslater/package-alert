@@ -96,7 +96,7 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
     mock_proc.create_time.return_value = create_time
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=12345),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
         patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
@@ -114,7 +114,7 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
 @pytest.mark.asyncio
 async def test_gather_status_daemon_stopped(mem_db, tmp_path):
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
         patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
@@ -128,14 +128,11 @@ async def test_gather_status_daemon_stopped(mem_db, tmp_path):
 
 @pytest.mark.asyncio
 async def test_gather_status_daemon_running_via_process_scan(mem_db, tmp_path):
-    """Daemon detected via process scan when PID file is absent."""
-    mock_proc = MagicMock()
-    mock_proc.info = {"pid": 9999, "cmdline": ["/usr/bin/python", "package-alert", "daemon"]}
+    """Daemon detected via find_daemon_pid (which includes process scan fallback)."""
     create_time = time.time() - 120
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=None),
-        patch("packagealert.cli.status.psutil.process_iter", return_value=[mock_proc]),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=9999),
         patch("packagealert.cli.status.psutil.Process") as mock_process_cls,
         patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
@@ -177,7 +174,7 @@ async def test_gather_status_alerts_and_count(mem_db, tmp_path):
     await mem_db.commit()
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
         patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
@@ -199,7 +196,7 @@ async def test_gather_status_psutil_no_such_process(mem_db, tmp_path):
     mock_proc.create_time.side_effect = _psutil.NoSuchProcess(pid=12345)
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=12345),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
@@ -218,7 +215,7 @@ async def test_gather_status_psutil_access_denied(mem_db, tmp_path):
     mock_proc.create_time.side_effect = _psutil.AccessDenied(pid=12345)
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=12345),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
         patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
@@ -238,7 +235,7 @@ async def test_gather_status_psutil_zombie_process(mem_db, tmp_path):
     mock_proc.create_time.side_effect = _psutil.ZombieProcess(pid=12345)
 
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=12345),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=12345),
         patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
         patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
         patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
@@ -255,7 +252,7 @@ async def test_gather_status_psutil_zombie_process(mem_db, tmp_path):
 async def test_gather_status_no_db(tmp_path):
     missing_db = tmp_path / "nonexistent.db"
     with (
-        patch("packagealert.cli.status.check_already_running", return_value=None),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
         patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
         patch("packagealert.cli.status._DB_PATH", missing_db),
         patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),

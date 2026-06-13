@@ -534,6 +534,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pydantic" },
     { name = "rich" },
+    { name = "tomli-w" },
     { name = "typer" },
     { name = "watchdog" },
 ]
@@ -552,11 +553,12 @@ dev = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "httpx", specifier = ">=0.27" },
-    { name = "levenshtein", specifier = ">=0.25" },
-    { name = "packaging", specifier = ">=23" },
+    { name = "levenshtein", specifier = ">=0.21" },
+    { name = "packaging", specifier = ">=20" },
     { name = "psutil", specifier = ">=6" },
     { name = "pydantic", specifier = ">=2.7" },
-    { name = "rich", specifier = ">=13" },
+    { name = "rich", specifier = ">=10" },
+    { name = "tomli-w", specifier = ">=1.2.0" },
     { name = "typer", specifier = ">=0.12" },
     { name = "watchdog", specifier = ">=4" },
 ]

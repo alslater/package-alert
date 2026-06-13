@@ -48,3 +48,20 @@ requires_inotify_headroom = pytest.mark.skipif(
         "(VS Code and other tools consume most of the system limit)"
     ),
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_plugin_registry():
+    """Reset the plugin registry singleton before each test."""
+    from packagealert.plugins.registry import plugin_registry
+
+    def _reset():
+        for task in list(plugin_registry._alert_tasks):
+            task.cancel()
+        plugin_registry._alert_tasks = []
+        plugin_registry._plugins = []
+        plugin_registry._classes = None
+
+    _reset()
+    yield
+    _reset()

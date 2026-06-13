@@ -34,6 +34,7 @@ dependencies = [
     "psutil>=6",
     "Levenshtein>=0.21",
     "packaging>=20",
+    "tomli-w>=1.2.0",
 ]
 
 [project.urls]
@@ -44,6 +45,8 @@ Repository = "https://github.com/alslater/package-alert"
 package-alert = "packagealert.cli.app:main"
 pa = "packagealert.cli.app:main"
 
+[project.entry-points."packagealert.plugins"]
+pa-central = "packagealert.plugins.central:CentralPlugin"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

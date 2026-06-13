@@ -9,6 +9,13 @@ from pydantic import ValidationError
 from packagealert.config import AppConfig, SandboxConfig, SchedulerConfig, load_config, warn_missing_paths
 
 
+@pytest.fixture(autouse=True)
+def _no_real_config(tmp_path, monkeypatch):
+    """Prevent load_config(None) from reading the developer's real config file."""
+    monkeypatch.setattr("packagealert.config._DEFAULT_CONFIG", tmp_path / "no-config.toml")
+    monkeypatch.setattr("packagealert.config._OVERLAY_PATH", tmp_path / "no-overlay.toml")
+
+
 def test_defaults_load_without_file():
     cfg = load_config(None)
     assert cfg.osv.cache_ttl_hours == 24
@@ -33,6 +40,27 @@ def test_toml_overrides_defaults(tmp_path):
     assert cfg.osv.cache_ttl_hours == 6
     assert cfg.watch.enable_cache_monitoring is False
     assert cfg.alerts.desktop_notifications is False
+
+
+def test_fleet_overlay_not_applied_when_plugin_disabled(tmp_path, monkeypatch):
+    overlay_file = tmp_path / "central-overlay.toml"
+    overlay_file.write_text("[heuristics]\nwarning_threshold = 99\n")
+    monkeypatch.setattr("packagealert.config._OVERLAY_PATH", overlay_file)
+    # No plugins.enabled in config — pa-central is disabled
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text("")
+    cfg = load_config(cfg_file)
+    assert cfg.heuristics.warning_threshold == 40  # default, overlay ignored
+
+
+def test_fleet_overlay_applied_when_plugin_enabled(tmp_path, monkeypatch):
+    overlay_file = tmp_path / "central-overlay.toml"
+    overlay_file.write_text("[heuristics]\nwarning_threshold = 99\n")
+    monkeypatch.setattr("packagealert.config._OVERLAY_PATH", overlay_file)
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[plugins]\nenabled = ["pa-central"]\n')
+    cfg = load_config(cfg_file)
+    assert cfg.heuristics.warning_threshold == 99
 
 
 def test_invalid_toml_raises(tmp_path):
@@ -201,3 +229,42 @@ def test_cooldown_config_from_toml(tmp_path):
     assert cfg.sandbox.cooldown.period_days == 14
     assert cfg.sandbox.cooldown.on_new_low_risk == "block"
     assert cfg.sandbox.cooldown.on_new_medium_risk == "prompt"  # default preserved
+
+
+def test_cooldown_config_allow_cooldown_allow_default():
+    from packagealert.config import CooldownConfig
+    cfg = CooldownConfig()
+    assert cfg.allow_cooldown_allow is True
+
+
+def test_cooldown_config_allow_cooldown_allow_false():
+    from packagealert.config import CooldownConfig
+    cfg = CooldownConfig(allow_cooldown_allow=False)
+    assert cfg.allow_cooldown_allow is False
+
+
+def test_plugins_config_defaults():
+    from packagealert.config import PluginsConfig
+    cfg = PluginsConfig()
+    assert cfg.enabled == []
+    assert cfg.pa_central.api_key == ""
+    assert cfg.pa_central.server_url == ""
+    assert cfg.pa_central.heartbeat_interval_seconds == 300
+    assert cfg.pa_central.config_fetch_interval_seconds == 3600
+
+
+def test_app_config_has_plugins():
+    from packagealert.config import AppConfig
+    cfg = AppConfig()
+    assert hasattr(cfg, "plugins")
+    assert cfg.plugins.enabled == []
+
+
+def test_load_config_remaps_pa_central_key(tmp_path):
+    from packagealert.config import load_config
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[plugins]\nenabled = ["pa-central"]\n\n[plugins.pa-central]\napi_key = "sk-test"\nserver_url = "https://example.com"\n')
+    cfg = load_config(cfg_file)
+    assert "pa-central" in cfg.plugins.enabled
+    assert cfg.plugins.pa_central.api_key == "sk-test"
+    assert cfg.plugins.pa_central.server_url == "https://example.com"
