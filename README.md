@@ -242,6 +242,7 @@ package-alert scan-project [PATH] [OPTIONS]
 | `PATH` | `.` | Project directory |
 | `--scan-unpinned` | off | Also query OSV for unpinned/range-constrained dependencies |
 | `--scan-installed` | off | Scan `venv/.venv` site-packages or `node_modules` instead of lock files |
+| `--prod-only` | off | Exclude dev dependencies from the scan (lock file scanning only; mutually exclusive with `--scan-installed`) |
 | `--requirements` / `-r` | — | Explicit requirements file to scan instead of auto-detecting lock files (mutually exclusive with `--scan-installed`) |
 | `--details` / `-d` | off | Show full advisory details and URL |
 | `--format` / `-f` | `text` | Output format: `text`, `json`, `html`, `browser` |
@@ -254,6 +255,19 @@ package-alert scan-project [PATH] [OPTIONS]
 - `browser` — writes HTML to `/tmp/package-alert-*.html` and opens it in the default browser
 
 `--requirements` accepts a path relative to `PATH` (the project directory) or an absolute path. Nested `-r`/`--requirement` includes within the file are followed recursively. `--requirements` and `--scan-installed` are mutually exclusive.
+
+`--prod-only` filters out dev dependencies before querying OSV. Dev/prod detection coverage by lock file format:
+
+| Lock file | Dev detection |
+|-----------|--------------|
+| `package-lock.json` v2/v3 | `"dev": true` flag per entry |
+| `package-lock.json` v1 | per-entry `"dev": true` flag (when present); falls back to `devDependencies` keys at root for direct deps |
+| `yarn.lock` | full graph traversal via `dependencies:` blocks in each entry, seeded from `package.json`; ⚠ packages not reachable from either seed (e.g. missing `dependencies:` entries) are undetectable |
+| `pnpm-lock.yaml` | full graph traversal via `snapshots:` section (lockfileVersion 9+), seeded from `importers['.']`; without `snapshots:` falls back to direct seed names only; ⚠ undetectable if no `importers:` section (older single-project lockfiles) |
+| `uv.lock` | full dependency graph traversal from root package `dependencies`/`[package.dev-dependencies]`; packages reachable from both trees are treated as prod |
+| `Pipfile.lock` | `[develop]` section |
+| `composer.lock` | `packages-dev` section |
+| `requirements.txt` | ⚠ not supported — a warning is printed and all packages are included |
 
 **Auto-detected lock files (in order of precedence):**
 

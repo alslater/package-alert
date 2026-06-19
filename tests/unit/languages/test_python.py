@@ -827,3 +827,162 @@ def test_resolve_package_dir_duplicate_dist_info_falls_through(lang: PythonLangu
     pkg_dir.mkdir()
     result = lang.resolve_package_dir("mypkg", None, sp)
     assert result == pkg_dir
+
+
+# ---------------------------------------------------------------------------
+# is_dev
+# ---------------------------------------------------------------------------
+
+def test_pipfile_lock_marks_develop_as_dev(lang: PythonLanguage, tmp_path: Path) -> None:
+    data = {
+        "default": {"flask": {"version": "==3.0.0"}},
+        "develop": {"pytest": {"version": "==7.4.0"}},
+    }
+    pf_lock = tmp_path / "Pipfile.lock"
+    pf_lock.write_text(json.dumps(data))
+    result = lang.parse_lockfile(pf_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["flask"].is_dev is False
+    assert by_name["pytest"].is_dev is True
+
+
+def test_uv_lock_marks_dev_dependencies(lang: PythonLanguage, tmp_path: Path) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[workspace]\nmembers = ["."]\n\n'
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "requests" },\n'
+        ']\n\n'
+        '[package.dev-dependencies]\n'
+        'dev = [\n'
+        '    { name = "pytest" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pytest"\n'
+        'version = "8.0.0"\n\n'
+        '[[package]]\n'
+        'name = "requests"\n'
+        'version = "2.31.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["pytest"].is_dev is True
+    assert by_name["requests"].is_dev is False
+
+
+def test_uv_lock_no_editable_root_all_unknown(lang: PythonLanguage, tmp_path: Path) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\nname = "requests"\nversion = "2.31.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    # No editable root package — can't determine direct vs transitive, all None
+    assert all(p.is_dev is None for p in result)
+
+
+def test_uv_lock_transitive_prod_dep_is_false(lang: PythonLanguage, tmp_path: Path) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "requests" },\n'
+        ']\n\n'
+        '[package.dev-dependencies]\n'
+        'dev = [\n'
+        '    { name = "pytest" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pytest"\n'
+        'version = "8.0.0"\n\n'
+        '[[package]]\n'
+        'name = "requests"\n'
+        'version = "2.31.0"\n'
+        'dependencies = [\n'
+        '    { name = "urllib3" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "urllib3"\n'
+        'version = "2.0.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["pytest"].is_dev is True
+    assert by_name["requests"].is_dev is False
+    assert by_name["urllib3"].is_dev is False  # transitive of prod — resolved as prod
+
+
+def test_uv_lock_transitive_dev_only_dep_is_true(lang: PythonLanguage, tmp_path: Path) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "requests" },\n'
+        ']\n\n'
+        '[package.dev-dependencies]\n'
+        'dev = [\n'
+        '    { name = "pytest" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pytest"\n'
+        'version = "8.0.0"\n'
+        'dependencies = [\n'
+        '    { name = "pluggy" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pluggy"\n'
+        'version = "1.0.0"\n\n'
+        '[[package]]\n'
+        'name = "requests"\n'
+        'version = "2.31.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["pytest"].is_dev is True
+    assert by_name["pluggy"].is_dev is True   # transitive of dev-only — resolved as dev
+    assert by_name["requests"].is_dev is False
+
+
+def test_uv_lock_shared_transitive_dep_is_prod(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A dep reachable from both prod and dev trees is treated as prod (conservative)."""
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "requests" },\n'
+        ']\n\n'
+        '[package.dev-dependencies]\n'
+        'dev = [\n'
+        '    { name = "pytest" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pytest"\n'
+        'version = "8.0.0"\n'
+        'dependencies = [\n'
+        '    { name = "urllib3" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "requests"\n'
+        'version = "2.31.0"\n'
+        'dependencies = [\n'
+        '    { name = "urllib3" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "urllib3"\n'
+        'version = "2.0.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["urllib3"].is_dev is False  # in both trees — conservative prod

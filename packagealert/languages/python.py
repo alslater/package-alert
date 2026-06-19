@@ -199,13 +199,77 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
     """Parse a uv.lock TOML file into PackageSpec objects."""
     try:
         data = tomllib.loads(path.read_text())
+        packages = data.get("package", [])
+
+        # Build a name -> dep-names adjacency map from the lock (all packages).
+        deps_of: dict[str, set[str]] = {}
+        for pkg in packages:
+            norm = _normalize_name(pkg.get("name", "") or "")
+            if not norm:
+                continue
+            deps_of[norm] = {
+                _normalize_name(d["name"])
+                for d in pkg.get("dependencies", [])
+                if d.get("name")
+            }
+
+        # Find the root project entry (source.editable = ".") and collect its
+        # direct prod and dev dep seeds.
+        prod_seeds: set[str] = set()
+        dev_seeds: set[str] = set()
+        found_root = False
+        for pkg in packages:
+            src = pkg.get("source", {})
+            if isinstance(src, dict) and src.get("editable") == ".":
+                found_root = True
+                for dep in pkg.get("dependencies", []):
+                    if dep_name := dep.get("name"):
+                        prod_seeds.add(_normalize_name(dep_name))
+                for group_deps in pkg.get("dev-dependencies", {}).values():
+                    for dep in group_deps:
+                        if dep_name := dep.get("name"):
+                            dev_seeds.add(_normalize_name(dep_name))
+                break
+
+        # BFS/DFS reachability from each seed set.
+        def _reachable(seeds: set[str]) -> set[str]:
+            visited: set[str] = set()
+            queue = list(seeds)
+            while queue:
+                name = queue.pop()
+                if name in visited:
+                    continue
+                visited.add(name)
+                queue.extend(deps_of.get(name, set()) - visited)
+            return visited
+
+        if found_root:
+            prod_reachable = _reachable(prod_seeds)
+            dev_reachable = _reachable(dev_seeds)
+        else:
+            prod_reachable = set()
+            dev_reachable = set()
+
         results = []
-        for pkg in data.get("package", []):
+        for pkg in packages:
             name = pkg.get("name", "")
             if not name:
                 continue
+            # Skip the root project itself — it's the package being scanned, not a dependency.
+            src = pkg.get("source", {})
+            if isinstance(src, dict) and src.get("editable") == ".":
+                continue
             version = pkg.get("version")
-            results.append(PackageSpec(name=_normalize_name(name), version=version, ecosystem="PyPI"))
+            norm = _normalize_name(name)
+            in_prod = norm in prod_reachable
+            in_dev = norm in dev_reachable
+            if in_prod:
+                is_dev: bool | None = False  # reachable from prod — treat as prod
+            elif in_dev:
+                is_dev = True
+            else:
+                is_dev = None  # unreachable from root (workspace member, etc.)
+            results.append(PackageSpec(name=norm, version=version, ecosystem="PyPI", is_dev=is_dev))
         return results
     except Exception:
         log.debug("Failed to parse uv.lock at %s", path, exc_info=True)
@@ -218,13 +282,14 @@ def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
         data = json.loads(path.read_text())
         results = []
         for section in ("default", "develop"):
+            is_dev = section == "develop"
             for name, info in data.get(section, {}).items():
                 # VCS entries (git/hg/svn/bzr) have a ref but no PyPI version;
                 # they can't be queried against OSV so skip them entirely.
                 if any(k in info for k in ("git", "hg", "svn", "bzr")):
                     continue
                 raw_version = info.get("version", "").lstrip("=") or None
-                results.append(PackageSpec(name=_normalize_name(name), version=raw_version, ecosystem="PyPI"))
+                results.append(PackageSpec(name=_normalize_name(name), version=raw_version, ecosystem="PyPI", is_dev=is_dev))
         return results
     except Exception:
         log.debug("Failed to parse Pipfile.lock at %s", path, exc_info=True)

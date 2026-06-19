@@ -1565,3 +1565,173 @@ class TestPythonSandboxWritePaths:
             ["pip", "install", "-e", "git+https://github.com/org/repo.git"], tmp_path
         )
         assert not result
+
+
+# ---------------------------------------------------------------------------
+# prod_only filtering
+# ---------------------------------------------------------------------------
+
+class TestProdOnly:
+    """Tests for scan_project(prod_only=True) dev dep filtering."""
+
+    def _setup_registry(self):
+        from packagealert.languages import registry as reg
+        reg.load()
+
+    def test_prod_only_filters_dev_packages(self, tmp_path):
+        self._setup_registry()
+        from packagealert.parsers.lockfiles import scan_project
+
+        lock = tmp_path / "package-lock.json"
+        lock.write_text(json.dumps({
+            "lockfileVersion": 2,
+            "packages": {
+                "node_modules/express": {"version": "4.18.0"},
+                "node_modules/jest": {"version": "29.0.0", "dev": True},
+            },
+        }))
+
+        result = scan_project(tmp_path, prod_only=True)
+        names = [p.name for p in result.pinned]
+        assert "express" in names
+        assert "jest" not in names
+
+    def test_prod_only_false_includes_dev_packages(self, tmp_path):
+        self._setup_registry()
+        from packagealert.parsers.lockfiles import scan_project
+
+        lock = tmp_path / "package-lock.json"
+        lock.write_text(json.dumps({
+            "lockfileVersion": 2,
+            "packages": {
+                "node_modules/express": {"version": "4.18.0"},
+                "node_modules/jest": {"version": "29.0.0", "dev": True},
+            },
+        }))
+
+        result = scan_project(tmp_path, prod_only=False)
+        names = [p.name for p in result.pinned]
+        assert "express" in names
+        assert "jest" in names
+
+    def test_prod_only_dev_undetectable_for_requirements_txt(self, tmp_path):
+        """requirements.txt has no dev/prod concept — dev_undetectable should be populated."""
+        self._setup_registry()
+        from packagealert.parsers.lockfiles import scan_project
+
+        req = tmp_path / "requirements.txt"
+        req.write_text("requests==2.31.0\n")
+
+        result = scan_project(tmp_path, prod_only=True)
+        assert result.dev_undetectable == ["requirements.txt"]
+
+    def test_prod_only_empty_dev_undetectable_when_source_supports_it(self, tmp_path):
+        """package-lock.json supports dev detection — dev_undetectable should be empty."""
+        self._setup_registry()
+        from packagealert.parsers.lockfiles import scan_project
+
+        lock = tmp_path / "package-lock.json"
+        lock.write_text(json.dumps({
+            "lockfileVersion": 2,
+            "packages": {
+                "node_modules/express": {"version": "4.18.0"},
+                "node_modules/jest": {"version": "29.0.0", "dev": True},
+            },
+        }))
+
+        result = scan_project(tmp_path, prod_only=True)
+        assert result.dev_undetectable == []
+
+    def test_prod_only_all_dev_lockfile_does_not_fall_through_to_lower_priority_pattern(self, tmp_path):
+        """When the highest-priority lockfile pattern for a language parses successfully
+        but all packages are dev-only, scan_project must treat it as the winning match
+        and not fall through to a lower-priority pattern for the same language."""
+        self._setup_registry()
+        from packagealert.parsers.lockfiles import scan_project
+        from unittest.mock import patch
+
+        # Patch node language to have two patterns: high-priority returns all dev,
+        # low-priority returns a prod package. The low-priority must never be reached.
+        from packagealert.languages.base import PackageSpec
+
+        all_dev = [PackageSpec(name="jest", version="29.0.0", ecosystem="npm", is_dev=True)]
+        prod_pkg = [PackageSpec(name="express", version="4.18.0", ecosystem="npm", is_dev=False)]
+
+        from packagealert.languages import registry as reg
+        reg.load()
+        node_lang = next(l for l in reg.all_languages() if l.name == "node")
+
+        call_count = {"n": 0}
+        original_parse = node_lang.parse_lockfile
+        original_patterns = node_lang.lockfile_patterns
+
+        def patched_patterns():
+            return ["package-lock.json", "yarn.lock"]
+
+        def patched_parse(path):
+            call_count["n"] += 1
+            if path.name == "package-lock.json":
+                return all_dev
+            return prod_pkg  # should never be reached
+
+        # Create both lockfiles so both patterns would match
+        (tmp_path / "package-lock.json").write_text("{}")
+        (tmp_path / "yarn.lock").write_text("# yarn lockfile v1\n")
+
+        with patch.object(node_lang, "lockfile_patterns", patched_patterns), \
+             patch.object(node_lang, "parse_lockfile", patched_parse):
+            result = scan_project(tmp_path, prod_only=True)
+
+        # package-lock.json was the winning match — source recorded even with empty output
+        assert any("package-lock.json" in s for s in result.sources)
+        # yarn.lock must never have been parsed
+        assert call_count["n"] == 1, "lower-priority pattern was reached when it should not have been"
+        # express (from yarn.lock) must not appear
+        assert not any(p.name == "express" for p in result.pinned)
+
+
+class TestScanLockfilesAllDev:
+    """scan_lockfiles() all-dev filtering must still record source and dev_undetectable."""
+
+    def test_scan_lockfiles_all_dev_records_source(self, tmp_path):
+        """When prod_only=True and all packages are dev-only, the source must still
+        appear in ProjectScan.sources — consistent with scan_project behaviour."""
+        from packagealert.parsers.lockfiles import scan_lockfiles
+
+        lock = tmp_path / "package-lock.json"
+        lock.write_text(json.dumps({
+            "lockfileVersion": 2,
+            "packages": {
+                "node_modules/jest": {"version": "29.0.0", "dev": True},
+            },
+        }))
+
+        from packagealert.languages import registry as reg
+        reg.load()
+
+        result = scan_lockfiles([lock], prod_only=True)
+        assert any("package-lock.json" in s for s in result.sources)
+        assert result.pinned == []
+
+    def test_scan_lockfiles_dev_undetectable_only_for_present_sources(self, tmp_path):
+        """dev_undetectable entries must correspond to sources that appear in
+        ProjectScan.sources (no orphan warnings for all-dev-filtered files).
+        Use yarn.lock without a package.json — all packages get is_dev=None."""
+        from packagealert.parsers.lockfiles import scan_lockfiles
+
+        lock = tmp_path / "yarn.lock"
+        lock.write_text(
+            "# yarn lockfile v1\n\n"
+            "jest@^29.0.0:\n"
+            "  version \"29.0.0\"\n"
+        )
+        # No package.json — yarn parser returns is_dev=None for all entries
+
+        from packagealert.languages import registry as reg
+        reg.load()
+
+        result = scan_lockfiles([lock], prod_only=True)
+        # dev_undetectable fires because jest has is_dev=None
+        assert "yarn.lock" in result.dev_undetectable
+        # source must also be present — no orphan warning
+        assert any("yarn.lock" in s for s in result.sources)

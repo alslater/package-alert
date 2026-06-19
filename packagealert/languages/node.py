@@ -211,11 +211,17 @@ class NodeLanguage:
                     if not key:  # root entry
                         continue
                     name = info.get("name") or key.rsplit("node_modules/", 1)[-1]
-                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm"))
+                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=bool(info.get("dev"))))
             elif "dependencies" in data:
-                # v1 format
+                # v1 format — prefer per-entry "dev" flag; fall back to root devDependencies list.
+                # A package present in both prod and dev contexts is conservative: prod (False).
+                dev_names = set(data.get("devDependencies", {}).keys())
                 for name, info in data["dependencies"].items():
-                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm"))
+                    if "dev" in info:
+                        is_dev = bool(info["dev"])
+                    else:
+                        is_dev = name in dev_names
+                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=is_dev))
             return result
         except Exception:
             log.debug("Failed to parse package-lock.json at %s", path)
@@ -228,20 +234,135 @@ class NodeLanguage:
         # Matches both plain names (lodash) and scoped names (@babel/core).
         _HEADER_RE = re.compile(r'^"?(@?[^@"\s][^@"]*?)@', re.MULTILINE)
         _VERSION_RE = re.compile(r'^\s+version\s+"([^"]+)"', re.MULTILINE)
+        # Matches dependency entries within a block's `dependencies:` section:
+        #   lodash "^4.17.0"  or  "@babel/core" "^7.0.0"
+        _DEP_ENTRY_RE = re.compile(r'^\s+"?(@?[^@"\s][^@"]*?)"?\s+"([^"]+)"')
         try:
             text = path.read_text()
         except Exception:
             log.debug("Failed to read yarn.lock at %s", path)
             return []
-        result: list[PackageSpec] = []
-        # Split into blocks on blank lines; each block corresponds to one resolved pkg.
+
+        # Load package.json for seed classification (name → version range).
+        prod_direct: dict[str, str] = {}
+        dev_direct: dict[str, str] = {}
+        pkg_json_available = False
+        pkg_json = path.parent / "package.json"
+        try:
+            pkg_data = json.loads(pkg_json.read_text())
+            prod_direct = dict(pkg_data.get("dependencies", {}))
+            dev_direct = dict(pkg_data.get("devDependencies", {}))
+            pkg_json_available = True
+        except Exception:
+            pass
+
+        # First pass: parse all blocks to collect resolved versions and adjacency.
+        # Block header selectors (name@range) are the keys by which parent blocks
+        # reference children in their dependencies: section.
+        # adjacency: maps (name, range) → (resolved_name, resolved_version)
+        # block_deps: maps resolved (name, version) → list of (dep_name, dep_range)
+        resolved_map: dict[tuple[str, str], tuple[str, str]] = {}  # (name, range) → (name, version)
+        block_deps: dict[tuple[str, str], list[tuple[str, str]]] = {}  # (name, version) → [(dep_name, dep_range)]
+
         blocks = re.split(r"\n\n+", text)
         for block in blocks:
-            header = _HEADER_RE.match(block.lstrip())
+            stripped = block.lstrip()
+            header = _HEADER_RE.match(stripped)
             version_match = _VERSION_RE.search(block)
-            if header and version_match:
-                name = header.group(1).lstrip('"')
-                result.append(PackageSpec(name=name, version=version_match.group(1), ecosystem="npm"))
+            if not header or not version_match:
+                continue
+            resolved_version = version_match.group(1)
+
+            # Extract all selectors from the header line (before the colon).
+            header_line = stripped.split("\n", 1)[0].rstrip(":")
+            selectors = [s.strip().strip('"') for s in header_line.split(",")]
+            resolved_name = _HEADER_RE.match(selectors[0].lstrip('"') if selectors else "")
+            if not resolved_name:
+                continue
+            name = resolved_name.group(1)
+
+            for sel in selectors:
+                sel = sel.strip().strip('"')
+                sel_match = _HEADER_RE.match(sel)
+                if sel_match:
+                    sel_name = sel_match.group(1)
+                    # range is everything after "name@"
+                    sel_range = sel[len(sel_match.group(0)):]
+                    resolved_map[(sel_name, sel_range)] = (name, resolved_version)
+
+            # Parse dependencies: section within this block.
+            deps: list[tuple[str, str]] = []
+            in_deps = False
+            for line in block.split("\n"):
+                if line.strip() == "dependencies:":
+                    in_deps = True
+                    continue
+                if in_deps:
+                    if line and not line[0].isspace():
+                        break  # back to block header level
+                    m = _DEP_ENTRY_RE.match(line)
+                    if m:
+                        deps.append((m.group(1), m.group(2)))
+            block_deps[(name, resolved_version)] = deps
+
+        if not pkg_json_available:
+            # Without package.json seeds we can't classify anything
+            result: list[PackageSpec] = []
+            for block in blocks:
+                stripped = block.lstrip()
+                header = _HEADER_RE.match(stripped)
+                version_match = _VERSION_RE.search(block)
+                if header and version_match:
+                    name = header.group(1).lstrip('"')
+                    result.append(PackageSpec(name=name, version=version_match.group(1), ecosystem="npm", is_dev=None))
+            return result
+
+        # BFS reachability from prod and dev seeds.
+        def _reachable(seed_deps: dict[str, str]) -> set[tuple[str, str]]:
+            visited: set[tuple[str, str]] = set()
+            # Use (name, range) → resolved to pin each seed to the exact lockfile entry.
+            queue: list[tuple[str, str]] = []
+            for seed_name, seed_range in seed_deps.items():
+                node = resolved_map.get((seed_name, seed_range))
+                if node:
+                    queue.append(node)
+            while queue:
+                node = queue.pop()
+                if node in visited:
+                    continue
+                visited.add(node)
+                for dep_name, dep_range in block_deps.get(node, []):
+                    child = resolved_map.get((dep_name, dep_range))
+                    if child and child not in visited:
+                        queue.append(child)
+            return visited
+
+        prod_reachable = _reachable(prod_direct)
+        dev_reachable = _reachable(dev_direct)
+
+        result = []
+        seen: set[tuple[str, str]] = set()
+        for block in blocks:
+            stripped = block.lstrip()
+            header = _HEADER_RE.match(stripped)
+            version_match = _VERSION_RE.search(block)
+            if not header or not version_match:
+                continue
+            name = header.group(1).lstrip('"')
+            version = version_match.group(1)
+            key = (name, version)
+            if key in seen:
+                continue
+            seen.add(key)
+            in_prod = key in prod_reachable
+            in_dev = key in dev_reachable
+            if in_prod:
+                is_dev: bool | None = False
+            elif in_dev:
+                is_dev = True
+            else:
+                is_dev = None  # unreachable from either seed (workspace members, etc.)
+            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev))
         return result
 
     def _parse_pnpm_lock(self, path: Path) -> list[PackageSpec]:
@@ -252,25 +373,200 @@ class NodeLanguage:
         _PKG_LINE_RE = re.compile(
             r"^  '?/?(@?[^@'/\s][^@']*?)@([^':(]+)[^':]*'?\s*:$"
         )
+        # Matches dependency entries in snapshots: section at 6-space indent:
+        #   "      accepts: 1.3.8"  or  "      '@scope/pkg': 2.0.0"
+        _SNAP_DEP_RE = re.compile(r"^      '?(@?[^@'/\s][^@']*?)'?\s*:\s+(\S+)")
+        # Matches snapshot entry keys — like _PKG_LINE_RE but allows trailing content
+        # after the colon (e.g. "accepts@1.3.8: {}" for entries with no sub-keys).
+        _SNAP_KEY_RE = re.compile(
+            r"^  '?/?(@?[^@'/\s][^@']*?)@([^':(]+)[^':]*'?\s*:"
+        )
         try:
             text = path.read_text()
         except Exception:
             log.debug("Failed to read pnpm-lock.yaml at %s", path)
             return []
-        result: list[PackageSpec] = []
+        lines = text.splitlines()
+
+        # ------------------------------------------------------------------
+        # Pass 1: parse importers['.'] to collect prod/dev seed (name, version)
+        # pairs and whether dev detection is possible at all.
+        # ------------------------------------------------------------------
+        prod_seeds: dict[str, str] | None = None  # None = no importers: section found
+        dev_seeds: dict[str, str] | None = None
+        in_root_importer = False
+        in_prod_deps = False
+        in_dev_deps = False
+        _current_dep_name: str | None = None
+        _IMPORTER_RE = re.compile(r"^  '\.':\s*$|^  \.\:\s*$")
+        for line in lines:
+            if line == "importers:":
+                prod_seeds = {}
+                dev_seeds = {}
+                in_root_importer = False
+                continue
+            if prod_seeds is None:
+                continue
+            if _IMPORTER_RE.match(line):
+                in_root_importer = True
+                in_prod_deps = False
+                in_dev_deps = False
+                _current_dep_name = None
+                continue
+            if in_root_importer:
+                if line and not line.startswith(" "):
+                    in_root_importer = False
+                    in_prod_deps = False
+                    in_dev_deps = False
+                    _current_dep_name = None
+                elif line.startswith("  ") and not line.startswith("    ") and line.rstrip().endswith(":"):
+                    # Another importer key at 2-space indent — exit root importer scope.
+                    in_root_importer = False
+                    in_prod_deps = False
+                    in_dev_deps = False
+                    _current_dep_name = None
+                elif line.strip() == "dependencies:":
+                    in_prod_deps = True
+                    in_dev_deps = False
+                    _current_dep_name = None
+                elif line.strip() == "devDependencies:":
+                    in_dev_deps = True
+                    in_prod_deps = False
+                    _current_dep_name = None
+                elif line.startswith("    ") and not line.startswith("      ") and line.rstrip().endswith(":"):
+                    # Sibling section under importer (specifiers:, etc.)
+                    in_prod_deps = False
+                    in_dev_deps = False
+                    _current_dep_name = None
+                elif in_dev_deps or in_prod_deps:
+                    if line.startswith("      ") and not line.startswith("        "):
+                        # Dep name key, e.g. "      express:" or "      '@scope/pkg':"
+                        _current_dep_name = line.strip().rstrip(":").strip("'\"")
+                        if not _current_dep_name or _current_dep_name.startswith("-"):
+                            _current_dep_name = None
+                    elif line.startswith("        ") and _current_dep_name:
+                        # 8-space indent: specifier/version sub-keys for this dep
+                        stripped = line.strip()
+                        if stripped.startswith("version:"):
+                            resolved = stripped[len("version:"):].strip().split("(", 1)[0]
+                            target = dev_seeds if in_dev_deps else prod_seeds
+                            target[_current_dep_name] = resolved
+
+        # ------------------------------------------------------------------
+        # Pass 2: parse packages: section to collect the canonical package list.
+        # ------------------------------------------------------------------
+        packages: list[tuple[str, str]] = []  # (name, version) in declaration order
         in_packages = False
-        for line in text.splitlines():
+        for line in lines:
             if line == "packages:":
                 in_packages = True
                 continue
             if in_packages:
-                # Any non-indented non-empty line ends the packages block
                 if line and not line.startswith(" "):
                     in_packages = False
                     continue
                 m = _PKG_LINE_RE.match(line)
                 if m:
-                    result.append(PackageSpec(name=m.group(1), version=m.group(2), ecosystem="npm"))
+                    packages.append((m.group(1), m.group(2)))
+
+        if dev_seeds is None:
+            # No importers: section — cannot classify anything.
+            return [PackageSpec(name=n, version=v, ecosystem="npm", is_dev=None) for n, v in packages]
+
+        # ------------------------------------------------------------------
+        # Pass 3: parse snapshots: section to build adjacency map.
+        # snapshots: contains per-package resolved dependency lists.
+        # Format:
+        #   express@4.18.2:
+        #     dependencies:
+        #       accepts: 1.3.8
+        # Key is "name@version" (same as in packages:).
+        # ------------------------------------------------------------------
+        snap_deps: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        in_snapshots = False
+        current_snap: tuple[str, str] | None = None
+        in_snap_deps = False
+        for line in lines:
+            if line == "snapshots:":
+                in_snapshots = True
+                continue
+            if not in_snapshots:
+                continue
+            if line and not line.startswith(" "):
+                in_snapshots = False
+                continue
+            m = _SNAP_KEY_RE.match(line)
+            if m:
+                current_snap = (m.group(1), m.group(2))
+                snap_deps[current_snap] = []
+                in_snap_deps = False
+                continue
+            if current_snap is None:
+                continue
+            if line.strip() == "dependencies:":
+                in_snap_deps = True
+                continue
+            if in_snap_deps:
+                if line.startswith("    ") and not line.startswith("      "):
+                    # Back to 4-space indent = sibling section (optionalDependencies:, etc.)
+                    in_snap_deps = False
+                dm = _SNAP_DEP_RE.match(line)
+                if dm:
+                    dep_ver = dm.group(2).split("(", 1)[0]  # strip peer suffix e.g. 1.0.0(react@18.2.0)
+                    snap_deps[current_snap].append((dm.group(1), dep_ver))
+
+        # ------------------------------------------------------------------
+        # BFS reachability from prod and dev seeds.
+        # Seeds are (name, resolved_version) pairs from importers['.'].
+        # ------------------------------------------------------------------
+        def _reachable(seed_deps: dict[str, str]) -> set[tuple[str, str]]:
+            visited: set[tuple[str, str]] = set()
+            queue: list[tuple[str, str]] = []
+            for seed_name, seed_ver in seed_deps.items():
+                node = (seed_name, seed_ver)
+                if node in snap_deps:
+                    queue.append(node)
+            while queue:
+                node = queue.pop()
+                if node in visited:
+                    continue
+                visited.add(node)
+                for dep_name, dep_version in snap_deps.get(node, []):
+                    child = (dep_name, dep_version)
+                    if child not in visited and child in snap_deps:
+                        queue.append(child)
+            return visited
+
+        prod_reachable = _reachable(prod_seeds)
+        dev_reachable = _reachable(dev_seeds)
+        has_snapshots = bool(snap_deps)
+
+        result: list[PackageSpec] = []
+        for name, version in packages:
+            key = (name, version)
+            in_prod = key in prod_reachable
+            in_dev = key in dev_reachable
+            if not has_snapshots:
+                # No snapshots: section — only direct root importer deps are classifiable.
+                # Match by (name, version) so that when a name appears in both prod and dev
+                # seeds at different versions, each version is classified correctly.
+                # Packages not matching any seed are transitives or other-importer deps;
+                # use None so --prod-only warns rather than silently treating them as prod.
+                prod_ver = prod_seeds.get(name)
+                dev_ver = dev_seeds.get(name)
+                if prod_ver == version:
+                    is_dev: bool | None = False
+                elif dev_ver == version:
+                    is_dev = True
+                else:
+                    is_dev = None
+            elif in_prod:
+                is_dev = False
+            elif in_dev:
+                is_dev = True
+            else:
+                is_dev = None  # unreachable from either seed (peer-only, etc.)
+            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev))
         return result
 
     # ------------------------------------------------------------------

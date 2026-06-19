@@ -37,6 +37,7 @@
 - [ ] Package popularity integration (deps.dev, npm download stats, PyPI stats)
 - [ ] macOS support (sandbox alternative to bwrap, macOS desktop notifications, Homebrew; platform-specific cache paths e.g. `~/Library/Caches/pip`; cache monitoring already works via watchdog's FSEvents backend)
 - [ ] Windows support (ReadDirectoryChangesW)
+- [ ] Obfuscated code detection — flag packages containing heavily obfuscated source: `eval`/`exec` of base64-decoded or hex-encoded payloads, high-entropy string literals, single-line minified scripts used as install hooks, and similar patterns seen in supply chain attacks (inspired by Socket.io's obfuscation checks). Contribute as a heuristic signal to the existing risk scoring engine.
 - [ ] YARA rule integration for binary inspection
 - [ ] Webhook / Slack alert channel
 - [ ] Lightweight local web dashboard
