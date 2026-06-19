@@ -291,3 +291,19 @@ def test_resolve_package_dir_rejects_no_slash(lang, tmp_path: Path) -> None:
 
 def test_resolve_package_dir_no_project_path(lang) -> None:
     assert lang.resolve_package_dir("vendor/pkg", None, None) is None
+
+
+# ---------------------------------------------------------------------------
+# is_dev
+# ---------------------------------------------------------------------------
+
+def test_parse_lockfile_marks_dev_packages(lang, tmp_path):
+    lock_path = tmp_path / "composer.lock"
+    lock_path.write_text(json.dumps({
+        "packages": [{"name": "vendor/prod", "version": "1.0.0"}],
+        "packages-dev": [{"name": "vendor/dev", "version": "2.0.0"}],
+    }))
+    result = lang.parse_lockfile(lock_path)
+    by_name = {p.name: p for p in result}
+    assert by_name["vendor/prod"].is_dev is False
+    assert by_name["vendor/dev"].is_dev is True

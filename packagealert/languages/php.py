@@ -87,11 +87,12 @@ class PhpLanguage:
             data = json.loads(path.read_text())
             result = []
             for section in ("packages", "packages-dev"):
+                is_dev = section == "packages-dev"
                 for pkg in data.get(section, []):
                     name = pkg.get("name", "")
                     version = pkg.get("version", "").lstrip("v") or None
                     if name:
-                        result.append(PackageSpec(name=name.lower(), version=version, ecosystem="Packagist"))
+                        result.append(PackageSpec(name=name.lower(), version=version, ecosystem="Packagist", is_dev=is_dev))
             return result
         except Exception:
             log.debug("Failed to parse composer.lock at %s", path)

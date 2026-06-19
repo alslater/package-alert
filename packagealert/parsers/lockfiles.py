@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -15,6 +15,7 @@ class LockedPackage:
     name: str
     version: str | None  # None = unpinned
     ecosystem: str
+    is_dev: bool | None = None  # True/False = dev/prod known; None = unknown (format lacks the concept, or source data was unavailable)
 
 
 @dataclass
@@ -22,9 +23,10 @@ class ProjectScan:
     sources: list[str]  # human-readable descriptions of what was found
     pinned: list[LockedPackage]
     unpinned: list[LockedPackage]
+    dev_undetectable: list[str] = field(default_factory=list)  # sources where dev/prod couldn't be distinguished
 
 
-def scan_lockfiles(paths: list[Path]) -> ProjectScan:
+def scan_lockfiles(paths: list[Path], *, prod_only: bool = False) -> ProjectScan:
     """Parse each path in *paths* directly via its owning language module.
 
     Unlike scan_project(), this does not apply first-match-per-language logic —
@@ -37,6 +39,7 @@ def scan_lockfiles(paths: list[Path]) -> ProjectScan:
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     sources: list[str] = []
+    dev_undetectable: list[str] = []
 
     for path in paths:
         if not path.exists():
@@ -52,24 +55,30 @@ def scan_lockfiles(paths: list[Path]) -> ProjectScan:
                 getattr(lang, "name", "?"), path, exc_info=True,
             )
             continue
+        if not specs:
+            continue
+        if prod_only:
+            if any(s.is_dev is None for s in specs):
+                dev_undetectable.append(path.name)
+            specs = [s for s in specs if s.is_dev is not True]
+        sources.append(f"{lang.name} ({path.name})")
         for spec in specs:
-            pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower())
+            pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev)
             if spec.version:
                 pinned.append(pkg)
             else:
                 unpinned.append(pkg)
-        if specs:
-            sources.append(f"{lang.name} ({path.name})")
 
-    return ProjectScan(sources=sources, pinned=pinned, unpinned=unpinned)
+    return ProjectScan(sources=sources, pinned=pinned, unpinned=unpinned, dev_undetectable=dev_undetectable)
 
 
-def scan_project(root: Path) -> ProjectScan:
+def scan_project(root: Path, *, prod_only: bool = False) -> ProjectScan:
     from packagealert.languages import registry as lang_registry
     lang_registry.load()
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     sources: list[str] = []
+    dev_undetectable: list[str] = []
 
     for lang in lang_registry.all_languages():
         try:
@@ -98,8 +107,18 @@ def scan_project(root: Path) -> ProjectScan:
                 # treating this as a successful match and skipping higher-quality
                 # lock files that may also be present.
                 continue
+            if prod_only:
+                if any(s.is_dev is None for s in specs):
+                    dev_undetectable.append(pattern)
+                specs = [s for s in specs if s.is_dev is not True]
+                if not specs:
+                    # All packages were dev-only — this is still a successful match.
+                    # Record the source and stop; don't fall through to a lower-priority
+                    # lockfile that might include packages from a different source.
+                    sources.append(f"{lang.name} ({pattern})")
+                    break
             for spec in specs:
-                pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower())
+                pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev)
                 if spec.version:
                     pinned.append(pkg)
                 else:
@@ -107,7 +126,7 @@ def scan_project(root: Path) -> ProjectScan:
             sources.append(f"{lang.name} ({pattern})")
             break  # first pattern that yielded packages wins
 
-    return ProjectScan(sources=sources, pinned=pinned, unpinned=unpinned)
+    return ProjectScan(sources=sources, pinned=pinned, unpinned=unpinned, dev_undetectable=dev_undetectable)
 
 
 _PINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")

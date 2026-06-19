@@ -25,6 +25,7 @@ class PackageSpec:
     name: str
     version: str | None
     ecosystem: str
+    is_dev: bool | None = None  # True/False = dev/prod known; None = unknown (format lacks the concept, or source data was unavailable)
 
 
 # Describes a package that has been observed (from a cache file or installed environment).

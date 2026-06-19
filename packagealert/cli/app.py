@@ -484,6 +484,7 @@ def scan_project(
     path: Path = typer.Argument(Path("."), help="Project directory to scan."),
     scan_unpinned: bool = typer.Option(False, "--scan-unpinned", help="Query OSV for unpinned dependencies too."),
     scan_installed: bool = typer.Option(False, "--scan-installed", help="Scan venv/.venv or node_modules instead of lock files."),
+    prod_only: bool = typer.Option(False, "--prod-only", help="Exclude dev dependencies from the scan. Mutually exclusive with --scan-installed. With --requirements, dev/prod is undetectable so all packages are included with a warning."),
     requirements: Optional[Path] = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html."),
@@ -495,6 +496,9 @@ def scan_project(
         raise typer.Exit(1)
     if requirements is not None and scan_installed:
         console.print("[red]--requirements and --scan-installed are mutually exclusive[/red]")
+        raise typer.Exit(1)
+    if prod_only and scan_installed:
+        console.print("[red]--prod-only and --scan-installed are mutually exclusive (installed environments have no dev/prod distinction)[/red]")
         raise typer.Exit(1)
     root = path.resolve()
     if requirements is not None:
@@ -508,12 +512,13 @@ def scan_project(
             console.print(f"[red]--requirements must be a file, not a directory: {requirements}[/red]")
             raise typer.Exit(1)
     cfg, _ = _load(config)
-    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements))
+    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only))
 
 
 async def _run_scan_project(
     cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str,
     requirements: Optional[Path] = None,
+    prod_only: bool = False,
 ):
     import json as jsonlib
     from packagealert.osv.client import OsvClient
@@ -532,11 +537,21 @@ async def _run_scan_project(
             sources=[f"pypi ({requirements.name})"],
             pinned=pinned,
             unpinned=unpinned,
+            dev_undetectable=[requirements.name] if prod_only else [],
         )
     elif installed:
         result = detect_installed(root)
     else:
-        result = detect_project(root)
+        result = detect_project(root, prod_only=prod_only)
+
+    if prod_only and result.dev_undetectable:
+        warn_console = Console(stderr=True)
+        for src in result.dev_undetectable:
+            warn_console.print(
+                f"Warning: {src} — some packages could not be classified as dev or prod and were included in the scan.",
+                style="yellow",
+                markup=False,
+            )
 
     if not result.sources:
         console.print(f"[yellow]No supported lock files found in {root}[/yellow]")

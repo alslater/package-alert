@@ -257,6 +257,44 @@ def test_parse_lockfile_v1_format(lang: NodeLanguage, tmp_path: Path) -> None:
     assert "lodash" in names
 
 
+def test_parse_package_lock_v1_per_entry_dev_flag(lang: NodeLanguage, tmp_path: Path) -> None:
+    # v1 entries can carry a "dev": true flag; this takes precedence over the root
+    # devDependencies list, allowing transitive dev deps to be classified correctly.
+    lock_data = {
+        "name": "myapp",
+        "lockfileVersion": 1,
+        "devDependencies": {"jest": "^29.0.0"},
+        "dependencies": {
+            "express": {"version": "4.18.0"},
+            "jest": {"version": "29.0.0", "dev": True},
+            "jest-circus": {"version": "29.0.0", "dev": True},  # transitive — not in devDependencies
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock_data))
+    result = lang.parse_lockfile(tmp_path / "package-lock.json")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+    assert by_name["jest-circus"].is_dev is True  # classified via per-entry flag, not devDependencies
+
+
+def test_parse_package_lock_v1_prod_wins_when_in_both(lang: NodeLanguage, tmp_path: Path) -> None:
+    # A package listed in root devDependencies but with "dev": false on its entry
+    # (prod context wins) should be classified as prod.
+    lock_data = {
+        "name": "myapp",
+        "lockfileVersion": 1,
+        "devDependencies": {"debug": "^4.0.0"},
+        "dependencies": {
+            "debug": {"version": "4.3.4", "dev": False},
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock_data))
+    result = lang.parse_lockfile(tmp_path / "package-lock.json")
+    by_name = {p.name: p for p in result}
+    assert by_name["debug"].is_dev is False
+
+
 def test_parse_yarn_lock(lang: NodeLanguage, tmp_path: Path) -> None:
     yarn_lock = tmp_path / "yarn.lock"
     yarn_lock.write_text(
@@ -338,6 +376,8 @@ def test_parse_pnpm_lock(lang: NodeLanguage, tmp_path: Path) -> None:
     assert versions["lodash"] == "4.17.21"
     assert versions["express"] == "4.18.2"
     assert all(p.ecosystem == "npm" for p in result)
+    # No importers: section — dev/prod undetectable
+    assert all(p.is_dev is None for p in result)
 
 
 def test_parse_pnpm_lock_scoped_package(lang: NodeLanguage, tmp_path: Path) -> None:
@@ -1038,3 +1078,400 @@ def test_resolve_package_dir_dotdot_without_separator_accepted(lang: NodeLanguag
     pkg_dir.mkdir(parents=True)
     result = lang.resolve_package_dir("some..pkg", tmp_path, None)
     assert result == pkg_dir.resolve()
+
+
+# ---------------------------------------------------------------------------
+# is_dev
+# ---------------------------------------------------------------------------
+
+def test_package_lock_v2_marks_dev_true(lang: NodeLanguage, tmp_path: Path) -> None:
+    lock_data = {
+        "lockfileVersion": 2,
+        "packages": {
+            "": {"name": "my-app", "version": "1.0.0"},
+            "node_modules/express": {"version": "4.18.0"},
+            "node_modules/jest": {"version": "29.0.0", "dev": True},
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock_data))
+    result = lang.parse_lockfile(tmp_path / "package-lock.json")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+
+
+def test_package_lock_v1_marks_dev_from_devdependencies(lang: NodeLanguage, tmp_path: Path) -> None:
+    lock_data = {
+        "lockfileVersion": 1,
+        "devDependencies": {"jest": "^29.0.0"},
+        "dependencies": {
+            "express": {"version": "4.18.0"},
+            "jest": {"version": "29.0.0"},
+        },
+    }
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock_data))
+    result = lang.parse_lockfile(tmp_path / "package-lock.json")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+
+
+def test_yarn_lock_marks_dev_via_package_json(lang: NodeLanguage, tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "dependencies": {"express": "^4.18.0"},
+        "devDependencies": {"jest": "^29.0.0"},
+    }))
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        'express@^4.18.0:\n'
+        '  version "4.18.2"\n\n'
+        'jest@^29.0.0:\n'
+        '  version "29.0.0"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+
+
+def test_yarn_lock_transitive_deps_are_unknown(lang: NodeLanguage, tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "dependencies": {"express": "^4.18.0"},
+        "devDependencies": {"jest": "^29.0.0"},
+    }))
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        'express@^4.18.0:\n'
+        '  version "4.18.2"\n\n'
+        'jest@^29.0.0:\n'
+        '  version "29.0.0"\n\n'
+        # transitive of express — not listed in package.json
+        'accepts@~1.3.8:\n'
+        '  version "1.3.8"\n\n'
+        # transitive of jest — also not in package.json
+        'jest-circus@^29.0.0:\n'
+        '  version "29.0.0"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+    assert by_name["accepts"].is_dev is None      # transitive — unknown
+    assert by_name["jest-circus"].is_dev is None  # transitive — unknown
+
+
+def test_yarn_lock_no_package_json_all_unknown(lang: NodeLanguage, tmp_path: Path) -> None:
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        'express@^4.18.0:\n'
+        '  version "4.18.2"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    # No package.json — can't distinguish, all is_dev=None
+    assert all(p.is_dev is None for p in result)
+
+
+def test_pnpm_lock_marks_dev_from_importers(lang: NodeLanguage, tmp_path: Path) -> None:
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      express:\n"
+        "        specifier: ^4.18.0\n"
+        "        version: 4.18.2\n"
+        "    devDependencies:\n"
+        "      jest:\n"
+        "        specifier: ^29.0.0\n"
+        "        version: 29.0.0\n\n"
+        "packages:\n"
+        "  express@4.18.2:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  jest@29.0.0:\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["jest"].is_dev is True
+
+
+def test_pnpm_lock_monorepo_does_not_leak_other_importer_dev_deps(lang: NodeLanguage, tmp_path: Path) -> None:
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      express:\n"
+        "        specifier: ^4.18.0\n"
+        "        version: 4.18.2\n\n"
+        "  packages/app:\n"
+        "    devDependencies:\n"
+        "      jest:\n"
+        "        specifier: ^29.0.0\n"
+        "        version: 29.0.0\n\n"
+        "packages:\n"
+        "  express@4.18.2:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  jest@29.0.0:\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_name = {p.name: p for p in result}
+    # express is a direct root prod dep — classified False
+    assert by_name["express"].is_dev is False
+    # jest is only a dev dep in packages/app (non-root importer); without snapshots:
+    # it's unclassifiable from the root's perspective — None, not False
+    assert by_name["jest"].is_dev is None
+
+
+def test_pnpm_lock_graph_traversal_classifies_transitives(lang: NodeLanguage, tmp_path: Path) -> None:
+    # With snapshots: section, transitive deps are classified via BFS.
+    # express depends on accepts (prod transitive); jest depends on jest-circus (dev transitive).
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      express:\n"
+        "        specifier: ^4.18.0\n"
+        "        version: 4.18.2\n"
+        "    devDependencies:\n"
+        "      jest:\n"
+        "        specifier: ^29.0.0\n"
+        "        version: 29.0.0\n\n"
+        "packages:\n"
+        "  accepts@1.3.8:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  express@4.18.2:\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+        "  jest@29.0.0:\n"
+        "    resolution: {integrity: sha512-ccc}\n"
+        "  jest-circus@29.0.0:\n"
+        "    resolution: {integrity: sha512-ddd}\n\n"
+        "snapshots:\n"
+        "  accepts@1.3.8: {}\n"
+        "  express@4.18.2:\n"
+        "    dependencies:\n"
+        "      accepts: 1.3.8\n"
+        "  jest@29.0.0:\n"
+        "    dependencies:\n"
+        "      jest-circus: 29.0.0\n"
+        "  jest-circus@29.0.0: {}\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["accepts"].is_dev is False     # transitive of prod express
+    assert by_name["jest"].is_dev is True
+    assert by_name["jest-circus"].is_dev is True  # transitive of dev jest
+
+
+def test_yarn_lock_graph_traversal_classifies_transitives(lang: NodeLanguage, tmp_path: Path) -> None:
+    # With dependencies: in yarn.lock blocks, transitives are classified via BFS.
+    (tmp_path / "package.json").write_text(json.dumps({
+        "dependencies": {"express": "^4.18.0"},
+        "devDependencies": {"jest": "^29.0.0"},
+    }))
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        'accepts@~1.3.8:\n'
+        '  version "1.3.8"\n\n'
+        'express@^4.18.0:\n'
+        '  version "4.18.2"\n'
+        '  dependencies:\n'
+        '    accepts "~1.3.8"\n\n'
+        'jest@^29.0.0:\n'
+        '  version "29.0.0"\n'
+        '  dependencies:\n'
+        '    jest-circus "^29.0.0"\n\n'
+        'jest-circus@^29.0.0:\n'
+        '  version "29.0.0"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    by_name = {p.name: p for p in result}
+    assert by_name["express"].is_dev is False
+    assert by_name["accepts"].is_dev is False     # transitive of prod express
+    assert by_name["jest"].is_dev is True
+    assert by_name["jest-circus"].is_dev is True  # transitive of dev jest
+
+
+def test_yarn_lock_shared_transitive_is_prod(lang: NodeLanguage, tmp_path: Path) -> None:
+    # A package reachable from both prod and dev seeds is prod (conservative).
+    (tmp_path / "package.json").write_text(json.dumps({
+        "dependencies": {"express": "^4.18.0"},
+        "devDependencies": {"jest": "^29.0.0"},
+    }))
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        'debug@^4.0.0:\n'
+        '  version "4.3.4"\n\n'
+        'express@^4.18.0:\n'
+        '  version "4.18.2"\n'
+        '  dependencies:\n'
+        '    debug "^4.0.0"\n\n'
+        'jest@^29.0.0:\n'
+        '  version "29.0.0"\n'
+        '  dependencies:\n'
+        '    debug "^4.0.0"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    by_name = {p.name: p for p in result}
+    assert by_name["debug"].is_dev is False  # reachable from both — conservative: prod
+
+
+def test_pnpm_lock_scoped_importer_deps_unquoted(lang: NodeLanguage, tmp_path: Path) -> None:
+    # pnpm quotes scoped package names in importers: (e.g. '@babel/core':).
+    # Seed names must be stripped of quotes so they match the unquoted package names.
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      '@babel/core':\n"
+        "        specifier: ^7.0.0\n"
+        "        version: 7.22.0\n"
+        "    devDependencies:\n"
+        "      '@types/node':\n"
+        "        specifier: ^18.0.0\n"
+        "        version: 18.0.0\n\n"
+        "packages:\n"
+        "  '@babel/core@7.22.0':\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  '@types/node@18.0.0':\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["@babel/core"].is_dev is False
+    assert by_name["@types/node"].is_dev is True
+
+
+def test_pnpm_lock_snapshot_dep_peer_suffix_stripped(lang: NodeLanguage, tmp_path: Path) -> None:
+    # Snapshot dep versions can include peer metadata suffixes like "1.0.0(react@18.2.0)".
+    # These must be stripped when building the adjacency map so BFS edges resolve correctly.
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      react-dom:\n"
+        "        specifier: ^18.2.0\n"
+        "        version: 18.2.0(react@18.2.0)\n\n"
+        "packages:\n"
+        "  react@18.2.0:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  react-dom@18.2.0:\n"
+        "    resolution: {integrity: sha512-bbb}\n\n"
+        "snapshots:\n"
+        "  react@18.2.0: {}\n"
+        "  react-dom@18.2.0(react@18.2.0):\n"
+        "    dependencies:\n"
+        "      react: 18.2.0\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["react-dom"].is_dev is False
+    assert by_name["react"].is_dev is False  # transitive of prod react-dom
+
+
+def test_yarn_lock_multi_version_uses_range_to_resolve_seed(lang: NodeLanguage, tmp_path: Path) -> None:
+    # When two versions of the same package exist in yarn.lock, the seed lookup
+    # must use (name, range) from package.json to pin the correct entry, not
+    # match by name alone (which would reach both versions).
+    (tmp_path / "package.json").write_text(json.dumps({
+        "dependencies": {"debug": "^3.0.0"},
+        "devDependencies": {"jest": "^29.0.0"},
+    }))
+    (tmp_path / "yarn.lock").write_text(
+        '# yarn lockfile v1\n\n'
+        # prod dep: debug ^3 resolves to 3.2.7
+        'debug@^3.0.0:\n'
+        '  version "3.2.7"\n\n'
+        # dev transitive: jest pulls debug ^4, which resolves to 4.3.4
+        'debug@^4.0.0:\n'
+        '  version "4.3.4"\n\n'
+        'jest@^29.0.0:\n'
+        '  version "29.0.0"\n'
+        '  dependencies:\n'
+        '    debug "^4.0.0"\n'
+    )
+    result = lang.parse_lockfile(tmp_path / "yarn.lock")
+    by_version = {p.version: p for p in result if p.name == "debug"}
+    # debug@3.2.7 is a direct prod dep
+    assert by_version["3.2.7"].is_dev is False
+    # debug@4.3.4 is only reachable from dev jest, not from any prod seed
+    assert by_version["4.3.4"].is_dev is True
+
+
+def test_pnpm_lock_multi_version_uses_exact_seed_version(lang: NodeLanguage, tmp_path: Path) -> None:
+    # When multiple versions of the same package exist, importers['.'].version
+    # must be used to seed BFS with the exact (name, version) node, not match by
+    # name alone (which would incorrectly reach all versions).
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      debug:\n"
+        "        specifier: ^3.0.0\n"
+        "        version: 3.2.7\n"
+        "    devDependencies:\n"
+        "      jest:\n"
+        "        specifier: ^29.0.0\n"
+        "        version: 29.0.0\n\n"
+        "packages:\n"
+        "  debug@3.2.7:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  debug@4.3.4:\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+        "  jest@29.0.0:\n"
+        "    resolution: {integrity: sha512-ccc}\n\n"
+        "snapshots:\n"
+        "  debug@3.2.7: {}\n"
+        "  debug@4.3.4: {}\n"
+        "  jest@29.0.0:\n"
+        "    dependencies:\n"
+        "      debug: 4.3.4\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_version = {(p.name, p.version): p for p in result}
+    # debug@3.2.7 is the direct prod dep seed
+    assert by_version[("debug", "3.2.7")].is_dev is False
+    # debug@4.3.4 is only reachable from dev jest — must not be pulled in as prod
+    assert by_version[("debug", "4.3.4")].is_dev is True
+
+
+def test_pnpm_lock_no_snapshots_same_name_prod_and_dev_different_versions(lang: NodeLanguage, tmp_path: Path) -> None:
+    # Without snapshots:, when the same package name appears in both prod and dev
+    # seeds at different versions, each version must be classified by its exact
+    # resolved version, not just by name membership.
+    pnpm_lock = tmp_path / "pnpm-lock.yaml"
+    pnpm_lock.write_text(
+        "lockfileVersion: '9.0'\n\n"
+        "importers:\n"
+        "  .:\n"
+        "    dependencies:\n"
+        "      debug:\n"
+        "        specifier: ^3.0.0\n"
+        "        version: 3.2.7\n"
+        "    devDependencies:\n"
+        "      debug:\n"
+        "        specifier: ^4.0.0\n"
+        "        version: 4.3.4\n\n"
+        "packages:\n"
+        "  debug@3.2.7:\n"
+        "    resolution: {integrity: sha512-aaa}\n"
+        "  debug@4.3.4:\n"
+        "    resolution: {integrity: sha512-bbb}\n"
+    )
+    result = lang.parse_lockfile(pnpm_lock)
+    by_version = {(p.name, p.version): p for p in result}
+    assert by_version[("debug", "3.2.7")].is_dev is False
+    assert by_version[("debug", "4.3.4")].is_dev is True
