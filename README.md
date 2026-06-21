@@ -38,16 +38,30 @@ echo fs.inotify.max_user_watches=524288 | sudo tee /etc/sysctl.d/99-package-aler
 
 This persists across reboots. Without it you may see `ENOSPC: System limit for number of file watchers reached` errors in file watchers after the daemon has been running for a while.
 
-**Recommended — pipx (isolated environment, `package-alert` available system-wide):**
+**[uv](https://docs.astral.sh/uv/) (recommended):**
+
+```bash
+uv tool install package-alert
+```
+
+**pipx:**
 
 ```bash
 pipx install package-alert
 ```
 
+Both install `package-alert` and `pa` into an isolated environment and make them available system-wide. `pa update` works with either.
+
+**Try it without installing** — scan a project's lock files for vulnerabilities using `uvx`:
+
+```bash
+uvx package-alert scan-project /path/to/project
+```
+
 **Development install:**
 
 ```bash
-pipx install -e .
+uv tool install -e .   # or: pipx install -e .
 ```
 
 The installer registers two entry points: `package-alert` (full name) and `pa` (short alias). Both are identical — use whichever you prefer:

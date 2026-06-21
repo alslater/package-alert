@@ -45,17 +45,35 @@ def _pipx_venvs_candidates() -> list[Path]:
     ]
 
 
-def _is_pipx_install() -> bool:
+def _uv_tool_dirs_candidates() -> list[Path]:
+    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
+    if uv_tool_dir:
+        return [Path(uv_tool_dir).expanduser()]
+    return [Path("~/.local/share/uv/tools").expanduser()]
+
+
+def _exe_is_under(candidates: list[Path]) -> bool:
     # Do NOT resolve symlinks — venv Pythons are symlinks to the system Python,
     # so resolve() would return /usr/bin/pythonX.Y and break the path check.
-    exe = Path(sys.executable)
-    for venvs in _pipx_venvs_candidates():
+    # Normalise both exe and candidates with absolute() so relative paths (e.g.
+    # from PIPX_HOME or UV_TOOL_DIR) match correctly regardless of call site.
+    exe = Path(sys.executable).absolute()
+    abs_candidates = [c.absolute() for c in candidates]
+    for candidate in abs_candidates:
         try:
-            exe.relative_to(venvs)
+            exe.relative_to(candidate)
             return True
         except ValueError:
             continue
     return False
+
+
+def _is_pipx_install() -> bool:
+    return _exe_is_under(_pipx_venvs_candidates())
+
+
+def _is_uv_tool_install() -> bool:
+    return _exe_is_under(_uv_tool_dirs_candidates())
 
 
 def _is_interactive() -> bool:
@@ -997,20 +1015,28 @@ def daemon_remove_cmd():
 
 @app.command("update")
 def update_cmd(
-    force: bool = typer.Option(False, "--force", help="Force reinstall via pipx reinstall even if already at the latest version."),
+    force: bool = typer.Option(False, "--force", help="Force reinstall even if already at the latest version."),
 ):
-    """Upgrade package-alert to the latest version using pipx."""
-    if not _is_pipx_install():
-        console.print("[red]package-alert is not installed via pipx. Cannot self-update.[/red]")
+    """Upgrade package-alert to the latest version using pipx or uv."""
+    # Mutually exclusive: a venv lives under exactly one tool's directory.
+    is_uv = _is_uv_tool_install()
+    is_pipx = _is_pipx_install()
+    if not is_uv and not is_pipx:
+        console.print("[red]package-alert is not installed via pipx or uv tool. Cannot self-update.[/red]")
         raise typer.Exit(1)
 
     version_before = _pkg_version("package-alert")
 
-    pipx_cmd = ["pipx", "reinstall", "package-alert"] if force else ["pipx", "upgrade", "package-alert"]
+    if is_uv:
+        cmd = ["uv", "tool", "install", "--reinstall", "package-alert"] if force else ["uv", "tool", "upgrade", "package-alert"]
+        tool_name = "uv"
+    else:
+        cmd = ["pipx", "reinstall", "package-alert"] if force else ["pipx", "upgrade", "package-alert"]
+        tool_name = "pipx"
     try:
-        result = subprocess.run(pipx_cmd)
+        result = subprocess.run(cmd)
     except FileNotFoundError:
-        console.print("[red]pipx not found on PATH. Cannot self-update.[/red]")
+        console.print(f"[red]{tool_name} not found on PATH. Cannot self-update.[/red]")
         raise typer.Exit(1)
 
     if result.returncode != 0:
