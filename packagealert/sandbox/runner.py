@@ -465,6 +465,7 @@ class SandboxRunner:
             env=sandbox_env,
             home_ro_dirs=home_ro,
             extra_tmpfs=extra_tmpfs,
+            post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
         ))
         print()
 
@@ -897,6 +898,7 @@ class SandboxRunner:
             env=sandbox_env,
             home_ro_dirs=home_ro,
             extra_tmpfs=extra_tmpfs,
+            post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
         ))
         print()
 
@@ -1354,6 +1356,34 @@ def _home_ro_dirs() -> list[Path]:
             except Exception:
                 log.warning("home_ro_paths raised for lang=%s — skipping",
                             getattr(lang, "name", "?"), exc_info=True)
+    return result
+
+
+def _post_ro_tmpfs_dirs(home_ro: list[Path]) -> list[Path]:
+    """Return log subdirectories of ro-bound tool dirs that need a writable tmpfs overlay.
+
+    Tools like pipx unconditionally try to delete old log files during startup,
+    before executing any user command.  When their home directory is re-exposed
+    read-only inside the sandbox, that cleanup fails with EROFS.  Overlaying the
+    logs directory with a fresh tmpfs (after the ro-bind) makes it writable again
+    without exposing it to the host.
+
+    Only dirs that exist are returned — bwrap cannot create a missing mount point
+    under the read-only root bind.
+
+    Deduplication uses ``os.path.realpath`` (resolves symlinks in all components)
+    so two ro_path entries that refer to the same filesystem location via different
+    spellings or symlinked parents yield a single logs entry.
+    """
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for ro_path in home_ro:
+        logs = ro_path / "logs"
+        if not logs.is_symlink() and logs.is_dir():
+            key = Path(os.path.realpath(logs))
+            if key not in seen:
+                seen.add(key)
+                result.append(logs)
     return result
 
 

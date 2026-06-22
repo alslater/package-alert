@@ -29,6 +29,7 @@ from packagealert.sandbox.runner import (
     _build_sandbox_env,
     _assert_scannable_lock_files_contained,
     _LOCK_UNREADABLE,
+    _post_ro_tmpfs_dirs,
     _restorable_lock_files,
     _scannable_lock_files,
     _SANDBOX_ENV_COMMON,
@@ -47,6 +48,20 @@ from packagealert.languages.python import (
 )
 from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.parsers.process_args import ParsedInstall
+
+
+@pytest.fixture(scope="session")
+def symlinks_supported() -> bool:
+    """Session-scoped fixture: skip the test if symlink creation is not supported."""
+    import tempfile
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "target"
+            src.mkdir()
+            Path(d, "link").symlink_to(src, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, TypeError):
+        return False
 
 
 def _make_runner():
@@ -196,6 +211,20 @@ class TestBuildCmd:
         ro_pairs = _ro_bind_pairs(cmd)
         assert (str(nonexistent), str(nonexistent)) not in ro_pairs
 
+    def test_home_ro_dirs_symlink_resolved(self, tmp_path, symlinks_supported):
+        if not symlinks_supported:
+            pytest.skip("symlink creation not supported on this platform or environment")
+        real_dir = tmp_path / "real_tool"
+        real_dir.mkdir()
+        link = tmp_path / "link_tool"
+        link.symlink_to(real_dir, target_is_directory=True)
+        cmd = build_cmd(["uv", "sync"], [], home_ro_dirs=[link])
+        ro_pairs = _ro_bind_pairs(cmd)
+        # Source is resolved to the real path; destination stays at the original
+        # symlink path so tools inside the sandbox find the content where expected.
+        assert (str(real_dir), str(link)) in ro_pairs
+        assert (str(link), str(link)) not in ro_pairs
+
     def test_home_ro_dirs_appear_before_write_dirs(self, tmp_path):
         ro_dir = tmp_path / "ro"
         ro_dir.mkdir()
@@ -205,6 +234,179 @@ class TestBuildCmd:
         ro_idx = cmd.index("--ro-bind", 3)   # skip the first --ro-bind (/ /)
         bind_idx = cmd.index("--bind")
         assert ro_idx < bind_idx
+
+    def test_post_ro_tmpfs_mounted_after_ro_bind(self, tmp_path):
+        ro_dir = tmp_path / "pipx"
+        ro_dir.mkdir()
+        logs_dir = ro_dir / "logs"
+        logs_dir.mkdir()
+        cmd = build_cmd(
+            ["pipx", "install", "x"], [],
+            home_ro_dirs=[ro_dir],
+            post_ro_tmpfs=[logs_dir],
+        )
+        # Find the index of the --ro-bind specifically for ro_dir
+        ro_idx = next(
+            (i for i in range(len(cmd) - 2)
+             if cmd[i] == "--ro-bind"
+             and cmd[i + 1] == str(ro_dir)
+             and cmd[i + 2] == str(ro_dir)),
+            None,
+        )
+        assert ro_idx is not None, f"--ro-bind for {ro_dir} not found in cmd"
+        # The post-ro tmpfs for logs must come after the ro-bind for ro_dir
+        post_ro_positions = [i for i, tgt in _tmpfs_targets(cmd) if tgt == str(logs_dir)]
+        assert post_ro_positions, "post_ro_tmpfs dir not found in cmd"
+        assert post_ro_positions[0] > ro_idx + 2
+
+    @pytest.mark.parametrize("kwarg", ["write_dirs", "home_ro_dirs", "extra_tmpfs", "post_ro_tmpfs"])
+    def test_relative_path_raises(self, kwarg):
+        relative = Path("some/relative/path")
+        import re
+        pattern = (
+            r"^build_cmd: "
+            + re.escape(kwarg)
+            + r" paths must be absolute, got: "
+            + re.escape(repr(relative))
+        )
+        if kwarg == "write_dirs":
+            with pytest.raises(ValueError, match=pattern):
+                build_cmd(["uv", "sync"], [relative])
+        else:
+            with pytest.raises(ValueError, match=pattern):
+                build_cmd(["uv", "sync"], [], **{kwarg: [relative]})
+
+    def test_post_ro_tmpfs_nonexistent_skipped(self, tmp_path):
+        nonexistent = tmp_path / "nope" / "logs"
+        cmd = build_cmd(["pipx", "install", "x"], [], post_ro_tmpfs=[nonexistent])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(nonexistent) not in tmpfs_vals
+
+    def test_post_ro_tmpfs_file_skipped(self, tmp_path):
+        regular_file = tmp_path / "logs"
+        regular_file.write_text("not a directory")
+        cmd = build_cmd(["pipx", "install", "x"], [], post_ro_tmpfs=[regular_file])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(regular_file) not in tmpfs_vals
+
+    def test_post_ro_tmpfs_symlink_to_dir_skipped(self, tmp_path, symlinks_supported):
+        if not symlinks_supported:
+            pytest.skip("symlink creation not supported on this platform or environment")
+        real_dir = tmp_path / "real_logs"
+        real_dir.mkdir()
+        link = tmp_path / "logs_link"
+        link.symlink_to(real_dir, target_is_directory=True)
+        cmd = build_cmd(["pipx", "install", "x"], [], post_ro_tmpfs=[link])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(link) not in tmpfs_vals
+
+    def test_extra_tmpfs_dir_included(self, tmp_path):
+        d = tmp_path / "scratch"
+        d.mkdir()
+        cmd = build_cmd(["uv", "sync"], [], extra_tmpfs=[d])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(d) in tmpfs_vals
+
+    def test_extra_tmpfs_nonexistent_skipped(self, tmp_path):
+        nonexistent = tmp_path / "nope"
+        cmd = build_cmd(["uv", "sync"], [], extra_tmpfs=[nonexistent])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(nonexistent) not in tmpfs_vals
+
+    def test_extra_tmpfs_file_skipped(self, tmp_path):
+        regular_file = tmp_path / "notadir"
+        regular_file.write_text("content")
+        cmd = build_cmd(["uv", "sync"], [], extra_tmpfs=[regular_file])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(regular_file) not in tmpfs_vals
+
+    def test_extra_tmpfs_symlink_to_dir_skipped(self, tmp_path, symlinks_supported):
+        if not symlinks_supported:
+            pytest.skip("symlink creation not supported on this platform or environment")
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real_dir, target_is_directory=True)
+        cmd = build_cmd(["uv", "sync"], [], extra_tmpfs=[link])
+        tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
+        assert str(link) not in tmpfs_vals
+
+
+class TestPostRoTmpfsDirs:
+    def test_returns_existing_logs_subdir(self, tmp_path):
+        tool_dir = tmp_path / "pipx"
+        tool_dir.mkdir()
+        logs = tool_dir / "logs"
+        logs.mkdir()
+        result = _post_ro_tmpfs_dirs([tool_dir])
+        assert logs in result
+
+    def test_skips_missing_logs_subdir(self, tmp_path):
+        tool_dir = tmp_path / "tool"
+        tool_dir.mkdir()
+        result = _post_ro_tmpfs_dirs([tool_dir])
+        assert result == []
+
+    def test_deduplicates_same_logs_dir(self, tmp_path):
+        tool_dir = tmp_path / "pipx"
+        tool_dir.mkdir()
+        logs = tool_dir / "logs"
+        logs.mkdir()
+        result = _post_ro_tmpfs_dirs([tool_dir, tool_dir])
+        assert result.count(logs) == 1
+
+    def test_deduplicates_equivalent_paths(self, tmp_path):
+        tool_dir = tmp_path / "pipx"
+        tool_dir.mkdir()
+        (tool_dir / "logs").mkdir()
+        # Two spellings of the same directory: one with a redundant parent traversal
+        equiv = tmp_path / "pipx" / "logs" / ".." / "logs"
+        result = _post_ro_tmpfs_dirs([tool_dir, equiv.parent])
+        assert len(result) == 1
+
+    def test_deduplicates_via_symlinked_parent(self, tmp_path, symlinks_supported):
+        if not symlinks_supported:
+            pytest.skip("symlink creation not supported on this platform or environment")
+        real_dir = tmp_path / "real_pipx"
+        real_dir.mkdir()
+        (real_dir / "logs").mkdir()
+        # A symlink to the same real directory — should deduplicate with real_dir
+        link_dir = tmp_path / "link_pipx"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        result = _post_ro_tmpfs_dirs([real_dir, link_dir])
+        assert len(result) == 1
+
+    def test_skips_logs_that_is_a_file(self, tmp_path):
+        tool_dir = tmp_path / "tool"
+        tool_dir.mkdir()
+        (tool_dir / "logs").write_text("not a dir")
+        result = _post_ro_tmpfs_dirs([tool_dir])
+        assert result == []
+
+    def test_skips_logs_that_is_a_symlink(self, tmp_path, symlinks_supported):
+        if not symlinks_supported:
+            pytest.skip("symlink creation not supported on this platform or environment")
+        tool_dir = tmp_path / "tool"
+        tool_dir.mkdir()
+        real_logs = tmp_path / "real_logs"
+        real_logs.mkdir()
+        (tool_dir / "logs").symlink_to(real_logs, target_is_directory=True)
+        result = _post_ro_tmpfs_dirs([tool_dir])
+        assert result == []
+
+    def test_multiple_tool_dirs(self, tmp_path):
+        t1 = tmp_path / "pipx"
+        t1.mkdir()
+        (t1 / "logs").mkdir()
+        t2 = tmp_path / "uv"
+        t2.mkdir()
+        (t2 / "logs").mkdir()
+        t3 = tmp_path / "nologs"
+        t3.mkdir()
+        result = _post_ro_tmpfs_dirs([t1, t2, t3])
+        assert t1 / "logs" in result
+        assert t2 / "logs" in result
+        assert len(result) == 2
 
 
 def _ro_bind_pairs(cmd: list[str]) -> list[tuple[str, str]]:
@@ -217,6 +419,15 @@ def _ro_bind_pairs(cmd: list[str]) -> list[tuple[str, str]]:
         else:
             i += 1
     return pairs
+
+
+def _tmpfs_targets(cmd: list[str]) -> list[tuple[int, str]]:
+    """Return (index, target) for every --tmpfs token that has a following argument."""
+    return [
+        (i, cmd[i + 1])
+        for i in range(len(cmd) - 1)
+        if cmd[i] == "--tmpfs"
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1706,6 +1917,159 @@ class TestRunShell:
             if tok == "--setenv"
         }
         assert str(nm_bin) in setenv_pairs.get("PATH", "")
+
+
+class TestPostRoTmpfsWiredIntoRunner:
+    """Verify that the runner threads _post_ro_tmpfs_dirs(home_ro) into build_cmd.
+
+    These tests capture the bwrap command produced by the runner and assert that
+    --tmpfs <tool>/logs appears after --ro-bind <tool> when home_ro contains a
+    tool directory with a logs/ subdirectory.  They sit between the unit tests
+    for build_cmd and _post_ro_tmpfs_dirs, closing the gap where each half is
+    correct but the wiring between them could silently break.
+
+    The tool_dir is placed outside cwd so the shell path's
+    `not p.is_relative_to(cwd)` filter does not remove it from home_ro.
+    The install path stubs _preflight, _cooldown_check, and
+    _scan_updated_lock_files to avoid real OSV / DB calls.
+    """
+
+    def _setup_common(self, monkeypatch, home_ro_dirs):
+        """Patch bwrap_available, subprocess.run, and _home_ro_dirs; return cmd capture list."""
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+
+        bwrap_cmds: list[list[str]] = []
+
+        def fake_run(*popenargs, **kw):
+            import shlex
+            raw = popenargs[0] if popenargs else kw.get("args", [])
+            if isinstance(raw, str):
+                cmd = shlex.split(raw)
+            elif isinstance(raw, (list, tuple)):
+                cmd = list(raw)
+            else:
+                raise TypeError(
+                    f"fake_run: unexpected args type {type(raw).__name__!r}; "
+                    "expected str, list, or tuple"
+                )
+            bwrap_cmds.append(cmd)
+            # The runner only reads .returncode; it passes no capture_output/
+            # stdout/stderr kwargs, so stdout=None (bytes default) is correct.
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod, "_home_ro_dirs", lambda *a, **kw: home_ro_dirs)
+        return bwrap_cmds
+
+    @staticmethod
+    def _bwrap_cmd(all_cmds: list[list[str]]) -> list[str]:
+        """Return the first captured command whose argv[0] is 'bwrap'."""
+        for cmd in all_cmds:
+            if cmd and cmd[0] == "bwrap":
+                return cmd
+        raise AssertionError(f"No bwrap command found in captured calls: {all_cmds}")
+
+    @staticmethod
+    def _tmpfs_positions_for(cmd, path):
+        return [i for i, tgt in _tmpfs_targets(cmd) if tgt == str(path)]
+
+    @staticmethod
+    def _ro_bind_idx_for(cmd, path):
+        return next(
+            (i for i in range(len(cmd) - 2)
+             if cmd[i] == "--ro-bind"
+             and cmd[i + 1] == str(path)
+             and cmd[i + 2] == str(path)),
+            None,
+        )
+
+    def test_install_includes_tool_logs_tmpfs(self, tmp_path, monkeypatch):
+        """Install path: --tmpfs <tool>/logs in bwrap cmd, after --ro-bind <tool>."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+
+        # tool_dir is outside project_dir so it is not filtered by _run_shell's
+        # `not p.is_relative_to(cwd)` guard (install path does not filter, but
+        # keeping it outside avoids any future confusion).
+        tool_dir = tmp_path / "fake_pipx"
+        tool_dir.mkdir()
+        logs_dir = tool_dir / "logs"
+        logs_dir.mkdir()
+
+        bwrap_cmds = self._setup_common(monkeypatch, [tool_dir])
+
+        import packagealert.sandbox.runner as runner_mod
+
+        async def _preflight_ok(*a, **kw):
+            return True
+        async def _cooldown_ok(*a, **kw):
+            return []
+        async def _scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _cooldown_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _scan_ok)
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        cmd = self._bwrap_cmd(bwrap_cmds)
+
+        ro_idx = self._ro_bind_idx_for(cmd, tool_dir)
+        tmpfs_pos = self._tmpfs_positions_for(cmd, logs_dir)
+        assert tmpfs_pos, f"--tmpfs {logs_dir} not found in bwrap cmd"
+        assert ro_idx is not None, f"--ro-bind {tool_dir} not found in bwrap cmd"
+        assert tmpfs_pos[0] > ro_idx + 2
+
+    def test_shell_includes_tool_logs_tmpfs(self, tmp_path, monkeypatch):
+        """Shell mode: --tmpfs <tool>/logs in bwrap cmd, after --ro-bind <tool>."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+
+        # tool_dir must be outside cwd: _run_shell filters out paths relative to cwd.
+        tool_dir = tmp_path / "fake_pipx"
+        tool_dir.mkdir()
+        logs_dir = tool_dir / "logs"
+        logs_dir.mkdir()
+
+        bwrap_cmds = self._setup_common(monkeypatch, [tool_dir])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["bash"]))
+
+        cmd = self._bwrap_cmd(bwrap_cmds)
+
+        ro_idx = self._ro_bind_idx_for(cmd, tool_dir)
+        tmpfs_pos = self._tmpfs_positions_for(cmd, logs_dir)
+        assert tmpfs_pos, f"--tmpfs {logs_dir} not found in bwrap cmd"
+        assert ro_idx is not None, f"--ro-bind {tool_dir} not found in bwrap cmd"
+        assert tmpfs_pos[0] > ro_idx + 2
+
+    def test_no_logs_dir_no_extra_tmpfs(self, tmp_path, monkeypatch):
+        """When tool dir has no logs/ subdir, no spurious --tmpfs is added."""
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        monkeypatch.chdir(project_dir)
+
+        tool_dir = tmp_path / "fake_pipx"
+        tool_dir.mkdir()
+        # no logs/ subdir
+
+        bwrap_cmds = self._setup_common(monkeypatch, [tool_dir])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["bash"]))
+
+        spurious = self._tmpfs_positions_for(self._bwrap_cmd(bwrap_cmds), tool_dir / "logs")
+        assert not spurious
 
 
 class TestExposeSSHKeysConfirmation:
