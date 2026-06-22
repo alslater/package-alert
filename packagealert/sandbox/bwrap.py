@@ -17,6 +17,7 @@ def build_cmd(
     env: dict[str, str] | None = None,
     home_ro_dirs: list[Path] | None = None,
     extra_tmpfs: list[Path] | None = None,
+    post_ro_tmpfs: list[Path] | None = None,
 ) -> list[str]:
     """Return a bwrap command list that runs *argv* with *write_dirs* writable.
 
@@ -29,10 +30,35 @@ def build_cmd(
       runtimes, package manager configs, pyenv/nvm installations, etc.).
     - *write_dirs* (project dir, site-packages, caches) are bound writable on
       top of the above, overriding the tmpfs where necessary.
+    - *extra_tmpfs* and *post_ro_tmpfs* entries that are not an existing,
+      non-symlink directory are silently skipped — bwrap cannot create a missing
+      mount point under the read-only root bind, and mounting a tmpfs over a
+      symlink or regular file would produce confusing behaviour. Callers are
+      responsible for pre-validating paths (the runner uses ``_check_extra_tmpfs``
+      for this). *post_ro_tmpfs* mounts are applied after *home_ro_dirs* ro-binds,
+      overlaying subdirectories of ro-bound paths with a fresh writable tmpfs; use
+      this for tool log directories whose parent is ro-bound (e.g. ~/.local/pipx/logs).
 
     When *env* is provided, ``--clearenv`` strips the parent environment and
     only the given variables are re-injected via ``--setenv``.
+
+    All path arguments (*write_dirs*, *home_ro_dirs*, *extra_tmpfs*,
+    *post_ro_tmpfs*) must be absolute; a relative path passed to bwrap would be
+    interpreted relative to the sandbox's working directory and almost certainly
+    wrong.
     """
+    for _param, _paths in (
+        ("write_dirs", write_dirs),
+        ("home_ro_dirs", home_ro_dirs or []),
+        ("extra_tmpfs", extra_tmpfs or []),
+        ("post_ro_tmpfs", post_ro_tmpfs or []),
+    ):
+        for _p in _paths:
+            if not _p.is_absolute():
+                raise ValueError(
+                    f"build_cmd: {_param} paths must be absolute, got: {_p!r}"
+                )
+
     home = str(Path.home())
     cmd = [
         "bwrap",
@@ -51,10 +77,25 @@ def build_cmd(
     if Path("/etc/ssh/ssh_config.d").exists():
         cmd += ["--tmpfs", "/etc/ssh/ssh_config.d"]
     for p in (extra_tmpfs or []):
-        cmd += ["--tmpfs", str(p)]
+        if not p.is_symlink() and p.is_dir():
+            cmd += ["--tmpfs", str(p)]
     for p in (home_ro_dirs or []):
-        if p.exists():
-            cmd += ["--ro-bind", str(p), str(p)]
+        # Resolve symlinks so the bind source is the real path — bwrap follows
+        # the symlink anyway, and using the resolved path makes the mount
+        # explicit and prevents a changed symlink target from silently altering
+        # what is exposed inside the sandbox.  Skip if resolution fails (broken
+        # symlink or permission error on an ancestor directory).
+        try:
+            rp = p.resolve()
+        except (OSError, RuntimeError):
+            continue
+        if rp.exists():
+            cmd += ["--ro-bind", str(rp), str(p)]
+    # post_ro_tmpfs overlays come after the ro-binds so they shadow subdirs of
+    # ro-bound paths with a fresh writable tmpfs (e.g. pipx logs inside ~/.local/pipx).
+    for p in (post_ro_tmpfs or []):
+        if not p.is_symlink() and p.is_dir():
+            cmd += ["--tmpfs", str(p)]
     for d in write_dirs:
         d.mkdir(parents=True, exist_ok=True)
         cmd += ["--bind", str(d), str(d)]
