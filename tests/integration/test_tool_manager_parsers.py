@@ -15,7 +15,6 @@ import stat
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 
 from packagealert.languages import registry as lang_registry
 

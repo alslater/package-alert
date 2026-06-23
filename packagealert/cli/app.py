@@ -945,7 +945,9 @@ def daemon_install_cmd():
         raise typer.Exit(1)
 
     if not _DEFAULT_CONFIG_FILE.exists():
-        import os, stat, tempfile
+        import os
+        import stat
+        import tempfile
         _CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=_CONFIG_DIR, suffix=".tmp")
         try:

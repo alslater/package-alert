@@ -13,12 +13,11 @@ import importlib.metadata
 import sys
 from importlib.metadata import DistributionFinder
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from packagealert.languages import registry as lang_registry
-from packagealert.osv.popularity import PackagePopularity, PopularityClient
+from packagealert.osv.popularity import PopularityClient
 
 
 class _StubLanguage:

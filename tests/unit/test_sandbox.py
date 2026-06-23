@@ -31,7 +31,6 @@ from packagealert.sandbox.runner import (
     _LOCK_UNREADABLE,
     _post_ro_tmpfs_dirs,
     _restorable_lock_files,
-    _scannable_lock_files,
     _SANDBOX_ENV_COMMON,
     _SHELL_NAMES,
     _SHELL_RC_FILES,
@@ -44,7 +43,6 @@ from packagealert.languages.python import (
     _has_ssh_vcs_deps,
     _is_ssh_vcs_url,
     _req_file_has_ssh,
-    _pipenv_venv_dir,
 )
 from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.parsers.process_args import ParsedInstall
@@ -628,7 +626,7 @@ class TestTryParse:
         bad_lang.parse_process_install.assert_called_once()
 
     def test_lockfile_hint_propagated(self):
-        from packagealert.languages.base import ProcessInstall, PackageSpec
+        from packagealert.languages.base import ProcessInstall
         from unittest.mock import MagicMock, patch
         lang = MagicMock()
         lang.name = "node"
@@ -996,7 +994,6 @@ class TestResolveTargets:
                                extra_write_home_dirs=[uv_tools])
         ctx = _Context(argv=[], parsed=parsed, cwd=fake_home)
 
-        import packagealert.languages.registry as reg_module
         with unittest.mock.patch("packagealert.sandbox.runner.Path.home", return_value=fake_home), \
              unittest.mock.patch("packagealert.sandbox.runner.lang_registry") as mock_reg:
             mock_reg.for_ecosystem.return_value = MaliciousLang()
@@ -2642,7 +2639,6 @@ class TestRestoreLockFiles:
 
 class TestRestoreInstallTargets:
     def test_calls_backend_restore_for_each_snapshot(self, tmp_path):
-        from packagealert.sandbox.runner import _restore_install_targets
         from rich.console import Console
 
         restored = []
@@ -2665,7 +2661,6 @@ class TestRestoreInstallTargets:
         assert target_b in restored
 
     def test_noop_for_empty_snapshots(self, tmp_path):
-        from packagealert.sandbox.runner import _restore_install_targets
         from rich.console import Console
 
         class FakeBackend:

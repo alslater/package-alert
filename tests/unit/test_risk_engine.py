@@ -1,5 +1,8 @@
+import math
+import time
+
 import pytest
-from pathlib import Path
+import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import ValidationError
 from packagealert.analyzers.risk import RiskEngine
@@ -7,6 +10,13 @@ from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport, RiskSignal, DampingContext
 from packagealert.config import HeuristicsConfig
 from datetime import datetime, timezone
+from packagealert.storage.db import open_db
+from packagealert.osv.popularity import PopularityCache, PopularityFetchResult, PackagePopularity
+from packagealert.storage.db import (
+    get_publication_date, store_publication_date,
+    store_age_failure_sentinel,
+)
+
 
 
 @pytest.fixture
@@ -207,12 +217,6 @@ def test_popularity_ecosystem_map_built_from_registry():
     assert "packagist" not in eco_map
 
 
-import pytest_asyncio
-import aiosqlite
-from packagealert.storage.db import open_db
-from packagealert.osv.popularity import PopularityCache, PopularityFetchResult
-
-
 @pytest_asyncio.fixture
 async def mem_db(tmp_path):
     db = await open_db(tmp_path / "test.db")
@@ -233,12 +237,6 @@ async def test_popularity_cache_miss_returns_miss(mem_db):
     cache = PopularityCache(mem_db)
     result = await cache.get("pypi", "nonexistent-package-xyz")
     assert result == PopularityFetchResult.MISS
-
-
-from packagealert.storage.db import (
-    get_publication_date, store_publication_date,
-    store_age_failure_sentinel,
-)
 
 
 @pytest.mark.asyncio
@@ -263,14 +261,6 @@ async def test_age_not_found_no_sentinel(tmp_path):
 # Damping tests (Task 6)
 # ---------------------------------------------------------------------------
 
-import math
-import time
-import pytest_asyncio
-from packagealert.models.risk import DampingContext, RiskSignal
-from packagealert.osv.popularity import PackagePopularity, PopularityFetchResult
-from datetime import datetime, timezone as _tz
-
-
 def _make_engine(cfg=None, pop_client=None, pop_cache=None, top_packages_cache=None, db=None, cooldown_period_days=7):
     if cfg is None:
         cfg = HeuristicsConfig()
@@ -292,7 +282,7 @@ def _event(name="lodash", ecosystem="npm"):
         source="process",
         manager="npm",
         project_path=None,
-        timestamp=datetime.now(_tz.utc),
+        timestamp=datetime.now(timezone.utc),
     )
 
 

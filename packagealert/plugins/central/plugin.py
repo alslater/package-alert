@@ -6,7 +6,7 @@ import socket
 import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from packagealert.plugins.base import AgentPlugin, ConfigField, ScanNotFound
 from packagealert.plugins.central.client import CentralClient
@@ -45,7 +45,6 @@ def _render_scans_table(records: list[dict], *, title: str, show_project: bool =
     for r in records:
         scanned_at = str(r.get("scanned_at") or "")
         try:
-            from datetime import datetime, timezone
             dt = datetime.fromisoformat(scanned_at.replace("Z", "+00:00"))
             date_str = dt.astimezone().strftime("%Y-%m-%d %H:%M")
         except Exception:
@@ -79,7 +78,6 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
-        from datetime import datetime
         dt = datetime.fromisoformat(scanned_at.replace("Z", "+00:00"))
         date_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     except Exception:

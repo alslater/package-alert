@@ -6,6 +6,7 @@ from importlib.metadata import entry_points
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    import asyncio
     from pathlib import Path
     import typer
     from packagealert.config import AppConfig

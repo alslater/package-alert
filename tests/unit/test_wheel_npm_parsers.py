@@ -2,9 +2,7 @@ import json
 import zipfile
 import tarfile
 import io
-import pytest
-from pathlib import Path
-from packagealert.parsers.wheel import parse_wheel_filename, read_wheel_metadata, WheelInfo
+from packagealert.parsers.wheel import parse_wheel_filename, read_wheel_metadata
 from packagealert.parsers.npm import inspect_npm_tarball, parse_package_json_file
 
 

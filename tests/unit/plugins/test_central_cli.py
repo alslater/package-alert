@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import json
-import tomllib
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
 from packagealert.config import load_config
@@ -122,7 +119,6 @@ def test_write_config_creates_with_restrictive_permissions(tmp_path, monkeypatch
 
 
 def test_read_config_warns_on_permissive_file(tmp_path, monkeypatch):
-    import stat
     from packagealert.cli.plugins import central_app
     cfg_file = _make_config(tmp_path, '[plugins]\nenabled = ["pa-central"]\n')
     cfg_file.chmod(0o644)

@@ -73,7 +73,6 @@ class CentralClient:
         result: Any,
     ) -> None:
         from packagealert.models.risk import RiskReport
-        from packagealert.models.advisories import OsvResult
 
         try:
             if isinstance(result, RiskReport):

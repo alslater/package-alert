@@ -144,8 +144,8 @@ class SandboxRunner:
                                 f"{real_sibling} is missing — infinite recursion prevented.[/red]"
                             )
                             self._console.print(
-                                f"[dim]Run 'package-alert setup project --uninstall' "
-                                f"and reinstall the tool.[/dim]"
+                                "[dim]Run 'package-alert setup project --uninstall' "
+                                "and reinstall the tool.[/dim]"
                             )
                             return 1
                     except (UnicodeDecodeError, OSError):
@@ -1271,7 +1271,7 @@ class SandboxRunner:
 
         if malicious:
             self._console.print(
-                f"[bold red]✗ Malicious package(s) found in updated lock file(s):[/bold red]"
+                "[bold red]✗ Malicious package(s) found in updated lock file(s):[/bold red]"
             )
             for name, adv_id in malicious:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")

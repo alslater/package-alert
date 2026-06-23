@@ -8,10 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-log = logging.getLogger(__name__)
-
-
 from packagealert.plugins.overlay import deep_merge  # noqa: F401 — re-exported for back-compat
+
+log = logging.getLogger(__name__)
 
 
 def strip_overlay_unsafe_keys(raw: dict) -> None:

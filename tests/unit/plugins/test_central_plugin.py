@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-import pytest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
-from packagealert.config import AppConfig, PluginsConfig, CentralPluginConfig
+from packagealert.config import AppConfig
 from packagealert.models.events import PackageEvent
 from packagealert.models.scans import ScanResult
 from packagealert.models.risk import RiskReport, RiskSignal
@@ -45,7 +43,7 @@ def _risk() -> RiskReport:
     )
 
 
-def _setup_plugin(tmp_path: Path, cfg=None) -> "CentralPlugin":
+def _setup_plugin(tmp_path: Path, cfg=None):
     from packagealert.plugins.central.plugin import CentralPlugin
     plugin = CentralPlugin()
     with patch("packagealert.plugins.central.plugin._STATE_PATH", tmp_path / "central-state.json"), \

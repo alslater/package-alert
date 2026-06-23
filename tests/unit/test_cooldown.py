@@ -189,7 +189,7 @@ class TestCooldownClearedDB:
 class TestFetchPublicationDate:
     def test_pypi_parses_upload_time(self):
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, patch
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         pypi_response = {
@@ -235,7 +235,7 @@ class TestFetchPublicationDate:
 
     def test_returns_not_found_on_404(self):
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, patch
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         mock_resp = MagicMock()
@@ -254,7 +254,7 @@ class TestFetchPublicationDate:
 
     def test_packagist_matches_requested_version(self):
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, patch
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         packagist_response = {
@@ -289,7 +289,7 @@ class TestFetchPublicationDate:
 
     def test_packagist_returns_none_for_missing_version(self):
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, patch
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         packagist_response = {
@@ -329,7 +329,7 @@ class TestFetchLatestVersion:
 
     def test_pypi_returns_latest_version(self):
         import asyncio
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from packagealert.sandbox.cooldown import fetch_latest_version
         from packagealert.languages.python import PythonLanguage
 
@@ -348,7 +348,7 @@ class TestFetchLatestVersion:
 
     def test_returns_none_on_non_200(self):
         import asyncio
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from packagealert.sandbox.cooldown import fetch_latest_version
         from packagealert.languages.python import PythonLanguage
 
@@ -385,7 +385,7 @@ class TestFetchLatestVersion:
 
     def test_returns_none_on_parse_error(self):
         import asyncio
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from packagealert.sandbox.cooldown import fetch_latest_version
         from packagealert.languages.python import PythonLanguage
 
@@ -404,7 +404,7 @@ class TestFetchLatestVersion:
 
     def test_npm_returns_latest_version(self):
         import asyncio
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
         from packagealert.sandbox.cooldown import fetch_latest_version
         from packagealert.languages.node import NodeLanguage
 
