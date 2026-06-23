@@ -27,11 +27,10 @@ from packagealert.languages.base import (
     Snapshot,
 )
 from packagealert.models.risk import RiskSignal
+from packagealert.parsers.lockfiles import _find_project_root
 from packagealert.parsers.wheel import parse_wheel_filename
 
 log = logging.getLogger(__name__)
-
-from packagealert.parsers.lockfiles import _find_project_root
 
 # ---------------------------------------------------------------------------
 # Internal regex constants
@@ -1276,7 +1275,7 @@ class PythonLanguage:
             top_level = entry / "top_level.txt"
             if top_level.exists():
                 try:
-                    lines = [l.strip() for l in top_level.read_text().splitlines() if l.strip()]
+                    lines = [ln.strip() for ln in top_level.read_text().splitlines() if ln.strip()]
                     for name in lines:
                         # Reject anything that could escape site-packages:
                         # absolute paths, entries containing a path separator,

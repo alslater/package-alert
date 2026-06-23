@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import sys
+import time as _time
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -338,9 +340,6 @@ class TestDaemonRestart:
 
 
 # --- update notice + background thread tests ---
-
-import json
-import time as _time
 
 
 def test_cli_prints_notice_when_update_available(tmp_path):

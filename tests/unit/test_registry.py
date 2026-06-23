@@ -10,8 +10,6 @@ import pytest
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     LanguageBase,
-    PackageMetadata,
-    PackageSpec,
     SandboxPaths,
     Snapshot,
 )
@@ -388,7 +386,6 @@ def test_publication_date_url_php():
 
 
 def test_publication_date_url_base_default_returns_none():
-    from packagealert.languages.base import LanguageBase
     # The default implementation on LanguageBase must return None
     # Use a mock that doesn't override publication_date_url
     from unittest.mock import MagicMock

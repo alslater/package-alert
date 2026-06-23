@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from packagealert.heuristics.typosquat import TyposquatDetector, TyposquatResult
+from packagealert.heuristics.typosquat import TyposquatDetector
 
 
 @pytest.fixture

@@ -9,8 +9,8 @@ from packagealert.parsers.process_args import (
     parse_pnpm_args,
     parse_composer_args,
     parse_package_spec,
-    ParsedInstall,
 )
+from packagealert.parsers.lockfiles import collect_requirements_packages
 
 
 def test_pip_install_single():
@@ -221,7 +221,6 @@ def test_pipx_install_recognised():
 
 def test_pipx_upgrade_recognised():
     from packagealert.parsers.process_args import parse_pipx_args, _pipx_home
-    from pathlib import Path
     result = parse_pipx_args(["pipx", "upgrade", "httpie"])
     assert result is not None
     assert result.packages == ["httpie"]
@@ -337,7 +336,6 @@ class TestPipxHomeResolution:
 
     def test_pipx_home_relative_env_var_returns_absolute(self, tmp_path, monkeypatch):
         """A relative $PIPX_HOME that resolves under $HOME must be returned as an absolute path."""
-        import os
         from packagealert.parsers.process_args import _pipx_home
         # Put cwd inside tmp_path so the relative path resolves to a safe location.
         local_pipx = tmp_path / ".local" / "mypipx"
@@ -403,7 +401,6 @@ class TestPipxHomeResolution:
         so we must check is_absolute() on the *raw* value before resolving.
         """
         import sys
-        import os
         if not sys.platform.startswith("linux"):
             pytest.skip("Linux-specific XDG default")
         from packagealert.parsers.process_args import _pipx_home
@@ -430,7 +427,6 @@ class TestPipxHomeResolution:
 
     def test_pipx_home_dotdot_traversal_rejected(self, tmp_path, monkeypatch):
         """$PIPX_HOME with '..' that escapes home after normalisation must be rejected."""
-        import sys
         from packagealert.parsers.process_args import _pipx_home
         # ~/.local/../.ssh/pipx passes is_relative_to(home/".local") lexically but
         # normalises to ~/.ssh/pipx — outside all safe prefixes.
@@ -898,9 +894,6 @@ class TestParseComposerArgs:
 # ---------------------------------------------------------------------------
 # collect_requirements_packages
 # ---------------------------------------------------------------------------
-
-from pathlib import Path
-from packagealert.parsers.lockfiles import collect_requirements_packages
 
 
 class TestCollectRequirementsPackages:
@@ -1494,13 +1487,11 @@ class TestPythonSandboxArgv:
     def test_relative_editable_absolutised(self, tmp_path):
         lang = self._lang()
         result = lang.prepare_sandbox_argv(["pip", "install", "-e", "../../other"], tmp_path)
-        from pathlib import Path
         assert result[3] == str((tmp_path / "../../other").resolve())
 
     def test_extras_preserved(self, tmp_path):
         lang = self._lang()
         result = lang.prepare_sandbox_argv(["pip", "install", "-e", ".[dev]"], tmp_path)
-        from pathlib import Path
         expected = str((tmp_path / ".").resolve()) + "[dev]"
         assert result[3] == expected
 
@@ -1519,7 +1510,6 @@ class TestPythonSandboxArgv:
     def test_long_form_editable_absolutised(self, tmp_path):
         lang = self._lang()
         result = lang.prepare_sandbox_argv(["pip", "install", "--editable=../other"], tmp_path)
-        from pathlib import Path
         expected = f"--editable={(tmp_path / '../other').resolve()}"
         assert result[2] == expected
 
@@ -1659,11 +1649,9 @@ class TestProdOnly:
 
         from packagealert.languages import registry as reg
         reg.load()
-        node_lang = next(l for l in reg.all_languages() if l.name == "node")
+        node_lang = next(ln for ln in reg.all_languages() if ln.name == "node")
 
         call_count = {"n": 0}
-        original_parse = node_lang.parse_lockfile
-        original_patterns = node_lang.lockfile_patterns
 
         def patched_patterns():
             return ["package-lock.json", "yarn.lock"]

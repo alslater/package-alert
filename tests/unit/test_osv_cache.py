@@ -1,4 +1,3 @@
-import time
 import pytest
 from packagealert.osv.cache import OsvCache
 from packagealert.models.advisories import OsvAdvisory, OsvResult
@@ -46,8 +45,7 @@ async def test_negative_lookup_cached(cache):
 
 @pytest.mark.asyncio
 async def test_expired_entry_returns_none(tmp_path):
-    import aiosqlite
-    from packagealert.storage.db import open_db, SCHEMA
+    from packagealert.storage.db import open_db
     db = await open_db(tmp_path / "exp.db")
     # TTL of 0 hours = immediate expiry
     cfg = OsvConfig(cache_ttl_hours=0)

@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 from pathlib import Path
-import pytest
 from packagealert.models.events import PackageEvent
 from packagealert.models.advisories import OsvAdvisory, OsvResult
 from packagealert.models.risk import RiskSignal, RiskReport

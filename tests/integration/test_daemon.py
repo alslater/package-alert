@@ -17,9 +17,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from packagealert.config import AppConfig, OsvConfig, HeuristicsConfig, AlertsConfig, WatchConfig, DaemonLogConfig
-from packagealert.daemon import Daemon, check_already_running, _PID_FILE
+from packagealert.daemon import Daemon, check_already_running
 from packagealert.models.events import PackageEvent
-from packagealert.models.advisories import OsvAdvisory, OsvResult
+from packagealert.models.advisories import OsvResult
 from packagealert.osv.client import OsvClient
 from packagealert.osv.cache import OsvCache
 from packagealert.storage.db import open_db
@@ -364,21 +364,12 @@ class TestSignalHandling:
             await asyncio.sleep(0.05)
             completed.append(event.package_name)
 
-        shutdown_event = asyncio.Event()
-
         async def _run_one_event(self_inner):
-            db = await open_db(tmp_path / "test.db")
-            client = OsvClient(OsvConfig(base_url="https://api.osv.dev/v1"))
-            cache = OsvCache(db, OsvConfig(base_url="https://api.osv.dev/v1"))
-
             event = _event("test-pkg", path=tmp_path)
 
             with patch.object(daemon, "_process_event", _slow_process):
                 task = asyncio.create_task(_slow_process(event))
                 await task
-
-            await client.aclose()
-            await db.close()
 
         with patch.object(Daemon, "_run", _run_one_event):
             await daemon.run()

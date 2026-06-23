@@ -1,7 +1,6 @@
 """Incomplete example package-alert language plugin for Rust / Cargo / crates.io."""
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path

@@ -1,7 +1,4 @@
 import asyncio
-import subprocess
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 from packagealert.monitors.process import ProcessMonitor

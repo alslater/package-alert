@@ -1,5 +1,4 @@
 """Unit tests for parse_package_spec — ecosystem-aware spec normalisation."""
-import pytest
 from packagealert.parsers.process_args import parse_package_spec
 
 

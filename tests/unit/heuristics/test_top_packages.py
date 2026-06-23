@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -193,7 +192,7 @@ async def test_resolve_fetches_when_cache_empty(db):
     cache = TopPackagesCache(db=db, cfg=_cfg())
     lang = _make_lang(fallback=["fallback-pkg"])
 
-    async def fake_fetch(l, eco):
+    async def fake_fetch(lang, eco):
         return ["fetched-pkg"]
 
     with patch.object(cache, "fetch_and_store", new=fake_fetch):
