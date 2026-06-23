@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 import httpx
@@ -69,8 +70,7 @@ class OsvClient:
                 continue
             adv.summary = data.get("summary", adv.summary)
             adv.details = data.get("details")
-            db_specific = data.get("database_specific", {})
-            adv.severity = db_specific.get("severity")
+            adv.severity = _severity_from_response(data)
             if not adv.fixed_versions:
                 adv.fixed_versions = _extract_fixed_versions(data, pkg_name, ecosystem)
 
@@ -99,18 +99,174 @@ def _parse_batch_response(
     for (eco, pkg, ver), item in zip(queries, data.get("results", [])):
         advisories = []
         for vuln in item.get("vulns", []):
-            db_specific = vuln.get("database_specific", {})
-            severity = db_specific.get("severity")
             advisories.append(OsvAdvisory(
                 id=vuln["id"],
                 summary=vuln.get("summary", ""),
                 details=vuln.get("details"),
-                severity=severity,
+                severity=_severity_from_response(vuln),
                 aliases=vuln.get("aliases", []),
                 fixed_versions=_extract_fixed_versions(vuln, pkg, eco),
             ))
         results.append(OsvResult(package_name=pkg, ecosystem=eco, version=ver, advisories=advisories))
     return results
+
+
+# CVSS 3.1 base metric weights (section 7.1 of the spec)
+_CVSS3_AV = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}
+_CVSS3_AC = {"L": 0.77, "H": 0.44}
+_CVSS3_PR_UNCHANGED = {"N": 0.85, "L": 0.62, "H": 0.27}
+_CVSS3_PR_CHANGED = {"N": 0.85, "L": 0.68, "H": 0.50}
+_CVSS3_UI = {"N": 0.85, "R": 0.62}
+_CVSS3_CIA = {"N": 0.00, "L": 0.22, "H": 0.56}
+
+
+def _cvss3_label(vector: str) -> str | None:
+    """Return a severity label for a CVSS v3 vector string.
+
+    Implements the CVSS 3.1 base score formula (section 7.1 of the spec).
+    Returns None if the vector cannot be parsed.
+    """
+    metrics: dict[str, str] = {}
+    for part in vector.split("/"):
+        if ":" in part:
+            k, v = part.split(":", 1)
+            metrics[k] = v
+
+    try:
+        av = _CVSS3_AV[metrics["AV"]]
+        ac = _CVSS3_AC[metrics["AC"]]
+        scope_changed = metrics["S"] == "C"
+        pr = (_CVSS3_PR_CHANGED if scope_changed else _CVSS3_PR_UNCHANGED)[metrics["PR"]]
+        ui = _CVSS3_UI[metrics["UI"]]
+        c = _CVSS3_CIA[metrics["C"]]
+        i = _CVSS3_CIA[metrics["I"]]
+        a = _CVSS3_CIA[metrics["A"]]
+    except KeyError:
+        return None
+
+    iss = 1 - (1 - c) * (1 - i) * (1 - a)
+    if scope_changed:
+        impact = 7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15
+    else:
+        impact = 6.42 * iss
+
+    exploitability = 8.22 * av * ac * pr * ui
+
+    if impact <= 0:
+        base = 0.0
+    elif scope_changed:
+        base = min(1.08 * (impact + exploitability), 10.0)
+    else:
+        base = min(impact + exploitability, 10.0)
+
+    # CVSS 3.1 Roundup: smallest value with one decimal place >= base.
+    # Mirrors the reference JS implementation: int(input * 100000 + 0.5) gives
+    # half-up (not banker's) rounding; ceiling over 10000-unit steps avoids
+    # float representation errors from math.ceil(base * 10) alone.
+    int_base = int(base * 100000 + 0.5)
+    base = math.ceil(int_base / 10000) / 10
+
+    if base == 0.0:
+        return "NONE"
+    if base < 4.0:
+        return "LOW"
+    if base < 7.0:
+        return "MEDIUM"
+    if base < 9.0:
+        return "HIGH"
+    return "CRITICAL"
+
+
+def _numeric_score_label(score: float) -> str | None:
+    """Map a CVSS numeric base score (0–10) to a severity label.
+
+    The 0/0.1–3.9/4.0–6.9/7.0–8.9/9.0–10.0 bands are identical in CVSS v3.1
+    and CVSS v4.0, so this function is used for both.
+    Returns None for NaN, infinite, or out-of-range values.
+    """
+    if not math.isfinite(score) or score < 0.0 or score > 10.0:
+        return None
+    if score == 0.0:
+        return "NONE"
+    if score < 4.0:
+        return "LOW"
+    if score < 7.0:
+        return "MEDIUM"
+    if score < 9.0:
+        return "HIGH"
+    return "CRITICAL"
+
+
+_SEVERITY_RANK: dict[str, int] = {
+    "NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4,
+}
+
+# Map source-specific labels to the canonical vocabulary.
+_SEVERITY_ALIASES: dict[str, str] = {
+    "MODERATE": "MEDIUM",  # GHSA uses MODERATE instead of MEDIUM
+}
+
+
+def _normalise_severity(label: str) -> str | None:
+    """Uppercase and map to the canonical severity vocabulary, or return None."""
+    upper = label.strip().upper()
+    upper = _SEVERITY_ALIASES.get(upper, upper)
+    return upper if upper in _SEVERITY_RANK else None
+
+
+def _severity_from_response(data: dict[str, Any]) -> str | None:
+    """Extract a severity label from an OSV vulnerability response.
+
+    GHSA advisories store a plain label in database_specific.severity.
+    PYSEC and others store only a CVSS vector in the top-level severity array.
+    The score field may be a CVSS vector string (with or without the CVSS:
+    prefix), a numeric string, or a plain number.
+
+    When multiple severity entries are present, returns the highest.
+    """
+    db_specific = data.get("database_specific")
+    if isinstance(db_specific, dict):
+        raw_label = db_specific.get("severity")
+        if raw_label:
+            normalised = _normalise_severity(str(raw_label))
+            if normalised is not None:
+                return normalised
+
+    best: str | None = None
+    severity_list = data.get("severity")
+    for entry in (severity_list if isinstance(severity_list, list) else []):
+        if not isinstance(entry, dict):
+            continue
+        score_type = entry.get("type", "")
+        if score_type not in ("CVSS_V3", "CVSS_V4"):
+            continue
+        raw = entry.get("score")
+        if raw is None:
+            continue
+        # Numeric score (float or int) — map directly to label.
+        if isinstance(raw, (int, float)):
+            candidate = _numeric_score_label(float(raw))
+        else:
+            score_str = str(raw).strip()
+            # Vector string: only parse with the CVSS v3 formula for CVSS_V3 entries.
+            # CVSS_V4 vectors use a different structure; without a dedicated v4 parser
+            # only accept numeric scores for that type.
+            if score_type == "CVSS_V4" and "AV:" in score_str:
+                log.warning("CVSS_V4 vector score encountered but no v4 parser is implemented; add one. score=%r", score_str)
+                continue
+            if score_type == "CVSS_V3" and "AV:" in score_str:
+                candidate = _cvss3_label(score_str if score_str.startswith("CVSS:") else f"CVSS:3.1/{score_str.lstrip('/')}")
+            else:
+                # Numeric string (e.g. "7.5") — works for both CVSS_V3 and CVSS_V4.
+                try:
+                    candidate = _numeric_score_label(float(score_str))
+                except ValueError:
+                    continue
+
+        if candidate is not None and _SEVERITY_RANK.get(candidate, -1) > _SEVERITY_RANK.get(best or "", -1):
+            best = candidate
+
+    return best
 
 
 def _normalize_pypi_name(name: str) -> str:
