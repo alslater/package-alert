@@ -4,47 +4,162 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from packagealert.managers import manager_registry_name
+
 # Matches the leading PEP 508 distribution name (letters, digits, hyphens, underscores, dots).
 _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
 # Flags whose next argument is a non-package value and must be consumed (not treated as a pkg spec).
+# Audited against: pip 25.3 `pip install --help`.
 _PIP_VALUE_FLAGS = frozenset({
+    # Requirements / constraints files
+    "-r", "--requirement",
     "-c", "--constraint",
+    "--build-constraint",
+    # Editable installs (local path / VCS URL — not a package name)
+    "-e", "--editable",
+    # Install destination
+    "--target", "-t",
+    "--prefix", "--root", "--src",
+    # Wheel tag filtering (values are platform/abi strings, not packages)
+    "--platform", "--python-version", "--implementation", "--abi",
+    # Upgrade / solver
+    "--upgrade-strategy",
+    # Index / source
     "--index-url", "-i", "--extra-index-url",
     "--find-links", "-f",
-    "--target", "-t",
-    "--prefix", "--root",
-    "--config-settings", "--config-setting", "-C",  # pip 22.1+ / uv: build-system config
+    "--no-binary", "--only-binary",
+    # Dependency groups (pip 24.3+)
+    "--group",
+    # Build config (pip 22.1+)
+    "--config-settings", "--config-setting", "-C",
+    # Progress / reporting
+    "--progress-bar",
+    "--root-user-action",
+    "--report",
+    # Network / auth
+    "--proxy", "--retries", "--timeout",
+    "--exists-action",
+    "--trusted-host",
+    "--cert", "--client-cert",
+    "--keyring-provider",
+    # Cache / misc
+    "--cache-dir",
+    "--log",
+    "--python",
+    "--use-feature", "--use-deprecated",
+    "--resume-retries",
 })
-# Flags that consume the next argument as their value for `uv tool install/upgrade`.
-_UV_TOOL_VALUE_FLAGS = frozenset({
+# Flags that consume the next argument as their value for `uv add` / `uv remove`.
+# Audited against: uv 0.11.23 `uv add --help` / `uv remove --help`.
+_UV_PROJECT_VALUE_FLAGS = frozenset({
+    # Python selector
     "-p", "--python",
-    "--with", "--with-requirements", "--with-editable", "--with-executables-from",
-    "-c", "--constraints", "--overrides", "--excludes",
-    "-b", "--build-constraints",
+    # Dependency targeting (add/remove)
+    "-r", "--requirements",
+    "-m", "--marker",
+    "--optional", "--group", "--extra",
+    "--script", "--package",
+    "--bounds",
+    # VCS pinning (add only)
+    "--tag", "--rev", "--branch",
+    # Index / source resolution
     "--index", "--default-index", "-i", "--index-url", "--extra-index-url",
     "-f", "--find-links",
     "--index-strategy", "--keyring-provider",
-    "-P", "--upgrade-package", "--upgrade-group",
+    # Solver strategy
+    "-c", "--constraints",
     "--resolution", "--prerelease", "--fork-strategy",
     "--exclude-newer", "--exclude-newer-package",
+    # Upgrade control
+    "-P", "--upgrade-package", "--upgrade-group",
+    # Install control
+    "--no-install-package",
+    "--reinstall-package",
+    "--link-mode",
+    # Build config
+    "-C", "--config-setting", "--config-settings-package",
+    "--no-build-isolation-package",
+    "--no-build-package",
+    "--no-binary-package",
+    "--no-sources-package",
+    # Cache
+    "--cache-dir",
+    "--refresh-package",
+    # Global flags that take values
+    "--allow-insecure-host",
+    "--directory",
+    "--project",
+    "--config-file",
+    "--color",
+})
+
+# Flags that consume the next argument as their value for `uv tool install/upgrade`.
+# Audited against: uv 0.11.23 `uv tool install --help` / `uv tool upgrade --help`.
+_UV_TOOL_VALUE_FLAGS = frozenset({
+    # Python selector
+    "-p", "--python",
+    # Extra dependencies (install only)
+    "-w", "--with", "--with-requirements", "--with-editable", "--with-executables-from",
+    # Constraints / overrides
+    "-c", "--constraints", "--overrides", "--excludes",
+    "-b", "--build-constraints",
+    # Index / source
+    "--index", "--default-index", "-i", "--index-url", "--extra-index-url",
+    "-f", "--find-links",
+    "--index-strategy", "--keyring-provider",
+    # Upgrade control
+    "-P", "--upgrade-package", "--upgrade-group",
+    # Solver strategy
+    "--resolution", "--prerelease", "--fork-strategy",
+    "--exclude-newer", "--exclude-newer-package",
+    # Platform (install only)
     "--python-platform", "--torch-backend",
+    # Install control
+    "--reinstall-package",
+    "--link-mode",
+    # Build config
+    "-C", "--config-setting",
+    "--config-settings-package",   # install
+    "--config-setting-package",    # upgrade (different spelling)
+    "--no-build-isolation-package",
+    "--no-build-package",
+    "--no-binary-package",
+    "--no-sources-package",
+    # Cache
+    "--cache-dir",
+    "--refresh-package",
+    # Global flags that take values
+    "--allow-insecure-host",
+    "--directory",
+    "--project",
+    "--config-file",
+    "--color",
 })
 
 # Flags that consume the next argument as their value for `pipx install/inject/etc`.
+# Audited against: pipx 1.8.0 `pipx install --help` / `pipx inject --help`.
 _PIPX_VALUE_FLAGS = frozenset({
-    "--python", "-p",
+    "--python",
     "--suffix",
     "--preinstall",
     "--index-url", "-i",
     "--pip-args",
     "--spec",
+    "-r", "--requirement",  # inject only
 })
 
 def _positionals(args: list[str], value_flags: frozenset[str]) -> list[str]:
-    """Return all positional arguments, skipping flags and their values."""
+    """Return all positional arguments, skipping flags and their values.
+
+    Recognises ``--`` as the end-of-options marker; all tokens after it are
+    treated as positionals regardless of whether they start with ``-``.
+    """
     result: list[str] = []
     skip_next = False
-    for arg in args:
+    for i, arg in enumerate(args):
+        if arg == "--":
+            result.extend(args[i + 1:])
+            break
         if skip_next:
             skip_next = False
             continue
@@ -54,6 +169,49 @@ def _positionals(args: list[str], value_flags: frozenset[str]) -> list[str]:
         if arg.startswith("-"):
             continue
         result.append(arg)
+    return result
+
+
+def _value_flag_args(args: list[str], collect_flags: frozenset[str]) -> list[str]:
+    """Return the values consumed by flags in *collect_flags*.
+
+    Handles three spelling forms:
+    - Space-separated:  ``-r file.txt`` / ``--requirements file.txt``
+    - Equals-form:      ``--requirements=file.txt``
+    - Concatenated short: ``-rfile.txt``
+
+    For equals-form and concatenated matching, only flags that appear literally
+    in *collect_flags* are matched (e.g. ``-r`` matches ``-rfile`` but ``--req``
+    does not match ``--requirements=…``).
+
+    Tokens after ``--`` are not inspected (they are positionals, not flag values).
+    """
+    result: list[str] = []
+    collect_next = False
+    long_flags = frozenset(f for f in collect_flags if f.startswith("--"))
+    short_flags = frozenset(f for f in collect_flags if f.startswith("-") and not f.startswith("--"))
+    for arg in args:
+        if arg == "--":
+            break
+        if collect_next:
+            result.append(arg)
+            collect_next = False
+            continue
+        if arg in collect_flags:
+            collect_next = True
+            continue
+        # Equals-form: --requirements=file.txt
+        for lf in long_flags:
+            prefix = lf + "="
+            if arg.startswith(prefix):
+                result.append(arg[len(prefix):])
+                break
+        else:
+            # Concatenated short: -rfile.txt
+            for sf in short_flags:
+                if len(sf) == 2 and arg.startswith(sf) and len(arg) > len(sf):
+                    result.append(arg[len(sf):])
+                    break
     return result
 
 
@@ -80,6 +238,7 @@ def _is_vcs_editable(s: str) -> bool:
     )
 
 
+
 @dataclass
 class ParsedInstall:
     manager: str
@@ -95,6 +254,11 @@ class ParsedInstall:
     # packages[0] (e.g. pipx inject httpie httpx → target_env_name="httpie").
     # None means the environment name is derived from packages[0] as normal.
     target_env_name: str | None = None
+
+    @property
+    def registry_name(self) -> str:
+        """Registry lookup key for this manager; see :func:`manager_registry_name`."""
+        return manager_registry_name(self.manager)
 
 
 def derive_site_packages(exe_path: str) -> Path | None:
@@ -390,11 +554,12 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
     if not args:
         return None
     subcmd = args[0]
-    if subcmd == "add":
-        packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe)
+    if subcmd in ("add", "remove"):
+        packages = _positionals(args[1:], _UV_PROJECT_VALUE_FLAGS)
+        req_files = _value_flag_args(args[1:], frozenset({"-r", "--requirements"}))
+        return ParsedInstall(manager="uv-project", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
     if subcmd in ("sync", "lock"):
-        return ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+        return ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     if subcmd == "pip" and len(args) > 1 and args[1] == "install":
         rest = args[2:]
         packages: list[str] = []
@@ -450,7 +615,7 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
         return None
     if subcmd in ("run", "python", "init", "build", "publish", "export",
                   "cache", "version", "generate-shell-completion", "self",
-                  "pip", "venv", "remove"):
+                  "pip", "venv"):
         return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     return None
 

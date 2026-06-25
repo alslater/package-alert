@@ -323,6 +323,66 @@ def _fingerprint_distinfo(path: Path) -> str:
     return path.name
 
 
+def _venv_targets(venv_root: Path) -> list[Path]:
+    """Return [venv_root, site_packages] for a venv, or [venv_root] if pyvenv.cfg
+    is invalid.  Returns [] if site_packages is None (venv not yet populated).
+    """
+    try:
+        sp = venv_site_packages(venv_root)
+    except ValueError:
+        return [venv_root]
+    return [venv_root, sp] if sp else []
+
+
+class _ResolutionBlocked(Exception):
+    """Raised by _strict_resolve() when a path cannot be resolved.
+
+    Carries a ready-to-return PreRunResult so the single catch site can
+    return it directly without any isinstance() checks.
+    """
+
+    def __init__(self, result: PreRunResult) -> None:
+        super().__init__(result.message)
+        self.result = result
+
+
+def _strict_resolve(path: Path, label: str, hint: str, fields: dict[str, str]) -> Path:
+    """Resolve *path* strictly, raising _ResolutionBlocked on any OSError.
+
+    *fields* is an ordered mapping of display-name → value rendered as aligned
+    ``key = value`` lines.  The OS error is appended automatically as a final
+    field so callers never need to manage message formatting.
+
+    OSError covers all CPython 3.6+ resolution failures: missing paths
+    (ENOENT), permission denied (EACCES), symlink loops (ELOOP), and other
+    platform-specific errno values.
+    """
+    try:
+        return path.resolve(strict=True)
+    except OSError as exc:
+        if exc.strerror:
+            err = f"[errno {exc.errno}] {exc.strerror}" if exc.errno is not None else exc.strerror
+        else:
+            err = f"{type(exc).__name__}: {exc}"
+        all_fields = {**fields, "Error": err}
+        width = max(len(k) for k in all_fields)
+        field_lines = "\n".join(
+            f"  {k:<{width}} = {v}" for k, v in all_fields.items()
+        )
+        raise _ResolutionBlocked(
+            PreRunResult(
+                ok=False,
+                message=(
+                    f"✗ Blocked — {label} could not be resolved "
+                    f"(not found, permission error, or broken symlink):\n"
+                    f"{field_lines}\n"
+                    f"\n{hint}"
+                ),
+                required_flag="",
+            )
+        ) from exc
+
+
 def venv_site_packages(venv_root: Path) -> Path | None:
     """Return the site-packages directory for a virtualenv.
 
@@ -413,7 +473,7 @@ def _has_ssh_vcs_deps(parsed: Any, cwd: Path) -> bool:
                     return True
             except OSError:
                 pass
-    elif parsed.manager in ("pip", "uv"):
+    elif parsed.manager in ("pip", "uv", "uv-project"):
         if parsed.req_files:
             roots = [cwd / f for f in parsed.req_files]
         elif not parsed.packages:
@@ -451,8 +511,101 @@ def _find_pipenv_venv(cwd: Path) -> Path | None:
 
 
 def _pipenv_venv_dir() -> Path:
+    """Return the pipenv external venv root (WORKON_HOME or default).
+
+    If WORKON_HOME is set but resolves outside $HOME, fall back to the default
+    so that values like ``WORKON_HOME=/`` cannot expand the external-venv allowlist
+    to the entire filesystem.
+    """
+    home = Path.home()
+    default = home / ".local" / "share" / "virtualenvs"
     workon = os.environ.get("WORKON_HOME")
-    return Path(workon) if workon else Path.home() / ".local" / "share" / "virtualenvs"
+    if not workon:
+        return default
+    expanded = Path(workon).expanduser()
+    if not expanded.is_absolute():
+        log.debug("WORKON_HOME=%r is a relative path; using default pipenv venv dir", workon)
+        return default
+    candidate = expanded.resolve(strict=False)
+    if candidate == home or candidate.is_relative_to(home):
+        return candidate
+    log.debug("WORKON_HOME=%r resolves outside $HOME; using default pipenv venv dir", workon)
+    return default
+
+
+def _pyenv_versions_dir() -> Path:
+    """Return the pyenv versions directory (PYENV_ROOT/versions or default).
+
+    If PYENV_ROOT resolves outside $HOME, fall back to the default so that
+    values like ``PYENV_ROOT=/`` cannot expand the external-venv allowlist.
+    """
+    home = Path.home()
+    default = home / ".pyenv" / "versions"
+    pyenv_root = os.environ.get("PYENV_ROOT")
+    if not pyenv_root:
+        return default
+    expanded = Path(pyenv_root).expanduser()
+    if not expanded.is_absolute():
+        log.debug("PYENV_ROOT=%r is a relative path; using default pyenv versions dir", pyenv_root)
+        return default
+    candidate = expanded.resolve(strict=False)
+    if candidate == home or candidate.is_relative_to(home):
+        return candidate / "versions"
+    log.debug("PYENV_ROOT=%r resolves outside $HOME; using default pyenv versions dir", pyenv_root)
+    return default
+
+
+def _looks_like_venv(resolved: Path) -> bool:
+    """Return True if *resolved* looks like a real virtualenv.
+
+    Checks that pyvenv.cfg contains a 'home' key (required by PEP 405 for all
+    compliant venv creators) and that bin/python or bin/activate exists.  An
+    attacker-controlled directory is unlikely to satisfy both conditions.
+    """
+    cfg = resolved / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    has_home = any(
+        line.split("=", 1)[0].strip().lower() == "home"
+        for line in text.splitlines()
+        if "=" in line
+    )
+    if not has_home:
+        return False
+    bin_dir = resolved / "bin"
+    return (bin_dir / "python").exists() or (bin_dir / "activate").exists()
+
+
+def _is_external_managed_venv(resolved: Path) -> bool:
+    """Return True if *resolved* (an already-resolved absolute path) is under a known
+    external venv manager's directory AND structurally resembles a real virtualenv.
+
+    Callers must pass a resolved path — this function does not call resolve() itself,
+    both to avoid redundant filesystem operations and to keep path comparisons consistent
+    with the resolved candidate roots built here.
+
+    Covers pyenv-virtualenv, pipenv (WORKON_HOME), and virtualenvwrapper so that
+    pa does not block these when VIRTUAL_ENV points outside the project root.
+
+    Pipenv's external dir is only treated as managed when PIPENV_VENV_IN_PROJECT is
+    not set — if it is set, the venv is expected inside the project tree, so an
+    outside location should still be blocked.
+
+    Validation requires pyvenv.cfg to contain a 'home' key (PEP 405 mandatory field)
+    and bin/python or bin/activate to exist, making it hard to spoof with a bare
+    directory planted under the managed root.
+    """
+    try:
+        if not _looks_like_venv(resolved):
+            return False
+        candidates = [_pyenv_versions_dir().resolve()]
+        if not os.environ.get("PIPENV_VENV_IN_PROJECT"):
+            candidates.append(_pipenv_venv_dir().resolve())
+        return any(resolved.is_relative_to(c) for c in candidates)
+    except (ValueError, OSError):
+        return False
 
 
 def _pipx_venvs_dir() -> Path:
@@ -494,7 +647,7 @@ def _find_site_packages(parsed: Any, cwd: Path) -> Path | None:
         sp = derive_site_packages(parsed.venv_exe)
         if sp and sp.exists():
             return sp
-    if parsed.manager in ("pip", "pipenv"):
+    if parsed.manager in ("pip", "pipenv", "uv"):
         venv_env = os.environ.get("VIRTUAL_ENV")
         if venv_env:
             sp = venv_site_packages(Path(venv_env))
@@ -557,7 +710,7 @@ class PythonLanguage:
                     specs.append(PackageSpec(name=_normalize_name(name), version=version, ecosystem="PyPI"))
             _LOCKFILE_HINTS = {
                 "pipenv": "Pipfile.lock",
-                "uv-lock": "uv.lock",
+                "uv-project": "uv.lock",
             }
             # If argv[0] is inside a venv's bin/ but VIRTUAL_ENV is not set
             # (e.g. venv not activated, called directly via shim), derive it so
@@ -877,14 +1030,9 @@ class PythonLanguage:
                 if tool_name:
                     tool_venv = venvs_dir / tool_name
                     if (tool_venv / "pyvenv.cfg").exists():
-                        try:
-                            sp = venv_site_packages(tool_venv)
-                        except ValueError:
-                            # Invalid/tampered pyvenv.cfg — still return the venv
-                            # root so the runner has a rollback target.
-                            return [tool_venv]
-                        if sp:
-                            return [tool_venv, sp]
+                        targets = _venv_targets(tool_venv)
+                        if targets:
+                            return targets
         # Tool-manager commands must never fall back to project-local venvs — doing
         # so would cause the runner to delete an unrelated .venv on rollback.
         if is_tool_manager_cmd:
@@ -902,18 +1050,27 @@ class PythonLanguage:
         for name in (".venv", "venv"):
             venv_root = cwd / name
             if (venv_root / "pyvenv.cfg").exists():
-                sp = venv_site_packages(venv_root)
-                if sp:
-                    return [venv_root, sp]
+                targets = _venv_targets(venv_root)
+                if targets:
+                    return targets
         # 3. pipenv-managed venv outside the project (common on first sync).
         #    pipenv creates the venv under WORKON_HOME, not under cwd.
         manager = getattr(parsed, "manager", None)
         if manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             pipenv_venv = _find_pipenv_venv(cwd)
             if pipenv_venv:
-                sp = venv_site_packages(pipenv_venv)
-                if sp:
-                    return [pipenv_venv, sp]
+                targets = _venv_targets(pipenv_venv)
+                if targets:
+                    return targets
+        # 4. External managed venv (pyenv-virtualenv, etc.) — VIRTUAL_ENV set but
+        #    venv lives outside the project tree.
+        venv_env = os.environ.get("VIRTUAL_ENV")
+        if venv_env and manager in ("pip", "pipenv", "uv"):
+            venv_root = Path(venv_env)
+            if venv_root.is_absolute() and _is_external_managed_venv(venv_root.resolve()):
+                targets = _venv_targets(venv_root)
+                if targets:
+                    return targets
         return []
 
     def pre_run_check(
@@ -922,26 +1079,59 @@ class PythonLanguage:
         cwd: Path,
         flags: frozenset[str] = frozenset(),
     ) -> PreRunResult:
-        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv only, skipped in cross-namespace calls)
-        if parsed is not None and parsed.manager in ("pip", "pipenv"):
+        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv/uv, skipped in cross-namespace calls)
+        if parsed is not None and parsed.manager in ("pip", "pipenv", "uv"):
             virtual_env = os.environ.get("VIRTUAL_ENV")
             if virtual_env:
                 venv_path = Path(virtual_env)
-                if not venv_path.is_relative_to(cwd):
-                    if not (parsed.manager == "pipenv"
-                            and not os.environ.get("PIPENV_VENV_IN_PROJECT")
-                            and venv_path.is_relative_to(_pipenv_venv_dir())):
-                        return PreRunResult(
-                            ok=False,
-                            message=(
-                                f"✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:\n"
-                                f"  VIRTUAL_ENV = {virtual_env}\n"
-                                f"  Project     = {cwd}\n"
-                                f"Run 'deactivate' before using package-alert run, "
-                                f"or cd to the project that owns this virtualenv."
-                            ),
-                            required_flag="",
-                        )
+                if not venv_path.is_absolute():
+                    try:
+                        _process_cwd: str = str(Path.cwd())
+                    except OSError:
+                        _process_cwd = "<unavailable>"
+                    return PreRunResult(
+                        ok=False,
+                        message=(
+                            f"✗ Blocked — VIRTUAL_ENV is a relative path, which is not supported:\n"
+                            f"  VIRTUAL_ENV = {virtual_env}\n"
+                            f"  Project     = {cwd}\n"
+                            f"  Process CWD = {_process_cwd}\n"
+                            f"Relative paths are resolved against the process working directory, "
+                            f"which may differ from the project root and cause incorrect allow/block decisions.\n"
+                            f"Re-activate your virtualenv to set an absolute path."
+                        ),
+                        required_flag="",
+                    )
+                try:
+                    resolved_venv = _strict_resolve(
+                        venv_path,
+                        label="VIRTUAL_ENV path",
+                        hint="Verify the path exists and is accessible, then re-activate your virtualenv.",
+                        fields={"VIRTUAL_ENV": virtual_env, "Project": str(cwd)},
+                    )
+                    resolved_cwd = _strict_resolve(
+                        cwd,
+                        label="project path",
+                        hint=(
+                            "Ensure the project directory exists and is accessible, "
+                            "or run package-alert from an existing project folder."
+                        ),
+                        fields={"Project": str(cwd), "VIRTUAL_ENV": virtual_env},
+                    )
+                except _ResolutionBlocked as exc:
+                    return exc.result
+                if not resolved_venv.is_relative_to(resolved_cwd) and not _is_external_managed_venv(resolved_venv):
+                    return PreRunResult(
+                        ok=False,
+                        message=(
+                            f"✗ Blocked — VIRTUAL_ENV points to a virtualenv outside this project:\n"
+                            f"  VIRTUAL_ENV = {virtual_env}\n"
+                            f"  Project     = {cwd}\n"
+                            f"Run 'deactivate' before using package-alert run, "
+                            f"or cd to the project that owns this virtualenv."
+                        ),
+                        required_flag="",
+                    )
 
         # 2. SSH VCS dependency check
         ssh_granted = "ssh-keys" in flags
@@ -1127,12 +1317,12 @@ class PythonLanguage:
     ) -> list[Path]:
         extra_write: list[Path] = []
 
-        if parsed.manager not in ("pip", "pipenv"):
+        if parsed.manager not in ("pip", "pipenv", "uv"):
             return extra_write
 
         if "VIRTUAL_ENV" in env:
             venv_path: Path | None = Path(env["VIRTUAL_ENV"])
-        elif parsed.manager == "pip":
+        elif parsed.manager in ("pip", "uv"):
             venv_env = os.environ.get("VIRTUAL_ENV")
             if venv_env:
                 venv_path = Path(venv_env)
@@ -1146,7 +1336,8 @@ class PythonLanguage:
                 if venv_path:
                     env["VIRTUAL_ENV"] = str(venv_path)
                     log.debug("No active virtualenv — using detected project venv: %s", venv_path)
-                else:
+                elif parsed.manager == "pip":
+                    # uv can create its own venv on first run; only block pip.
                     raise SandboxEnvError(
                         "✗ Blocked — no virtualenv found for this project.\n"
                         "Create one first:  python -m venv .venv  &&  source .venv/bin/activate\n"

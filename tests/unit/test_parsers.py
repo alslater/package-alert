@@ -131,16 +131,107 @@ def test_pip_install_editable_relative_path_not_in_packages():
     assert result.packages == []
 
 
-def test_uv_add():
-    result = parse_uv_args(["uv", "add", "httpx"])
-    assert result is not None
-    assert result.packages == ["httpx"]
+class TestUvProjectSubcommands:
+    """Parametrized coverage of uv add/remove positional extraction.
 
+    All cases assert manager=="uv-project".  Structural edge cases that need
+    their own assertion (end-of-options marker, sync/lock empty packages) are
+    kept as dedicated test methods below the parametrized matrix.
+    """
 
-def test_uv_sync_returns_empty_packages():
-    result = parse_uv_args(["uv", "sync"])
-    assert result is not None
-    assert result.packages == []
+    @pytest.mark.parametrize("argv_suffix,expected", [
+        # --- basic positionals ---
+        (["add", "httpx"],                                                        ["httpx"]),
+        (["add", "httpx", "rich"],                                                ["httpx", "rich"]),
+        (["remove", "httpx"],                                                     ["httpx"]),
+        (["remove", "httpx", "rich"],                                             ["httpx", "rich"]),
+        # --- boolean flags stripped ---
+        (["add", "--dev", "httpx"],                                               ["httpx"]),
+        (["add", "httpx", "--dev"],                                               ["httpx"]),
+        (["remove", "--dev", "httpx"],                                            ["httpx"]),
+        (["remove", "httpx", "--dev"],                                            ["httpx"]),
+        # --- value-consuming flags (space-separated form) ---
+        (["add", "--index-url", "https://pypi.org/simple", "httpx"],             ["httpx"]),
+        (["add", "httpx", "--extra", "security"],                                 ["httpx"]),
+        (["remove", "--package", "mylib", "httpx"],                               ["httpx"]),
+        (["remove", "httpx", "--package", "mylib"],                               ["httpx"]),
+        (["add", "--group", "dev", "httpx"],                                      ["httpx"]),
+        (["remove", "--group", "dev", "httpx"],                                   ["httpx"]),
+        (["add", "--marker", "python_version>='3.11'", "httpx"],                  ["httpx"]),
+        (["add", "-r", "requirements.txt", "httpx"],                              ["httpx"]),
+        (["add", "--script", "myscript.py", "httpx"],                             ["httpx"]),
+        (["add", "--upgrade-package", "rich", "httpx"],                           ["httpx"]),
+        # --- equals-form flags (single token, value must not bleed) ---
+        (["add", "--index-url=https://pypi.org/simple", "httpx"],                 ["httpx"]),
+        (["remove", "--python=3.12", "httpx"],                                    ["httpx"]),
+        # --- combined short flag (single token, no value consumed) ---
+        (["add", "-p3.12", "httpx"],                                              ["httpx"]),
+        # --- package sandwiched between flags ---
+        (["add", "--dev", "httpx", "--index-url=https://pypi.org/simple"],        ["httpx"]),
+    ])
+    def test_packages_extracted(self, argv_suffix, expected):
+        result = parse_uv_args(["uv"] + argv_suffix)
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == expected
+
+    def test_add_end_of_options_marker(self):
+        # Tokens after -- are positionals even if they look like flags.
+        result = parse_uv_args(["uv", "add", "--dev", "--", "httpx", "--not-a-flag"])
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == ["httpx", "--not-a-flag"]
+
+    def test_remove_end_of_options_marker(self):
+        result = parse_uv_args(["uv", "remove", "--", "httpx"])
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == ["httpx"]
+
+    def test_sync_returns_empty_packages(self):
+        result = parse_uv_args(["uv", "sync"])
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == []
+
+    def test_lock_returns_empty_packages(self):
+        result = parse_uv_args(["uv", "lock"])
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == []
+
+    def test_add_req_files_captured(self):
+        # -r/--requirements value must be recorded in req_files (not treated as a package).
+        result = parse_uv_args(["uv", "add", "-r", "requirements.txt"])
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.req_files == ["requirements.txt"]
+        assert result.packages == []
+
+    def test_add_req_files_and_explicit_package(self):
+        result = parse_uv_args(["uv", "add", "-r", "requirements.txt", "httpx"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+        assert result.packages == ["httpx"]
+
+    def test_add_req_files_end_of_options_not_collected(self):
+        # Values after -- are positionals, not flag values; req_files stops at --.
+        result = parse_uv_args(["uv", "add", "--", "httpx"])
+        assert result is not None
+        assert result.req_files == []
+        assert result.packages == ["httpx"]
+
+    def test_add_req_files_equals_form(self):
+        # --requirements=file.txt must populate req_files.
+        result = parse_uv_args(["uv", "add", "--requirements=requirements.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_add_req_files_concatenated_short(self):
+        # -rrequirements.txt (no space) must populate req_files.
+        result = parse_uv_args(["uv", "add", "-rrequirements.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
 
 
 def test_uv_non_install_recognised():

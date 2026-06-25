@@ -100,7 +100,7 @@ def test_parse_uv_sync_defers_to_lockfile(lang: PythonLanguage) -> None:
     install = lang.parse_process_install(["/usr/bin/uv", "sync"])
     assert install is not None
     assert install.defer_to_lockfile is True
-    assert install.manager == "uv-lock"
+    assert install.manager == "uv-project"
 
 
 def test_parse_pipenv_install_defers_to_lockfile(lang: PythonLanguage) -> None:
