@@ -67,6 +67,53 @@ def _make_runner():
     return SandboxRunner(AppConfig())
 
 
+class VenvLayout:
+    """Minimal virtualenv created by make_venv().
+
+    Attributes:
+        root: the venv root directory
+        site_packages: lib/pythonX.Y/site-packages derived from the version arg
+    """
+
+    def __init__(self, root: Path, version: str) -> None:
+        self.root = root
+        major_minor = ".".join(version.split(".")[:2])
+        self.site_packages = root / "lib" / f"python{major_minor}" / "site-packages"
+
+    # Allow VenvLayout to be used directly where a Path is expected.
+    def __fspath__(self) -> str:
+        return str(self.root)
+
+    def __truediv__(self, other: str | os.PathLike[str]) -> Path:
+        return self.root / other
+
+    def __str__(self) -> str:
+        return str(self.root)
+
+
+def make_venv(root: Path, version: str = "3.12.0") -> VenvLayout:
+    """Create a minimal but structurally valid virtualenv under *root*.
+
+    Writes a pyvenv.cfg with the mandatory 'home' key (PEP 405) and creates
+    bin/python so that _looks_like_venv() accepts it.  Returns a VenvLayout
+    whose .site_packages attribute is derived from *version*, avoiding the need
+    to hardcode 'python3.12' in individual tests.
+    """
+    bin_dir = root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python").touch()
+    (root / "pyvenv.cfg").write_text(f"home = /usr/bin\nversion = {version}\n", encoding="utf-8")
+    return VenvLayout(root, version)
+
+
+@pytest.fixture
+def existing_cwd(tmp_path: Path) -> Path:
+    """A pre-created project directory under tmp_path for use as cwd in pre_run_check."""
+    d = tmp_path / "project"
+    d.mkdir()
+    return d
+
+
 # ---------------------------------------------------------------------------
 # _parse_flags
 # ---------------------------------------------------------------------------
@@ -521,7 +568,7 @@ class TestTryParse:
     def test_recognises_uv_sync(self):
         result = _try_parse(["uv", "sync"])
         assert result is not None
-        assert result.manager == "uv-lock"
+        assert result.manager == "uv-project"
 
     def test_recognises_npm_install(self):
         result = _try_parse(["npm", "install"])
@@ -741,7 +788,7 @@ class TestFindSitePackages:
     def test_finds_dotenv_in_cwd(self, tmp_path):
         site_pkgs = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         site_pkgs.mkdir(parents=True)
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         result = _find_site_packages(parsed, tmp_path)
         assert result == site_pkgs
 
@@ -780,7 +827,7 @@ class TestFindSitePackages:
         # project-local .venv also exists
         local_sp = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         local_sp.mkdir(parents=True)
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         result = _find_site_packages(parsed, tmp_path)
         assert result == local_sp
 
@@ -820,7 +867,7 @@ class TestResolveTargets:
     def test_pypi_site_packages_in_scan_targets_when_detected(self, tmp_path):
         site_pkgs = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         site_pkgs.mkdir(parents=True)
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         _resolve_targets(ctx)
         assert site_pkgs in ctx.scan_targets
@@ -828,7 +875,7 @@ class TestResolveTargets:
     def test_site_packages_under_cwd_not_duplicated_in_write_dirs(self, tmp_path):
         site_pkgs = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
         site_pkgs.mkdir(parents=True)
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         ctx = _Context(argv=[], parsed=parsed, cwd=tmp_path)
         _resolve_targets(ctx)
         # site-packages is inside cwd, so it must NOT be added as a separate write_dir
@@ -837,6 +884,7 @@ class TestResolveTargets:
     def test_pipenv_creates_venvs_dir_when_absent(self, tmp_path, monkeypatch):
         venvs_dir = tmp_path / "virtualenvs"
         assert not venvs_dir.exists()
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
@@ -848,6 +896,7 @@ class TestResolveTargets:
     def test_pipenv_adds_venvs_dir_when_already_exists(self, tmp_path, monkeypatch):
         venvs_dir = tmp_path / "virtualenvs"
         venvs_dir.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("WORKON_HOME", str(venvs_dir))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
@@ -1331,7 +1380,7 @@ class TestHasSshVcsDeps:
     def test_uv_lock_not_scanned(self, tmp_path):
         # uv uses git+https, not git+ssh; uv.lock is not scanned
         (tmp_path / "uv.lock").write_text("git+ssh://git@github.com/org/repo.git\n")
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         assert _has_ssh_vcs_deps(parsed, tmp_path) is False
 
     def test_explicit_packages_do_not_trigger_glob_scan(self, tmp_path):
@@ -1410,12 +1459,14 @@ class TestCheckVenvScope:
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
         assert self._lang().pre_run_check(parsed, tmp_path).ok is True
 
-    def test_blocks_venv_outside_project(self, tmp_path, monkeypatch):
+    def test_blocks_venv_outside_project(self, tmp_path, monkeypatch, existing_cwd):
         other = tmp_path / "other_project" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = ParsedInstall(manager="pip", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
 
     def test_allows_when_no_virtual_env(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -1426,7 +1477,7 @@ class TestCheckVenvScope:
         other = tmp_path / "other" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
-        parsed = ParsedInstall(manager="uv-lock", packages=[], ecosystem="pypi")
+        parsed = ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi")
         assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
 
     def test_allows_for_npm_manager(self, tmp_path, monkeypatch):
@@ -1440,19 +1491,19 @@ class TestCheckVenvScope:
         assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
 
 
-    def test_allows_pipenv_venv_in_managed_dir(self, tmp_path, monkeypatch):
+    def test_allows_pipenv_venv_in_managed_dir(self, tmp_path, monkeypatch, existing_cwd):
         # pipenv puts venvs outside the project by default — must not be blocked.
         pipenv_dir = tmp_path / "virtualenvs"
         pipenv_dir.mkdir()
-        managed_venv = pipenv_dir / "myproject-AbCdEfGh"
-        managed_venv.mkdir()
+        managed_venv = make_venv(pipenv_dir / "myproject-AbCdEfGh")
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("WORKON_HOME", str(pipenv_dir))
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is True
+        assert self._lang().pre_run_check(parsed, existing_cwd).ok is True
 
-    def test_blocks_pipenv_foreign_venv_outside_managed_dir(self, tmp_path, monkeypatch):
+    def test_blocks_pipenv_foreign_venv_outside_managed_dir(self, tmp_path, monkeypatch, existing_cwd):
         # A venv neither in the project tree nor in the pipenv-managed dir is foreign.
         foreign = tmp_path / "other_project" / ".venv"
         foreign.mkdir(parents=True)
@@ -1462,9 +1513,11 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(foreign))
         monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
 
-    def test_blocks_pipenv_outside_project_when_venv_in_project_set(self, tmp_path, monkeypatch):
+    def test_blocks_pipenv_outside_project_when_venv_in_project_set(self, tmp_path, monkeypatch, existing_cwd):
         # When PIPENV_VENV_IN_PROJECT=1 the venv must be inside the project tree.
         pipenv_dir = tmp_path / "virtualenvs"
         pipenv_dir.mkdir()
@@ -1474,7 +1527,9 @@ class TestCheckVenvScope:
         monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
         monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
         parsed = ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi")
-        assert self._lang().pre_run_check(parsed, tmp_path / "my_project").ok is False
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
 
 
 class TestPreRunResult:
@@ -1984,11 +2039,11 @@ class TestPostRoTmpfsWiredIntoRunner:
 
     def test_install_includes_tool_logs_tmpfs(self, tmp_path, monkeypatch):
         """Install path: --tmpfs <tool>/logs in bwrap cmd, after --ro-bind <tool>."""
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
 
-        # tool_dir is outside project_dir so it is not filtered by _run_shell's
+        # tool_dir is outside project so it is not filtered by _run_shell's
         # `not p.is_relative_to(cwd)` guard (install path does not filter, but
         # keeping it outside avoids any future confusion).
         tool_dir = tmp_path / "fake_pipx"
@@ -2025,9 +2080,9 @@ class TestPostRoTmpfsWiredIntoRunner:
 
     def test_shell_includes_tool_logs_tmpfs(self, tmp_path, monkeypatch):
         """Shell mode: --tmpfs <tool>/logs in bwrap cmd, after --ro-bind <tool>."""
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
 
         # tool_dir must be outside cwd: _run_shell filters out paths relative to cwd.
         tool_dir = tmp_path / "fake_pipx"
@@ -2051,9 +2106,9 @@ class TestPostRoTmpfsWiredIntoRunner:
 
     def test_no_logs_dir_no_extra_tmpfs(self, tmp_path, monkeypatch):
         """When tool dir has no logs/ subdir, no spurious --tmpfs is added."""
-        project_dir = tmp_path / "project"
-        project_dir.mkdir()
-        monkeypatch.chdir(project_dir)
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
 
         tool_dir = tmp_path / "fake_pipx"
         tool_dir.mkdir()
@@ -2176,6 +2231,8 @@ class TestNoChangeLockFileRestore:
         async def _preflight_ok(*a, **kw):
             return True
         monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        # Prevent the test-runner's own VIRTUAL_ENV from triggering the cross-project check.
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
 
     def test_restores_on_success_clean_scan(self, tmp_path, monkeypatch):
         """no_change=True: command succeeds, scan clean → restore called, returns 0."""
@@ -4375,17 +4432,18 @@ class TestPythonPreRunCheck:
         from packagealert.languages.python import PythonLanguage
         return PythonLanguage()
 
-    def test_returns_none_for_uv(self, tmp_path):
+    def test_returns_none_for_uv(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         parsed = self._make_parsed(manager="uv")
         result = self._lang().pre_run_check(parsed, tmp_path)
         assert result.ok is True
 
-    def test_blocks_when_virtual_env_outside_project(self, tmp_path, monkeypatch):
+    def test_blocks_when_virtual_env_outside_project(self, tmp_path, monkeypatch, existing_cwd):
         other = tmp_path / "other_project" / ".venv"
         other.mkdir(parents=True)
         monkeypatch.setenv("VIRTUAL_ENV", str(other))
         parsed = self._make_parsed(manager="pip")
-        result = self._lang().pre_run_check(parsed, tmp_path / "my_project")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
         assert result.ok is False
         assert "VIRTUAL_ENV" in result.message
 
@@ -4396,6 +4454,239 @@ class TestPythonPreRunCheck:
         parsed = self._make_parsed(manager="pip")
         result = self._lang().pre_run_check(parsed, tmp_path)
         assert result.ok is True
+
+    def test_uv_blocks_when_virtual_env_outside_project(self, tmp_path, monkeypatch, existing_cwd):
+        other = tmp_path / "other_project" / ".venv"
+        other.mkdir(parents=True)
+        monkeypatch.setenv("VIRTUAL_ENV", str(other))
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
+
+    def test_allows_pyenv_virtualenv_for_pip(self, tmp_path, monkeypatch, existing_cwd):
+        # pyenv-virtualenv venv lives under ~/.pyenv/versions/ — must not be blocked.
+        pyenv_venv = make_venv(tmp_path / ".pyenv" / "versions" / "myproject")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYENV_ROOT", str(tmp_path / ".pyenv"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(pyenv_venv))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_allows_pyenv_virtualenv_with_tilde_in_pyenv_root(self, tmp_path, monkeypatch, existing_cwd):
+        # PYENV_ROOT is commonly set as ~/... — expanduser() must be applied.
+        pyenv_venv = make_venv(tmp_path / ".pyenv" / "versions" / "myproject")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYENV_ROOT", "~/.pyenv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(pyenv_venv))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_allows_pyenv_virtualenv_for_uv(self, tmp_path, monkeypatch, existing_cwd):
+        pyenv_venv = make_venv(tmp_path / ".pyenv" / "versions" / "myproject")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYENV_ROOT", str(tmp_path / ".pyenv"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(pyenv_venv))
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_blocks_dotdot_traversal_in_virtual_env(self, tmp_path, monkeypatch, existing_cwd):
+        # /project/../other/.venv is absolute but resolves outside the project — must block.
+        other = tmp_path / "other" / ".venv"
+        other.mkdir(parents=True)
+        traversal = existing_cwd / ".." / "other" / ".venv"
+        monkeypatch.setenv("VIRTUAL_ENV", str(traversal))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
+
+    def test_blocks_nonexistent_virtual_env(self, tmp_path, monkeypatch):
+        # A VIRTUAL_ENV that does not exist on disk cannot be resolved — must block
+        # rather than falling back to weaker lexical path comparison.
+        monkeypatch.setenv("VIRTUAL_ENV", str(tmp_path / "does_not_exist" / ".venv"))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, tmp_path)
+        assert result.ok is False
+        assert "could not be resolved" in result.message
+        assert "VIRTUAL_ENV" in result.message
+
+    def test_blocks_when_cwd_cannot_be_resolved(self, tmp_path, monkeypatch):
+        # FileNotFoundError — cwd that never existed.
+        venv = make_venv(tmp_path / ".venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        nonexistent_cwd = tmp_path / "ghost_project"  # never created
+        result = self._lang().pre_run_check(parsed, nonexistent_cwd)
+        assert result.ok is False
+        assert "project path" in result.message.lower()
+        assert str(nonexistent_cwd) in result.message
+
+    def test_blocks_when_cwd_is_broken_symlink(self, tmp_path, monkeypatch, symlinks_supported):
+        # Broken symlink — resolve(strict=True) raises OSError; must give the same
+        # project-path error, not fall back to weaker lexical comparison.
+        if not symlinks_supported:
+            pytest.skip("symlinks not supported on this platform")
+        venv = make_venv(tmp_path / ".venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        broken_link = tmp_path / "broken_project"
+        broken_link.symlink_to(tmp_path / "nonexistent_target")
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, broken_link)
+        assert result.ok is False
+        assert "project path" in result.message.lower()
+        assert str(broken_link) in result.message
+
+    def test_blocks_relative_virtual_env(self, tmp_path, monkeypatch):
+        # A relative VIRTUAL_ENV must be rejected — resolving it against the wrong
+        # cwd could produce incorrect allow/block decisions.
+        monkeypatch.setenv("VIRTUAL_ENV", ".venv")
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, tmp_path)
+        assert result.ok is False
+        assert "relative" in result.message.lower()
+        assert str(tmp_path) in result.message
+
+    def test_blocks_bare_directory_with_only_pyvenv_cfg_under_pyenv_root(self, tmp_path, monkeypatch, existing_cwd):
+        # A directory under PYENV_ROOT that has pyvenv.cfg but no home key or bin/python
+        # must not be treated as a managed venv — pyvenv.cfg alone is easy to spoof.
+        pyenv_root = tmp_path / ".pyenv"
+        fake = pyenv_root / "versions" / "fake"
+        fake.mkdir(parents=True)
+        (fake / "pyvenv.cfg").write_text("version = 3.12.0\n", encoding="utf-8")  # no 'home' key, no bin/python
+        monkeypatch.setenv("PYENV_ROOT", str(pyenv_root))
+        monkeypatch.setenv("VIRTUAL_ENV", str(fake))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+
+    def test_blocks_dotdot_traversal_through_pyenv_root(self, tmp_path, monkeypatch, existing_cwd):
+        # A VIRTUAL_ENV like $PYENV_ROOT/versions/../../../foreign must not pass the
+        # managed-root check via lexical prefix matching — resolve() closes this.
+        pyenv_root = tmp_path / ".pyenv"
+        make_venv(tmp_path / "foreign_project" / ".venv")
+        pyenv_root.mkdir(parents=True)
+        traversal = pyenv_root / "versions" / ".." / ".." / "foreign_project" / ".venv"
+        monkeypatch.setenv("PYENV_ROOT", str(pyenv_root))
+        monkeypatch.setenv("VIRTUAL_ENV", str(traversal))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+
+    def test_allows_workon_home_venv_for_pip(self, tmp_path, monkeypatch, existing_cwd):
+        # pip with VIRTUAL_ENV under WORKON_HOME must be allowed (pipenv-style external venv).
+        workon = tmp_path / "virtualenvs"
+        managed_venv = make_venv(workon / "myproject-AbCdEfGh")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("WORKON_HOME", str(workon))
+        monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_allows_workon_home_venv_for_uv(self, tmp_path, monkeypatch, existing_cwd):
+        workon = tmp_path / "virtualenvs"
+        managed_venv = make_venv(workon / "myproject-AbCdEfGh")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("WORKON_HOME", str(workon))
+        monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_blocks_workon_home_venv_when_venv_in_project_set_pip(self, tmp_path, monkeypatch, existing_cwd):
+        # PIPENV_VENV_IN_PROJECT=1 means the venv is expected inside the project — block external.
+        workon = tmp_path / "virtualenvs"
+        managed_venv = make_venv(workon / "myproject-AbCdEfGh")
+        monkeypatch.setenv("WORKON_HOME", str(workon))
+        monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
+        monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
+
+    def test_blocks_workon_home_venv_when_venv_in_project_set_uv(self, tmp_path, monkeypatch, existing_cwd):
+        workon = tmp_path / "virtualenvs"
+        managed_venv = make_venv(workon / "myproject-AbCdEfGh")
+        monkeypatch.setenv("WORKON_HOME", str(workon))
+        monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
+        monkeypatch.setenv("PIPENV_VENV_IN_PROJECT", "1")
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+        assert "VIRTUAL_ENV" in result.message
+
+    def test_allows_workon_home_with_tilde_prefix(self, tmp_path, monkeypatch, existing_cwd):
+        # WORKON_HOME is commonly set with a tilde (e.g. "~/.venvs") in shell configs.
+        # _pipenv_venv_dir() must call expanduser() so the resolved venv path matches.
+        workon = tmp_path / "virtualenvs"
+        managed_venv = make_venv(workon / "myproject-AbCdEfGh")
+        # expanduser() reads HOME from the environment, not Path.home().
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("WORKON_HOME", "~/virtualenvs")
+        monkeypatch.setenv("VIRTUAL_ENV", str(managed_venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is True
+
+    def test_workon_home_outside_home_falls_back_to_default(self, tmp_path, monkeypatch, existing_cwd):
+        # WORKON_HOME pointing outside $HOME must be ignored — fall back to the default
+        # so that values like WORKON_HOME=/ cannot expand the external-venv allowlist.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("WORKON_HOME", "/")
+        # A venv under the (rejected) root "/" must not be treated as managed.
+        foreign_venv = make_venv(tmp_path / "some" / "venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(foreign_venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        # The venv is not inside the project tree or the real default managed dir — must block.
+        assert result.ok is False
+
+    def test_pyenv_root_outside_home_falls_back_to_default(self, tmp_path, monkeypatch, existing_cwd):
+        # PYENV_ROOT pointing outside $HOME must be ignored.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYENV_ROOT", "/")
+        foreign_venv = make_venv(tmp_path / "some" / "venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(foreign_venv))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+
+    def test_workon_home_relative_path_rejected(self, tmp_path, monkeypatch, existing_cwd):
+        # A relative WORKON_HOME must be rejected — resolve(strict=False) would make it
+        # absolute relative to CWD, which could widen the allowlist unexpectedly.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("WORKON_HOME", "relative/venvs")
+        foreign_venv = make_venv(tmp_path / "some" / "venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(foreign_venv))
+        monkeypatch.delenv("PIPENV_VENV_IN_PROJECT", raising=False)
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
+
+    def test_pyenv_root_relative_path_rejected(self, tmp_path, monkeypatch, existing_cwd):
+        # A relative PYENV_ROOT must be rejected for the same reason.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PYENV_ROOT", "relative/pyenv")
+        foreign_venv = make_venv(tmp_path / "some" / "venv")
+        monkeypatch.setenv("VIRTUAL_ENV", str(foreign_venv))
+        parsed = self._make_parsed(manager="pip")
+        result = self._lang().pre_run_check(parsed, existing_cwd)
+        assert result.ok is False
 
     def test_blocks_ssh_deps_without_flag(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -4424,14 +4715,23 @@ class TestPythonResolveSandboxTargets:
             global_install=False, suggested_env={},
         )
 
-    def test_detects_venv_site_packages(self, tmp_path):
-        venv = tmp_path / ".venv"
-        sp = venv / "lib" / "python3.12" / "site-packages"
-        sp.mkdir(parents=True)
-        (venv / "pyvenv.cfg").write_text("version = 3.12.0\n")
+    def test_detects_pyenv_venv_via_virtual_env(self, tmp_path, monkeypatch):
+        # pyenv-virtualenv: venv lives under PYENV_ROOT/versions/, VIRTUAL_ENV is set.
+        pyenv_venv = make_venv(tmp_path / ".pyenv" / "versions" / "myproject")
+        pyenv_venv.site_packages.mkdir(parents=True)
+        monkeypatch.setenv("PYENV_ROOT", str(tmp_path / ".pyenv"))
+        monkeypatch.setenv("VIRTUAL_ENV", str(pyenv_venv))
+        parsed = self._make_parsed(manager="uv")
+        result = self._lang().resolve_sandbox_targets(parsed, tmp_path / "project")
+        assert pyenv_venv.site_packages in result.scan_targets
+
+    def test_detects_venv_site_packages(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        venv = make_venv(tmp_path / ".venv")
+        venv.site_packages.mkdir(parents=True)
         parsed = self._make_parsed()
         result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
-        assert sp in result.scan_targets
+        assert venv.site_packages in result.scan_targets
 
     def test_returns_empty_when_no_venv(self, tmp_path, monkeypatch):
         monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -4439,10 +4739,11 @@ class TestPythonResolveSandboxTargets:
         result = self._lang().resolve_sandbox_targets(parsed, tmp_path)
         assert result.scan_targets == []
 
-    def test_invalid_pyvenv_cfg_version_propagates_warning(self, tmp_path):
+    def test_invalid_pyvenv_cfg_version_propagates_warning(self, tmp_path, monkeypatch):
         # A pyvenv.cfg with a non-numeric version must NOT silently fall through
         # to the glob fallback. The warning must appear in SandboxTargets.warnings
         # so it is printed to the console regardless of log level.
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         venv = tmp_path / ".venv"
         venv.mkdir()
         (venv / "pyvenv.cfg").write_text("version = ../evil\n")
@@ -4458,6 +4759,7 @@ class TestPythonResolveSandboxTargets:
     def test_unreadable_pyvenv_cfg_propagates_warning(self, tmp_path, monkeypatch):
         # An unreadable pyvenv.cfg (OSError) must also surface a warning,
         # not silently fall through to the glob fallback.
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
         venv = tmp_path / ".venv"
         venv.mkdir()
         cfg = venv / "pyvenv.cfg"

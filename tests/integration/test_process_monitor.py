@@ -67,6 +67,7 @@ async def test_emit_from_lockfile_continues_on_parse_lockfile_exception(tmp_path
     from packagealert.monitors.process import _PendingInstall
     pending = _PendingInstall(
         manager="npm",
+        registry_name="npm",
         cwd=tmp_path,
         site_pkgs=None,
         lockfile_hint=None,
@@ -92,6 +93,7 @@ async def test_emit_from_lockfile_returns_on_lockfile_patterns_exception(tmp_pat
     from packagealert.monitors.process import _PendingInstall
     pending = _PendingInstall(
         manager="npm",
+        registry_name="npm",
         cwd=tmp_path,
         site_pkgs=None,
         lockfile_hint=None,

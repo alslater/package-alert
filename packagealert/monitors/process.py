@@ -15,6 +15,7 @@ from packagealert.config import WatchConfig
 from packagealert.languages import registry as lang_registry
 from packagealert.languages.base import ProcessInstall
 from packagealert.languages.registry import _normalise_process_name
+from packagealert.managers import manager_registry_name
 from packagealert.models.events import PackageEvent, normalise_ecosystem
 from packagealert.monitors.base import AbstractMonitor
 from packagealert.parsers.process_args import derive_site_packages
@@ -38,7 +39,8 @@ def _package_managers() -> frozenset[str]:
 
 @dataclass
 class _PendingInstall:
-    manager: str
+    manager: str          # original invocation manager (e.g. "uv-project"); used for logs/events
+    registry_name: str    # language-registry lookup key (e.g. "uv"); may differ from manager
     cwd: Path
     site_pkgs: Path | None
     lockfile_hint: str | None = None
@@ -115,6 +117,7 @@ class ProcessMonitor(AbstractMonitor):
                     if project_path:
                         self._pending[pid] = _PendingInstall(
                             manager=parsed.manager,
+                            registry_name=manager_registry_name(parsed.manager),
                             cwd=project_path,
                             site_pkgs=site_pkgs,
                             lockfile_hint=parsed.lockfile_hint,
@@ -167,11 +170,9 @@ class ProcessMonitor(AbstractMonitor):
         self._seen_pids &= current_pids  # gc dead pids
 
     async def _emit_from_lockfile(self, pending: _PendingInstall) -> None:
-        # "uv-lock" is a synthetic manager name used internally; map it to "uv" for registry lookup.
-        lookup_name = "uv" if pending.manager == "uv-lock" else pending.manager
-        lang = lang_registry.for_process(lookup_name)
+        lang = lang_registry.for_process(pending.registry_name)
         if lang is None:
-            log.debug("No language registered for manager '%s', skipping lockfile scan", pending.manager)
+            log.debug("No language registered for registry_name='%s' (manager='%s'), skipping lockfile scan", pending.registry_name, pending.manager)
             return
 
         hint = pending.lockfile_hint

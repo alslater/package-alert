@@ -224,7 +224,55 @@ sudo dnf install bubblewrap
 sudo pacman -S bubblewrap
 ```
 
-**Virtual environment detection:** for Python commands, package-alert automatically detects the target site-packages directory by checking (in order) the executable path in the command, `VIRTUAL_ENV` (pip/pipenv only — uv always uses the project-local `.venv`), and `.venv`/`venv` directories in the current working directory.
+**Troubleshooting: `bwrap: setting up uid map: Permission denied`**
+
+This error means the kernel is blocking unprivileged user namespaces, which bwrap requires. It is most commonly seen on **Ubuntu 24.04** bare metal, which enabled an AppArmor restriction by default that was later relaxed in 25.04+.
+
+Check whether the restriction is active:
+
+```bash
+cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+```
+
+If the output is `1`, disable the restriction:
+
+```bash
+sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+To make the change permanent across reboots:
+
+```bash
+echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/99-userns.conf
+sudo sysctl -p /etc/sysctl.d/99-userns.conf
+```
+
+If you prefer a targeted fix that leaves the global restriction in place, you can instead grant bwrap permission via an AppArmor profile:
+
+```bash
+sudo tee /etc/apparmor.d/bwrap <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+This allows bwrap to use user namespaces without disabling the restriction system-wide.
+
+On other distributions (Debian, older kernels) the relevant setting may instead be:
+
+```bash
+sysctl kernel.unprivileged_userns_clone   # should be 1
+```
+
+**Virtual environment detection:** for Python commands, package-alert automatically detects the target site-packages directory by checking (in order) the executable path in the command, `VIRTUAL_ENV` (pip, `uv pip install`, and pipenv), and `.venv`/`venv` directories in the current working directory. Project-aware uv subcommands (`uv add`, `uv remove`, `uv sync`, `uv lock`) resolve the virtualenv from the project directory and do not consult `VIRTUAL_ENV`. External virtualenv managers are supported:
+
+- **pyenv-virtualenv** — if `VIRTUAL_ENV` points to a venv under `$PYENV_ROOT/versions/`, it is accepted rather than blocked.
+- **pipenv / virtualenvwrapper** — if `VIRTUAL_ENV` points to a venv under `WORKON_HOME` (default `~/.local/share/virtualenvs`), it is accepted when `PIPENV_VENV_IN_PROJECT` is unset. If `PIPENV_VENV_IN_PROJECT` is set, the venv is expected inside the project tree and an external location is blocked as usual.
 
 ### `status`
 

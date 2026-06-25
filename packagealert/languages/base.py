@@ -104,8 +104,15 @@ class Snapshot:
 class ProcessInstall:
     """Result of parsing a process invocation.
 
-    ``manager`` is the canonical name used for lockfile lookup (e.g. ``"pip"``,
-    ``"uv-lock"``, ``"npm"``, ``"composer"``).  ``defer_to_lockfile`` signals that
+    ``manager`` identifies how the install was invoked.  Common values are
+    ``"pip"``, ``"npm"``, ``"composer"``.  Some values are internal identifiers
+    that do not correspond directly to a registry name — for example
+    ``"uv-project"`` covers project-aware uv subcommands (``uv add``,
+    ``uv remove``, ``uv sync``, ``uv lock``).  Use
+    :func:`~packagealert.managers.manager_registry_name` to translate
+    ``manager`` to the registry lookup key before calling
+    :func:`packagealert.languages.registry.for_process`.
+    ``defer_to_lockfile`` signals that
     the monitor should wait for the process to exit and then read the lock file
     rather than acting on ``packages`` immediately.  ``venv_exe`` is the path to
     the Python interpreter when the invocation was inside a venv.
