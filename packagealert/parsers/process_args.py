@@ -50,7 +50,7 @@ _PIP_VALUE_FLAGS = frozenset({
     "--resume-retries",
 })
 # Flags that consume the next argument as their value for `uv add` / `uv remove`.
-# Audited against: uv 0.11.23 `uv add --help` / `uv remove --help`.
+# Audited against: uv 0.11.24 `uv add --help` / `uv remove --help`.
 _UV_PROJECT_VALUE_FLAGS = frozenset({
     # Python selector
     "-p", "--python",
@@ -94,7 +94,7 @@ _UV_PROJECT_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `uv tool install/upgrade`.
-# Audited against: uv 0.11.23 `uv tool install --help` / `uv tool upgrade --help`.
+# Audited against: uv 0.11.24 `uv tool install --help` / `uv tool upgrade --help`.
 _UV_TOOL_VALUE_FLAGS = frozenset({
     # Python selector
     "-p", "--python",
