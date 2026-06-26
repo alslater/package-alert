@@ -173,11 +173,44 @@ package-alert run bash                          # interactive sandboxed shell
 |--------|-------------|
 | `--no-network` | Block all outbound network inside the sandbox. Use only when all packages are already in the local cache. |
 | `--env VAR` | Pass an additional environment variable through into the sandbox. Repeatable: `--env MY_TOKEN --env CUSTOM_URL`. |
-| `--flags CAPABILITY[,…]` | Enable named capabilities for this run, e.g. `--flags python:ssh-keys` to expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. |
+| `--flags CAPABILITY[,…]` | Enable named capabilities for this run, e.g. `--flags python:ssh-keys` to expose `~/.ssh` read-only inside the sandbox. Required when installing packages with `git+ssh://` or scp-style (`git@host:org/repo`) VCS dependencies. package-alert detects these automatically and suggests the flag if it is not passed. To make flags persistent for a project, use `.pa-run.toml` (see below). |
 | `--expose-ssh-keys` | *(Deprecated — use `--flags python:ssh-keys` instead.)* Equivalent to `--flags python:ssh-keys`. Will be removed in a future release. |
 | `--allow-external-lockfiles` | Disable symlink containment checks on lock files. Use in monorepo or editable-install setups where lock files are symlinks pointing outside the project root. Without this flag, lock files that resolve outside the project are rejected at every stage — pre-flight scan, post-run lock-file scan, snapshot, and restore — to prevent a malicious install from reading or writing arbitrary paths via a redirected lock file symlink. |
 | `--no-change` / `-n` | Dry-run mode. Runs the command in the sandbox and performs all pre- and post-checks, but always restores lock files to their pre-run state on exit regardless of outcome. Useful for auditing what a command would install without committing changes to the project. |
+| `--allow-project-env` | Bypass the `sandbox.project_env_allowlist` check for this run only. Allows an untrusted `.pa-run.toml` to forward env vars that are not in the allowlist. |
 | `--config PATH` | Path to config TOML file. |
+
+**Per-project defaults — `.pa-run.toml`:**
+
+Place a `.pa-run.toml` file in a project directory to set default options for every `pa run` invocation in that tree. This is the recommended way to persist flags such as `python:ssh-keys` for projects with SSH VCS dependencies.
+
+```toml
+# .pa-run.toml
+flags = "python:ssh-keys"          # merged with any --flags passed on the CLI
+env   = ["MY_PRIVATE_TOKEN"]       # merged with --env
+no_network             = false     # set true to always run offline
+allow_external_lockfiles = false   # set true for monorepo symlinked lock files
+```
+
+**Discovery:** starting from the current working directory, package-alert walks up the directory tree looking for `.pa-run.toml`. The first (closest) file found wins, and its path is printed to the console so the source is always transparent. Two boundaries apply: the walk never goes above `$HOME`, and if the project is *outside* `$HOME` the walk stops at the first VCS root (`.git`/`.hg`) it encounters. For projects under `$HOME`, VCS roots are not stopping points — they only determine whether the file is *trusted* (see Security below). A `~/.pa-run.toml` acts as a user-wide default for projects under `$HOME`; a monorepo can carry a shared file at its repo root.
+
+**Precedence:** `.pa-run.toml` < `PA_RUN_OPTS` < explicit CLI flags. The `flags` option is *unioned* across all three sources — `--flags python:network` on the command line *adds to* the project defaults rather than replacing them. The `env` option is unioned between `.pa-run.toml` and CLI only (`PA_RUN_OPTS` does not support `--env`). Boolean options (`no_network`, `allow_external_lockfiles`) are OR-ed: once set to `true` in any source they cannot be unset by a lower-precedence source.
+
+**Security — env vars from untrusted configs:** A `.pa-run.toml` at or below a VCS root (`.git`/`.hg`) is considered untrusted — it is repo-controlled and could have been committed by anyone. Env vars listed in an untrusted `.pa-run.toml` are only forwarded if the variable name is in `sandbox.project_env_allowlist` in your config file. If a blocked var is requested, `pa run` aborts with an explanation. Pass `--allow-project-env` to bypass the check for a single run.
+
+A `.pa-run.toml` is trusted only when **both** conditions hold: it is above the VCS root (e.g. `~/dev/.pa-run.toml` for a repo at `~/dev/myrepo/`), **and** no directory on the path from the file to `$HOME` is world-writable. Either condition failing makes the config untrusted — a world-writable path component is flagged with a warning in the log even when the file is otherwise above the VCS root. Trusted configs forward env vars freely.
+
+**`PA_RUN_OPTS` environment variable:**
+
+Set `PA_RUN_OPTS` to inject options for every `pa run` call in the current shell without modifying the shell hook. Useful for one-off session flags or scripted pipelines:
+
+```bash
+PA_RUN_OPTS="--no-change" pipenv install          # audit mode for this install only
+export PA_RUN_OPTS="--no-network"                 # all subsequent hook invocations go offline
+export PA_RUN_OPTS="--flags python:ssh-keys"      # session-level flag without a .pa-run.toml
+```
+
+Supported tokens: `--no-change` / `-n`, `--no-network`, `--flags CAPABILITY`, `--allow-external-lockfiles`, `--expose-ssh-keys`.
 
 **Filesystem isolation:**
 
@@ -663,6 +696,12 @@ critical_threshold = 70
 # the built-in allowlist (PATH, HOME, proxy vars, registry URLs, etc.).
 extra_env = []
 # Example: extra_env = ["MY_PRIVATE_REGISTRY_TOKEN", "CUSTOM_CERT_PATH"]
+
+# project_env_allowlist = []  # exact env var names that untrusted .pa-run.toml files
+                               # (at or below a VCS root) may forward into the sandbox.
+                               # Trusted .pa-run.toml files (above the VCS root, no
+                               # world-writable path components) are not restricted.
+                               # Example: project_env_allowlist = ["MY_TOKEN", "REGISTRY"]
 
 # Additional paths to mount as empty tmpfs inside the sandbox.
 # Use this on systems where other root-owned paths cause tool failures inside

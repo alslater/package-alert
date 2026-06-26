@@ -897,6 +897,7 @@ critical_threshold = 70
 # extra_tmpfs = []
 # extra_ro_paths = []   # paths inside $HOME to re-expose read-only (e.g. editable installs)
 # editable_roots = []   # permit pip install -e from external source dirs (e.g. ["~/dev"]); in-project installs always allowed
+# project_env_allowlist = []  # exact env var names that untrusted .pa-run.toml files may forward into the sandbox
 
 [sandbox.cooldown]
 # period_days = 7
@@ -1139,6 +1140,11 @@ def run_cmd(
              "but always restore lock files to their pre-run state on exit regardless of outcome. "
              "Useful for auditing what a command would install without committing changes to the project.",
     ),
+    allow_project_env: bool = typer.Option(
+        False, "--allow-project-env",
+        help="Bypass the sandbox.project_env_allowlist check for env vars from .pa-run.toml. "
+             "Use when you trust the repository's .pa-run.toml env entries for this run only.",
+    ),
     config: Optional[Path] = _cfg_option,
 ):
     """Run a package manager command inside a bubblewrap sandbox.
@@ -1173,7 +1179,80 @@ def run_cmd(
 
       PA_RUN_OPTS="--no-change" pipenv install
       export PA_RUN_OPTS="--no-network"   # applies to all subsequent hook invocations
+
+    Per-project defaults can be set in a .pa-run.toml file. package-alert searches
+    for this file starting in the current directory and walking up to $HOME
+    (inclusive). For projects under $HOME, VCS roots (.git, .hg) are not stopping
+    points — they only determine whether the file is trusted (see --allow-project-env).
+    For projects outside $HOME (e.g. /srv/myrepo), the walk stops at the first VCS
+    root. Example:
+
+      # .pa-run.toml
+      flags = "python:ssh-keys"
+      env   = ["MY_TOKEN"]
+      no_network = false
+      allow_external_lockfiles = false
+
+    Merge rules: --flags is unioned across all three sources — it adds to,
+    rather than replaces, project defaults. --env is unioned between
+    .pa-run.toml and CLI only (PA_RUN_OPTS does not support --env). Boolean
+    options (no_network, allow_external_lockfiles) are OR-ed — once set to
+    true in any source they cannot be unset by another. When a .pa-run.toml
+    is used, its path is printed to the console.
     """
+    command = list(ctx.args)
+    if not command:
+        console.print("[red]No command specified.[/red]")
+        console.print("[dim]Usage: package-alert run [OPTIONS] <command> [args...][/dim]")
+        raise typer.Exit(1)
+
+    cfg, _ = _load(config)
+    # Apply .pa-run.toml project defaults (lowest precedence — CLI and PA_RUN_OPTS win).
+    from packagealert.project_config import find_project_run_config, ProjectRunConfigError
+    _project_flags_list: list[str] = []
+    try:
+        _proj_cfg = find_project_run_config(Path.cwd())
+    except ProjectRunConfigError as _e:
+        console.print(f"Error in {_e.path}: {_e.detail}", style="red", markup=False)
+        raise typer.Exit(1)
+    except OSError:
+        _proj_cfg = None
+    _project_env_list: list[str] = []
+    if _proj_cfg is not None:
+        console.print(f"Using project run config: {_proj_cfg.source}", style="dim", markup=False)
+        if _proj_cfg.no_network:
+            no_network = True
+        if _proj_cfg.allow_external_lockfiles:
+            allow_external_lockfiles = True
+        _project_env_list.extend(_proj_cfg.env)
+        if _proj_cfg.flags:
+            _project_flags_list.append(_proj_cfg.flags)
+
+    if _proj_cfg is not None and not _proj_cfg.trusted and _proj_cfg.env:
+        _allowlist = set(cfg.sandbox.project_env_allowlist)
+        _blocked = list(dict.fromkeys(v for v in _proj_cfg.env if v not in _allowlist))
+        if _blocked:
+            if allow_project_env:
+                console.print(
+                    "Skipping project_env_allowlist check (--allow-project-env).",
+                    style="dim", markup=False,
+                )
+            else:
+                console.print(
+                    f"{_proj_cfg.source}: requests env vars not in sandbox.project_env_allowlist: "
+                    f"{', '.join(sorted(_blocked))}",
+                    style="red", markup=False,
+                )
+                console.print(
+                    "To allow permanently: add them to sandbox.project_env_allowlist in your config file.",
+                    style="red", markup=False,
+                )
+                console.print(
+                    "To allow this run only: re-run with --allow-project-env.",
+                    style="red", markup=False,
+                )
+                raise typer.Exit(1)
+
     # Apply PA_RUN_OPTS environment variable — allows shell hook users to pass
     # package-alert run options without modifying the hook itself, e.g.:
     #   PA_RUN_OPTS="--no-change" pip install requests
@@ -1219,13 +1298,29 @@ def run_cmd(
                     f"lowercase letters, digits, hyphens, or underscores (e.g. python:ssh-keys)[/yellow]"
                 )
 
-    if flags:
-        _warn_invalid_flag_tokens(flags, "--flags")
-    parsed_flags = _parse_flags(flags)
+    parsed_flags: dict[str, frozenset[str]] = {}
+    for _proj_flags in _project_flags_list:
+        _warn_invalid_flag_tokens(_proj_flags, ".pa-run.toml flags")
+        for ns, caps in _parse_flags(_proj_flags).items():
+            parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
     for _env_flags in _env_flags_list:
         _warn_invalid_flag_tokens(_env_flags, "PA_RUN_OPTS --flags")
         for ns, caps in _parse_flags(_env_flags).items():
             parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
+    if flags:
+        _warn_invalid_flag_tokens(flags, "--flags")
+    for ns, caps in _parse_flags(flags).items():
+        parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
+
+    # Merge env from .pa-run.toml and CLI, deduplicating while preserving order
+    # (.pa-run.toml entries first, then CLI; duplicates dropped on second occurrence).
+    _seen_env: set[str] = set()
+    _merged_env: list[str] = []
+    for _v in list(_project_env_list) + list(env):
+        if _v not in _seen_env:
+            _seen_env.add(_v)
+            _merged_env.append(_v)
+    env = _merged_env
 
     if expose_ssh_keys:
         console.print(
@@ -1236,12 +1331,6 @@ def run_cmd(
             "python": parsed_flags.get("python", frozenset()) | {"ssh-keys"},
         }
 
-    command = list(ctx.args)
-    if not command:
-        console.print("[red]No command specified.[/red]")
-        console.print("[dim]Usage: package-alert run [OPTIONS] <command> [args...][/dim]")
-        raise typer.Exit(1)
-    cfg, _ = _load(config)
     from packagealert.sandbox.runner import SandboxRunner
     runner = SandboxRunner(cfg)
     code = asyncio.run(runner.run(command, allow_network=not no_network, extra_env=env, flags=parsed_flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change))

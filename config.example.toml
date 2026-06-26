@@ -62,6 +62,12 @@ critical_threshold = 70
 
 [sandbox]
 # extra_env = []      # additional environment variable names to pass into the bubblewrap sandbox
+# project_env_allowlist = []  # exact env var names that .pa-run.toml files in repos are
+                               # allowed to forward into the sandbox.  Untrusted .pa-run.toml
+                               # files (at or below a VCS root) may only forward vars listed
+                               # here.  Trusted files (above the VCS root, no world-writable
+                               # path components) forward env vars freely.
+                               # Example: project_env_allowlist = ["MY_PRIVATE_TOKEN", "REGISTRY_URL"]
 # extra_tmpfs = []    # paths to mount as empty tmpfs inside the sandbox, in addition to the
                       # built-in ones (/tmp, $HOME, /etc/ssh/ssh_config.d).  Useful on systems
                       # where other root-owned paths cause SSH or tool failures inside bwrap's

@@ -100,6 +100,7 @@ _KNOWN_BACKENDS: frozenset[str] = frozenset({"filesystem"})
 class SandboxConfig(BaseModel):
     backend: str = "filesystem"
     extra_env: list[str] = Field(default_factory=list)
+    project_env_allowlist: list[str] = Field(default_factory=list)
     extra_tmpfs: list[ExpandedPath] = Field(default_factory=list)
     extra_ro_paths: list[ExpandedPath] = Field(default_factory=list)
     editable_roots: list[ExpandedPath] = Field(default_factory=list)
