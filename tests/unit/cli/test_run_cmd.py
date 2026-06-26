@@ -1,11 +1,13 @@
 """Tests for `package-alert run` CLI option parsing and PA_RUN_OPTS handling."""
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from typer.testing import CliRunner
 
 from packagealert.cli.app import app
+from packagealert.project_config import ProjectRunConfig, ProjectRunConfigError
 
 runner = CliRunner()
 
@@ -20,16 +22,38 @@ def _make_mock_runner(return_code: int = 0):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _invoke(args: list[str], env: dict[str, str] | None = None):
-    """Invoke the CLI with optional environment overrides."""
-    from unittest.mock import MagicMock
+def _invoke(
+    args: list[str],
+    env: dict[str, str] | None = None,
+    proj_cfg: ProjectRunConfig | ProjectRunConfigError | None = None,
+):
+    """Invoke the CLI with optional environment and project-config overrides.
+
+    *proj_cfg* controls what ``find_project_run_config`` returns:
+    - ``None`` (default) → no ``.pa-run.toml`` found
+    - a ``ProjectRunConfig`` instance → that config is returned
+    - a ``ProjectRunConfigError`` instance → that error is raised
+    """
     mock_cfg = MagicMock()
+
+    def _fake_find_proj_cfg(_cwd: Path) -> ProjectRunConfig | None:
+        if isinstance(proj_cfg, ProjectRunConfigError):
+            raise proj_cfg
+        return proj_cfg
+
     with patch("packagealert.cli.app._load", return_value=(mock_cfg, None)), \
+         patch("packagealert.project_config.find_project_run_config", _fake_find_proj_cfg), \
          patch("packagealert.sandbox.runner.SandboxRunner") as MockRunner:
         MockRunner.return_value.run = AsyncMock(return_value=0)
         result = runner.invoke(app, args, env=env)
         run_kwargs = MockRunner.return_value.run.call_args
     return result, run_kwargs
+
+
+def _proj_cfg(**kwargs) -> ProjectRunConfig:
+    """Build a ProjectRunConfig with a dummy source path."""
+    defaults = dict(source=Path("/project/.pa-run.toml"), flags="", env=[], no_network=False, allow_external_lockfiles=False)
+    return ProjectRunConfig(**{**defaults, **kwargs})
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +189,146 @@ def test_package_manager_short_n_flag_passed_through():
 
 
 # ---------------------------------------------------------------------------
+# .pa-run.toml — project config integration
+# ---------------------------------------------------------------------------
+
+class TestProjectRunConfig:
+    def test_proj_cfg_flags_applied(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"))
+        assert "ssh-keys" in call.kwargs["flags"].get("python", frozenset())
+
+    def test_proj_cfg_no_network_applied(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(no_network=True))
+        assert call.kwargs["allow_network"] is False
+
+    def test_proj_cfg_allow_external_lockfiles_applied(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(allow_external_lockfiles=True))
+        assert call.kwargs["allow_external_lockfiles"] is True
+
+    def test_proj_cfg_env_prepended(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(env=["FROM_TOML"]))
+        assert "FROM_TOML" in call.kwargs["extra_env"]
+
+    def test_proj_cfg_path_printed_to_console(self):
+        result, _ = _invoke(["run", "uv", "sync"],
+                            proj_cfg=_proj_cfg())
+        assert ".pa-run.toml" in result.output
+
+    def test_proj_cfg_error_exits_1(self):
+        err = ProjectRunConfigError(Path("/project/.pa-run.toml"), "unknown key: foo")
+        result, _ = _invoke(["run", "uv", "sync"], proj_cfg=err)
+        assert result.exit_code == 1
+        assert "foo" in result.output
+
+    def test_no_proj_cfg_no_output(self):
+        result, _ = _invoke(["run", "uv", "sync"])
+        assert ".pa-run.toml" not in result.output
+
+
+class TestMergeOrder:
+    """Three-source merge: .pa-run.toml < PA_RUN_OPTS < CLI flags."""
+
+    # --- flags union ---
+
+    def test_flags_proj_cfg_only(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"))
+        assert call.kwargs["flags"] == {"python": frozenset({"ssh-keys"})}
+
+    def test_flags_env_only(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          env={"PA_RUN_OPTS": "--flags python:network"})
+        assert call.kwargs["flags"] == {"python": frozenset({"network"})}
+
+    def test_flags_cli_only(self):
+        _, call = _invoke(["run", "--flags", "python:ssh-keys", "uv", "sync"])
+        assert call.kwargs["flags"] == {"python": frozenset({"ssh-keys"})}
+
+    def test_flags_proj_and_env_unioned(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"),
+                          env={"PA_RUN_OPTS": "--flags python:network"})
+        assert call.kwargs["flags"] == {"python": frozenset({"ssh-keys", "network"})}
+
+    def test_flags_proj_and_cli_unioned(self):
+        _, call = _invoke(["run", "--flags", "python:network", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"))
+        assert call.kwargs["flags"] == {"python": frozenset({"ssh-keys", "network"})}
+
+    def test_flags_all_three_sources_unioned(self):
+        _, call = _invoke(["run", "--flags", "ruby:gems", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"),
+                          env={"PA_RUN_OPTS": "--flags python:network"})
+        assert "ssh-keys" in call.kwargs["flags"].get("python", frozenset())
+        assert "network" in call.kwargs["flags"].get("python", frozenset())
+        assert "gems" in call.kwargs["flags"].get("ruby", frozenset())
+
+    def test_flags_duplicate_capability_deduplicated(self):
+        _, call = _invoke(["run", "--flags", "python:ssh-keys", "uv", "sync"],
+                          proj_cfg=_proj_cfg(flags="python:ssh-keys"),
+                          env={"PA_RUN_OPTS": "--flags python:ssh-keys"})
+        assert call.kwargs["flags"] == {"python": frozenset({"ssh-keys"})}
+
+    # --- no_network OR-ing ---
+
+    def test_no_network_from_proj_cfg_not_overridden_by_absence_elsewhere(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(no_network=True))
+        assert call.kwargs["allow_network"] is False
+
+    def test_no_network_from_env_not_overridden_by_proj_cfg_false(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(no_network=False),
+                          env={"PA_RUN_OPTS": "--no-network"})
+        assert call.kwargs["allow_network"] is False
+
+    def test_no_network_from_cli_wins(self):
+        _, call = _invoke(["run", "--no-network", "uv", "sync"],
+                          proj_cfg=_proj_cfg(no_network=False))
+        assert call.kwargs["allow_network"] is False
+
+    # --- allow_external_lockfiles OR-ing ---
+
+    def test_allow_external_lockfiles_from_proj_cfg(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          proj_cfg=_proj_cfg(allow_external_lockfiles=True))
+        assert call.kwargs["allow_external_lockfiles"] is True
+
+    def test_allow_external_lockfiles_from_env(self):
+        _, call = _invoke(["run", "uv", "sync"],
+                          env={"PA_RUN_OPTS": "--allow-external-lockfiles"})
+        assert call.kwargs["allow_external_lockfiles"] is True
+
+    def test_allow_external_lockfiles_from_cli(self):
+        _, call = _invoke(["run", "--allow-external-lockfiles", "uv", "sync"],
+                          proj_cfg=_proj_cfg(allow_external_lockfiles=False))
+        assert call.kwargs["allow_external_lockfiles"] is True
+
+    # --- env union ---
+
+    def test_env_proj_and_cli_both_forwarded(self):
+        _, call = _invoke(["run", "--env", "CLI_VAR", "uv", "sync"],
+                          proj_cfg=_proj_cfg(env=["TOML_VAR"]))
+        assert "TOML_VAR" in call.kwargs["extra_env"]
+        assert "CLI_VAR" in call.kwargs["extra_env"]
+
+    def test_env_duplicate_deduplicated(self):
+        _, call = _invoke(["run", "--env", "SHARED", "uv", "sync"],
+                          proj_cfg=_proj_cfg(env=["SHARED"]))
+        assert call.kwargs["extra_env"].count("SHARED") == 1
+
+    def test_env_dedup_preserves_order(self):
+        _, call = _invoke(["run", "--env", "CLI_VAR", "uv", "sync"],
+                          proj_cfg=_proj_cfg(env=["TOML_VAR", "SHARED"]))
+        env = list(call.kwargs["extra_env"])
+        assert env.index("TOML_VAR") < env.index("CLI_VAR")
+
+
+# ---------------------------------------------------------------------------
 # --flags option
 # ---------------------------------------------------------------------------
 
@@ -204,3 +368,99 @@ class TestFlagsOption:
             result = runner.invoke(app, ["run", "--expose-ssh-keys", "uv", "sync"])
         assert result.exit_code == 0, result.output
         assert "deprecated" in result.output.lower() or "python:ssh-keys" in result.output
+
+
+# ---------------------------------------------------------------------------
+# project_env_allowlist enforcement
+# ---------------------------------------------------------------------------
+
+class TestProjectEnvAllowlist:
+    """Tests for .pa-run.toml env allowlist enforcement."""
+
+    def _invoke_with_allowlist(
+        self,
+        args: list[str],
+        proj_cfg: "ProjectRunConfig | None" = None,
+        allowlist: list[str] | None = None,
+        env: dict[str, str] | None = None,
+    ):
+        from unittest.mock import MagicMock, AsyncMock, patch
+        from typer.testing import CliRunner
+        from packagealert.cli.app import app
+
+        mock_cfg = MagicMock()
+        mock_cfg.sandbox.project_env_allowlist = allowlist or []
+
+        def _fake_find(cwd):
+            return proj_cfg
+
+        runner = CliRunner()
+        with patch("packagealert.cli.app._load", return_value=(mock_cfg, None)), \
+             patch("packagealert.project_config.find_project_run_config", _fake_find), \
+             patch("packagealert.sandbox.runner.SandboxRunner") as MockRunner:
+            MockRunner.return_value.run = AsyncMock(return_value=0)
+            result = runner.invoke(app, args, env=env)
+            run_kwargs = MockRunner.return_value.run.call_args
+        return result, run_kwargs
+
+    def test_untrusted_no_env_no_abort(self):
+        cfg = _proj_cfg(trusted=False, env=[])
+        result, _ = self._invoke_with_allowlist(["run", "uv", "sync"], proj_cfg=cfg)
+        assert result.exit_code == 0
+
+    def test_untrusted_env_in_allowlist_forwarded(self):
+        cfg = _proj_cfg(trusted=False, env=["MY_TOKEN"])
+        result, call = self._invoke_with_allowlist(
+            ["run", "uv", "sync"], proj_cfg=cfg, allowlist=["MY_TOKEN"]
+        )
+        assert result.exit_code == 0
+        assert "MY_TOKEN" in call.kwargs["extra_env"]
+
+    def test_untrusted_env_not_in_allowlist_aborts(self):
+        cfg = _proj_cfg(trusted=False, env=["AWS_SECRET_ACCESS_KEY"])
+        result, _ = self._invoke_with_allowlist(["run", "uv", "sync"], proj_cfg=cfg)
+        assert result.exit_code == 1
+        assert "AWS_SECRET_ACCESS_KEY" in result.output
+        assert "project_env_allowlist" in result.output
+
+    def test_untrusted_env_not_in_allowlist_allow_flag_proceeds(self):
+        cfg = _proj_cfg(trusted=False, env=["AWS_SECRET_ACCESS_KEY"])
+        result, call = self._invoke_with_allowlist(
+            ["run", "--allow-project-env", "uv", "sync"], proj_cfg=cfg
+        )
+        assert result.exit_code == 0
+        assert "AWS_SECRET_ACCESS_KEY" in call.kwargs["extra_env"]
+        assert "allow-project-env" in result.output.lower() or "skipping" in result.output.lower()
+
+    def test_untrusted_env_partially_in_allowlist_shows_blocked_only(self):
+        cfg = _proj_cfg(trusted=False, env=["MY_TOKEN", "AWS_SECRET"])
+        result, _ = self._invoke_with_allowlist(
+            ["run", "uv", "sync"], proj_cfg=cfg, allowlist=["MY_TOKEN"]
+        )
+        assert result.exit_code == 1
+        assert "AWS_SECRET" in result.output
+        assert "MY_TOKEN" not in result.output
+
+    def test_trusted_env_not_in_allowlist_forwarded_freely(self):
+        cfg = _proj_cfg(trusted=True, env=["AWS_SECRET_ACCESS_KEY"])
+        result, call = self._invoke_with_allowlist(["run", "uv", "sync"], proj_cfg=cfg)
+        assert result.exit_code == 0
+        assert "AWS_SECRET_ACCESS_KEY" in call.kwargs["extra_env"]
+
+    def test_allow_project_env_no_proj_cfg_no_effect(self):
+        result, _ = self._invoke_with_allowlist(
+            ["run", "--allow-project-env", "uv", "sync"], proj_cfg=None
+        )
+        assert result.exit_code == 0
+
+    def test_allow_project_env_trusted_cfg_no_effect(self):
+        cfg = _proj_cfg(trusted=True, env=["MY_TOKEN"])
+        result, _ = self._invoke_with_allowlist(
+            ["run", "--allow-project-env", "uv", "sync"], proj_cfg=cfg
+        )
+        assert result.exit_code == 0
+
+    def test_empty_allowlist_default_untrusted_env_aborts(self):
+        cfg = _proj_cfg(trusted=False, env=["GITHUB_TOKEN"])
+        result, _ = self._invoke_with_allowlist(["run", "uv", "sync"], proj_cfg=cfg, allowlist=[])
+        assert result.exit_code == 1

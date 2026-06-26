@@ -126,6 +126,21 @@ def test_sandbox_extra_tmpfs_rejects_relative_via_toml(tmp_path):
         load_config(toml)
 
 
+def test_project_env_allowlist_defaults_empty():
+    from packagealert.config import SandboxConfig
+    cfg = SandboxConfig()
+    assert cfg.project_env_allowlist == []
+
+
+def test_project_env_allowlist_round_trips():
+    import tomllib
+    from packagealert.config import AppConfig
+    toml = b'[sandbox]\nproject_env_allowlist = ["MY_TOKEN", "REGISTRY_URL"]\n'
+    data = tomllib.loads(toml.decode())
+    cfg = AppConfig.model_validate(data)
+    assert cfg.sandbox.project_env_allowlist == ["MY_TOKEN", "REGISTRY_URL"]
+
+
 def test_warn_missing_paths_skips_buggy_plugin():
     """A plugin that raises in cache_paths() must not abort warn_missing_paths()."""
     bad_lang = MagicMock()
