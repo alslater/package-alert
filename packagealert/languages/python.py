@@ -4,12 +4,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
-from typing import Any
 import re
+import shlex
+import shutil
 import subprocess
+import tempfile
 import tomllib
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -1206,6 +1208,117 @@ class PythonLanguage:
         from packagealert.parsers.process_args import _pipx_home
         sandbox_env["PIPX_HOME"] = str(_pipx_home())
         sandbox_env.pop("XDG_DATA_HOME", None)
+
+        # When uv-auth is active, uv inside the sandbox must resolve the same
+        # credentials directory that _uv_credentials_dir() snapshotted on the
+        # host.  If XDG_DATA_HOME was set on the host, removing it would cause
+        # uv to fall back to ~/.local/share/uv/credentials — a different path
+        # from the bind-mount destination.  Restore it in sandbox_env so the
+        # paths agree, and ro-bind $XDG_DATA_HOME/uv so the bind-mount point
+        # exists inside the sandbox namespace (bwrap requires the dest to exist).
+        #
+        # Only do this when XDG_DATA_HOME is strictly under $HOME: the runner's
+        # _is_safe_writable_bind_dest() will reject bind destinations outside
+        # $HOME, so forwarding an out-of-home XDG_DATA_HOME would make uv look
+        # somewhere the snapshot was never mounted (silent failure) and would also
+        # ro-bind paths outside the intended home boundary.
+        if "uv-auth" in flags:
+            xdg = os.environ.get("XDG_DATA_HOME")
+            if xdg:
+                xdg_path = Path(xdg)
+                try:
+                    xdg_resolved = xdg_path.resolve(strict=False)
+                    home_resolved = Path.home().resolve()
+                    _xdg_under_home = (
+                        xdg_path.is_absolute()
+                        and xdg_resolved != home_resolved
+                        and xdg_resolved.is_relative_to(home_resolved)
+                    )
+                except (OSError, RuntimeError):
+                    _xdg_under_home = False
+                if _xdg_under_home:
+                    sandbox_env["XDG_DATA_HOME"] = xdg
+                    xdg_uv = xdg_path / "uv"
+                    if xdg_uv.is_dir() and not xdg_uv.is_symlink():
+                        home_ro.append(xdg_uv)
+
+    @staticmethod
+    def _uv_credentials_dir() -> Path:
+        """Return the path to uv's credentials directory.
+
+        Tries ``uv auth dir`` first (respects XDG_DATA_HOME); falls back to
+        the XDG default when uv is unavailable or the subcommand fails.
+        """
+        xdg_data_home = os.environ.get("XDG_DATA_HOME")
+        if xdg_data_home and Path(xdg_data_home).is_absolute():
+            _data_home = Path(xdg_data_home)
+        else:
+            if xdg_data_home:
+                log.debug("_uv_credentials_dir: XDG_DATA_HOME is relative (%r), ignoring", xdg_data_home)
+            _data_home = Path.home() / ".local" / "share"
+        _fallback = _data_home / "uv" / "credentials"
+        try:
+            out = subprocess.check_output(
+                ["uv", "auth", "dir"],
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+            p = Path(out.decode().strip())
+            if not p.parts or not p.is_absolute():
+                log.debug("_uv_credentials_dir: unexpected output %r, using XDG fallback", out)
+                return _fallback
+            return p
+        except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired, UnicodeDecodeError) as exc:
+            log.debug("_uv_credentials_dir: %s, using XDG fallback", exc)
+            return _fallback
+
+    def available_flags(self) -> list[tuple[str, str]]:
+        return [
+            ("ssh-keys", "Expose ~/.ssh into the sandbox for installs that require SSH-hosted dependencies."),
+            ("uv-auth", "Snapshot uv's credential store into the sandbox for private package index authentication."),
+        ]
+
+    def configure_sandbox_writable(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> list[tuple[Path, Path]]:
+        if "uv-auth" not in flags:
+            return []
+        creds_dir = self._uv_credentials_dir()
+        if not creds_dir.exists():
+            return []
+        try:
+            creds_dir = creds_dir.resolve(strict=True)
+        except OSError:
+            return []
+        tmp = Path(tempfile.mkdtemp(prefix="pa-uv-auth-"))
+        try:
+            shutil.copytree(
+                creds_dir,
+                tmp,
+                dirs_exist_ok=True,
+                ignore=lambda _dir, names: {n for n in names if (Path(_dir) / n).is_symlink()},
+            )
+        except Exception:
+            log.warning(
+                "python:uv-auth — failed to snapshot credentials dir %s, flag will have no effect",
+                creds_dir,
+                exc_info=True,
+            )
+            shutil.rmtree(tmp, ignore_errors=True)
+            return []
+        return [(tmp, creds_dir)]
+
+    def configure_sandbox_writable_warning(self, parsed, cwd, flags, targets) -> str | None:
+        if "uv-auth" not in flags:
+            return None
+        return (
+            "[yellow]⚠  uv credentials (python:uv-auth): credential store snapshot mounted "
+            "writably inside the sandbox — install-time code can read it.[/yellow]"
+        )
 
     def resolve_sandbox_targets(
         self,

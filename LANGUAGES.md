@@ -10,7 +10,7 @@ All language modules must satisfy the `LanguageBase` protocol defined in [`packa
 
 ### Contract Version
 
-Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `3`). When a module is registered the registry checks this value:
+Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `4`). When a module is registered the registry checks this value:
 
 | Declared version | Behaviour |
 |-----------------|-----------|
@@ -328,6 +328,45 @@ class LanguageBase(Protocol):
 
         Default is a no-op."""
 
+    def configure_sandbox_writable(
+        self,
+        parsed: ParsedCommand | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> list[tuple[Path, Path]]:
+        """Return `(src, dest)` pairs for writable bind mounts.
+
+        Each *src* is a temporary directory you create; *dest* is where it is
+        mounted inside the sandbox at the real path of the resource you are
+        snapshotting. The runner owns cleanup of *src* after the sandbox exits
+        — do not delete it yourself.
+
+        Use this when a flag needs a resource to be writable inside the sandbox
+        but the real resource must not be modified (e.g. a credential store that
+        requires a write lock to read). Create a temp dir with
+        ``tempfile.mkdtemp()``, copy the resource into it with
+        ``shutil.copytree``, and return the pair.
+
+        *parsed* is ``None`` in shell mode and for cross-namespace flags —
+        guard with ``if parsed is not None`` if you need it.
+
+        **Example (uv credentials snapshot):**
+
+        ```python
+        def configure_sandbox_writable(self, parsed, cwd, flags, targets):
+            if "uv-auth" not in flags:
+                return []
+            creds_dir = self._uv_credentials_dir()
+            if not creds_dir.exists():
+                return []
+            tmp = Path(tempfile.mkdtemp(prefix="pa-uv-auth-"))
+            shutil.copytree(creds_dir, tmp, dirs_exist_ok=True)
+            return [(tmp, creds_dir)]
+        ```
+
+        Default returns ``[]``."""
+
     def resolve_sandbox_targets(self, parsed: Any, cwd: Path) -> SandboxTargets:
         """Return scan targets and extra writable dirs for this install.
 
@@ -421,6 +460,40 @@ class LanguageBase(Protocol):
 
     def detect_post_install(self, before: Snapshot, after: Snapshot) -> list[PackageSpec]:
         """Diff two snapshots and return packages that appeared in after but not before."""
+```
+
+#### `configure_sandbox_writable` (optional, contract v4)
+
+```python
+def configure_sandbox_writable(
+    self,
+    parsed: ParsedCommand | None,
+    cwd: Path,
+    flags: frozenset[str],
+    targets: SandboxTargets,
+) -> list[tuple[Path, Path]]:
+```
+
+Return `(src, dest)` pairs for writable bind mounts. Each *src* is a temporary directory you create; *dest* is where it is mounted inside the sandbox at the real path of the resource you are snapshotting. The runner owns cleanup of *src* after the sandbox exits — do not delete it yourself.
+
+Use this when a flag needs a resource to be writable inside the sandbox but the real resource must not be modified (e.g. a credential store that requires a write lock to read). Create a temp dir with `tempfile.mkdtemp()`, copy the resource into it with `shutil.copytree`, and return the pair.
+
+*parsed* is `None` in shell mode and for cross-namespace flags — guard with `if parsed is not None` if you need it.
+
+Default returns `[]`.
+
+**Example (uv credentials snapshot):**
+
+```python
+def configure_sandbox_writable(self, parsed, cwd, flags, targets):
+    if "uv-auth" not in flags:
+        return []
+    creds_dir = Path.home() / ".local" / "share" / "uv" / "credentials"
+    if not creds_dir.exists():
+        return []
+    tmp = Path(tempfile.mkdtemp(prefix="pa-uv-auth-"))
+    shutil.copytree(creds_dir, tmp, dirs_exist_ok=True)
+    return [(tmp, creds_dir)]
 ```
 
 ---
@@ -765,3 +838,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 | 1 | Initial contract. All methods listed above. `publication_date_url`, `package_manager_names`, `interpreter_names`, `latest_version_url`, `latest_version_parse`, `prepare_sandbox_argv`, `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, and `post_run_scan_targets` added as optional methods with default no-op implementations (no version bump required). |
 | 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir`, and `interpreter_shim_script` added as optional hooks with default no-op implementations (no version bump required for existing plugins). `interpreter_shim_script(real, pa)` lets language modules supply their own interpreter shim script; the default returns None (plain passthrough shim). |
 | 3 | Added `popularity_ecosystem() -> str | None` optional hook. Plugins returning `None` (the default) are unaffected; implement to enable popularity dampening for your ecosystem. Added `PreRunResult` dataclass (`ok`, `message`, `required_flag`). `pre_run_check` now accepts a `flags: frozenset[str]` parameter and returns `PreRunResult` instead of `str | None`; the `expose_ssh_keys: bool` parameter is deprecated. Added `configure_sandbox(parsed, cwd, flags, targets, home_ro, sandbox_env) -> None` hook for flag-driven sandbox configuration; default is a no-op. |
+| 4 | Added optional `configure_sandbox_writable(parsed, cwd, flags, targets) -> list[tuple[Path, Path]]` hook. Default returns `[]`. Runner collects `(src, dest)` pairs from all active language modules, binds them writably into the sandbox, and deletes *src* in a `finally` block after the sandbox exits. Use for resources that require write access inside the sandbox but must not be modified on the host (snapshot pattern). |

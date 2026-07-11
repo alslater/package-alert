@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     import httpx
     from packagealert.heuristics.base import AbstractHeuristic
 
-CURRENT_CONTRACT_VERSION = 3
+CURRENT_CONTRACT_VERSION = 4
 
 # Describes a package being requested or installed (from CLI args or lock files).
 @dataclass
@@ -199,6 +199,16 @@ class LanguageBase(Protocol):
         its own common allowlist.
         """
         ...
+    def available_flags(self) -> list[tuple[str, str]]:
+        """Return (flag_name, description) pairs for flags this language supports.
+
+        *flag_name* is the bare capability name without the language namespace
+        prefix (e.g. ``"ssh-keys"``, not ``"python:ssh-keys"``).  The CLI uses
+        this to show users what flags are available for each language.  Default
+        returns [].
+        """
+        return []
+
     def top_packages_url(self) -> str | None:
         """URL to fetch a ranked list of top packages for this ecosystem.
         Return None if no dynamic source is available for this language."""
@@ -311,6 +321,42 @@ class LanguageBase(Protocol):
         during ``npm install`` calls the Python plugin with ``parsed=None``).
         Always guard access with ``if parsed is not None``.
         """
+
+    def configure_sandbox_writable(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> list[tuple[Path, Path]]:
+        """Return (src, dest) pairs for writable bind mounts.
+
+        Each *src* is a temporary directory created by the language module;
+        *dest* is where it is mounted inside the sandbox. The caller (runner)
+        owns cleanup of *src* after the sandbox exits. Default returns [].
+
+        Called in the same contexts as ``configure_sandbox``: after
+        ``pre_run_check`` in run mode, and without a preceding check in shell
+        mode. *parsed* is ``None`` in shell mode and for cross-namespace flags.
+        """
+        return []
+
+    def configure_sandbox_writable_warning(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> str | None:
+        """Return a security warning string to display when writable bind mounts are active.
+
+        Called by the runner immediately after ``configure_sandbox_writable``
+        returns a non-empty list, using the same arguments.  The returned string
+        is printed via the runner's console (not directly to stderr) so it
+        appears in the correct place in the output stream.  Return ``None`` to
+        suppress the warning.  Default returns ``None``.
+        """
+        return None
 
     def resolve_sandbox_targets(
         self,

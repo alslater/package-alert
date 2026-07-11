@@ -986,3 +986,251 @@ def test_uv_lock_shared_transitive_dep_is_prod(lang: PythonLanguage, tmp_path: P
     result = lang.parse_lockfile(uv_lock)
     by_name = {p.name: p for p in result}
     assert by_name["urllib3"].is_dev is False  # in both trees — conservative prod
+
+
+# ---------------------------------------------------------------------------
+# configure_sandbox_writable
+# ---------------------------------------------------------------------------
+
+def _targets():
+    from packagealert.languages.base import SandboxTargets
+    return SandboxTargets(scan_targets=[], write_dirs=[])
+
+
+class TestUvCredentialsDir:
+    @pytest.fixture(autouse=True)
+    def _clear_xdg_data_home(self, monkeypatch):
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    def test_returns_uv_auth_dir_output(self, monkeypatch):
+        """_uv_credentials_dir returns the path printed by `uv auth dir` verbatim."""
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: b"/custom/uv/credentials\n",
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path("/custom/uv/credentials")
+
+    def test_fallback_on_failure(self, monkeypatch):
+        """_uv_credentials_dir falls back to XDG default when uv is unavailable."""
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("uv not found")),
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_on_empty_output(self, monkeypatch):
+        """_uv_credentials_dir falls back when uv auth dir returns an empty string."""
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: b"\n",
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_on_relative_output(self, monkeypatch):
+        """_uv_credentials_dir falls back when uv auth dir returns a relative path."""
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: b"relative/path/credentials\n",
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_on_called_process_error(self, monkeypatch):
+        """_uv_credentials_dir falls back when uv exits non-zero."""
+        import subprocess as _subprocess
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                _subprocess.CalledProcessError(1, "uv")
+            ),
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_on_timeout(self, monkeypatch):
+        """_uv_credentials_dir falls back when uv auth dir times out."""
+        import subprocess as _subprocess
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                _subprocess.TimeoutExpired("uv", 5)
+            ),
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_on_decode_error(self, monkeypatch):
+        """_uv_credentials_dir falls back when output cannot be decoded as UTF-8."""
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: b"\xff\xfe",
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_fallback_logs_at_debug(self, monkeypatch, caplog):
+        """_uv_credentials_dir logs at DEBUG level when falling back."""
+        import logging
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("uv not found")),
+        )
+        with caplog.at_level(logging.DEBUG, logger="packagealert.languages.python"):
+            PythonLanguage._uv_credentials_dir()
+        assert any("XDG fallback" in r.message for r in caplog.records)
+
+    def test_fallback_respects_xdg_data_home(self, monkeypatch, tmp_path):
+        """When XDG_DATA_HOME is set to an absolute path, the fallback uses it."""
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("uv not found")),
+        )
+        result = PythonLanguage._uv_credentials_dir()
+        assert result == tmp_path / "xdg" / "uv" / "credentials"
+        assert result != Path.home() / ".local" / "share" / "uv" / "credentials"
+
+    def test_relative_xdg_data_home_is_ignored(self, monkeypatch, caplog):
+        """A relative XDG_DATA_HOME is ignored (logged at debug) and the XDG default is used."""
+        import logging
+        monkeypatch.setenv("XDG_DATA_HOME", "relative/path")
+        monkeypatch.setattr(
+            "packagealert.languages.python.subprocess.check_output",
+            lambda *a, **kw: (_ for _ in ()).throw(FileNotFoundError("uv not found")),
+        )
+        with caplog.at_level(logging.DEBUG, logger="packagealert.languages.python"):
+            result = PythonLanguage._uv_credentials_dir()
+        assert result == Path.home() / ".local" / "share" / "uv" / "credentials"
+        assert any("XDG_DATA_HOME is relative" in r.message for r in caplog.records)
+
+
+class TestConfigureSandboxWritable:
+    def _lang(self):
+        return PythonLanguage()
+
+    def test_no_flag_returns_empty(self, tmp_path):
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset(), _targets())
+        assert result == []
+
+    def test_flag_no_credentials_dir_returns_empty(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: tmp_path / "nonexistent" / "credentials"),
+        )
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert result == []
+
+    def test_flag_with_credentials_returns_pair(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text('[registry."https://example.com"]\ntoken = "secret"\n')
+        (creds_dir / "credentials.toml.lock").write_text("")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert len(result) == 1
+        src, dest = result[0]
+        assert dest == creds_dir
+        assert (src / "credentials.toml").read_text() == (creds_dir / "credentials.toml").read_text()
+
+    def test_copy_is_independent_of_original(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text("original")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        src, _ = result[0]
+        (src / "credentials.toml").write_text("modified")
+        assert (creds_dir / "credentials.toml").read_text() == "original"
+
+    def test_src_is_temp_dir_outside_creds(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text("")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        src, _ = result[0]
+        assert src.is_absolute()
+        assert src != creds_dir
+        assert src.parent != creds_dir.parent  # temp dir, not a sibling
+
+    def test_copytree_failure_cleans_up_tmp_and_returns_empty(self, tmp_path, monkeypatch, caplog):
+        import logging
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text("")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        created_tmp: list = []
+        real_mkdtemp = __import__("tempfile").mkdtemp
+
+        def tracking_mkdtemp(**kwargs):
+            p = real_mkdtemp(**kwargs)
+            created_tmp.append(p)
+            return p
+
+        monkeypatch.setattr("packagealert.languages.python.tempfile.mkdtemp", tracking_mkdtemp)
+        monkeypatch.setattr("packagealert.languages.python.shutil.copytree", lambda *a, **kw: (_ for _ in ()).throw(OSError("simulated IO error")))
+        with caplog.at_level(logging.WARNING, logger="packagealert.languages.python"):
+            result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert result == []
+        assert created_tmp, "mkdtemp should have been called"
+        from pathlib import Path
+        assert not Path(created_tmp[0]).exists(), "temp dir must be cleaned up after copytree failure"
+        assert any("snapshot" in r.message and "uv-auth" in r.message for r in caplog.records), (
+            "a warning must be logged so users understand why the flag had no effect"
+        )
+
+    def test_symlinks_in_credentials_dir_are_not_copied(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text("token = secret")
+        outside_secret = tmp_path / "outside_secret.txt"
+        outside_secret.write_text("sensitive data outside creds dir")
+        (creds_dir / "symlink_to_outside").symlink_to(outside_secret)
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert len(result) == 1
+        src, _ = result[0]
+        assert (src / "credentials.toml").exists(), "real files must still be copied"
+        assert not (src / "symlink_to_outside").exists(), "symlinks must be excluded from the snapshot"
+        import shutil as _shutil
+        _shutil.rmtree(src, ignore_errors=True)
+
+
+class TestConfigureSandboxWritableWarning:
+    def _lang(self):
+        return PythonLanguage()
+
+    def test_uv_auth_flag_returns_warning(self, tmp_path):
+        lang = self._lang()
+        msg = lang.configure_sandbox_writable_warning(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert msg is not None
+        assert "uv-auth" in msg
+        assert "credential" in msg.lower()
+
+    def test_no_flag_returns_none(self, tmp_path):
+        lang = self._lang()
+        msg = lang.configure_sandbox_writable_warning(None, tmp_path, frozenset(), _targets())
+        assert msg is None
+
+    def test_other_flag_returns_none(self, tmp_path):
+        lang = self._lang()
+        msg = lang.configure_sandbox_writable_warning(None, tmp_path, frozenset({"ssh-keys"}), _targets())
+        assert msg is None
