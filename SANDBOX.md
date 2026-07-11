@@ -192,6 +192,29 @@ If any are found and neither `--flags python:ssh-keys` nor `--expose-ssh-keys` i
 
 > **Note:** `--expose-ssh-keys` is deprecated. Use `--flags python:ssh-keys` instead. Both are accepted and have identical behaviour; `--expose-ssh-keys` will be removed in a future release.
 
+## Package Index Authentication
+
+### `python:uv-auth`
+
+Exposes uv's credential store inside the sandbox so `uv sync`/`uv lock` can authenticate against private package indexes.
+
+**Why it is needed:** uv stores index credentials in `~/.local/share/uv/credentials/credentials.toml` and acquires a write lock on `credentials.toml.lock` before reading. The sandbox mounts `~/.local/share/uv` read-only, so the lock fails and uv returns a 401 to the private index.
+
+**What it does:** Before the sandbox starts, package-alert copies the credentials directory to a temporary directory, mounts that copy writably inside the sandbox at the real credentials path, then deletes the copy after the sandbox exits. uv can write its lockfile freely; the real credential store is never modified.
+
+**Security note:** Any code running inside the sandbox — including PEP 517 build backends and `setup.py` — can read the credentials file. This is the same exposure model as `python:ssh-keys` with SSH keys. Use this flag only when you trust the packages being installed.
+
+**Usage:**
+
+```
+pa run --flags python:uv-auth uv sync
+
+# Persistent in .pa-run.toml:
+flags = "python:uv-auth"
+```
+
+If the credentials directory does not exist (uv auth not configured), the flag is silently ignored.
+
 ## Filesystem Isolation
 
 The sandbox uses a layered mount strategy built from `bwrap` flags:

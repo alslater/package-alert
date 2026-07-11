@@ -106,3 +106,40 @@ def languages_info(
         log.warning("lang=%s top_packages_url() raised unexpectedly", getattr(lang, "name", "?"), exc_info=True)
         top_url_str = _ERROR_DISPLAY
     console.print(f"Top packages URL: {top_url_str}")
+
+    try:
+        flags_list = lang.available_flags() if callable(getattr(lang, "available_flags", None)) else []
+    except Exception:
+        log.warning("lang=%s available_flags() raised unexpectedly", getattr(lang, "name", "?"), exc_info=True)
+        flags_list = None
+    if flags_list is None:
+        console.print(f"Available flags: {_ERROR_DISPLAY}")
+    elif not flags_list:
+        console.print("Available flags: none")
+    else:
+        flags_table = Table(show_header=False, box=None, padding=(0, 2, 0, 0))
+        flags_table.add_column("Flag", style="bold cyan")
+        flags_table.add_column("Description")
+        any_rows = False
+        for entry in flags_list:
+            if (
+                isinstance(entry, tuple)
+                and len(entry) == 2
+                and isinstance(entry[0], str)
+                and isinstance(entry[1], str)
+            ):
+                flags_table.add_row(
+                    f"{markup_escape(lang.name)}:{markup_escape(entry[0])}",
+                    markup_escape(entry[1]),
+                )
+                any_rows = True
+            else:
+                log.warning(
+                    "lang=%s available_flags() returned invalid entry %r — skipping",
+                    getattr(lang, "name", "?"), entry,
+                )
+        if any_rows:
+            console.print("Available flags:")
+            console.print(flags_table)
+        else:
+            console.print(f"Available flags: {_ERROR_DISPLAY}")

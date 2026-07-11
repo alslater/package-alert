@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def available() -> bool:
@@ -18,6 +21,7 @@ def build_cmd(
     home_ro_dirs: list[Path] | None = None,
     extra_tmpfs: list[Path] | None = None,
     post_ro_tmpfs: list[Path] | None = None,
+    writable_binds: list[tuple[Path, Path]] | None = None,
 ) -> list[str]:
     """Return a bwrap command list that runs *argv* with *write_dirs* writable.
 
@@ -46,6 +50,11 @@ def build_cmd(
     *post_ro_tmpfs*) must be absolute; a relative path passed to bwrap would be
     interpreted relative to the sandbox's working directory and almost certainly
     wrong.
+
+    - *writable_binds* is a list of (src, dest) pairs bound writably into
+      the sandbox after *write_dirs* (i.e. after home_ro_dirs, post_ro_tmpfs,
+      and write_dirs), so they take precedence over all earlier mounts.
+      Both src and dest must be absolute paths.
     """
     for _param, _paths in (
         ("write_dirs", write_dirs),
@@ -58,6 +67,25 @@ def build_cmd(
                 raise ValueError(
                     f"build_cmd: {_param} paths must be absolute, got: {_p!r}"
                 )
+    for _i, _entry in enumerate(writable_binds or []):
+        if (
+            not isinstance(_entry, tuple)
+            or len(_entry) != 2
+            or not isinstance(_entry[0], Path)
+            or not isinstance(_entry[1], Path)
+        ):
+            raise ValueError(
+                f"build_cmd: writable_binds[{_i}] must be a (Path, Path) tuple, got: {_entry!r}"
+            )
+        _src, _dest = _entry
+        if not _src.is_absolute():
+            raise ValueError(
+                f"build_cmd: writable_binds[{_i}] src must be absolute, got: {_src!r}"
+            )
+        if not _dest.is_absolute():
+            raise ValueError(
+                f"build_cmd: writable_binds[{_i}] dest must be absolute, got: {_dest!r}"
+            )
 
     home = str(Path.home())
     cmd = [
@@ -99,6 +127,68 @@ def build_cmd(
     for d in write_dirs:
         d.mkdir(parents=True, exist_ok=True)
         cmd += ["--bind", str(d), str(d)]
+    for src, dest in (writable_binds or []):
+        # Resolve src so bwrap receives the real filesystem path, not a symlink
+        # that could silently redirect what is mounted.  dest is the mount point
+        # inside the sandbox namespace and must be passed as the caller provided
+        # it — resolving it could change the path the sandboxed process expects.
+        # dest must not be a symlink: is_dir() follows symlinks and would pass
+        # for a symlink-to-dir, silently redirecting the bind to an unintended path.
+        _orig_src = src
+        try:
+            src = src.resolve(strict=False)
+        except (OSError, RuntimeError):
+            log.warning(
+                "build_cmd: writable_binds src could not be resolved, skipping bind: %s -> %s",
+                _orig_src,
+                dest,
+            )
+            continue
+        if not src.exists():
+            log.warning(
+                "build_cmd: writable_binds src does not exist, skipping bind: %s -> %s",
+                src,
+                dest,
+            )
+            continue
+        if not src.is_dir():
+            log.warning(
+                "build_cmd: writable_binds src is not a directory, skipping bind: %s -> %s",
+                src,
+                dest,
+            )
+            continue
+        # bwrap requires the destination mount point to exist in the sandbox
+        # mount namespace — not just on the host.  Because $HOME is replaced
+        # with a fresh tmpfs early in the command, any dest under $HOME that
+        # is not re-exposed via home_ro_dirs or write_dirs will be absent at
+        # the time this bind is applied, causing a silent skip or bwrap error.
+        # build_cmd only has visibility of the host filesystem; ensuring the
+        # namespace path exists is the caller's responsibility (e.g. by
+        # including dest's parent in home_ro_dirs).  The check below is a
+        # best-effort host guard only.
+        if not dest.exists():
+            log.warning(
+                "build_cmd: writable_binds dest does not exist, skipping bind: %s -> %s",
+                src,
+                dest,
+            )
+            continue
+        if dest.is_symlink():
+            log.warning(
+                "build_cmd: writable_binds dest is a symlink, skipping bind: %s -> %s",
+                src,
+                dest,
+            )
+            continue
+        if not dest.is_dir():
+            log.warning(
+                "build_cmd: writable_binds dest is not a directory, skipping bind: %s -> %s",
+                src,
+                dest,
+            )
+            continue
+        cmd += ["--bind", str(src), str(dest)]
     if not allow_network:
         cmd += ["--unshare-net"]
     if env is not None:

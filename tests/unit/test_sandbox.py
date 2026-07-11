@@ -35,6 +35,9 @@ from packagealert.sandbox.runner import (
     _SHELL_NAMES,
     _SHELL_RC_FILES,
     _Context,
+    _is_safe_writable_bind_src,
+    _is_safe_writable_bind_dest,
+    _cleanup_writable_binds,
 )
 from packagealert.languages.python import (
     _find_pipenv_venv,
@@ -155,6 +158,15 @@ class TestFlagParsing:
 # ---------------------------------------------------------------------------
 # bwrap.build_cmd
 # ---------------------------------------------------------------------------
+
+def _bind_pairs(cmd: list[str]) -> list[tuple[str, str]]:
+    """Extract all (src, dest) pairs from --bind flags in a bwrap command list."""
+    return [
+        (cmd[i + 1], cmd[i + 2])
+        for i, token in enumerate(cmd)
+        if token == "--bind" and i + 2 < len(cmd)
+    ]
+
 
 class TestBuildCmd:
     def test_ro_bind_root_present(self, tmp_path):
@@ -375,6 +387,100 @@ class TestBuildCmd:
         cmd = build_cmd(["uv", "sync"], [], extra_tmpfs=[link])
         tmpfs_vals = [tgt for _, tgt in _tmpfs_targets(cmd)]
         assert str(link) not in tmpfs_vals
+
+    def test_writable_binds_added_to_cmd(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        cmd = build_cmd(
+            ["echo", "hi"],
+            write_dirs=[tmp_path],
+            writable_binds=[(src, dest)],
+        )
+        assert (str(src), str(dest)) in _bind_pairs(cmd), (
+            f"--bind {src} {dest} not found in cmd: {cmd}"
+        )
+
+    def test_writable_binds_none_is_no_op(self, tmp_path):
+        cmd_with = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=None)
+        cmd_without = build_cmd(["echo"], write_dirs=[tmp_path])
+        assert cmd_with == cmd_without
+
+    def test_writable_binds_src_absolute_path_required(self, tmp_path):
+        with pytest.raises(ValueError, match="src must be absolute"):
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(Path("relative"), tmp_path)])
+
+    def test_writable_binds_dest_absolute_path_required(self, tmp_path):
+        with pytest.raises(ValueError, match="dest must be absolute"):
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(tmp_path, Path("relative"))])
+
+    def test_writable_binds_non_tuple_entry_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=["not-a-tuple"])
+
+    def test_writable_binds_wrong_length_tuple_raises(self, tmp_path):
+        with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(tmp_path,)])
+
+    def test_writable_binds_non_path_elements_raise(self, tmp_path):
+        with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[("/src", "/dest")])
+
+    def test_writable_binds_skips_nonexistent_dest(self, tmp_path, caplog):
+        src = tmp_path / "src"
+        src.mkdir()
+        dest = tmp_path / "nonexistent_dest"
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.bwrap"):
+            cmd = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(src, dest)])
+        assert (str(src), str(dest)) not in _bind_pairs(cmd)
+        assert any("dest does not exist" in r.message for r in caplog.records)
+
+    def test_writable_binds_skips_dest_that_is_not_dir(self, tmp_path, caplog):
+        src = tmp_path / "src"
+        src.mkdir()
+        dest = tmp_path / "dest_file"
+        dest.write_text("not a directory")
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.bwrap"):
+            cmd = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(src, dest)])
+        assert (str(src), str(dest)) not in _bind_pairs(cmd)
+        assert any("not a directory" in r.message for r in caplog.records)
+
+    def test_writable_binds_skips_dest_that_is_symlink_to_dir(self, tmp_path, caplog):
+        src = tmp_path / "src"
+        src.mkdir()
+        real_dir = tmp_path / "real_dest"
+        real_dir.mkdir()
+        dest = tmp_path / "symlink_dest"
+        dest.symlink_to(real_dir)
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.bwrap"):
+            cmd = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(src, dest)])
+        assert (str(src), str(dest)) not in _bind_pairs(cmd)
+        assert any("symlink" in r.message for r in caplog.records)
+
+    def test_writable_binds_skips_src_that_is_not_a_directory(self, tmp_path, caplog):
+        src = tmp_path / "src_file"
+        src.write_text("not a directory")
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.bwrap"):
+            cmd = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(src, dest)])
+        assert (str(src.resolve()), str(dest)) not in _bind_pairs(cmd)
+        assert any("src is not a directory" in r.message for r in caplog.records)
+
+    def test_writable_binds_logs_warning_when_src_does_not_exist(self, tmp_path, caplog):
+        src = tmp_path / "nonexistent_src"
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.bwrap"):
+            cmd = build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(src, dest)])
+        assert (str(src), str(dest)) not in _bind_pairs(cmd)
+        assert any("src does not exist" in r.message for r in caplog.records)
 
 
 class TestPostRoTmpfsDirs:
@@ -1691,6 +1797,106 @@ class TestPythonConfigureSandbox:
         assert "PIPX_HOME" in sandbox_env
         assert "XDG_DATA_HOME" not in sandbox_env
 
+    def test_uv_auth_flag_preserves_xdg_data_home_under_home_in_sandbox_env(self, tmp_path, monkeypatch):
+        """When uv-auth is active and XDG_DATA_HOME is strictly under $HOME, it must be kept in
+        sandbox_env so that uv inside the sandbox resolves the same credentials directory
+        that was snapshotted on the host."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        home = tmp_path / "home"
+        home.mkdir()
+        xdg = home / ".local" / "custom_xdg"
+        xdg.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {"XDG_DATA_HOME": str(xdg)}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"uv-auth"}), targets, home_ro, sandbox_env)
+        assert sandbox_env.get("XDG_DATA_HOME") == str(xdg)
+
+    def test_uv_auth_flag_drops_xdg_data_home_outside_home(self, tmp_path, monkeypatch):
+        """When uv-auth is active but XDG_DATA_HOME is outside $HOME, it must not be forwarded —
+        the bind dest would be rejected by _is_safe_writable_bind_dest and the flag would silently
+        fail if sandbox_env pointed uv at an unmounted path."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        home = tmp_path / "home"
+        home.mkdir()
+        xdg = tmp_path / "outside_home" / "xdg"
+        xdg.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {"XDG_DATA_HOME": str(xdg)}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"uv-auth"}), targets, home_ro, sandbox_env)
+        assert "XDG_DATA_HOME" not in sandbox_env
+        assert not any(str(xdg) in str(p) for p in home_ro)
+
+    def test_uv_auth_flag_without_xdg_data_home_leaves_it_absent(self, tmp_path, monkeypatch):
+        """When uv-auth is active but XDG_DATA_HOME is not set, sandbox_env must not gain it."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"uv-auth"}), targets, home_ro, sandbox_env)
+        assert "XDG_DATA_HOME" not in sandbox_env
+
+    def test_uv_auth_flag_ro_binds_xdg_uv_dir_when_it_exists(self, tmp_path, monkeypatch):
+        """When $XDG_DATA_HOME/uv exists under $HOME, configure_sandbox must ro-bind it so the
+        writable-bind destination exists inside the sandbox namespace."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        home = tmp_path / "home"
+        home.mkdir()
+        xdg = home / ".local" / "custom_xdg"
+        xdg_uv = xdg / "uv"
+        xdg_uv.mkdir(parents=True)
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {"XDG_DATA_HOME": str(xdg)}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"uv-auth"}), targets, home_ro, sandbox_env)
+        assert xdg_uv in home_ro
+
+    def test_uv_auth_flag_does_not_bind_missing_xdg_uv_dir(self, tmp_path, monkeypatch):
+        """When $XDG_DATA_HOME/uv does not exist, no ro-bind is added (bwrap skips missing mount points)."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        home = tmp_path / "home"
+        home.mkdir()
+        xdg = home / ".local" / "custom_xdg"
+        xdg.mkdir(parents=True)
+        # intentionally no xdg/uv subdirectory
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+        monkeypatch.setenv("XDG_DATA_HOME", str(xdg))
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {"XDG_DATA_HOME": str(xdg)}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset({"uv-auth"}), targets, home_ro, sandbox_env)
+        assert not any("uv" in str(p) for p in home_ro)
+
+    def test_no_uv_auth_flag_still_removes_xdg_data_home(self, tmp_path, monkeypatch):
+        """Without uv-auth, XDG_DATA_HOME must still be removed from sandbox_env (existing behaviour)."""
+        from packagealert.languages.base import SandboxTargets
+        from packagealert.parsers.process_args import ParsedInstall
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "custom_xdg"))
+        parsed = ParsedInstall(manager="uv", packages=[], ecosystem="pypi")
+        targets = SandboxTargets()
+        home_ro: list = []
+        sandbox_env: dict = {"XDG_DATA_HOME": str(tmp_path / "custom_xdg")}
+        self._lang().configure_sandbox(parsed, tmp_path, frozenset(), targets, home_ro, sandbox_env)
+        assert "XDG_DATA_HOME" not in sandbox_env
+
     def test_configure_sandbox_overwrites_unsafe_pipx_home(self, tmp_path, monkeypatch):
         # An unsafe raw PIPX_HOME already present in sandbox_env (forwarded by
         # _build_sandbox_env) must be replaced with the sanitised _pipx_home() value
@@ -2122,6 +2328,600 @@ class TestPostRoTmpfsWiredIntoRunner:
 
         spurious = self._tmpfs_positions_for(self._bwrap_cmd(bwrap_cmds), tool_dir / "logs")
         assert not spurious
+
+
+class TestConfigureSandboxWritableDispatch:
+    """Runner dispatches configure_sandbox_writable and cleans up temp dirs."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_gettempdir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.sandbox.runner.tempfile.gettempdir",
+            lambda: str(tmp_path),
+        )
+
+    def _setup_common(self, monkeypatch, configure_sandbox_writable_pairs):
+        """Patch subprocess.run, bwrap_available, and lang_registry.all_languages.
+
+        Returns (bwrap_cmds, captured_writable_binds).
+        """
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        import packagealert.sandbox.bwrap as bwrap_mod
+        from unittest.mock import MagicMock
+
+        bwrap_cmds: list[list[str]] = []
+        captured_writable_binds: list = []
+
+        def fake_run(*popenargs, **kw):
+            import shlex
+            raw = popenargs[0] if popenargs else kw.get("args", [])
+            if isinstance(raw, str):
+                cmd = shlex.split(raw)
+            elif isinstance(raw, (list, tuple)):
+                cmd = list(raw)
+            else:
+                raise TypeError(f"fake_run: unexpected args type {type(raw).__name__!r}")
+            bwrap_cmds.append(cmd)
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        original_build_cmd = bwrap_mod.build_cmd
+
+        def capturing_build_cmd(*args, writable_binds=None, **kwargs):
+            captured_writable_binds.extend(writable_binds or [])
+            return original_build_cmd(*args, writable_binds=writable_binds, **kwargs)
+
+        mock_lang = MagicMock()
+        mock_lang.name = "python"
+        mock_lang.configure_sandbox_writable = MagicMock(return_value=configure_sandbox_writable_pairs)
+        mock_lang.configure_sandbox = MagicMock()
+        mock_lang.shell_environment = MagicMock(return_value=MagicMock(
+            write_dirs=[], scan_targets=[], env_updates={}, path_prepends=[], notes=[], warnings=[],
+        ))
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod, "_home_ro_dirs", lambda *a, **kw: [])
+        monkeypatch.setattr(runner_mod, "build_cmd", capturing_build_cmd)
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [mock_lang])
+
+        async def _preflight_ok(*a, **kw):
+            return True
+        async def _cooldown_ok(*a, **kw):
+            return []
+        async def _scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _cooldown_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _scan_ok)
+
+        return bwrap_cmds, captured_writable_binds
+
+    def test_install_calls_hook_and_passes_writable_binds(self, tmp_path, monkeypatch):
+        """_run_cs: configure_sandbox_writable result flows to build_cmd as writable_binds."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-cs"
+        src.mkdir()
+        dest = tmp_path / "dest-cs"
+        dest.mkdir()
+
+        _bwrap_cmds, captured = self._setup_common(monkeypatch, [(src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert (src, dest) in captured, f"Expected {(src, dest)} in captured writable_binds: {captured}"
+
+    def test_shell_calls_hook_and_passes_writable_binds(self, tmp_path, monkeypatch):
+        """_run_shell: configure_sandbox_writable result flows to build_cmd as writable_binds."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-sh"
+        src.mkdir()
+        dest = tmp_path / "dest-sh"
+        dest.mkdir()
+
+        _bwrap_cmds, captured = self._setup_common(monkeypatch, [(src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["bash"]))
+
+        assert (src, dest) in captured, f"Expected {(src, dest)} in captured writable_binds: {captured}"
+
+    def test_install_cleans_up_temp_dirs_on_success(self, tmp_path, monkeypatch):
+        """_run_cs: src temp dirs are deleted in finally block when subprocess exits 0."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-cleanup-cs"
+        src.mkdir()
+        dest = tmp_path / "dest-cleanup-cs"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert not src.exists(), f"Expected temp dir {src} to be deleted after sandbox exit"
+
+    def test_shell_cleans_up_temp_dirs_on_success(self, tmp_path, monkeypatch):
+        """_run_shell: src temp dirs are deleted in finally block when subprocess exits 0."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-cleanup-sh"
+        src.mkdir()
+        dest = tmp_path / "dest-cleanup-sh"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["bash"]))
+
+        assert not src.exists(), f"Expected temp dir {src} to be deleted after sandbox exit"
+
+    def test_install_cleans_up_temp_dirs_on_failure(self, tmp_path, monkeypatch):
+        """_run_cs: src temp dirs are deleted in finally block even when subprocess exits non-zero."""
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        import packagealert.sandbox.bwrap as bwrap_mod
+        from unittest.mock import MagicMock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-fail-cs"
+        src.mkdir()
+        dest = tmp_path / "dest-fail-cs"
+        dest.mkdir()
+
+        original_build_cmd = bwrap_mod.build_cmd
+        mock_lang = MagicMock()
+        mock_lang.name = "python"
+        mock_lang.configure_sandbox_writable = MagicMock(return_value=[(src, dest)])
+        mock_lang.configure_sandbox = MagicMock()
+        mock_lang.shell_environment = MagicMock(return_value=MagicMock(
+            write_dirs=[], scan_targets=[], env_updates={}, path_prepends=[], notes=[], warnings=[],
+        ))
+
+        def fake_run_fail(*popenargs, **kw):
+            raw = popenargs[0] if popenargs else kw.get("args", [])
+            cmd = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+            return subprocess.CompletedProcess(args=cmd, returncode=1)
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run_fail)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod, "_home_ro_dirs", lambda *a, **kw: [])
+        monkeypatch.setattr(runner_mod, "build_cmd", original_build_cmd)
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [mock_lang])
+
+        async def _preflight_ok(*a, **kw):
+            return True
+        async def _cooldown_ok(*a, **kw):
+            return []
+        async def _scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _cooldown_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _scan_ok)
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert not src.exists(), f"Expected temp dir {src} to be deleted even after non-zero exit"
+
+    def test_install_cleans_up_on_early_return_before_subprocess(self, tmp_path, monkeypatch):
+        """_run_cs: writable-bind temp dirs are cleaned up even when _check_extra_tmpfs fails."""
+        import packagealert.sandbox.runner as runner_mod
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-early-cs"
+        src.mkdir()
+        dest = tmp_path / "dest-early-cs"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(src, dest)])
+        # Force _check_extra_tmpfs to return False — simulates an early return
+        # after _collect_writable_binds has already run.
+        monkeypatch.setattr(
+            runner_mod.SandboxRunner,
+            "_check_extra_tmpfs",
+            lambda self, paths: False,
+        )
+
+        import asyncio
+        runner = _make_runner()
+        result = asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert result == 1
+        assert not src.exists(), (
+            f"Temp dir {src} must be cleaned up even on early return before subprocess"
+        )
+
+    def test_shell_cleans_up_on_early_return_before_subprocess(self, tmp_path, monkeypatch):
+        """_run_shell: writable-bind temp dirs are cleaned up even when _check_extra_tmpfs fails."""
+        import packagealert.sandbox.runner as runner_mod
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-early-sh"
+        src.mkdir()
+        dest = tmp_path / "dest-early-sh"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(src, dest)])
+        monkeypatch.setattr(
+            runner_mod.SandboxRunner,
+            "_check_extra_tmpfs",
+            lambda self, paths: False,
+        )
+
+        import asyncio
+        runner = _make_runner()
+        result = asyncio.run(runner.run(["bash"]))
+
+        assert result == 1
+        assert not src.exists(), (
+            f"Temp dir {src} must be cleaned up even on early return before subprocess"
+        )
+
+    def test_hook_exception_is_swallowed(self, tmp_path, monkeypatch):
+        """configure_sandbox_writable exceptions are caught and logged; sandbox still runs."""
+        import subprocess
+        import packagealert.sandbox.runner as runner_mod
+        from unittest.mock import MagicMock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        mock_lang = MagicMock()
+        mock_lang.name = "python"
+        mock_lang.configure_sandbox_writable = MagicMock(side_effect=RuntimeError("boom"))
+        mock_lang.configure_sandbox = MagicMock()
+        mock_lang.shell_environment = MagicMock(return_value=MagicMock(
+            write_dirs=[], scan_targets=[], env_updates={}, path_prepends=[], notes=[], warnings=[],
+        ))
+
+        def fake_run(*popenargs, **kw):
+            raw = popenargs[0] if popenargs else kw.get("args", [])
+            cmd = list(raw) if isinstance(raw, (list, tuple)) else [raw]
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod, "_home_ro_dirs", lambda *a, **kw: [])
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [mock_lang])
+
+        async def _preflight_ok(*a, **kw):
+            return True
+        async def _cooldown_ok(*a, **kw):
+            return []
+        async def _scan_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _preflight_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _cooldown_ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _scan_ok)
+
+        import asyncio
+        runner = _make_runner()
+        # Must not raise; runner continues without the failing hook's pairs
+        result = asyncio.run(runner.run(["npm", "install", "lodash"]))
+        assert result == 0
+
+    def test_install_refuses_to_delete_unsafe_src(self, tmp_path, monkeypatch):
+        """_run_cs: src paths outside tempdir are not deleted (safety guard)."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        # Use a path guaranteed outside tempdir: monkeypatch gettempdir() to a
+        # subdirectory so our unsafe_src (under tmp_path root) fails the guard.
+        fake_tmpdir = tmp_path / "fake_tmp"
+        fake_tmpdir.mkdir()
+        monkeypatch.setattr("packagealert.sandbox.runner.tempfile.gettempdir", lambda: str(fake_tmpdir))
+
+        # Simulate a buggy/malicious plugin returning a path outside the (fake) temp root.
+        unsafe_src = tmp_path / "pa-uv-auth-unsafe"
+        unsafe_src.mkdir()
+        dest = tmp_path / "dest-unsafe"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(unsafe_src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert unsafe_src.exists(), (
+            f"Runner must not delete {unsafe_src} — it is outside the (mocked) temp root"
+        )
+
+    def test_shell_refuses_to_delete_unsafe_src(self, tmp_path, monkeypatch):
+        """_run_shell: src paths outside tempdir are not deleted (safety guard)."""
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+
+        fake_tmpdir = tmp_path / "fake_tmp"
+        fake_tmpdir.mkdir()
+        monkeypatch.setattr("packagealert.sandbox.runner.tempfile.gettempdir", lambda: str(fake_tmpdir))
+
+        unsafe_src = tmp_path / "pa-uv-auth-unsafe-sh"
+        unsafe_src.mkdir()
+        dest = tmp_path / "dest-unsafe-sh"
+        dest.mkdir()
+
+        self._setup_common(monkeypatch, [(unsafe_src, dest)])
+
+        import asyncio
+        runner = _make_runner()
+        asyncio.run(runner.run(["bash"]))
+
+        assert unsafe_src.exists(), (
+            f"Runner must not delete {unsafe_src} — it is outside the (mocked) temp root"
+        )
+
+    def test_install_prints_warning_from_configure_sandbox_writable_warning(self, tmp_path, monkeypatch):
+        """_run_cs: warning from configure_sandbox_writable_warning is printed via runner console."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod_inner
+        from unittest.mock import MagicMock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-warn-cs"
+        src.mkdir()
+        dest = tmp_path / "dest-warn-cs"
+        dest.mkdir()
+
+        _bwrap_cmds, _captured = self._setup_common(monkeypatch, [(src, dest)])
+
+        # Patch the mock lang to also return a warning message.
+        all_langs = runner_mod_inner.lang_registry.all_languages()
+        mock_lang = all_langs[0]
+        mock_lang.configure_sandbox_writable_warning = MagicMock(
+            return_value="[yellow]test warning: credential snapshot active[/yellow]"
+        )
+
+        from unittest.mock import patch as _patch
+        printed: list[str] = []
+        runner = _make_runner()
+        with _patch.object(runner._console, "print", side_effect=lambda *a, **kw: printed.append(str(a[0]) if a else "")):
+            asyncio.run(runner.run(["npm", "install", "lodash"]))
+
+        assert any("credential snapshot active" in m for m in printed), (
+            f"Expected warning in console output, got: {printed}"
+        )
+
+    def test_shell_prints_warning_from_configure_sandbox_writable_warning(self, tmp_path, monkeypatch):
+        """_run_shell: warning from configure_sandbox_writable_warning is printed via runner console."""
+        import asyncio
+        import packagealert.sandbox.runner as runner_mod_inner
+        from unittest.mock import MagicMock
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+
+        src = tmp_path / "pa-uv-auth-warn-sh"
+        src.mkdir()
+        dest = tmp_path / "dest-warn-sh"
+        dest.mkdir()
+
+        _bwrap_cmds, _captured = self._setup_common(monkeypatch, [(src, dest)])
+
+        all_langs = runner_mod_inner.lang_registry.all_languages()
+        mock_lang = all_langs[0]
+        mock_lang.configure_sandbox_writable_warning = MagicMock(
+            return_value="[yellow]test warning: credential snapshot active[/yellow]"
+        )
+
+        from unittest.mock import patch as _patch
+        printed: list[str] = []
+        runner = _make_runner()
+        with _patch.object(runner._console, "print", side_effect=lambda *a, **kw: printed.append(str(a[0]) if a else "")):
+            asyncio.run(runner.run(["bash"]))
+
+        assert any("credential snapshot active" in m for m in printed), (
+            f"Expected warning in shell-mode console output, got: {printed}"
+        )
+
+
+class TestCollectWritableBindsValidation:
+    """_collect_writable_binds skips and logs bad return values from plugins."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_gettempdir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.sandbox.runner.tempfile.gettempdir",
+            lambda: str(tmp_path),
+        )
+
+    def _call(self, return_value, monkeypatch):
+        import packagealert.sandbox.runner as runner_mod
+        from packagealert.languages.base import SandboxTargets
+        from unittest.mock import MagicMock
+
+        mock_lang = MagicMock()
+        mock_lang.name = "testlang"
+        mock_lang.configure_sandbox_writable = MagicMock(return_value=return_value)
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [mock_lang])
+
+        pairs, warnings = runner_mod._collect_writable_binds(
+            runner_mod.lang_registry,
+            flags_by_lang={},
+            cwd=Path("."),
+            targets=SandboxTargets(),
+            parsed_by_lang={},
+        )
+        return pairs, warnings
+
+    def test_non_list_return_is_skipped(self, tmp_path, monkeypatch, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call((Path(tmp_path), Path(tmp_path)), monkeypatch)
+        assert pairs == []
+        assert any("expected list" in r.message for r in caplog.records)
+
+    def test_list_of_strings_entries_are_skipped(self, tmp_path, monkeypatch, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([("/tmp/pa-x", "/dest")], monkeypatch)
+        assert pairs == []
+        assert any("invalid entry" in r.message for r in caplog.records)
+
+    def test_wrong_tuple_length_is_skipped(self, tmp_path, monkeypatch, caplog):
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(Path(tmp_path),)], monkeypatch)
+        assert pairs == []
+        assert any("invalid entry" in r.message for r in caplog.records)
+
+    def test_valid_entry_is_accepted(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        dest = home / "dest"
+        dest.mkdir()
+        pairs, _ = self._call([(src, dest)], monkeypatch)
+        assert (src, dest) in pairs
+
+    def test_mixed_valid_invalid_entries_partial_accept(self, tmp_path, monkeypatch, caplog):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        dest = home / "dest"
+        dest.mkdir()
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, dest), ("not", "paths")], monkeypatch)
+        assert (src, dest) in pairs
+        assert len(pairs) == 1
+        assert any("invalid entry" in r.message for r in caplog.records)
+
+    def test_duplicate_entries_are_deduped(self, tmp_path, monkeypatch, caplog):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        dest = home / "dest"
+        dest.mkdir()
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, dest), (src, dest)], monkeypatch)
+        assert pairs.count((src, dest)) == 1
+        assert any("duplicate entry" in r.message for r in caplog.records)
+
+    def test_duplicate_entries_with_different_spellings_are_deduped(self, tmp_path, monkeypatch, caplog):
+        """Entries that resolve to the same path (e.g. via .. or symlink) count as duplicates."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        dest = home / "dest"
+        dest.mkdir()
+        # Two spellings of dest that resolve identically.
+        dest_via_dotdot = home / "dest" / ".." / "dest"
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, dest), (src, dest_via_dotdot)], monkeypatch)
+        assert len(pairs) == 1
+        assert any("duplicate entry" in r.message for r in caplog.records)
+
+    def test_dest_outside_home_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """Dest pointing outside $HOME (e.g. /etc) must be rejected with a warning."""
+        import logging
+        src = tmp_path / "pa-creds"
+        src.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, Path("/etc/passwd"))], monkeypatch)
+        assert pairs == []
+        assert any("outside $HOME" in r.message for r in caplog.records)
+
+    def test_dest_at_root_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """Dest pointing to / must be rejected."""
+        import logging
+        src = tmp_path / "pa-creds"
+        src.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, Path("/"))], monkeypatch)
+        assert pairs == []
+        assert any("outside $HOME" in r.message for r in caplog.records)
+
+    def test_dest_at_home_itself_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """Dest == $HOME must be rejected (not strictly under home)."""
+        import logging
+        monkeypatch.setenv("HOME", str(tmp_path))
+        src = tmp_path / "pa-creds"
+        src.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, tmp_path)], monkeypatch)
+        assert pairs == []
+        assert any("outside $HOME" in r.message for r in caplog.records)
+
+    def test_relative_src_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """A relative src path must be rejected before reaching _is_safe_writable_bind_src."""
+        import logging
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        dest = home / "dest"
+        dest.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(Path("relative/pa-creds"), dest)], monkeypatch)
+        assert pairs == []
+        assert any("src is not absolute" in r.message for r in caplog.records)
+
+    def test_relative_dest_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """A relative dest path must be rejected before reaching _is_safe_writable_bind_dest."""
+        import logging
+        src = tmp_path / "pa-creds"
+        src.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, Path("relative/dest"))], monkeypatch)
+        assert pairs == []
+        assert any("dest is not absolute" in r.message for r in caplog.records)
 
 
 class TestExposeSSHKeysConfirmation:
@@ -4839,3 +5639,337 @@ class TestPhpLanguageHooks:
     def test_shell_env_no_vendor_without_composer_json(self, tmp_path):
         result = self._lang().shell_environment(tmp_path)
         assert tmp_path / "vendor" not in result.scan_targets
+
+
+# ---------------------------------------------------------------------------
+# _is_safe_writable_bind_src guard tests
+# ---------------------------------------------------------------------------
+
+class TestIsSafeWritableBindSrc:
+    """All tests monkeypatch gettempdir so results don't depend on where pytest
+    places tmp_path (e.g. --basetemp outside the real /tmp)."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_gettempdir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.sandbox.runner.tempfile.gettempdir",
+            lambda: str(tmp_path),
+        )
+
+    def test_accepts_pa_prefixed_dir_under_tempdir(self, tmp_path):
+        pa_dir = tmp_path / "pa-uv-auth-abc123"
+        pa_dir.mkdir()
+        assert _is_safe_writable_bind_src(pa_dir) is True
+
+    def test_rejects_non_pa_prefix_under_tempdir(self, tmp_path):
+        # A directory under the mocked temp root without the pa- prefix must be rejected.
+        other = tmp_path / "some-other-tool-dir"
+        other.mkdir()
+        assert _is_safe_writable_bind_src(other) is False
+
+    def test_rejects_pa_prefixed_file_not_dir(self, tmp_path):
+        pa_file = tmp_path / "pa-uv-auth-abc123"
+        pa_file.write_text("not a directory")
+        assert _is_safe_writable_bind_src(pa_file) is False
+
+    def test_rejects_home_directory(self):
+        assert _is_safe_writable_bind_src(Path.home()) is False
+
+    def test_rejects_path_outside_tempdir(self, tmp_path):
+        # /home is guaranteed outside the mocked tmp_path temp root.
+        assert _is_safe_writable_bind_src(Path("/home")) is False
+
+    def test_rejects_tempdir_root_itself(self, tmp_path):
+        assert _is_safe_writable_bind_src(tmp_path) is False
+
+    def test_rejects_filesystem_root(self):
+        assert _is_safe_writable_bind_src(Path("/")) is False
+
+    def test_returns_false_when_gettempdir_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.sandbox.runner.tempfile.gettempdir",
+            lambda: (_ for _ in ()).throw(OSError("no temp dir")),
+        )
+        pa_dir = tmp_path / "pa-uv-auth-abc123"
+        pa_dir.mkdir()
+        assert _is_safe_writable_bind_src(pa_dir) is False
+
+    def test_accepts_symlink_to_pa_prefixed_dir_under_tempdir(self, tmp_path):
+        # A symlink that resolves to a valid pa- directory must be accepted —
+        # _cleanup_writable_binds resolves before rmtree, so the guard only
+        # needs to verify the target, not reject the symlink itself.
+        real_dir = tmp_path / "pa-uv-auth-real"
+        real_dir.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+        assert _is_safe_writable_bind_src(link) is True
+
+
+class TestIsSafeWritableBindDest:
+    def test_rejects_relative_path(self):
+        assert _is_safe_writable_bind_dest(Path("relative/path")) is False
+
+    def test_rejects_root(self):
+        assert _is_safe_writable_bind_dest(Path("/")) is False
+
+    def test_rejects_etc(self):
+        assert _is_safe_writable_bind_dest(Path("/etc")) is False
+
+    def test_rejects_home_itself(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        # dest == home: not strictly under it
+        assert _is_safe_writable_bind_dest(tmp_path) is False
+
+    def test_accepts_path_under_home(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dest = tmp_path / ".local" / "share" / "uv" / "credentials"
+        assert _is_safe_writable_bind_dest(dest) is True
+
+    def test_rejects_path_outside_home(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        outside = tmp_path / "other"
+        assert _is_safe_writable_bind_dest(outside) is False
+
+    def test_rejects_path_that_escapes_home_via_traversal(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        # resolve(strict=False) on a ".." path normalises it, so /home/../other resolves outside home
+        dest = home / ".." / "other"
+        assert _is_safe_writable_bind_dest(dest) is False
+
+    def test_rejects_known_credential_dir(self, monkeypatch, tmp_path):
+        """Dest pointing directly at a credential dir (e.g. ~/.ssh) must be rejected."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _is_safe_writable_bind_dest(tmp_path / ".ssh") is False
+
+    def test_rejects_path_under_credential_dir(self, monkeypatch, tmp_path):
+        """Dest under a credential dir (e.g. ~/.aws/credentials) must be rejected."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _is_safe_writable_bind_dest(tmp_path / ".aws" / "credentials") is False
+
+    def test_rejects_ancestor_of_credential_dir(self, monkeypatch, tmp_path):
+        """Dest that is an ancestor of a credential dir (e.g. ~/.config, parent of ~/.config/gcloud)
+        must be rejected — a writable overlay on an ancestor re-exposes the credential dir."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert _is_safe_writable_bind_dest(tmp_path / ".config") is False
+
+    def test_accepts_path_that_does_not_overlap_credential_dirs(self, monkeypatch, tmp_path):
+        """Dest under $HOME and not overlapping any credential dir must be accepted."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dest = tmp_path / ".local" / "share" / "uv" / "credentials"
+        assert _is_safe_writable_bind_dest(dest) is True
+
+    def test_rejects_dest_equal_to_cwd(self, monkeypatch, tmp_path):
+        """Dest that equals cwd must be rejected — would shadow the project tree."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        cwd = home / "project"
+        assert _is_safe_writable_bind_dest(cwd, cwd) is False
+
+    def test_rejects_dest_under_cwd(self, monkeypatch, tmp_path):
+        """Dest under cwd must be rejected — a subdirectory overlay also shadows the project."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        cwd = home / "project"
+        assert _is_safe_writable_bind_dest(cwd / "src", cwd) is False
+
+    def test_rejects_dest_that_is_ancestor_of_cwd(self, monkeypatch, tmp_path):
+        """Dest that is an ancestor of cwd must be rejected — overlaying a parent shadows cwd too."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        cwd = home / "dev" / "project"
+        assert _is_safe_writable_bind_dest(home / "dev", cwd) is False
+
+    def test_accepts_path_under_home_not_overlapping_cwd(self, monkeypatch, tmp_path):
+        """Dest under $HOME but not overlapping cwd must be accepted."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        cwd = home / "project"
+        dest = home / ".local" / "share" / "uv" / "credentials"
+        assert _is_safe_writable_bind_dest(dest, cwd) is True
+
+
+class TestCleanupWritableBinds:
+    @pytest.fixture(autouse=True)
+    def _patch_gettempdir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "packagealert.sandbox.runner.tempfile.gettempdir",
+            lambda: str(tmp_path),
+        )
+
+    def test_deletes_underlying_dir_when_src_is_symlink(self, tmp_path):
+        """Cleanup must delete the real temp dir and the symlink when src is a symlink."""
+        real_dir = tmp_path / "pa-uv-auth-target"
+        real_dir.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _cleanup_writable_binds([(link, dest)])
+        assert not real_dir.exists(), "underlying temp dir must be deleted via resolved path"
+        assert not link.is_symlink(), "symlink must be removed after its target is deleted"
+
+    def test_deletes_real_dir_directly(self, tmp_path):
+        src = tmp_path / "pa-uv-auth-direct"
+        src.mkdir()
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        _cleanup_writable_binds([(src, dest)])
+        assert not src.exists()
+
+    def test_skips_unsafe_src_and_logs(self, tmp_path, caplog):
+        import logging
+        unsafe = tmp_path / "not-pa-prefixed"
+        unsafe.mkdir()
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            _cleanup_writable_binds([(unsafe, dest)])
+        assert unsafe.exists(), "unsafe src must not be deleted"
+        assert any("failed safety checks" in r.message for r in caplog.records)
+
+    def test_nonexistent_src_skipped_silently(self, tmp_path, caplog):
+        """Cleanup must not warn when src no longer exists — it is already gone."""
+        import logging
+        gone = tmp_path / "pa-uv-auth-gone"
+        # deliberately not created
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            _cleanup_writable_binds([(gone, dest)])
+        assert not any("refusing to delete" in r.message or "failed safety checks" in r.message
+                       for r in caplog.records)
+
+    def test_resolve_failure_logs_warning_and_skips(self, tmp_path, monkeypatch, caplog):
+        """Cleanup warns and skips when src cannot be resolved (e.g. permission error)."""
+        import logging
+        src = tmp_path / "pa-uv-auth-unresolvable"
+        src.mkdir()
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        original_resolve = Path.resolve
+
+        def failing_resolve(p, *args, **kwargs):
+            if p == src:
+                raise OSError("permission denied")
+            return original_resolve(p, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", failing_resolve)
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            _cleanup_writable_binds([(src, dest)])
+        assert src.exists(), "unresolvable src must not be deleted"
+        assert any("could not resolve" in r.message for r in caplog.records)
+
+    def test_deletes_resolved_path_not_symlink_target_at_delete_time(self, tmp_path):
+        """Cleanup deletes the path resolved at loop entry, not whatever the symlink
+        points to when rmtree runs — closing the TOCTOU window."""
+        real_dir = tmp_path / "pa-uv-auth-original"
+        real_dir.mkdir()
+        unrelated = tmp_path / "pa-uv-auth-unrelated"
+        unrelated.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+
+        original_rmtree = shutil.rmtree
+        deleted: list[Path] = []
+
+        def capturing_rmtree(path, **kwargs):
+            # Retarget the symlink to unrelated before the actual delete —
+            # cleanup must still delete real_dir (the path resolved at entry),
+            # not unrelated.
+            if link.is_symlink():
+                link.unlink()
+                link.symlink_to(unrelated)
+            deleted.append(Path(path))
+            original_rmtree(path, **kwargs)
+
+        import unittest.mock
+        with unittest.mock.patch("packagealert.sandbox.runner.shutil.rmtree", capturing_rmtree):
+            _cleanup_writable_binds([(link, tmp_path / "dest")])
+
+        assert real_dir in deleted, "must delete the path resolved at loop entry"
+        assert unrelated not in deleted, "must not delete the retargeted symlink destination"
+        assert unrelated.exists(), "unrelated dir must be untouched"
+
+    def test_dangling_symlink_is_unlinked(self, tmp_path):
+        """A symlink whose target was already removed must be unlinked, not silently skipped."""
+        real_dir = tmp_path / "pa-uv-auth-target"
+        real_dir.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+        real_dir.rmdir()  # make it dangling
+        assert link.is_symlink() and not link.exists(), "precondition: dangling symlink"
+
+        _cleanup_writable_binds([(link, tmp_path / "dest")])
+
+        assert not link.exists() and not os.path.lexists(link), "dangling symlink must be removed"
+
+    def test_dangling_symlink_unlink_failure_is_silently_swallowed(self, tmp_path, monkeypatch):
+        """If unlinking a dangling symlink raises OSError, cleanup continues without propagating."""
+        real_dir = tmp_path / "pa-uv-auth-target"
+        real_dir.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+        real_dir.rmdir()
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(p, *args, **kwargs):
+            if p == link:
+                raise OSError("read-only filesystem")
+            return original_unlink(p, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        # Must not raise even when unlink fails.
+        _cleanup_writable_binds([(link, tmp_path / "dest")])
+
+    def test_symlink_unlink_failure_after_rmtree_is_silently_swallowed(self, tmp_path, monkeypatch):
+        """If unlinking the symlink after rmtree raises OSError, cleanup does not propagate."""
+        real_dir = tmp_path / "pa-uv-auth-target"
+        real_dir.mkdir()
+        link = tmp_path / "pa-link"
+        link.symlink_to(real_dir)
+
+        original_unlink = Path.unlink
+
+        def failing_unlink(p, *args, **kwargs):
+            if p == link:
+                raise OSError("permission denied")
+            return original_unlink(p, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        # rmtree deletes the real dir; the subsequent symlink unlink fails — must not raise.
+        _cleanup_writable_binds([(link, tmp_path / "dest")])
+        assert not real_dir.exists(), "underlying dir must still be deleted"
+
+    def test_oserror_from_lexists_is_caught_and_loop_continues(self, tmp_path, monkeypatch, caplog):
+        """An OSError from os.path.lexists must not abort cleanup of remaining entries."""
+        import logging
+        import packagealert.sandbox.runner as runner_mod
+
+        good_src = tmp_path / "pa-uv-auth-good"
+        good_src.mkdir()
+        bad_src = tmp_path / "pa-uv-auth-bad"
+        bad_src.mkdir()
+
+        original_lexists = os.path.lexists
+
+        def raising_lexists(p):
+            if str(p) == str(bad_src):
+                raise OSError("permission denied")
+            return original_lexists(p)
+
+        monkeypatch.setattr(runner_mod.os.path, "lexists", raising_lexists)
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            _cleanup_writable_binds([(bad_src, tmp_path / "dest"), (good_src, tmp_path / "dest")])
+
+        assert not good_src.exists(), "good src must still be cleaned up after bad entry raises"
+        assert any("unexpected OSError" in r.message for r in caplog.records)
+

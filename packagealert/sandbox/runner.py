@@ -9,12 +9,12 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field, replace as dataclass_replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from packagealert.languages import registry as lang_registry
-from packagealert.languages.base import PackageSpec, SandboxEnvError, SandboxScanError
+from packagealert.languages.base import PackageSpec, SandboxEnvError, SandboxScanError, SandboxTargets
 from packagealert.parsers.process_args import (
     ParsedInstall,
     parse_package_spec,
@@ -380,8 +380,7 @@ class SandboxRunner:
         # a more-specific ro-bind on any of them would silently shadow it.
         home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
 
-        from packagealert.languages.base import SandboxTargets as _SandboxTargets
-        _cs_targets = _SandboxTargets(
+        _cs_targets = SandboxTargets(
             scan_targets=list(ctx.scan_targets),
             write_dirs=list(ctx.write_dirs),
         )
@@ -419,54 +418,64 @@ class SandboxRunner:
                     log.warning("configure_sandbox raised for lang=%s — skipping",
                                 _ns_name, exc_info=True)
 
-        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
-        if not self._check_extra_tmpfs(extra_tmpfs):
-            return 1
+        # Collect writable bind pairs from configure_sandbox_writable.
+        _parsed_by_lang = {_primary_lang_name: ctx.parsed} if _primary_lang_name and ctx.parsed else {}
+        _writable_binds = self._collect_and_print_writable_binds(
+            flags, cwd, _cs_targets, _parsed_by_lang,
+        )
 
-        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+        try:
+            extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+            if not self._check_extra_tmpfs(extra_tmpfs):
+                return 1
 
-        argv = _resolve_real_binary(argv)
-        if ctx.parsed is not None:
-            lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
-            if lang is not None:
-                lang_name = getattr(lang, "name", "?")
-                prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
-                if callable(prepare_fn):
-                    try:
-                        argv = prepare_fn(argv, cwd)
-                    except Exception:
-                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
-                editable_roots = self._cfg.sandbox.editable_roots
-                extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
-                if callable(extra_ro_fn):
-                    try:
-                        for p in extra_ro_fn(argv, cwd):
-                            if _is_safe_sandbox_path(p, editable_roots):
-                                home_ro.append(p.resolve())
-                            else:
-                                log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
-                                self._print_editable_rejection(p, editable_roots)
-                    except Exception:
-                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
-                extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
-                if callable(extra_write_fn):
-                    try:
-                        for p in extra_write_fn(argv, cwd):
-                            if _is_safe_sandbox_path(p, editable_roots):
-                                ctx.write_dirs.append(p.resolve())
-                            else:
-                                log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
-                                self._print_editable_rejection(p, editable_roots)
-                    except Exception:
-                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
-        result = subprocess.run(build_cmd(
-            argv, ctx.write_dirs,
-            allow_network=allow_network,
-            env=sandbox_env,
-            home_ro_dirs=home_ro,
-            extra_tmpfs=extra_tmpfs,
-            post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
-        ))
+            home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+
+            argv = _resolve_real_binary(argv)
+            if ctx.parsed is not None:
+                lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+                if lang is not None:
+                    lang_name = getattr(lang, "name", "?")
+                    prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
+                    if callable(prepare_fn):
+                        try:
+                            argv = prepare_fn(argv, cwd)
+                        except Exception:
+                            log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
+                    editable_roots = self._cfg.sandbox.editable_roots
+                    extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
+                    if callable(extra_ro_fn):
+                        try:
+                            for p in extra_ro_fn(argv, cwd):
+                                if _is_safe_sandbox_path(p, editable_roots):
+                                    home_ro.append(p.resolve())
+                                else:
+                                    log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
+                                    self._print_editable_rejection(p, editable_roots)
+                        except Exception:
+                            log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+                    extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
+                    if callable(extra_write_fn):
+                        try:
+                            for p in extra_write_fn(argv, cwd):
+                                if _is_safe_sandbox_path(p, editable_roots):
+                                    ctx.write_dirs.append(p.resolve())
+                                else:
+                                    log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
+                                    self._print_editable_rejection(p, editable_roots)
+                        except Exception:
+                            log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+            result = subprocess.run(build_cmd(
+                argv, ctx.write_dirs,
+                allow_network=allow_network,
+                env=sandbox_env,
+                home_ro_dirs=home_ro,
+                extra_tmpfs=extra_tmpfs,
+                post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
+                writable_binds=_writable_binds,
+            ))
+        finally:
+            _cleanup_writable_binds(_writable_binds)
         print()
 
         if result.returncode != 0:
@@ -598,6 +607,25 @@ class SandboxRunner:
             roots = ", ".join(f'"{r}"' for r in editable_roots)
             self._console.print(f"  Path is outside configured editable_roots: [{roots}]", style="dim", markup=False)
             self._console.print(f'  Add "{p.parent}" to sandbox.editable_roots to permit this install.', style="dim", markup=False)
+
+    def _collect_and_print_writable_binds(
+        self,
+        flags_by_lang: dict[str, frozenset[str]],
+        cwd: Path,
+        targets: SandboxTargets,
+        parsed_by_lang: dict[str, ParsedInstall | None],
+    ) -> list[tuple[Path, Path]]:
+        """Collect writable-bind pairs and print any security warnings via the runner console.
+
+        Thin wrapper around :func:`_collect_writable_binds` that handles the
+        warning-printing step so callers don't duplicate it.
+        """
+        pairs, warnings = _collect_writable_binds(
+            lang_registry, flags_by_lang, cwd, targets, parsed_by_lang,
+        )
+        for msg in warnings:
+            self._console.print(msg)
+        return pairs
 
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
         """Return False (and print an error) if any configured extra_tmpfs path does not exist.
@@ -875,7 +903,6 @@ class SandboxRunner:
                 continue
             configure_fn = getattr(lang, "configure_sandbox", None)
             if callable(configure_fn):
-                from packagealert.languages.base import SandboxTargets
                 _sh_targets = SandboxTargets(
                     scan_targets=list(scan_targets),
                     write_dirs=list(write_dirs),
@@ -886,20 +913,33 @@ class SandboxRunner:
                     log.warning("configure_sandbox raised for lang=%s in shell mode — skipping",
                                 lang_name_sh, exc_info=True)
 
-        extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
-        if not self._check_extra_tmpfs(extra_tmpfs):
-            return 1
+        # Collect writable bind pairs from configure_sandbox_writable (shell mode).
+        _wb_sh_targets = SandboxTargets(
+            scan_targets=list(scan_targets),
+            write_dirs=list(write_dirs),
+        )
+        _writable_binds = self._collect_and_print_writable_binds(
+            shell_flags, cwd, _wb_sh_targets, {},
+        )
 
-        home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+        try:
+            extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+            if not self._check_extra_tmpfs(extra_tmpfs):
+                return 1
 
-        result = subprocess.run(build_cmd(
-            argv, write_dirs,
-            allow_network=allow_network,
-            env=sandbox_env,
-            home_ro_dirs=home_ro,
-            extra_tmpfs=extra_tmpfs,
-            post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
-        ))
+            home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+
+            result = subprocess.run(build_cmd(
+                argv, write_dirs,
+                allow_network=allow_network,
+                env=sandbox_env,
+                home_ro_dirs=home_ro,
+                extra_tmpfs=extra_tmpfs,
+                post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
+                writable_binds=_writable_binds,
+            ))
+        finally:
+            _cleanup_writable_binds(_writable_binds)
         print()
 
         # Post-exit: scan changed lock files, then any newly installed packages.
@@ -1542,6 +1582,248 @@ def credential_dirs() -> tuple[Path, ...]:
         home / ".kube",
         home / ".docker",
     )
+
+
+def _collect_writable_binds(
+    lang_registry: Any,
+    flags_by_lang: dict[str, frozenset[str]],
+    cwd: Path,
+    targets: SandboxTargets,
+    parsed_by_lang: dict[str, ParsedInstall | None],
+) -> tuple[list[tuple[Path, Path]], list[str]]:
+    """Collect (src, dest) writable-bind pairs and security warnings from all language modules.
+
+    Returns ``(pairs, warnings)`` where *warnings* is a list of Rich markup
+    strings to be printed by the caller via its console.  *parsed_by_lang* maps
+    language name to the parsed command object for that language.  Languages
+    absent from the mapping receive ``None`` (the correct value in shell mode
+    and for cross-namespace calls).
+    """
+    result: list[tuple[Path, Path]] = []
+    seen: set[tuple[Path, Path]] = set()
+    warnings: list[str] = []
+    for lang in lang_registry.all_languages():
+        name = getattr(lang, "name", "?")
+        lang_flags = flags_by_lang.get(name, frozenset())
+        parsed = parsed_by_lang.get(name)
+        fn = getattr(lang, "configure_sandbox_writable", None)
+        if callable(fn):
+            try:
+                pairs = fn(parsed, cwd, lang_flags, targets)
+            except Exception:
+                log.warning(
+                    "configure_sandbox_writable raised for lang=%s — skipping",
+                    name,
+                    exc_info=True,
+                )
+                continue
+            if not isinstance(pairs, list):
+                log.warning(
+                    "configure_sandbox_writable lang=%s returned %s, expected list — skipping",
+                    name, type(pairs).__name__,
+                )
+                continue
+            valid_pairs: list[tuple[Path, Path]] = []
+            for entry in pairs:
+                if (
+                    isinstance(entry, tuple)
+                    and len(entry) == 2
+                    and isinstance(entry[0], Path)
+                    and isinstance(entry[1], Path)
+                ):
+                    if not entry[0].is_absolute():
+                        log.warning(
+                            "configure_sandbox_writable lang=%s: src is not absolute, skipping: %s",
+                            name, entry[0],
+                        )
+                    elif not entry[1].is_absolute():
+                        log.warning(
+                            "configure_sandbox_writable lang=%s: dest is not absolute, skipping: %s",
+                            name, entry[1],
+                        )
+                    elif not _is_safe_writable_bind_src(entry[0]):
+                        log.warning(
+                            "configure_sandbox_writable lang=%s: src failed safety checks "
+                            "(must be a pa- prefixed directory under tempdir), skipping: %s",
+                            name, entry[0],
+                        )
+                    elif not _is_safe_writable_bind_dest(entry[1], cwd):
+                        log.warning(
+                            "configure_sandbox_writable lang=%s: dest failed safety checks "
+                            "(must be strictly under $HOME, not a credential dir, and not overlapping the project dir): %s",
+                            name, entry[1],
+                        )
+                    else:
+                        try:
+                            norm_key = (entry[0].resolve(strict=False), entry[1].resolve(strict=False))
+                        except (OSError, RuntimeError):
+                            norm_key = entry
+                        if norm_key in seen:
+                            log.warning(
+                                "configure_sandbox_writable lang=%s returned duplicate entry %r — skipping",
+                                name, entry,
+                            )
+                        else:
+                            seen.add(norm_key)
+                            valid_pairs.append(entry)
+                else:
+                    log.warning(
+                        "configure_sandbox_writable lang=%s returned invalid entry %r "
+                        "(expected (Path, Path) tuple) — skipping entry",
+                        name, entry,
+                    )
+            if valid_pairs:
+                result.extend(valid_pairs)
+                warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
+                if callable(warn_fn):
+                    try:
+                        msg = warn_fn(parsed, cwd, lang_flags, targets)
+                        if msg:
+                            warnings.append(msg)
+                    except Exception:
+                        log.warning(
+                            "configure_sandbox_writable_warning raised for lang=%s — skipping",
+                            name,
+                            exc_info=True,
+                        )
+    return result, warnings
+
+
+def _cleanup_writable_binds(writable_binds: list[tuple[Path, Path]]) -> None:
+    """Delete temp directories created by configure_sandbox_writable.
+
+    Called in finally blocks to ensure cleanup regardless of how the run exits.
+    Always resolves *src* before deletion so that a symlink returned by a plugin
+    does not cause a silent leak (shutil.rmtree on a symlink removes the link
+    but leaves the underlying directory intact).
+    """
+    for _wb_src, _ in writable_binds:
+        try:
+            if not os.path.lexists(_wb_src):
+                continue
+            if _wb_src.is_symlink() and not _wb_src.exists():
+                # Dangling symlink — target was removed; unlink the stale entry.
+                try:
+                    _wb_src.unlink()
+                except OSError:
+                    pass
+                continue
+            try:
+                resolved = _wb_src.resolve(strict=False)
+            except (OSError, RuntimeError):
+                log.warning(
+                    "configure_sandbox_writable: could not resolve src %s, skipping cleanup",
+                    _wb_src,
+                )
+                continue
+            if _is_safe_writable_bind_src(resolved):
+                shutil.rmtree(resolved, ignore_errors=True)
+                if _wb_src.is_symlink() and _wb_src != resolved:
+                    try:
+                        _wb_src.unlink()
+                    except OSError:
+                        pass
+            else:
+                log.warning(
+                    "configure_sandbox_writable: refusing to delete src %s — "
+                    "failed safety checks (must be a pa- prefixed directory under tempdir)",
+                    _wb_src,
+                )
+        except OSError:
+            log.warning(
+                "configure_sandbox_writable: unexpected OSError during cleanup of %s, skipping",
+                _wb_src,
+                exc_info=True,
+            )
+
+
+_PA_WRITABLE_BIND_PREFIX = "pa-"
+
+
+def _is_safe_writable_bind_src(src: Path) -> bool:
+    """Return True if *src* resolves to a directory that is safe to delete.
+
+    Three guards must all pass:
+    1. *src* resolves to a path strictly under the system temp directory.
+    2. The resolved path's final component starts with ``pa-`` — the prefix
+       used by all package-alert mkdtemp calls — so that arbitrary paths under
+       /tmp created by other processes are never eligible for deletion.
+    3. The resolved path is a directory (``resolved.is_dir()``).
+
+    Note: *src* itself may be a symlink.  ``_cleanup_writable_binds`` always
+    resolves *src* before calling ``shutil.rmtree`` so that the underlying
+    directory is deleted rather than just the symlink.
+    """
+    try:
+        resolved = src.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    try:
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+    except (OSError, RuntimeError):
+        return False
+    if resolved == tmp_root or not resolved.is_relative_to(tmp_root):
+        return False
+    if not resolved.name.startswith(_PA_WRITABLE_BIND_PREFIX):
+        return False
+    return resolved.is_dir()
+
+
+def _is_safe_writable_bind_dest(dest: Path, cwd: Path | None = None) -> bool:
+    """Return True if *dest* is an acceptable writable-bind mount point.
+
+    Writable binds overlay the sandbox's home tmpfs with credential or config
+    directories.  To prevent plugins from punching writable holes into the
+    read-only system filesystem or into arbitrary project paths, *dest* must:
+
+    1. Be an absolute path.
+    2. Resolve to a path strictly under the user's home directory — the only
+       area where writable overlays are meaningful given the sandbox layout.
+    3. Not be, be under, or be an ancestor of any entry in ``credential_dirs()``
+       — overlaying a credential directory writably would re-expose secrets the
+       sandbox deliberately hides.  Ancestor rejection (e.g. ``~/.config``)
+       prevents writable overlays that would include a credential dir as a
+       subdirectory.
+    4. Not be, be under, or be an ancestor of *cwd* (the project directory) —
+       writable_binds are applied after write_dirs in the bwrap command, so a
+       plugin that targets the project tree could shadow it with a temp-dir
+       overlay, bypassing lockfile scanning or restore on the host.
+
+    Paths pointing to ``/``, ``/etc``, ``/usr``, the project directory,
+    anywhere outside ``$HOME``, or any known credential directory are rejected.
+    """
+    if not dest.is_absolute():
+        return False
+    try:
+        resolved = dest.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    home = Path.home().resolve()
+    if resolved == home or not resolved.is_relative_to(home):
+        return False
+    for cred in credential_dirs():
+        try:
+            cred_resolved = cred.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if (
+            resolved == cred_resolved
+            or resolved.is_relative_to(cred_resolved)
+            or cred_resolved.is_relative_to(resolved)
+        ):
+            return False
+    if cwd is not None:
+        try:
+            cwd_resolved = cwd.resolve(strict=False)
+        except (OSError, RuntimeError):
+            cwd_resolved = None
+        if cwd_resolved is not None and (
+            resolved == cwd_resolved
+            or resolved.is_relative_to(cwd_resolved)
+            or cwd_resolved.is_relative_to(resolved)
+        ):
+            return False
+    return True
 
 
 def _is_safe_sandbox_path(p: Path, editable_roots: list[Path] | None = None) -> bool:

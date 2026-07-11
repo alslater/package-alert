@@ -124,3 +124,57 @@ def test_languages_info_buggy_top_packages_url():
 
     assert result.exit_code == 0, result.output
     assert "[error]" in result.output
+
+
+def test_languages_info_shows_available_flags():
+    """languages info renders a flags table when available_flags() returns valid entries."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "available_flags", return_value=[("uv-auth", "Snapshot uv credentials")]):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "Available flags:" in result.output
+    assert "python:uv-auth" in result.output
+    assert "Snapshot uv credentials" in result.output
+
+
+def test_languages_info_empty_available_flags():
+    """languages info prints 'none' when available_flags() returns an empty list."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "available_flags", return_value=[]):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "Available flags: none" in result.output
+
+
+def test_languages_info_invalid_flag_entries_show_error():
+    """languages info shows [error] when all available_flags() entries are invalid."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "available_flags", return_value=["not-a-tuple", 42, (1, 2)]):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "[error]" in result.output
+
+
+def test_languages_info_available_flags_raises():
+    """languages info shows [error] and does not crash when available_flags() raises."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "available_flags", side_effect=RuntimeError("flags boom")):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "[error]" in result.output
