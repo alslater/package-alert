@@ -321,7 +321,7 @@ async def _run_scan_cache(cfg):
     from packagealert.languages import registry as lang_registry
     from datetime import datetime, timezone
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     osv_client = OsvClient(cfg.osv)
     osv_cache = OsvCache(db, cfg.osv)
     found = 0
@@ -403,7 +403,7 @@ async def _run_query(cfg, ecosystem: str, package: str, version: Optional[str]):
     from packagealert.osv.cache import OsvCache
     from packagealert.storage.db import open_db
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     client = OsvClient(cfg.osv)
     cache = OsvCache(db, cfg.osv)
 
@@ -451,7 +451,7 @@ async def _run_alerts(cfg, limit: int):
     import datetime as dt
     from packagealert.storage.db import open_db
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     table = Table(title="Recent Alerts")
     table.add_column("Package", style="bold")
     table.add_column("Ecosystem")
@@ -579,7 +579,7 @@ async def _run_scan_project(
     if scan_unpinned:
         to_query.extend(result.unpinned)
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     osv_client = OsvClient(cfg.osv)
     osv_cache = OsvCache(db, cfg.osv)
 
@@ -799,7 +799,7 @@ async def _run_clear_cache(cfg, ecosystem: Optional[str]):
         console.print(f"[red]Unknown ecosystem '{ecosystem}'. Use 'pypi', 'npm', or 'packagist'.[/red]")
         raise typer.Exit(1)
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     if ecosystem:
         await db.execute("DELETE FROM osv_cache WHERE ecosystem=?", (ecosystem,))
     else:
@@ -1362,7 +1362,7 @@ def schedule_add(
 async def _schedule_add(cfg, path: str, schedule: str, scan_type: str) -> None:
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import add_project
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         await add_project(db, path=path, schedule=schedule, scan_type=scan_type)
     finally:
@@ -1386,7 +1386,7 @@ def schedule_remove(
         console.print("[red]Specify --installed or --project, not both.[/red]")
         raise typer.Exit(1)
     scan_type: Optional[str] = "installed" if installed else ("project" if project else None)
-    removed = asyncio.run(_schedule_remove(str(root), scan_type))
+    removed = asyncio.run(_schedule_remove(cfg, str(root), scan_type))
     label = f" ({scan_type})" if scan_type else ""
     if removed:
         console.print(f"[green]✓[/green] Removed [bold]{root}[/bold]{label} from scheduled scans.")
@@ -1394,10 +1394,10 @@ def schedule_remove(
         console.print(f"[yellow]{root}[/yellow]{label} was not in the scheduled scan list.")
 
 
-async def _schedule_remove(path: str, scan_type: Optional[str]) -> bool:
+async def _schedule_remove(cfg, path: str, scan_type: Optional[str]) -> bool:
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import remove_project
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         return await remove_project(db, path, scan_type=scan_type)
     finally:
@@ -1407,16 +1407,16 @@ async def _schedule_remove(path: str, scan_type: Optional[str]) -> bool:
 @schedule_app.command("list")
 def schedule_list(config: Optional[Path] = _cfg_option):
     """List all projects registered for scheduled scans."""
-    _load(config)  # validates config; return value unused
-    asyncio.run(_schedule_list())
+    cfg, _ = _load(config)
+    asyncio.run(_schedule_list(cfg))
 
 
-async def _schedule_list() -> None:
+async def _schedule_list(cfg) -> None:
     import datetime
     from packagealert.storage.db import open_db
     from packagealert.scheduler.db import list_projects
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         projects = await list_projects(db)
     finally:
@@ -1450,12 +1450,12 @@ def scans_list(
     config: Optional[Path] = _cfg_option,
 ):
     """List completed scheduled scans for a project."""
-    _load(config)  # validates config; return value unused
+    cfg, _ = _load(config)
     root = (path or Path.cwd()).resolve()
-    asyncio.run(_scans_list(str(root), limit))
+    asyncio.run(_scans_list(cfg, str(root), limit))
 
 
-async def _scans_list(project_path: str, limit: int) -> None:
+async def _scans_list(cfg, project_path: str, limit: int) -> None:
     import datetime
     import socket
     from packagealert.plugins.registry import plugin_registry
@@ -1466,7 +1466,7 @@ async def _scans_list(project_path: str, limit: int) -> None:
     if await plugin_registry.try_scans_list(project_path, hostname, limit):
         return
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         records = await list_scan_results(db, project_path, limit=limit)
     finally:
@@ -1508,11 +1508,11 @@ def scans_listall(
     config: Optional[Path] = _cfg_option,
 ):
     """List completed scheduled scans across all projects."""
-    _load(config)  # validates config; return value unused
-    asyncio.run(_scans_listall(limit))
+    cfg, _ = _load(config)
+    asyncio.run(_scans_listall(cfg, limit))
 
 
-async def _scans_listall(limit: int) -> None:
+async def _scans_listall(cfg, limit: int) -> None:
     import datetime
     import socket
     from packagealert.plugins.registry import plugin_registry
@@ -1523,7 +1523,7 @@ async def _scans_listall(limit: int) -> None:
     if await plugin_registry.try_scans_listall(hostname, limit):
         return
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         records = await list_all_scan_results(db, limit=limit)
     finally:
@@ -1569,11 +1569,11 @@ def scans_show(
     config: Optional[Path] = _cfg_option,
 ):
     """Show findings from a completed scheduled scan."""
-    _load(config)  # validates config; return value unused
-    asyncio.run(_scans_show(scan_id, fmt, details))
+    cfg, _ = _load(config)
+    asyncio.run(_scans_show(cfg, scan_id, fmt, details))
 
 
-async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
+async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
     import datetime
     import json as jsonlib
     from packagealert.plugins.registry import plugin_registry
@@ -1583,7 +1583,7 @@ async def _scans_show(scan_id: int, fmt: str, show_details: bool) -> None:
     if await plugin_registry.try_scans_show(scan_id, fmt, show_details):
         return
 
-    db = await open_db()
+    db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         record = await get_scan_result(db, scan_id)
     finally:

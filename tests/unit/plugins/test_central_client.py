@@ -163,6 +163,275 @@ async def test_report_scan_clean():
 
 
 @respx.mock
+async def test_report_scan_returns_true_on_success():
+    from packagealert.plugins.central.client import CentralClient
+    from packagealert.models.scans import ScanResult
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        return_value=httpx.Response(201, json={"id": 5})
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    scan = ScanResult(
+        project_path="/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+    )
+    result = await client.report_scan("host", scan)
+    await client.aclose()
+    assert result.ok is True
+    assert result.payload is not None
+    assert result.error is None
+    assert bool(result) is True
+
+
+@respx.mock
+async def test_report_scan_returns_false_on_failure():
+    from packagealert.plugins.central.client import CentralClient
+    from packagealert.models.scans import ScanResult
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    scan = ScanResult(
+        project_path="/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+    )
+    result = await client.report_scan("host", scan)
+    await client.aclose()
+    assert result.ok is False
+    # payload is still the one that was attempted, so callers can enqueue it
+    # to the outbox without rebuilding.
+    assert result.payload is not None
+    assert result.error is not None
+    # A caller that writes `if await client.report_scan(...):` must see this
+    # as falsy — a plain dataclass would be truthy here regardless of `ok`,
+    # silently treating a failed report as successful.
+    assert bool(result) is False
+    assert not result
+    # ConnectError is a connection-level failure (server never reached) —
+    # classified as retryable, so _drain_outbox uses this to short-circuit.
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
+async def test_report_alert_returns_true_on_success():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        return_value=httpx.Response(201, json={"id": 9})
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.report_alert("host", _event(), _osv_result())
+    await client.aclose()
+    assert result.ok is True
+    assert result.payload is not None
+    assert bool(result) is True
+
+
+@respx.mock
+async def test_report_alert_returns_false_on_failure():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        side_effect=httpx.ConnectError("refused")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.report_alert("host", _event(), _osv_result())
+    await client.aclose()
+    assert result.ok is False
+    assert result.payload is not None
+    assert result.error is not None
+    assert bool(result) is False
+    assert not result
+
+
+def test_build_scan_payload_matches_report_scan_shape():
+    from packagealert.plugins.central.client import build_scan_payload
+    from packagealert.models.scans import ScanResult
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=1,
+        findings=[{"package": "evil"}], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["hostname"] == "host"
+    assert payload["root"] == "/home/user/proj"
+    assert payload["status"] == "findings"
+    assert payload["finding_count"] == 1
+
+
+def test_build_alert_payload_osv():
+    from packagealert.plugins.central.client import build_alert_payload
+    payload = build_alert_payload("host", _event(), _osv_result())
+    assert payload is not None
+    assert payload["kind"] == "osv"
+    assert payload["package_name"] == "evil-pkg"
+
+
+def test_build_alert_payload_risk():
+    from packagealert.plugins.central.client import build_alert_payload
+    payload = build_alert_payload("host", _event("risky-pkg"), _risk_report())
+    assert payload is not None
+    assert payload["kind"] == "heuristic"
+    assert payload["risk_score"] == 75
+
+
+@respx.mock
+async def test_send_scan_payload_posts_given_payload():
+    from packagealert.plugins.central.client import CentralClient
+    route = respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        return_value=httpx.Response(201, json={"id": 6})
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is True
+    assert bool(result) is True
+    assert result.error is None
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"hostname": "host", "root": "/proj"}
+
+
+@respx.mock
+async def test_send_scan_payload_returns_error_string_on_failure():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        return_value=httpx.Response(500, text="server exploded")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is False
+    assert bool(result) is False
+    assert not result
+    assert result.error is not None
+    assert "500" in result.error
+    # payload is preserved even on failure, so a caller (e.g. _drain_outbox)
+    # never needs to reconstruct it to enqueue/re-enqueue.
+    assert result.payload == {"hostname": "host", "root": "/proj"}
+    # 500 is a server-wide error, not specific to this payload — retryable,
+    # so _drain_outbox should short-circuit rather than draining the rest
+    # of a possibly-large queue against a server that's currently broken.
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
+async def test_send_scan_payload_marks_connection_error_as_retryable():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is False
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
+async def test_send_scan_payload_marks_timeout_as_retryable():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        side_effect=httpx.ConnectTimeout("timed out")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is False
+    # ConnectTimeout is an httpx.TransportError subclass, same as ConnectError
+    # — both represent "server never reached", so both classify the same way.
+    assert result.error_kind == "retryable"
+
+
+@pytest.mark.parametrize("status", [400, 404, 409, 413, 415, 422])
+@respx.mock
+async def test_send_scan_payload_classifies_payload_specific_statuses(status):
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        return_value=httpx.Response(status)
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is False
+    assert result.error_kind == "payload_specific"
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, 500, 502, 503, 504])
+@respx.mock
+async def test_send_scan_payload_classifies_retryable_statuses(status):
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/scans").mock(
+        return_value=httpx.Response(status)
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    await client.aclose()
+    assert result.ok is False
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
+async def test_send_alert_payload_posts_given_payload():
+    from packagealert.plugins.central.client import CentralClient
+    route = respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        return_value=httpx.Response(201, json={"id": 7})
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    await client.aclose()
+    assert result.ok is True
+    assert bool(result) is True
+    assert result.error is None
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"hostname": "host", "package_name": "evil"}
+
+
+@respx.mock
+async def test_send_alert_payload_returns_error_string_on_failure():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        return_value=httpx.Response(422)
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    await client.aclose()
+    assert result.ok is False
+    assert bool(result) is False
+    assert not result
+    assert result.error is not None
+    assert "422" in result.error
+    assert result.payload == {"hostname": "host", "package_name": "evil"}
+    # 422 is a validation failure specific to this payload — other queued
+    # entries may still succeed, so this is not retryable.
+    assert result.error_kind == "payload_specific"
+
+
+@respx.mock
+async def test_send_alert_payload_marks_auth_failure_as_retryable():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        return_value=httpx.Response(401)
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    await client.aclose()
+    assert result.ok is False
+    # 401 means authentication itself is broken — every subsequent request
+    # will be rejected the same way, so this is retryable/short-circuiting.
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
+async def test_send_alert_payload_marks_connection_error_as_retryable():
+    from packagealert.plugins.central.client import CentralClient
+    respx.post("https://fleet.example.com/api/ingest/alerts").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    await client.aclose()
+    assert result.ok is False
+    assert result.error_kind == "retryable"
+
+
+@respx.mock
 async def test_fetch_config_returns_toml():
     from packagealert.plugins.central.client import CentralClient
     respx.get("https://fleet.example.com/api/ingest/config").mock(
@@ -304,3 +573,73 @@ async def test_get_scan_raises_scan_not_found_on_404():
     with pytest.raises(ScanNotFound):
         await client.get_scan(99)
     await client.aclose()
+
+
+async def test_report_alert_returns_false_on_payload_build_error():
+    from packagealert.plugins.central.client import CentralClient
+
+    class _BrokenResult:
+        """Not a RiskReport and has no .advisories — forces build_alert_payload to raise."""
+
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    # Must not raise — a malformed event/result must be logged and swallowed,
+    # not propagate out of report_alert.
+    result = await client.report_alert("host", _event(), _BrokenResult())
+    await client.aclose()
+    assert result.ok is False
+    # payload build failed entirely, so there's nothing to enqueue/resend.
+    assert result.payload is None
+
+
+async def test_report_scan_returns_false_on_payload_build_error():
+    from packagealert.plugins.central.client import CentralClient
+
+    class _BrokenScan:
+        """Missing required ScanResult attributes — forces build_scan_payload to raise."""
+        project_path = "/proj"
+        # scan_type, finding_count, findings, sources, scanned_at intentionally absent
+
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    result = await client.report_scan("host", _BrokenScan())
+    await client.aclose()
+    assert result.ok is False
+    assert result.payload is None
+    assert bool(result) is False
+
+
+def test_report_result_truthiness_mirrors_ok():
+    # A plain @dataclass is always truthy regardless of field values — this
+    # is the exact hazard __bool__ exists to close. Construct ReportResult
+    # directly (no HTTP involved) to pin down the contract at the type level.
+    from packagealert.plugins.central.client import ReportResult
+
+    ok_result = ReportResult(ok=True, payload={"a": 1}, error=None)
+    assert bool(ok_result) is True
+    assert ok_result  # truthy in a plain `if result:` context
+
+    failed_result = ReportResult(ok=False, payload={"a": 1}, error="send failed")
+    assert bool(failed_result) is False
+    assert not failed_result  # falsy even though payload/error are non-empty
+
+    # Also falsy when there's nothing at all — the all-empty case must not
+    # accidentally read as "extra falsy" for the wrong reason (e.g. because
+    # payload is None), it must be falsy specifically because ok=False.
+    empty_failure = ReportResult(ok=False, payload=None, error=None)
+    assert bool(empty_failure) is False
+
+
+def test_heartbeat_tuple_result_is_always_truthy_even_on_failure():
+    # Documents a real, unavoidable hazard for heartbeat()/fetch_config()
+    # specifically (unlike send_scan_payload()/send_alert_payload(), which
+    # now return ReportResult and are exempt from this): they return a plain
+    # (bool, str | None) tuple, and a non-empty tuple is ALWAYS truthy in
+    # Python regardless of its contents — there is no way to give a tuple
+    # custom __bool__. A caller that writes `if await client.heartbeat(...):`
+    # instead of unpacking and checking the first element will treat every
+    # failure as success. The only correct usage is
+    # `ok, err = await client.heartbeat(...)` followed by `if ok:` — see
+    # heartbeat's docstring, which calls this out explicitly.
+    failure_result = (False, "HTTP 503")
+    assert bool(failure_result) is True  # the hazard, demonstrated directly
+    ok, err = failure_result
+    assert ok is False  # the correct way to check outcome

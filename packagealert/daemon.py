@@ -95,7 +95,7 @@ class Daemon:
         plugin_registry.load(self._cfg, self._config_path)
         lang_registry.load()
         warn_missing_paths(self._cfg)
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
         osv_client = OsvClient(self._cfg.osv)
         osv_cache = OsvCache(db, self._cfg.osv)
         pop_client = PopularityClient(lang_registry.popularity_ecosystem_map())

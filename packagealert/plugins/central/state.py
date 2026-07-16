@@ -73,6 +73,12 @@ def _default_state() -> dict[str, Any]:
         "last_config_fetch_at": None,
         "last_config_fetch_ok": None,
         "last_config_fetch_error": None,
+        # Timestamp of the most recent heartbeat that succeeded — unlike
+        # last_heartbeat_at (overwritten on every attempt, success or
+        # failure), this is only ever updated on success, so it survives a
+        # subsequent failed heartbeat and answers "when did we last actually
+        # hear back from central" for `pa status`.
+        "last_seen_at": None,
     }
 
 

@@ -24,8 +24,16 @@ def fixed_config():
 
 @pytest.fixture
 async def mem_db(tmp_path):
-    """File-backed SQLite DB at tmp_path/test.db with schema applied."""
-    conn = await open_db(tmp_path / "test.db")
+    """File-backed SQLite DB at tmp_path/test.db with schema applied.
+
+    Always includes pa-central's schema (central_outbox) regardless of the
+    machine's actual default config file — some tests in this module seed
+    central_outbox directly, and open_db()'s default enabled_plugins
+    resolution reads ~/.config/package-alert/config.toml, so without this
+    the test's pass/fail would depend on whatever plugins happen to be
+    enabled in that file on the machine running the suite.
+    """
+    conn = await open_db(tmp_path / "test.db", enabled_plugins={"pa-central"})
     yield conn
     await conn.close()
 
@@ -265,6 +273,65 @@ async def test_gather_status_no_db(tmp_path):
     assert data.db_exists is False
 
 
+@pytest.mark.asyncio
+async def test_gather_status_central_reports_outbox_counts_and_last_seen(mem_db, tmp_path):
+    import json as jsonlib
+    from packagealert.plugins.central import outbox as central_outbox
+    from packagealert.plugins.central.state import write_state, _default_state
+
+    await central_outbox.enqueue(mem_db, kind="scan", payload_json=jsonlib.dumps({"a": 1}))
+    await central_outbox.enqueue(mem_db, kind="scan", payload_json=jsonlib.dumps({"a": 2}))
+    await central_outbox.enqueue(mem_db, kind="alert", payload_json=jsonlib.dumps({"b": 1}))
+
+    state_path = tmp_path / "central-state.json"
+    state = _default_state()
+    state["last_heartbeat_at"] = "2026-07-15T10:00:00+00:00"
+    state["last_heartbeat_ok"] = False
+    state["last_heartbeat_error"] = "connection refused"
+    state["last_seen_at"] = "2026-07-15T09:00:00+00:00"
+    write_state(state, state_path)
+
+    cfg = AppConfig()
+    cfg.plugins.enabled = ["pa-central"]
+    cfg.plugins.pa_central.server_url = "https://fleet.example.com"
+
+    with (
+        patch("packagealert.cli.status.load_config", return_value=cfg),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
+        patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
+        patch("packagealert.plugins.central.state._STATE_PATH", state_path),
+    ):
+        data = await gather_status(None, _db=mem_db)
+
+    assert data.central is not None
+    assert data.central.enabled is True
+    assert data.central.server_url == "https://fleet.example.com"
+    assert data.central.outbox_scan_count == 2
+    assert data.central.outbox_alert_count == 1
+    # last_seen_at is the earlier success, distinct from the more recent
+    # failed last_heartbeat_at/ok/error — both must be surfaced separately.
+    assert data.central.last_seen_at == "2026-07-15T09:00:00+00:00"
+    assert data.central.last_heartbeat_ok is False
+    assert data.central.last_heartbeat_error == "connection refused"
+
+
+@pytest.mark.asyncio
+async def test_gather_status_central_disabled_has_no_central_section(mem_db, tmp_path):
+    cfg = AppConfig()
+    cfg.plugins.enabled = []
+
+    with (
+        patch("packagealert.cli.status.load_config", return_value=cfg),
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
+        patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
+    ):
+        data = await gather_status(None, _db=mem_db)
+
+    assert data.central is None
+
+
 # ── render_status tests ───────────────────────────────────────────────────────
 
 
@@ -435,6 +502,86 @@ def test_render_status_rich_log_disabled():
     render_status(data, as_json=False, console=console)
     output = console.file.getvalue()
     assert "disabled" in output
+
+
+def test_render_status_rich_shows_central_outbox_and_last_seen():
+    from packagealert.cli.status import CentralStatus
+
+    data = _make_status_data()
+    data.central = CentralStatus(
+        enabled=True,
+        plugin_name="pa-central",
+        server_url="https://fleet.example.com",
+        last_heartbeat_at="2026-07-15T10:00:00+00:00",
+        last_heartbeat_ok=False,
+        last_heartbeat_error="connection refused",
+        last_config_fetch_at=None,
+        last_config_fetch_ok=None,
+        last_config_fetch_error=None,
+        last_seen_at="2026-07-15T09:00:00+00:00",
+        outbox_scan_count=2,
+        outbox_alert_count=1,
+    )
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "Last seen" in output
+    assert "2026-07-15" in output  # last_seen_at timestamp rendered
+    assert "Outbox" in output
+    assert "2 scan(s)" in output
+    assert "1 alert(s)" in output
+
+
+def test_render_status_rich_shows_never_seen_when_no_successful_heartbeat():
+    from packagealert.cli.status import CentralStatus
+
+    data = _make_status_data()
+    data.central = CentralStatus(
+        enabled=True,
+        plugin_name="pa-central",
+        server_url="https://fleet.example.com",
+        last_heartbeat_at=None,
+        last_heartbeat_ok=None,
+        last_heartbeat_error=None,
+        last_config_fetch_at=None,
+        last_config_fetch_ok=None,
+        last_config_fetch_error=None,
+        last_seen_at=None,
+        outbox_scan_count=0,
+        outbox_alert_count=0,
+    )
+    console = Console(file=io.StringIO(), highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = console.file.getvalue()
+    assert "Last seen" in output
+    assert "never" in output
+    assert "Outbox" in output
+    assert "empty" in output
+
+
+def test_render_status_json_includes_central_outbox_and_last_seen(capsys):
+    from packagealert.cli.status import CentralStatus
+
+    data = _make_status_data()
+    data.central = CentralStatus(
+        enabled=True,
+        plugin_name="pa-central",
+        server_url="https://fleet.example.com",
+        last_heartbeat_at="2026-07-15T10:00:00+00:00",
+        last_heartbeat_ok=True,
+        last_heartbeat_error=None,
+        last_config_fetch_at=None,
+        last_config_fetch_ok=None,
+        last_config_fetch_error=None,
+        last_seen_at="2026-07-15T10:00:00+00:00",
+        outbox_scan_count=3,
+        outbox_alert_count=5,
+    )
+    render_status(data, as_json=True)
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["central"]["last_seen_at"] == "2026-07-15T10:00:00+00:00"
+    assert parsed["central"]["outbox"] == {"scan": 3, "alert": 5}
 
 
 def test_render_status_json_includes_severity(capsys):
