@@ -121,6 +121,34 @@ class TestDaemonStartupShutdown:
         monkeypatch.setattr("packagealert.daemon._PID_FILE", pid_path)
         assert check_already_running() == os.getpid()
 
+    async def test_run_passes_effective_config_enabled_plugins_to_open_db(self, tmp_path: Path, monkeypatch):
+        # The daemon already has its effective (possibly --config-loaded)
+        # AppConfig in self._cfg. open_db() falls back to reading the
+        # *default* config file when enabled_plugins is omitted, which is
+        # wrong here — under a non-default config, a plugin enabled via
+        # --config could run with its schema never created. _run() must
+        # pass enabled_plugins=set(self._cfg.plugins.enabled) explicitly.
+        pid_path = tmp_path / "daemon.pid"
+        monkeypatch.setattr("packagealert.daemon._PID_FILE", pid_path)
+        cfg = _make_cfg(tmp_path)
+        cfg.plugins.enabled = ["some-plugin"]
+        daemon = Daemon(cfg)
+
+        captured_kwargs = {}
+        real_open_db = open_db
+
+        async def _capture_and_stop(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            conn = await real_open_db(tmp_path / "capture.db", **kwargs)
+            await conn.close()
+            raise asyncio.CancelledError()
+
+        with patch("packagealert.daemon.open_db", _capture_and_stop):
+            with pytest.raises(asyncio.CancelledError):
+                await daemon._run()
+
+        assert captured_kwargs.get("enabled_plugins") == {"some-plugin"}
+
     async def test_pid_file_removed_on_exception(self, tmp_path: Path, monkeypatch):
         pid_path = tmp_path / "daemon.pid"
         monkeypatch.setattr("packagealert.daemon._PID_FILE", pid_path)

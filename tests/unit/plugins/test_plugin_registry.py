@@ -70,6 +70,17 @@ def test_agent_plugin_defaults():
     assert plugin.get_cli_commands() == []
 
 
+async def test_agent_plugin_extra_schema_defaults_to_none():
+    assert AgentPlugin.extra_schema() is None
+
+
+async def test_agent_plugin_extra_migrate_defaults_to_noop():
+    # Must not raise, and must accept any object positionally where a real
+    # aiosqlite.Connection would go — the default never touches it.
+    result = await AgentPlugin.extra_migrate(object())
+    assert result is None
+
+
 async def test_registry_loads_and_setups_enabled_plugin():
     from packagealert.plugins.registry import PluginRegistry
 

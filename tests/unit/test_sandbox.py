@@ -2877,7 +2877,7 @@ class TestCollectWritableBindsValidation:
         with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
             pairs, _ = self._call([(src, Path("/etc/passwd"))], monkeypatch)
         assert pairs == []
-        assert any("outside $HOME" in r.message for r in caplog.records)
+        assert any("failed safety checks" in r.message for r in caplog.records)
 
     def test_dest_at_root_is_rejected(self, tmp_path, monkeypatch, caplog):
         """Dest pointing to / must be rejected."""
@@ -2887,7 +2887,7 @@ class TestCollectWritableBindsValidation:
         with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
             pairs, _ = self._call([(src, Path("/"))], monkeypatch)
         assert pairs == []
-        assert any("outside $HOME" in r.message for r in caplog.records)
+        assert any("failed safety checks" in r.message for r in caplog.records)
 
     def test_dest_at_home_itself_is_rejected(self, tmp_path, monkeypatch, caplog):
         """Dest == $HOME must be rejected (not strictly under home)."""
@@ -2898,7 +2898,7 @@ class TestCollectWritableBindsValidation:
         with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
             pairs, _ = self._call([(src, tmp_path)], monkeypatch)
         assert pairs == []
-        assert any("outside $HOME" in r.message for r in caplog.records)
+        assert any("failed safety checks" in r.message for r in caplog.records)
 
     def test_relative_src_is_rejected(self, tmp_path, monkeypatch, caplog):
         """A relative src path must be rejected before reaching _is_safe_writable_bind_src."""
@@ -3634,7 +3634,7 @@ class TestRunnerUsesBackendForSnapshot:
 def _fake_osv_context(malicious_names: set[str]):
     """Return (fake_open_db, FakeClient, FakeCache) that flag packages in malicious_names."""
 
-    async def fake_open_db():
+    async def fake_open_db(*args, **kwargs):
         return unittest.mock.AsyncMock()
 
     class FakeCache:
@@ -4311,7 +4311,7 @@ class TestPreflightUnpinnedRequirements:
 
         seen_queries: list = []
 
-        async def fake_open_db():
+        async def fake_open_db(*args, **kwargs):
             return unittest.mock.AsyncMock()
 
         class FakeCache:
@@ -5206,9 +5206,9 @@ class TestLanguageBaseDataclasses:
         assert e.path_prepends == []
         assert e.notes == []
 
-    def test_contract_version_is_3(self):
+    def test_contract_version_is_4(self):
         from packagealert.languages.base import CURRENT_CONTRACT_VERSION
-        assert CURRENT_CONTRACT_VERSION == 3
+        assert CURRENT_CONTRACT_VERSION == 4
 
 
 # ---------------------------------------------------------------------------

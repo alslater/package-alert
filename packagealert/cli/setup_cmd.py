@@ -439,7 +439,7 @@ def cooldown_allow(
     ecosystem = ecosystem.lower()
 
     async def _run():
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
         await store_cooldown_cleared(db, ecosystem=ecosystem, package=package, version=version)
         await db.close()
 

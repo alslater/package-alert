@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pathlib import Path
     import typer
+    import aiosqlite
     from packagealert.config import AppConfig
     from packagealert.models.events import PackageEvent
     from packagealert.models.risk import RiskReport
@@ -95,6 +96,32 @@ class AgentPlugin(ABC):
         plugin — including this one — receives the already-merged config.  Return
         ``None`` (the default) to opt out.  Errors are caught and logged by the
         registry; a failing overlay is skipped rather than aborting startup.
+        """
+        return None
+
+    @classmethod
+    def extra_schema(cls) -> str | None:
+        """Return CREATE TABLE IF NOT EXISTS SQL for tables this plugin owns,
+        or None (the default) if it needs no schema of its own.
+
+        Executed once per open_db() call, alongside the core schema, only
+        when this plugin is enabled in the running config. The returned SQL
+        must not create, alter, or drop any table owned by the core
+        application (see packagealert/storage/db.py's SCHEMA) — any such
+        attempt is rejected at the SQLite engine level and this plugin's
+        entire schema contribution is discarded for that call.
+        """
+        return None
+
+    @classmethod
+    async def extra_migrate(cls, conn: "aiosqlite.Connection") -> None:
+        """Apply any migrations (e.g. ALTER TABLE ADD COLUMN) needed for
+        this plugin's own tables, following the same hand-rolled, idempotent
+        style as the core schema's _migrate(). Default no-op.
+
+        Must only touch tables created by this plugin's own extra_schema()
+        — the same reserved-core-table enforcement described on
+        extra_schema() applies here identically.
         """
         return None
 

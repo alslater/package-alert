@@ -563,7 +563,7 @@ class SandboxRunner:
                 return 1
 
         if pending_clears:
-            db = await open_db()
+            db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
             try:
                 for eco, pkg_name, ver in pending_clears:
                     await store_cooldown_cleared(db, ecosystem=eco, package=pkg_name, version=ver)
@@ -656,7 +656,7 @@ class SandboxRunner:
 
         cfg = self._cfg.sandbox.cooldown
         is_tty = sys.stdin.isatty()
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
 
         from packagealert.heuristics.top_packages import TopPackagesCache
         from packagealert.heuristics.typosquat import TyposquatDetector
@@ -1016,7 +1016,7 @@ class SandboxRunner:
             return True
 
         sources = ", ".join(scan.sources) if scan.sources else "no lock file"
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
@@ -1142,7 +1142,7 @@ class SandboxRunner:
             self._console.print("[dim]Pre-flight: nothing to check[/dim]")
             return True
 
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
@@ -1280,7 +1280,7 @@ class SandboxRunner:
             f"[dim]Lock file scan: {len(queries)} packages ({changed_names} updated)...[/dim]"
         )
 
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
@@ -1326,7 +1326,7 @@ class SandboxRunner:
         from packagealert.osv.client import OsvClient
         from packagealert.storage.db import open_db
 
-        db = await open_db()
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []

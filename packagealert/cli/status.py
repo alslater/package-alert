@@ -38,6 +38,13 @@ class CentralStatus:
     last_config_fetch_at: str | None
     last_config_fetch_ok: bool | None
     last_config_fetch_error: str | None
+    # "Last seen" is the timestamp of the most recent successful heartbeat —
+    # heartbeats fire on daemon start/stop and periodically while running, so
+    # this is the best available proxy for "was central reachable, and when."
+    # None if no heartbeat has ever succeeded.
+    last_seen_at: str | None
+    outbox_scan_count: int = 0
+    outbox_alert_count: int = 0
 
 
 @dataclass
@@ -110,6 +117,11 @@ class StatusData:
                 "last_config_fetch_at": self.central.last_config_fetch_at,
                 "last_config_fetch_ok": self.central.last_config_fetch_ok,
                 "last_config_fetch_error": self.central.last_config_fetch_error,
+                "last_seen_at": self.central.last_seen_at,
+                "outbox": {
+                    "scan": self.central.outbox_scan_count,
+                    "alert": self.central.outbox_alert_count,
+                },
             } if self.central else None,
             "paths": {
                 "pid_file": {"path": self.pid_file_path, "exists": self.pid_file_exists},
@@ -273,6 +285,21 @@ def render_status(
         _conn_line("Config sync", data.central.last_config_fetch_at,
                    data.central.last_config_fetch_ok, data.central.last_config_fetch_error)
 
+        if data.central.last_seen_at is not None:
+            _central_line("Last seen", f"{_fmt_ts(data.central.last_seen_at)}  [green]ok[/green]")
+        else:
+            _central_line("Last seen", "[dim]never[/dim]")
+
+        scan_n = data.central.outbox_scan_count
+        alert_n = data.central.outbox_alert_count
+        if scan_n or alert_n:
+            _central_line(
+                "Outbox",
+                f"[yellow]{scan_n} scan(s), {alert_n} alert(s) pending sync[/yellow]",
+            )
+        else:
+            _central_line("Outbox", "[dim]empty[/dim]")
+
 
 async def gather_status(
     config_path: Path | None,
@@ -322,6 +349,7 @@ async def gather_status(
     alerts_count = 0
     recent_alerts: list[AlertRow] = []
     scheduled_count = 0
+    outbox_counts = {"scan": 0, "alert": 0}
 
     if _db is not None:
         db = _db
@@ -329,7 +357,7 @@ async def gather_status(
         db_exists = True
         db_path_str = str(_DB_PATH)
     elif _DB_PATH.exists():
-        db = await open_db(_DB_PATH)
+        db = await open_db(_DB_PATH, enabled_plugins=set(cfg.plugins.enabled))
         close_db = True
         db_exists = True
         db_path_str = str(_DB_PATH)
@@ -373,6 +401,10 @@ async def gather_status(
             async with db.execute("SELECT COUNT(*) as cnt FROM scheduled_projects") as cur:
                 row = await cur.fetchone()
                 scheduled_count = row["cnt"]
+
+            if "pa-central" in cfg.plugins.enabled:
+                from packagealert.plugins.central import outbox as _outbox
+                outbox_counts = await _outbox.count_by_kind(db)
         finally:
             if close_db:
                 await db.close()
@@ -385,6 +417,7 @@ async def gather_status(
     if "pa-central" in cfg.plugins.enabled:
         from packagealert.plugins.central.state import read_state, _STATE_PATH
         state = read_state(_STATE_PATH)
+
         central_status = CentralStatus(
             enabled=True,
             plugin_name="pa-central",
@@ -395,6 +428,9 @@ async def gather_status(
             last_config_fetch_at=state.get("last_config_fetch_at"),
             last_config_fetch_ok=state.get("last_config_fetch_ok"),
             last_config_fetch_error=state.get("last_config_fetch_error"),
+            last_seen_at=state.get("last_seen_at"),
+            outbox_scan_count=outbox_counts["scan"],
+            outbox_alert_count=outbox_counts["alert"],
         )
 
     return StatusData(

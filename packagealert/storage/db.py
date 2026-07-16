@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from pathlib import Path
 
 import aiosqlite
+
+from packagealert.plugins.registry import _load_entry_points
 
 log = logging.getLogger(__name__)
 
@@ -96,11 +99,263 @@ CREATE TABLE IF NOT EXISTS cooldown_cleared (
 );
 """
 
+_CORE_TABLE_NAMES = frozenset({
+    "osv_cache", "alerts", "popularity_cache", "scheduled_projects",
+    "scan_results", "top_packages_cache", "publication_cache",
+    "cooldown_cleared",
+})
+
+_GUARDED_ACTIONS = frozenset({
+    sqlite3.SQLITE_CREATE_TABLE, sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE,
+})
+
+# CREATE INDEX/DROP INDEX report the index name in arg1 and the owning
+# table in arg2 — the same asymmetry as ALTER TABLE, and unlike every
+# action in _GUARDED_ACTIONS where arg1 IS the table name. Checked
+# separately against arg2 so a plugin can't create an index on a core
+# table or drop an existing core index (confirmed via direct probe: a
+# case-sensitive `arg1 in _CORE_TABLE_NAMES` check for these two actions
+# never matches, since arg1 is always an index name).
+_INDEX_ACTIONS = frozenset({sqlite3.SQLITE_CREATE_INDEX, sqlite3.SQLITE_DROP_INDEX})
+
+# Denied outright for any plugin schema/migration call, regardless of target.
+# CREATE TRIGGER/VIEW are refused unconditionally rather than filtered by
+# target table: a trigger's body is only re-authorized when the trigger
+# *fires*, not at CREATE TRIGGER time, so a trigger created during this
+# call's guard window could still run unguarded against core tables long
+# after the guard is removed. Plugin schema/migration hooks have no
+# legitimate need for triggers or views.
+_UNCONDITIONALLY_DENIED_ACTIONS = frozenset({
+    sqlite3.SQLITE_CREATE_TRIGGER, sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW, sqlite3.SQLITE_DROP_VIEW,
+})
+
+# Transaction/attachment control is denied unconditionally for the duration
+# of a plugin's schema/migration call. _run_schema_guarded relies on the
+# whole call staying inside ONE transaction so a denial rolls back
+# everything fn(conn) already did — but nothing stops fn(conn) (arbitrary
+# plugin code for extra_migrate(), or a plugin issuing conn.executescript()
+# instead of the required per-statement conn.execute()) from calling
+# conn.commit()/conn.rollback() or executing BEGIN/COMMIT/SAVEPOINT/ATTACH
+# itself, which would commit or otherwise finalize earlier work before this
+# function's own denial-triggered ROLLBACK ever runs. Confirmed directly:
+# sqlite3.Connection.commit() — the Python method, not just SQL text —
+# fires the same SQLITE_TRANSACTION authorizer callback as `COMMIT`, so
+# denying the action here blocks both routes. This authorizer is installed
+# AFTER this function's own BEGIN IMMEDIATE and removed BEFORE its own
+# final COMMIT/ROLLBACK, so the guard's own transaction control is never
+# itself denied — only a plugin's use of it inside the guarded window is.
+_TRANSACTION_CONTROL_ACTIONS = frozenset({
+    sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT,
+    sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH,
+})
+
+# PRAGMA is not blocked wholesale — read-only introspection pragmas (e.g.
+# `PRAGMA table_info(...)`, used by _MigrateOwnTablePlugin-style migrations
+# to check for an existing column before an idempotent ALTER TABLE) are a
+# legitimate, expected use. Only pragmas that can mutate schema state in a
+# way that bypasses the table-name guard are denied by name — arg1 is the
+# pragma name itself for SQLITE_PRAGMA. `writable_schema` is the concrete
+# vector found: SQLite normally refuses to modify sqlite_master directly
+# ("table sqlite_master may not be modified"), but `PRAGMA
+# writable_schema=ON` lifts that restriction, after which an UPDATE on
+# sqlite_master can rewrite a core table's stored DDL directly. Denying the
+# pragma itself is sufficient — with it denied, SQLite's own built-in
+# protection on sqlite_master is never lifted, so no separate guard is
+# needed for direct writes to sqlite_master (which would otherwise also
+# reject the internal INSERT INTO sqlite_master that every CREATE TABLE
+# performs, breaking all plugin schema DDL).
+_DENIED_PRAGMAS = frozenset({"writable_schema"})
+
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "package-alert" / "package-alert.db"
 _DEFAULT_DB_PATH = DEFAULT_DB_PATH  # internal alias
 
 
-async def open_db(path: Path = _DEFAULT_DB_PATH) -> aiosqlite.Connection:
+def _reject_core_tables(action, arg1, arg2, dbname, source):
+    # arg1 is the table name for CREATE/DROP TABLE, INSERT, UPDATE, DELETE.
+    # ALTER TABLE and CREATE/DROP INDEX are exceptions — SQLite reports the
+    # schema/index name in arg1 and the actual table name in arg2.
+    if action in _UNCONDITIONALLY_DENIED_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    # Denied here rather than only relying on _run_schema_guarded's
+    # install/removal timing to keep this callback the single source of
+    # truth for what a plugin's fn(conn) may do — this callback is only
+    # ever installed for the guarded window and never on the connection
+    # returned to callers, so it can safely deny all transaction control
+    # unconditionally without touching the guard's own BEGIN/COMMIT/
+    # ROLLBACK, which run before install / after removal respectively.
+    if action in _TRANSACTION_CONTROL_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    # PRAGMA names execute case-insensitively in SQLite, but the authorizer
+    # reports arg1 verbatim as written (e.g. "WRITABLE_SCHEMA"), so the
+    # comparison against _DENIED_PRAGMAS must normalize case or a
+    # differently-cased pragma name bypasses the guard.
+    if action == sqlite3.SQLITE_PRAGMA and (arg1 or "").lower() in _DENIED_PRAGMAS:
+        return sqlite3.SQLITE_DENY
+    if action == sqlite3.SQLITE_ALTER_TABLE and arg2 in _CORE_TABLE_NAMES:
+        return sqlite3.SQLITE_DENY
+    if action in _INDEX_ACTIONS and arg2 in _CORE_TABLE_NAMES:
+        return sqlite3.SQLITE_DENY
+    if action in _GUARDED_ACTIONS and arg1 in _CORE_TABLE_NAMES:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def _split_sql_statements(sql: str) -> list[str]:
+    """Split a multi-statement SQL string on ';' into individual statements,
+    dropping empty/whitespace-only fragments.
+
+    Naive (does not handle a ';' inside a string literal or comment), which
+    is acceptable here because plugin schema DDL is expected to be simple
+    CREATE TABLE/INDEX statements without embedded semicolons — the same
+    assumption the core SCHEMA string already relies on by using
+    conn.executescript(). Required (rather than just calling
+    conn.executescript() directly) because executescript() implicitly
+    commits any pending transaction before running and does not itself
+    support rollback — see _run_schema_guarded's docstring.
+    """
+    return [s.strip() for s in sql.split(";") if s.strip()]
+
+
+async def _run_schema_guarded(conn: aiosqlite.Connection, fn) -> None:
+    """Run fn(conn) with the core-table authorizer installed AND an explicit
+    transaction wrapping the call, then remove the authorizer.
+
+    The transaction ensures an authorizer denial rolls back EVERYTHING
+    fn(conn) already did, not just the denied statement — this was found
+    necessary during implementation: conn.executescript() implicitly
+    commits any pending transaction before running its own statements
+    (documented sqlite3 stdlib behavior), so a statement that runs and
+    succeeds before a later denied one in the same script would otherwise
+    stay committed even though the whole contribution is supposed to be
+    rejected as a unit. Wrapping executescript() itself in an outer
+    transaction does NOT fix this — executescript() commits that outer
+    transaction too before it ever gets to run its own statements. The
+    only combination that works: fn(conn) must issue SQL via conn.execute()
+    per individual statement (see _split_sql_statements), never
+    conn.executescript() — execute() does not implicitly commit anything,
+    so the whole batch stays inside the explicit BEGIN IMMEDIATE until this
+    function's own COMMIT/ROLLBACK decides the outcome. Verified directly
+    against a real aiosqlite connection with a 3-statement schema (two
+    legitimate statements ordered before a denied one): all three were
+    absent afterward, proving full rollback, not partial application.
+
+    Per-statement conn.execute() alone is not sufficient to guarantee the
+    whole-contribution rollback, though — fn(conn) is arbitrary code for
+    extra_migrate() (and, in principle, a buggy extra_schema() executor),
+    and nothing in Python stops it from calling conn.commit()/
+    conn.rollback() directly, which would finalize the transaction (or
+    abort it) out from under this function before its own denial-driven
+    ROLLBACK ever runs — committing whatever ran before the denial instead
+    of rolling it back. The authorizer denies this too: it also denies
+    SQLITE_TRANSACTION/SAVEPOINT/ATTACH/DETACH unconditionally while
+    installed (see _TRANSACTION_CONTROL_ACTIONS), and this was confirmed to
+    cover both routes — issuing `COMMIT` as SQL text and calling the
+    Python-level conn.commit()/sqlite3.Connection.commit() method both
+    trigger the same SQLITE_TRANSACTION authorizer callback. Because of
+    this, this function's OWN transaction control (BEGIN IMMEDIATE at the
+    start, COMMIT/ROLLBACK at the end) must happen outside the window where
+    the authorizer is installed, or it would deny itself.
+
+    The guard exists only for the duration of a single plugin's
+    schema/migration call — it must never remain active on the connection
+    returned to callers, or the application's own core-table writes would
+    start failing too.
+
+    Note: aiosqlite.Connection does not expose set_authorizer directly.
+    Reaching it requires the underlying sqlite3.Connection (conn._conn) and
+    running the call on aiosqlite's worker thread (conn._execute) — both
+    underscore-prefixed/undocumented. Confirmed working as of aiosqlite
+    0.22.1 (see docs/superpowers/specs/2026-07-15-plugin-schema-hook-design.md);
+    if a future aiosqlite upgrade breaks this, it should be handled as its
+    own follow-up rather than a silent regression.
+    """
+    raw_conn = conn._conn
+    # BEGIN IMMEDIATE runs before the authorizer is installed, and the
+    # authorizer is removed before the final COMMIT/ROLLBACK — both are
+    # transaction-control statements that _reject_core_tables now denies
+    # unconditionally while installed (see _TRANSACTION_CONTROL_ACTIONS),
+    # so this function's own transaction control must happen outside the
+    # guarded window, not inside it.
+    await conn.execute("BEGIN IMMEDIATE")
+    await conn._execute(raw_conn.set_authorizer, _reject_core_tables)
+    try:
+        await fn(conn)
+    except BaseException:
+        await conn._execute(raw_conn.set_authorizer, None)
+        await conn.execute("ROLLBACK")
+        raise
+    else:
+        await conn._execute(raw_conn.set_authorizer, None)
+        await conn.execute("COMMIT")
+
+
+async def _apply_plugin_schema(conn: aiosqlite.Connection, enabled_plugins: set[str]) -> None:
+    for name, cls in _load_entry_points(only=enabled_plugins).items():
+        try:
+            schema = cls.extra_schema()
+        except Exception:
+            log.warning("Plugin %r raised in extra_schema — skipping its schema", name, exc_info=True)
+            continue
+        if not schema:
+            continue
+        try:
+            async def _exec(conn, schema=schema):
+                for stmt in _split_sql_statements(schema):
+                    await conn.execute(stmt)
+            await _run_schema_guarded(conn, _exec)
+        except sqlite3.DatabaseError as exc:
+            # Raised whenever the authorizer installed by _run_schema_guarded
+            # denies an operation — not only core-table CREATE/ALTER/DROP/
+            # INSERT/UPDATE/DELETE, but also CREATE/DROP INDEX on a core
+            # table, CREATE/DROP TRIGGER/VIEW (denied unconditionally), a
+            # denied PRAGMA (e.g. writable_schema), or transaction control
+            # (COMMIT/SAVEPOINT/ATTACH/etc, denied so a plugin can't escape
+            # the guard's own rollback). SQLite's authorizer callback only
+            # returns SQLITE_DENY, not which check triggered it, so this
+            # message can't name the specific violation — %s below is the
+            # exception's own text (typically "not authorized"), included
+            # for whatever extra signal it carries; exc_info still has the
+            # full traceback for deeper diagnosis.
+            log.error(
+                "Plugin %r extra_schema() attempted a forbidden operation "
+                "during guarded schema application (%s) — its entire schema "
+                "contribution was rejected. This is a bug in the plugin.",
+                name, exc, exc_info=True,
+            )
+        except Exception:
+            log.warning("Plugin %r raised while applying extra_schema — skipping", name, exc_info=True)
+
+
+async def _apply_plugin_migrations(conn: aiosqlite.Connection, enabled_plugins: set[str]) -> None:
+    for name, cls in _load_entry_points(only=enabled_plugins).items():
+        try:
+            await _run_schema_guarded(conn, lambda c, cls=cls: cls.extra_migrate(c))
+        except sqlite3.DatabaseError as exc:
+            # See the matching comment in _apply_plugin_schema — this catches
+            # the same authorizer-denial cases (core-table CRUD, core
+            # indexes, unconditionally-denied triggers/views, denied
+            # PRAGMAs, transaction control), not only core-table
+            # modification.
+            log.error(
+                "Plugin %r extra_migrate() attempted a forbidden operation "
+                "during guarded migration (%s) — its migration was rejected. "
+                "This is a bug in the plugin.",
+                name, exc, exc_info=True,
+            )
+        except Exception:
+            log.warning("Plugin %r raised in extra_migrate — skipping", name, exc_info=True)
+
+
+async def open_db(
+    path: Path = _DEFAULT_DB_PATH,
+    *,
+    enabled_plugins: set[str] | None = None,
+) -> aiosqlite.Connection:
+    if enabled_plugins is None:
+        from packagealert.config import read_enabled_plugins
+        enabled_plugins = set(read_enabled_plugins())
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = await aiosqlite.connect(path, timeout=10)
     conn.row_factory = aiosqlite.Row
@@ -110,7 +365,9 @@ async def open_db(path: Path = _DEFAULT_DB_PATH) -> aiosqlite.Connection:
     except Exception:
         log.warning("Could not enable WAL journal mode — falling back to default; concurrent access may be limited", exc_info=True)
     await conn.executescript(SCHEMA)
+    await _apply_plugin_schema(conn, enabled_plugins)
     await _migrate(conn)
+    await _apply_plugin_migrations(conn, enabled_plugins)
     await conn.commit()
     log.debug("Database opened at %s", path)
     return conn
