@@ -30,13 +30,16 @@
 
 ### System requirements
 
-**inotify watch limit** — the daemon watches npm/pip/uv cache directories with inotify. The default Linux limit (8,192–65,536 watches depending on distro) is often exhausted by VS Code, JetBrains, or other tools running alongside the daemon. Raise it to the value VS Code itself recommends:
+**inotify limits** — the daemon watches npm/pip/uv cache directories with inotify. Two separate limits matter here, and raising only one can leave you still hitting `ENOSPC`:
+
+- `fs.inotify.max_user_watches` — max files a user can watch across all inotify instances. The default Linux limit (8,192–65,536 watches depending on distro) is often exhausted by VS Code, JetBrains, or other tools running alongside the daemon. Raise it to the value VS Code itself recommends.
+- `fs.inotify.max_user_instances` — max separate inotify instances (file descriptors) a user can open at once. Defaults to 128 on most distros and is easy to exhaust if you run several file-watching tools (editors, dev servers, the daemon) concurrently.
 
 ```bash
-echo fs.inotify.max_user_watches=524288 | sudo tee /etc/sysctl.d/99-package-alert.conf && sudo sysctl --system
+printf 'fs.inotify.max_user_watches=524288\nfs.inotify.max_user_instances=512\n' | sudo tee /etc/sysctl.d/99-package-alert.conf && sudo sysctl --system
 ```
 
-This persists across reboots. Without it you may see `ENOSPC: System limit for number of file watchers reached` errors in file watchers after the daemon has been running for a while.
+This persists across reboots. Without both limits raised you may see `ENOSPC: System limit for number of file watchers reached` errors in file watchers after the daemon has been running for a while — the same error is raised whether it's the watch count or the instance count that's exhausted, so raise both rather than trying to diagnose which one hit its limit.
 
 **[uv](https://docs.astral.sh/uv/) (recommended):**
 
