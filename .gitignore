@@ -237,3 +237,4 @@ superpowers/
 .worktrees/
 *.sqlite3
 .claude
+.serena/
