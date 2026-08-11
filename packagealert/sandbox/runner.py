@@ -7,14 +7,20 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass, field, replace as dataclass_replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
 from packagealert.languages import registry as lang_registry
-from packagealert.languages.base import PackageSpec, SandboxEnvError, SandboxScanError, SandboxTargets
+from packagealert.languages.base import (
+    PackageSpec,
+    SandboxEnvError,
+    SandboxScanError,
+    SandboxTargets,
+)
 from packagealert.parsers.process_args import (
     ParsedInstall,
     parse_package_spec,
@@ -175,6 +181,7 @@ class SandboxRunner:
             self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
         import inspect as _inspect
+
         from packagealert.languages.base import PreRunResult as _PreRunResult
 
         def _run_pre_check(lang, parsed_arg, lang_flags):
@@ -314,7 +321,7 @@ class SandboxRunner:
         for _t in ctx.scan_targets:
             try:
                 snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, cwd)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
                 self._console.print(f"✗ Cannot snapshot install target {_t}: {exc}", style="bold red", markup=False)
                 self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                 return 1
@@ -327,7 +334,7 @@ class SandboxRunner:
                     _home = Path.home()
                     _snap_root = _home if _t.is_relative_to(_home) else cwd
                     snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, _snap_root)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
                     self._console.print(f"✗ Cannot snapshot rollback target {_t}: {exc}", style="bold red", markup=False)
                     self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                     return 1
@@ -365,7 +372,7 @@ class SandboxRunner:
                                     snapshots[p] = self._backend.snapshot_install_target(
                                         p, self._console, cwd
                                     )
-                                except Exception as exc:
+                                except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
                                     self._console.print(
                                         f"✗ Cannot snapshot extra write target {p}: {exc}",
                                         style="bold red", markup=False,
@@ -465,7 +472,7 @@ class SandboxRunner:
                                     self._print_editable_rejection(p, editable_roots)
                         except Exception:
                             log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
-            result = subprocess.run(build_cmd(
+            result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
                 argv, ctx.write_dirs,
                 allow_network=allow_network,
                 env=sandbox_env,
@@ -473,7 +480,7 @@ class SandboxRunner:
                 extra_tmpfs=extra_tmpfs,
                 post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
                 writable_binds=_writable_binds,
-            ))
+            ), check=False)
         finally:
             _cleanup_writable_binds(_writable_binds)
         print()
@@ -495,11 +502,10 @@ class SandboxRunner:
             return result.returncode if scan_ok else 1
 
         scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
-        if not no_change:
-            if not scan_ok:
-                _restore_lock_files(lock_snapshots, cwd, self._console)
-                _restore_install_targets(self._backend, snapshots, self._console)
-                return 1
+        if not no_change and not scan_ok:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
+            return 1
 
         if not scan_ok:
             # no_change=True: lock file scan failed — restore everything and exit.
@@ -649,7 +655,11 @@ class SandboxRunner:
         import sys
         import time as _time
 
-        from packagealert.sandbox.cooldown import decide_with_cleared, fetch_latest_version, fetch_publication_date
+        from packagealert.sandbox.cooldown import (
+            decide_with_cleared,
+            fetch_latest_version,
+            fetch_publication_date,
+        )
 
         if ctx.parsed is None or not ctx.parsed.packages:
             return []
@@ -868,7 +878,7 @@ class SandboxRunner:
         for _t in targets_to_snapshot:
             try:
                 snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, cwd)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
                 self._console.print(f"✗ Cannot snapshot install target {_t}: {exc}", style="bold red", markup=False)
                 self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                 return 1
@@ -929,7 +939,7 @@ class SandboxRunner:
 
             home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
-            result = subprocess.run(build_cmd(
+            result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
                 argv, write_dirs,
                 allow_network=allow_network,
                 env=sandbox_env,
@@ -937,7 +947,7 @@ class SandboxRunner:
                 extra_tmpfs=extra_tmpfs,
                 post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
                 writable_binds=_writable_binds,
-            ))
+            ), check=False)
         finally:
             _cleanup_writable_binds(_writable_binds)
         print()
@@ -946,11 +956,10 @@ class SandboxRunner:
         # In --no-change mode, defer restore until after post-shell scanning so
         # new-package detection sees the actual installed state.
         scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
-        if not no_change:
-            if not scan_ok:
-                _restore_lock_files(lock_snapshots, cwd, self._console)
-                _restore_install_targets(self._backend, snapshots, self._console)
-                return 1
+        if not no_change and not scan_ok:
+            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console)
+            return 1
         if not scan_ok:
             # no_change=True and lock file scan failed — restore and exit.
             _restore_lock_files(lock_snapshots, cwd, self._console)
@@ -2231,7 +2240,7 @@ def _collect_new_packages(
         # intentionally skipped.
         after: set[Path] = set()
 
-        def _scan_onerror(err: OSError) -> None:
+        def _scan_onerror(err: OSError, walk_root: Path = walk_root) -> None:
             raise SandboxScanError(
                 f"Post-run scan of {walk_root} failed: {err}\n"
                 "Cannot safely detect new packages — treating as scan failure."

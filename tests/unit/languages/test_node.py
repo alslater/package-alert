@@ -10,7 +10,6 @@ import pytest
 from packagealert.languages.base import CURRENT_CONTRACT_VERSION, SandboxPaths, Snapshot
 from packagealert.languages.node import NodeLanguage
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

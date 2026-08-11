@@ -6,7 +6,7 @@ import os
 import shlex
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psutil
@@ -150,7 +150,7 @@ class ProcessMonitor(AbstractMonitor):
                         source="process",
                         manager=parsed.manager,
                         project_path=project_path,
-                        timestamp=datetime.now(timezone.utc),
+                        timestamp=datetime.now(UTC),
                         site_packages_dir=site_pkgs,
                     )
                     log.info(
@@ -221,7 +221,7 @@ class ProcessMonitor(AbstractMonitor):
                 source="process",
                 manager=pending.manager,
                 project_path=pending.cwd,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
                 site_packages_dir=pending.site_pkgs,
             )
             await self._queue.put(event)

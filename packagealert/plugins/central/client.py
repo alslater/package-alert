@@ -7,7 +7,6 @@ from typing import Any, Literal, TypedDict
 import httpx
 
 from packagealert.models.scans import ScanResult
-
 from packagealert.plugins.base import ScanNotFound
 
 log = logging.getLogger(__name__)
@@ -216,7 +215,7 @@ class CentralClient:
             msg = f"HTTP {e.response.status_code}"
             log.warning("Fleet heartbeat failed: %s", msg)
             return False, msg
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — network/client failure, degrade to reported error
             msg = str(e)[:120]
             log.warning("Fleet heartbeat error: %s", msg)
             return False, msg
@@ -247,7 +246,7 @@ class CentralClient:
             msg = str(e)[:120]
             log.warning("Fleet alert report connection error: %s", msg)
             return ReportResult(ok=False, payload=payload, error=msg, error_kind="retryable")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — network/client failure, degrade to reported error
             msg = str(e)[:120]
             log.warning("Fleet alert report error: %s", msg)
             return ReportResult(ok=False, payload=payload, error=msg)
@@ -276,7 +275,7 @@ class CentralClient:
             msg = str(e)[:120]
             log.warning("Fleet scan report connection error: %s", msg)
             return ReportResult(ok=False, payload=payload, error=msg, error_kind="retryable")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — network/client failure, degrade to reported error
             msg = str(e)[:120]
             log.warning("Fleet scan report error: %s", msg)
             return ReportResult(ok=False, payload=payload, error=msg)
@@ -329,7 +328,7 @@ class CentralClient:
             msg = f"HTTP {e.response.status_code}"
             log.warning("Fleet config fetch failed: %s", msg)
             return None, msg
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — network/client failure, degrade to reported error
             msg = str(e)[:120]
             log.warning("Fleet config fetch error: %s", msg)
             return None, msg

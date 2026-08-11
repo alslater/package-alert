@@ -4,11 +4,11 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
+from typing import Any, ClassVar
 
 import httpx
 
-from typing import Any
-
+from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     MAX_TOP_PACKAGES,
@@ -21,7 +21,6 @@ from packagealert.languages.base import (
     Snapshot,
     normalise_package_name,
 )
-from packagealert.heuristics.base import AbstractHeuristic
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +37,7 @@ def _parse_cargo_lock(path: Path) -> list[PackageSpec]:
             return []
     try:
         data = tomllib.loads(path.read_text())
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed/unreadable lockfile, best-effort parse
         log.debug("Failed to parse Cargo.lock at %s", path)
         return []
     result = []
@@ -54,8 +53,8 @@ class CargoLanguage:
     """package-alert language plugin for Rust / Cargo / crates.io."""
 
     name = "rust"
-    ecosystems = ["crates.io"]
-    process_names = ["cargo"]
+    ecosystems: ClassVar[list[str]] = ["crates.io"]
+    process_names: ClassVar[list[str]] = ["cargo"]
     contract_version = CURRENT_CONTRACT_VERSION
     author = "package-alert contributors"
     repository = "https://github.com/package-alert/package-alert-rust"

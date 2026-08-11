@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -182,7 +182,7 @@ def _parse_requirements_txt(
         if line.startswith("-"):
             continue
         # Skip local paths (./pkg, ../pkg, /abs/path) and VCS URLs
-        if line.startswith((".", "/")) or "://" in line or line.startswith(("git+", "hg+", "svn+", "bzr+")) or _SCP_VCS_RE.match(line):
+        if line.startswith((".", "/", "git+", "hg+", "svn+", "bzr+")) or "://" in line or _SCP_VCS_RE.match(line):
             continue
         m = _PINNED_RE.match(line)
         if m:
@@ -456,9 +456,8 @@ def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
         if _is_ssh_vcs_url(line):
             return True
         include = _req_include(line)
-        if include:
-            if _req_file_has_ssh(base / include, visited):
-                return True
+        if include and _req_file_has_ssh(base / include, visited):
+            return True
     return False
 
 
@@ -501,7 +500,7 @@ def _find_pipenv_venv(cwd: Path) -> Path | None:
     try:
         result = subprocess.run(
             ["pipenv", "--venv"],
-            capture_output=True, text=True, cwd=cwd,
+            capture_output=True, text=True, cwd=cwd, check=False,
         )
         if result.returncode == 0:
             venv = Path(result.stdout.strip())
@@ -676,8 +675,8 @@ class PythonLanguage:
     """Language module for Python / pip / uv / pipenv."""
 
     name: str = "python"
-    ecosystems: list[str] = ["PyPI"]
-    process_names: list[str] = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]
+    ecosystems: ClassVar[list[str]] = ["PyPI"]
+    process_names: ClassVar[list[str]] = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -1155,6 +1154,7 @@ class PythonLanguage:
         # mounts it conditionally, so there is nothing to warn about otherwise.
         if ssh_granted and (Path.home() / ".ssh").exists():
             import sys
+
             from rich.console import Console
             _con = Console(stderr=True)
             if sys.stdin.isatty():
@@ -1624,6 +1624,7 @@ class PythonLanguage:
 
     def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
         import shlex
+
         from packagealert.cli.setup_cmd import PA_FINGERPRINT, PA_SHIM_VERSION_MARKER
         pa_s = str(pa).replace("\n", "")
         real_s = str(real).replace("\n", "")

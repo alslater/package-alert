@@ -4,15 +4,16 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psutil
 
-from packagealert.config import load_config, DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
-from packagealert.daemon_pid import find_daemon_pid, is_started_by_systemd, PID_FILE as _PID_FILE
+from packagealert.config import DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
+from packagealert.config import load_config
+from packagealert.daemon_pid import PID_FILE as _PID_FILE
+from packagealert.daemon_pid import find_daemon_pid, is_started_by_systemd
 from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
-
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ class StatusData:
                         "severity": a.severity,
                         "risk_score": a.risk_score,
                         "alerted_at": datetime.fromtimestamp(
-                            a.alerted_at, tz=timezone.utc
+                            a.alerted_at, tz=UTC
                         ).isoformat(timespec="seconds"),
                     }
                     for a in self.recent_alerts
@@ -211,7 +212,7 @@ def render_status(
     )
     if data.recent_alerts:
         for alert in data.recent_alerts:
-            ts = datetime.fromtimestamp(alert.alerted_at).strftime("%Y-%m-%d %H:%M")  # local time for display; to_dict() uses UTC
+            ts = datetime.fromtimestamp(alert.alerted_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display; to_dict() uses UTC
             colour = _SEV_COLOUR.get(alert.severity, "white")
             pkg = escape(alert.package)
             eco = escape(alert.ecosystem)
@@ -257,9 +258,9 @@ def render_status(
         def _fmt_ts(at: str) -> str:
             try:
                 from datetime import datetime
-                dt = datetime.fromisoformat(at.replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(at)
                 return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-            except Exception:
+            except Exception:  # noqa: BLE001 — malformed timestamp, fall back to raw value for display
                 return at
 
         def _central_line(label: str, value: str) -> None:
@@ -311,9 +312,9 @@ async def gather_status(
 
     effective_config_path = config_path
     if config_path is not None:
+        from packagealert.cli.app import _apply_config_veto
         from packagealert.config import read_enabled_plugins
         from packagealert.plugins.registry import _load_entry_points
-        from packagealert.cli.app import _apply_config_veto
         effective_config_path = _apply_config_veto(config_path, read_enabled_plugins, _load_entry_points)
     cfg = load_config(effective_config_path)
     if effective_config_path is not None:
@@ -415,7 +416,7 @@ async def gather_status(
     # ── Central ─────────────────────────────────────────────────────────────────
     central_status: CentralStatus | None = None
     if "pa-central" in cfg.plugins.enabled:
-        from packagealert.plugins.central.state import read_state, _STATE_PATH
+        from packagealert.plugins.central.state import _STATE_PATH, read_state
         state = read_state(_STATE_PATH)
 
         central_status = CentralStatus(

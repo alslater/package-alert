@@ -9,21 +9,28 @@ from __future__ import annotations
 
 import asyncio
 import signal
-import pytest
-import respx
-import httpx
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from packagealert.config import AppConfig, OsvConfig, HeuristicsConfig, AlertsConfig, WatchConfig, DaemonLogConfig
-from packagealert.daemon import Daemon, check_already_running
-from packagealert.models.events import PackageEvent
-from packagealert.models.advisories import OsvResult
-from packagealert.osv.client import OsvClient
-from packagealert.osv.cache import OsvCache
-from packagealert.storage.db import open_db
+import httpx
+import pytest
+import respx
 
+from packagealert.config import (
+    AlertsConfig,
+    AppConfig,
+    DaemonLogConfig,
+    HeuristicsConfig,
+    OsvConfig,
+    WatchConfig,
+)
+from packagealert.daemon import Daemon, check_already_running
+from packagealert.models.advisories import OsvResult
+from packagealert.models.events import PackageEvent
+from packagealert.osv.cache import OsvCache
+from packagealert.osv.client import OsvClient
+from packagealert.storage.db import open_db
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,7 +44,7 @@ def _event(name: str, version: str = "1.0.0", ecosystem: str = "pypi", path: Pat
         source="process",
         manager="pip",
         project_path=path,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -143,9 +150,11 @@ class TestDaemonStartupShutdown:
             await conn.close()
             raise asyncio.CancelledError()
 
-        with patch("packagealert.daemon.open_db", _capture_and_stop):
-            with pytest.raises(asyncio.CancelledError):
-                await daemon._run()
+        with (
+            patch("packagealert.daemon.open_db", _capture_and_stop),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await daemon._run()
 
         assert captured_kwargs.get("enabled_plugins") == {"some-plugin"}
 
@@ -158,9 +167,8 @@ class TestDaemonStartupShutdown:
         async def _raise(self_inner):
             raise RuntimeError("boom")
 
-        with patch.object(Daemon, "_run", _raise):
-            with pytest.raises(RuntimeError):
-                await daemon.run()
+        with patch.object(Daemon, "_run", _raise), pytest.raises(RuntimeError):
+            await daemon.run()
 
         assert not pid_path.exists(), "PID file must be cleaned up even on crash"
 
@@ -182,7 +190,7 @@ class TestBatchPrefetch:
 
     async def test_batch_prefetch_single_osv_call(self, tmp_path, osv_setup):
         """N events from a lock file scan should trigger one OSV batch call, not N."""
-        client, cache, db = osv_setup
+        client, cache, _db = osv_setup
         cfg = _make_cfg(tmp_path)
         daemon = Daemon(cfg)
 
@@ -199,7 +207,7 @@ class TestBatchPrefetch:
 
     async def test_batch_prefetch_skips_cached(self, tmp_path, osv_setup):
         """Already-cached packages should not be re-queried."""
-        client, cache, db = osv_setup
+        client, cache, _db = osv_setup
         cfg = _make_cfg(tmp_path)
         daemon = Daemon(cfg)
 
@@ -226,7 +234,7 @@ class TestBatchPrefetch:
 
     async def test_batch_prefetch_no_call_when_all_cached(self, tmp_path, osv_setup):
         """If everything is cached, no OSV call should be made."""
-        client, cache, db = osv_setup
+        client, cache, _db = osv_setup
         cfg = _make_cfg(tmp_path)
         daemon = Daemon(cfg)
 

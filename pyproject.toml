@@ -71,3 +71,9 @@ dev = [
     "hatch",
     "ruff>=0.15",
 ]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer's idiomatic CLI parameter declarations call typer.Argument()/typer.Option()
+# directly in the function signature's defaults; this is the documented pattern,
+# not a mutable-default bug.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]

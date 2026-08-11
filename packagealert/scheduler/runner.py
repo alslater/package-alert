@@ -33,8 +33,8 @@ def _is_due(
     if project.last_scanned_at is None:
         return True
 
-    now = _now if _now is not None else datetime.datetime.now()
-    last = datetime.datetime.fromtimestamp(project.last_scanned_at)
+    now = _now if _now is not None else datetime.datetime.now()  # noqa: DTZ005 — daily_hour/weekly_hour are local wall-clock hours
+    last = datetime.datetime.fromtimestamp(project.last_scanned_at)  # noqa: DTZ006 — compared against local-time `now` above
 
     if project.schedule == "daily":
         scheduled_today = now.replace(hour=daily_hour, minute=0, second=0, microsecond=0)
@@ -84,7 +84,7 @@ class ScheduledScanner:
                 continue
             from packagealert.models.scans import ScanResult
             from packagealert.plugins.registry import plugin_registry
-            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            now_utc = datetime.datetime.now(datetime.UTC)
             scanned_at = now_utc.timestamp()
             scan = ScanResult(
                 project_path=project.path,

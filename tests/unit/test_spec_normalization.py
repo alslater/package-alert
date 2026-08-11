@@ -1,7 +1,6 @@
 """Unit tests for parse_package_spec — ecosystem-aware spec normalisation."""
 from packagealert.parsers.process_args import parse_package_spec
 
-
 # ---------------------------------------------------------------------------
 # PyPI / pip
 # ---------------------------------------------------------------------------

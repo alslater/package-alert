@@ -94,11 +94,9 @@ def _normalise_process_name(name: str) -> str:
     """
     name = name.lower()
     # Windows executable extension
-    if name.endswith(".exe"):
-        name = name[:-4]
+    name = name.removesuffix(".exe")
     # npm/npx ship as npm-cli.js / npx-cli.js inside node
-    if name.endswith("-cli.js"):
-        name = name[:-7]
+    name = name.removesuffix("-cli.js")
     # Strip trailing version segment: python3.11 -> python3, pip-3.11 -> pip
     name = _VERSION_SUFFIX_RE.sub("", name)
     return name

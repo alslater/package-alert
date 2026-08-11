@@ -1,7 +1,8 @@
 import pytest
-from packagealert.osv.cache import OsvCache
-from packagealert.models.advisories import OsvAdvisory, OsvResult
+
 from packagealert.config import OsvConfig
+from packagealert.models.advisories import OsvAdvisory, OsvResult
+from packagealert.osv.cache import OsvCache
 from packagealert.storage.db import open_db
 
 

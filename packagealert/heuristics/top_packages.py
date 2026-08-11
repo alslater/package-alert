@@ -9,6 +9,7 @@ import httpx
 
 if TYPE_CHECKING:
     import aiosqlite
+
     from packagealert.config import HeuristicsConfig
     from packagealert.languages.base import LanguageBase
 

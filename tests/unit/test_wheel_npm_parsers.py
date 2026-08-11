@@ -1,10 +1,10 @@
-import json
-import zipfile
-import tarfile
 import io
-from packagealert.parsers.wheel import parse_wheel_filename, read_wheel_metadata
-from packagealert.parsers.npm import inspect_npm_tarball, parse_package_json_file
+import json
+import tarfile
+import zipfile
 
+from packagealert.parsers.npm import inspect_npm_tarball, parse_package_json_file
+from packagealert.parsers.wheel import parse_wheel_filename, read_wheel_metadata
 
 # --- Wheel tests ---
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 import httpx
@@ -27,7 +27,7 @@ def decide(
     *,
     age_days: float | None,
     risk_score: int,
-    cfg: "CooldownConfig",
+    cfg: CooldownConfig,
     is_tty: bool,
 ) -> CooldownDecision:
     if age_days is None:
@@ -66,7 +66,7 @@ def decide_with_cleared(
     *,
     age_days: float | None,
     risk_score: int,
-    cfg: "CooldownConfig",
+    cfg: CooldownConfig,
     is_tty: bool,
     cleared_at: float | None,
 ) -> CooldownDecision:
@@ -98,7 +98,7 @@ async def fetch_publication_date(url: str, *, ecosystem: str, version: str | Non
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.get(url)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — network failure, fail open
         log.debug("Failed to fetch publication date from %s: %s", url, exc)
         return None
 
@@ -111,7 +111,7 @@ async def fetch_publication_date(url: str, *, ecosystem: str, version: str | Non
 
     try:
         return _parse_publication_date(resp.json(), ecosystem=ecosystem, version=version)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — malformed registry response, fail open
         log.debug("Failed to parse publication date from %s: %s", url, exc)
         return None
 
@@ -124,7 +124,7 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
         if not times:
             return None
         earliest = min(
-            datetime.fromisoformat(t).replace(tzinfo=timezone.utc) for t in times
+            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in times
         )
         return earliest.timestamp()
 
@@ -133,7 +133,7 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
         if version and version in version_time:
             t = version_time[version]
             try:
-                return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
+                return datetime.fromisoformat(t).replace(tzinfo=UTC).timestamp()
             except ValueError:
                 pass
         return None
@@ -145,7 +145,7 @@ def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None =
                     continue
                 t = entry.get("time")
                 if t:
-                    return datetime.fromisoformat(t).replace(tzinfo=timezone.utc).timestamp()
+                    return datetime.fromisoformat(t).replace(tzinfo=UTC).timestamp()
         return None
 
     return None
@@ -159,7 +159,7 @@ async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             resp = await client.get(url)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — network failure, fail open
         log.debug("Failed to fetch latest version from %s: %s", url, exc)
         return None
 
@@ -172,6 +172,6 @@ async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
         return None
     try:
         return parse_fn(resp.json(), name)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 — malformed registry response or plugin failure, fail open
         log.debug("Failed to parse latest version from %s: %s", url, exc)
         return None

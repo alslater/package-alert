@@ -2,18 +2,19 @@
 Full pipeline integration test:
 PackageEvent → OSV cache miss → OSV query (mocked) → cache store → alert render
 """
+from datetime import UTC, datetime
+
+import httpx
 import pytest
 import respx
-import httpx
-from datetime import datetime, timezone
-from packagealert.models.events import PackageEvent
-from packagealert.osv.client import OsvClient
-from packagealert.osv.cache import OsvCache
-from packagealert.config import OsvConfig
-from packagealert.storage.db import open_db
+
 from packagealert.alerts.terminal import alert_malicious
 from packagealert.analyzers.risk import RiskEngine
-from packagealert.config import HeuristicsConfig
+from packagealert.config import HeuristicsConfig, OsvConfig
+from packagealert.models.events import PackageEvent
+from packagealert.osv.cache import OsvCache
+from packagealert.osv.client import OsvClient
+from packagealert.storage.db import open_db
 
 
 @pytest.fixture
@@ -36,7 +37,7 @@ def malicious_event():
         source="process",
         manager="pip",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -49,13 +50,13 @@ def clean_event():
         source="process",
         manager="npm",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
 @pytest.mark.asyncio
 async def test_cache_miss_then_hit(pipeline, malicious_event, malicious_osv_response):
-    db, client, cache = pipeline
+    _db, client, cache = pipeline
 
     # First lookup: cache miss
     result = await cache.get("pypi", "evil-pkg", "1.0.0")
@@ -104,7 +105,7 @@ async def test_malicious_alert_renders(malicious_event, malicious_osv_response, 
 @pytest.mark.asyncio
 async def test_clean_package_no_alert(pipeline, clean_event, clean_osv_response):
     """A clean package should have no malicious advisories."""
-    db, client, cache = pipeline
+    _db, client, _cache = pipeline
 
     with respx.mock:
         respx.post("https://api.osv.dev/v1/querybatch").mock(
@@ -129,7 +130,7 @@ async def test_risk_engine_typosquat_pipeline():
         source="process",
         manager="pip",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     report = await engine.analyze(event, None)
     assert report.score > 0
@@ -148,7 +149,7 @@ async def test_risk_engine_clean_package():
         source="process",
         manager="pip",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     report = await engine.analyze(event, None)
     assert report.score == 0

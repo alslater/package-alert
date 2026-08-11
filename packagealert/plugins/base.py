@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from pathlib import Path
-    import typer
+
     import aiosqlite
+    import typer
+
     from packagealert.config import AppConfig
+    from packagealert.models.advisories import OsvResult
     from packagealert.models.events import PackageEvent
     from packagealert.models.risk import RiskReport
-    from packagealert.models.advisories import OsvResult
     from packagealert.models.scans import ScanResult
 
 
@@ -37,7 +39,7 @@ class ConfigField:
 class AgentPlugin(ABC):
     name: str
 
-    def setup(self, cfg: "AppConfig", config_path: "Path | None" = None) -> None:
+    def setup(self, cfg: AppConfig, config_path: Path | None = None) -> None:
         pass
 
     async def on_daemon_start(self, uptime_start: datetime) -> None:
@@ -48,12 +50,12 @@ class AgentPlugin(ABC):
 
     async def on_alert(
         self,
-        event: "PackageEvent",
-        result: "OsvResult | RiskReport",
+        event: PackageEvent,
+        result: OsvResult | RiskReport,
     ) -> None:
         pass
 
-    async def on_scan_complete(self, scan: "ScanResult") -> None:
+    async def on_scan_complete(self, scan: ScanResult) -> None:
         pass
 
     def is_scan_store(self) -> bool:
@@ -114,7 +116,7 @@ class AgentPlugin(ABC):
         return None
 
     @classmethod
-    async def extra_migrate(cls, conn: "aiosqlite.Connection") -> None:
+    async def extra_migrate(cls, conn: aiosqlite.Connection) -> None:
         """Apply any migrations (e.g. ALTER TABLE ADD COLUMN) needed for
         this plugin's own tables, following the same hand-rolled, idempotent
         style as the core schema's _migrate(). Default no-op.
@@ -123,10 +125,10 @@ class AgentPlugin(ABC):
         — the same reserved-core-table enforcement described on
         extra_schema() applies here identically.
         """
-        return None
+        return
 
     @classmethod
-    def get_cli_commands(cls) -> list["typer.Typer"]:
+    def get_cli_commands(cls) -> list[typer.Typer]:
         return []
 
     def config_fields(self) -> list[ConfigField]:

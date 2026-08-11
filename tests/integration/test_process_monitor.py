@@ -1,8 +1,11 @@
 import asyncio
+from datetime import UTC
 from unittest.mock import MagicMock, patch
+
 import pytest
-from packagealert.monitors.process import ProcessMonitor
+
 from packagealert.config import WatchConfig
+from packagealert.monitors.process import ProcessMonitor
 
 
 @pytest.mark.asyncio
@@ -24,7 +27,7 @@ async def test_process_monitor_starts_and_stops():
     # Stop after 0.5s regardless
     try:
         await asyncio.wait_for(collect_briefly(), timeout=0.5)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
     await monitor.stop()
@@ -110,13 +113,14 @@ async def test_emit_from_lockfile_returns_on_lockfile_patterns_exception(tmp_pat
 @pytest.mark.asyncio
 async def test_events_yields_before_sleep():
     """Queued events must be yielded before asyncio.sleep(), not after."""
+    from datetime import datetime
+
     from packagealert.models.events import PackageEvent
-    from datetime import datetime, timezone
 
     monitor = _make_monitor()
     dummy = PackageEvent(
         ecosystem="pypi", package_name="dummy", version="1.0", source="process",
-        manager="pip", project_path=None, timestamp=datetime.now(timezone.utc),
+        manager="pip", project_path=None, timestamp=datetime.now(UTC),
     )
     await monitor._queue.put(dummy)
 
@@ -147,8 +151,8 @@ async def test_events_yields_before_sleep():
 
 def test_package_managers_skips_buggy_plugin():
     """A plugin that raises accessing process_names must not abort _package_managers()."""
-    from packagealert.monitors.process import _package_managers
     from packagealert.languages import registry as lang_registry
+    from packagealert.monitors.process import _package_managers
     lang_registry.load()
 
     bad_lang = MagicMock()

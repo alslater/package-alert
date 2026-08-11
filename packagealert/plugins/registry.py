@@ -8,11 +8,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import asyncio
     from pathlib import Path
+
     import typer
+
     from packagealert.config import AppConfig
+    from packagealert.models.advisories import OsvResult
     from packagealert.models.events import PackageEvent
     from packagealert.models.risk import RiskReport
-    from packagealert.models.advisories import OsvResult
     from packagealert.models.scans import ScanResult
 
 log = logging.getLogger(__name__)
@@ -36,7 +38,7 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._plugins: list = []
         self._classes: dict[str, type] | None = None
-        self._alert_tasks: list["asyncio.Task"] = []
+        self._alert_tasks: list[asyncio.Task] = []
 
     def load_classes(self, only: set[str] | None = None) -> dict[str, type]:
         """Load entry-point classes for CLI command registration.
@@ -51,7 +53,7 @@ class PluginRegistry:
             self._classes = _load_entry_points(only)
         return self._classes
 
-    def load(self, cfg: "AppConfig", config_path: "Path | None" = None) -> None:
+    def load(self, cfg: AppConfig, config_path: Path | None = None) -> None:
         """Instantiate and set up plugins for the given config. Re-entrant: a
         second call with a different config replaces the active plugin set.
 
@@ -118,8 +120,8 @@ class PluginRegistry:
 
     def schedule_alert(
         self,
-        event: "PackageEvent",
-        result: "OsvResult | RiskReport",
+        event: PackageEvent,
+        result: OsvResult | RiskReport,
     ) -> None:
         """Fire alert hooks as a tracked background task.
 
@@ -158,7 +160,7 @@ class PluginRegistry:
                 _asyncio.gather(*tasks, return_exceptions=True),
                 timeout=timeout,
             )
-        except _asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "drain_alert_tasks: %d alert task(s) still running after %.1fs — cancelling",
                 sum(1 for t in tasks if not t.done()),
@@ -170,8 +172,8 @@ class PluginRegistry:
 
     async def fire_on_alert(
         self,
-        event: "PackageEvent",
-        result: "OsvResult | RiskReport",
+        event: PackageEvent,
+        result: OsvResult | RiskReport,
     ) -> None:
         for plugin in self._plugins:
             try:
@@ -183,7 +185,7 @@ class PluginRegistry:
         """Return True if any loaded plugin is actively handling scan persistence."""
         return any(p.is_scan_store() for p in self._plugins)
 
-    async def fire_on_scan_complete(self, scan: "ScanResult") -> None:
+    async def fire_on_scan_complete(self, scan: ScanResult) -> None:
         for plugin in self._plugins:
             try:
                 await plugin.on_scan_complete(scan)
@@ -217,7 +219,7 @@ class PluginRegistry:
                 log.warning("Plugin %r raised in scans_show", plugin.name, exc_info=True)
         return False
 
-    def get_all_cli_commands(self) -> list["typer.Typer"]:
+    def get_all_cli_commands(self) -> list[typer.Typer]:
         commands: list = []
         for plugin in self._plugins:
             try:

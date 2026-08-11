@@ -52,7 +52,7 @@ def _invoke(
 
 def _proj_cfg(**kwargs) -> ProjectRunConfig:
     """Build a ProjectRunConfig with a dummy source path."""
-    defaults = dict(source=Path("/project/.pa-run.toml"), flags="", env=[], no_network=False, allow_external_lockfiles=False)
+    defaults = {"source": Path("/project/.pa-run.toml"), "flags": "", "env": [], "no_network": False, "allow_external_lockfiles": False}
     return ProjectRunConfig(**{**defaults, **kwargs})
 
 
@@ -63,7 +63,7 @@ def _proj_cfg(**kwargs) -> ProjectRunConfig:
 def test_run_cmd_passes_command_to_runner():
     result, call = _invoke(["run", "pip", "install", "requests"])
     assert result.exit_code == 0
-    args, kwargs = call
+    args, _kwargs = call
     assert args[0] == ["pip", "install", "requests"]
 
 
@@ -155,7 +155,7 @@ def test_pa_run_opts_empty_string_ignored():
 
 
 def test_pa_run_opts_unrecognised_token_warns_and_continues():
-    result, call = _invoke(["run", "pip", "install", "requests"],
+    result, _call = _invoke(["run", "pip", "install", "requests"],
                            env={"PA_RUN_OPTS": "--bogus-flag"})
     assert result.exit_code == 0
     assert "unrecognised" in result.output.lower() or "ignored" in result.output.lower()
@@ -342,7 +342,9 @@ class TestFlagsOption:
             return 0
 
         from unittest.mock import patch
+
         from typer.testing import CliRunner
+
         from packagealert.cli.app import app
 
         with patch("packagealert.sandbox.runner.SandboxRunner.run", fake_run):
@@ -360,7 +362,9 @@ class TestFlagsOption:
             return 0
 
         from unittest.mock import patch
+
         from typer.testing import CliRunner
+
         from packagealert.cli.app import app
 
         with patch("packagealert.sandbox.runner.SandboxRunner.run", fake_run):
@@ -380,12 +384,14 @@ class TestProjectEnvAllowlist:
     def _invoke_with_allowlist(
         self,
         args: list[str],
-        proj_cfg: "ProjectRunConfig | None" = None,
+        proj_cfg: ProjectRunConfig | None = None,
         allowlist: list[str] | None = None,
         env: dict[str, str] | None = None,
     ):
-        from unittest.mock import MagicMock, AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from typer.testing import CliRunner
+
         from packagealert.cli.app import app
 
         mock_cfg = MagicMock()

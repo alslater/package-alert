@@ -11,7 +11,6 @@ import pytest
 from packagealert.languages.base import CURRENT_CONTRACT_VERSION, SandboxPaths, Snapshot
 from packagealert.languages.python import PythonLanguage
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

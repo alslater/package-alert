@@ -1,22 +1,27 @@
 import math
 import time
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
 from pydantic import ValidationError
-from packagealert.analyzers.risk import RiskEngine
-from packagealert.models.events import PackageEvent
-from packagealert.models.risk import RiskReport, RiskSignal, DampingContext
-from packagealert.config import HeuristicsConfig
-from datetime import datetime, timezone
-from packagealert.storage.db import open_db
-from packagealert.osv.popularity import PopularityCache, PopularityFetchResult, PackagePopularity
-from packagealert.storage.db import (
-    get_publication_date, store_publication_date,
-    store_age_failure_sentinel,
-)
 
+from packagealert.analyzers.risk import RiskEngine
+from packagealert.config import HeuristicsConfig
+from packagealert.models.events import PackageEvent
+from packagealert.models.risk import DampingContext, RiskReport, RiskSignal
+from packagealert.osv.popularity import (
+    PackagePopularity,
+    PopularityCache,
+    PopularityFetchResult,
+)
+from packagealert.storage.db import (
+    get_publication_date,
+    open_db,
+    store_age_failure_sentinel,
+    store_publication_date,
+)
 
 
 @pytest.fixture
@@ -28,7 +33,7 @@ def event():
         source="process",
         manager="npm",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -40,11 +45,12 @@ def cfg():
 @pytest.mark.asyncio
 async def test_empty_signals_returns_zero(event, cfg, tmp_path):
     engine = RiskEngine(cfg)
-    with patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=[]):
-        with patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None):
-            with patch.object(engine._typosquat, "analyze", new_callable=AsyncMock,
-                               return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()):
-                report = await engine.analyze(event, tmp_path)
+    with (
+        patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=[]),
+        patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None),
+        patch.object(engine._typosquat, "analyze", new_callable=AsyncMock, return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()),
+    ):
+        report = await engine.analyze(event, tmp_path)
     assert report.score == 0
     assert report.level == "info"
 
@@ -56,11 +62,12 @@ async def test_signals_accumulate(event, cfg, tmp_path):
         RiskSignal(name="postinstall", score=20, reason="postinstall found"),
         RiskSignal(name="eval", score=25, reason="eval detected"),
     ]
-    with patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=signals):
-        with patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None):
-            with patch.object(engine._typosquat, "analyze", new_callable=AsyncMock,
-                               return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()):
-                report = await engine.analyze(event, tmp_path)
+    with (
+        patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=signals),
+        patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None),
+        patch.object(engine._typosquat, "analyze", new_callable=AsyncMock, return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()),
+    ):
+        report = await engine.analyze(event, tmp_path)
     assert report.score == 45
     assert report.level == "warning"
 
@@ -69,11 +76,12 @@ async def test_signals_accumulate(event, cfg, tmp_path):
 async def test_score_capped_at_100(event, cfg, tmp_path):
     engine = RiskEngine(cfg)
     signals = [RiskSignal(name=f"s{i}", score=30, reason="x") for i in range(5)]
-    with patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=signals):
-        with patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None):
-            with patch.object(engine._typosquat, "analyze", new_callable=AsyncMock,
-                               return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()):
-                report = await engine.analyze(event, tmp_path)
+    with (
+        patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=signals),
+        patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None),
+        patch.object(engine._typosquat, "analyze", new_callable=AsyncMock, return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()),
+    ):
+        report = await engine.analyze(event, tmp_path)
     assert report.score == 100
 
 
@@ -86,7 +94,7 @@ async def test_typosquat_signal_added(cfg):
         source="process",
         manager="pip",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     engine = RiskEngine(cfg)
     with patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=[]):
@@ -113,11 +121,12 @@ def test_top_packages_cache_defaults_to_none(cfg):
 @pytest.mark.asyncio
 async def test_none_package_dir_skips_heuristics(event, cfg):
     engine = RiskEngine(cfg)
-    with patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=[]) as mock_heur:
-        with patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None):
-            with patch.object(engine._typosquat, "analyze", new_callable=AsyncMock,
-                               return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()):
-                report = await engine.analyze(event, None)
+    with (
+        patch.object(engine, "_run_heuristics", new_callable=AsyncMock, return_value=[]) as mock_heur,
+        patch.object(engine, "_popularity_signal", new_callable=AsyncMock, return_value=None),
+        patch.object(engine._typosquat, "analyze", new_callable=AsyncMock, return_value=type("R", (), {"is_typosquat": False, "closest_match": None, "distance": None, "score": 0})()),
+    ):
+        report = await engine.analyze(event, None)
     mock_heur.assert_called_once_with(event, None)
     assert report.score == 0
 
@@ -282,7 +291,7 @@ def _event(name="lodash", ecosystem="npm"):
         source="process",
         manager="npm",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -296,10 +305,12 @@ async def test_popular_package_heuristic_signals_dampened():
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
 
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="uses child_process")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping is not None
     assert report.damping.popularity_factor == pytest.approx(0.25)
@@ -316,10 +327,12 @@ async def test_unpopular_package_no_dampening():
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="uses child_process")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping.popularity_factor > 0.99
     assert report.score >= 19  # barely dampened: floor(20 * ~0.998) = 19
@@ -338,10 +351,12 @@ async def test_old_version_heuristic_signals_dampened():
     with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value=published_at)):
         engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db, cooldown_period_days=7)
         heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-        with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-            with patch.object(engine, "_typosquat") as mock_typo:
-                mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(0.25)
 
@@ -359,10 +374,12 @@ async def test_new_version_within_cooldown_no_age_dampening():
     with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value=published_at)):
         engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db, cooldown_period_days=7)
         heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-        with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-            with patch.object(engine, "_typosquat") as mock_typo:
-                mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(1.0)
 
@@ -379,10 +396,12 @@ async def test_combined_floor_applied():
     with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value=published_at)):
         engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db)
         heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-        with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-            with patch.object(engine, "_typosquat") as mock_typo:
-                mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.combined_factor == pytest.approx(0.1)
     assert report.score == math.floor(20 * 0.1)
@@ -399,13 +418,15 @@ async def test_typosquat_and_low_popularity_signals_not_dampened():
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
     pop_signal = RiskSignal(name="low_popularity", score=5, reason="low adoption")
 
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(
-                is_typosquat=True, closest_match="lodash", distance=1, score=20
-            ))
-            with patch.object(engine, "_popularity_signal", AsyncMock(return_value=pop_signal)):
-                report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(
+            is_typosquat=True, closest_match="lodash", distance=1, score=20
+        ))
+        with patch.object(engine, "_popularity_signal", AsyncMock(return_value=pop_signal)):
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.score == math.floor(20 * 0.25) + 20 + 5
 
@@ -421,11 +442,13 @@ async def test_popularity_unavailable_warning_logged(caplog):
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
-                report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
+            report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert any("popularity" in r.message.lower() for r in caplog.records)
@@ -443,11 +466,13 @@ async def test_popularity_genuine_404_during_damping_neutral_no_sentinel(caplog)
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
-                report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
+            report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert any("not found" in n for n in report.damping.notes)
@@ -469,12 +494,14 @@ async def test_popularity_signal_unsupported_ecosystem_no_low_popularity_signal(
     pop_cache = AsyncMock()
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(
-                is_typosquat=True, closest_match="laravel", distance=1, score=20,
-            ))
-            report = await engine.analyze(_event(ecosystem="packagist"), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(
+            is_typosquat=True, closest_match="laravel", distance=1, score=20,
+        ))
+        report = await engine.analyze(_event(ecosystem="packagist"), package_dir=None)
 
     assert not any(s.name == "low_popularity" for s in report.signals)
     pop_cache.get.assert_not_called()
@@ -489,11 +516,13 @@ async def test_popularity_unsupported_ecosystem_no_warning(caplog):
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
     heuristic_signal = RiskSignal(name="install_script", score=20, reason="x")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
-                report = await engine.analyze(_event(ecosystem="packagist"), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
+            report = await engine.analyze(_event(ecosystem="packagist"), package_dir=None)
 
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert "unsupported ecosystem" in " ".join(report.damping.notes)
@@ -510,15 +539,19 @@ async def test_age_fetch_failure_factor_neutral_noted():
     pop_client.fetch = AsyncMock(return_value=None)
 
     db = AsyncMock()
-    with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value="miss")):
-        with patch("packagealert.sandbox.cooldown.fetch_publication_date", AsyncMock(return_value=None)):
-            with patch("packagealert.storage.db.store_age_failure_sentinel", AsyncMock()) as mock_sentinel:
-                engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db)
-                heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-                with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-                    with patch.object(engine, "_typosquat") as mock_typo:
-                        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                        report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+    with (
+        patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value="miss")),
+        patch("packagealert.sandbox.cooldown.fetch_publication_date", AsyncMock(return_value=None)),
+        patch("packagealert.storage.db.store_age_failure_sentinel", AsyncMock()) as mock_sentinel,
+    ):
+        engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db)
+        heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("age data unavailable" in n for n in report.damping.notes)
@@ -537,10 +570,12 @@ async def test_age_not_found_factor_neutral_noted():
     with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value="not_found")):
         engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=db)
         heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-        with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-            with patch.object(engine, "_typosquat") as mock_typo:
-                mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("not found" in n for n in report.damping.notes)
@@ -555,10 +590,12 @@ async def test_no_db_age_factor_neutral_noted():
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache, db=None)
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("age data unavailable" in n for n in report.damping.notes)
@@ -574,10 +611,12 @@ async def test_version_count_fallback_when_dependent_count_zero():
     cfg = HeuristicsConfig(high_version_count=100)
     engine = _make_engine(cfg=cfg, pop_client=pop_client, pop_cache=pop_cache)
     heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.damping.popularity_factor == pytest.approx(0.25)
 
@@ -594,14 +633,18 @@ async def test_misconfigured_max_damping_age_logs_warning(caplog):
     db = AsyncMock()
     cfg = HeuristicsConfig(max_damping_age_days=5)
     published_at = time.time() - (60 * 86400)
-    with patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value=published_at)):
-        with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
-            engine = _make_engine(cfg=cfg, pop_client=pop_client, pop_cache=pop_cache, db=db, cooldown_period_days=7)
-            heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
-            with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])):
-                with patch.object(engine, "_typosquat") as mock_typo:
-                    mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-                    report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
+    with (
+        patch("packagealert.storage.db.get_publication_date", AsyncMock(return_value=published_at)),
+        caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"),
+    ):
+        engine = _make_engine(cfg=cfg, pop_client=pop_client, pop_cache=pop_cache, db=db, cooldown_period_days=7)
+        heuristic_signal = RiskSignal(name="child_process", score=20, reason="x")
+        with (
+            patch.object(engine, "_run_heuristics", AsyncMock(return_value=[heuristic_signal])),
+            patch.object(engine, "_typosquat") as mock_typo,
+        ):
+            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+            report = await engine.analyze(_event(ecosystem="npm"), package_dir=None)
 
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("max_damping_age_days" in r.message for r in caplog.records)
@@ -626,10 +669,12 @@ async def test_multi_signal_floor_applied_once():
         RiskSignal(name="signal_a", score=9, reason="a"),
         RiskSignal(name="signal_b", score=9, reason="b"),
     ]
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     # factor = 0.5 (ratio=1.0 at threshold); floor(9*0.5 + 9*0.5) = floor(9.0) = 9
     assert report.damping.combined_factor == pytest.approx(0.5)
@@ -656,10 +701,12 @@ async def test_signal_scores_sum_equals_report_score_no_damping_capped():
 
     # 5 × 25 = 125 undampened → capped to 100, but factor == 1.0
     signals = [RiskSignal(name=f"sig_{i}", score=25, reason="x") for i in range(5)]
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.score == 100
     assert sum(s.score for s in report.signals) == 100
@@ -683,10 +730,12 @@ async def test_signal_scores_sum_equals_report_score_when_capped():
     engine = _make_engine(cfg=cfg, pop_client=pop_client, pop_cache=pop_cache)
 
     signals = [RiskSignal(name=f"sig_{i}", score=25, reason="x") for i in range(5)]
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=signals)),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert report.score == 100
     assert sum(s.score for s in report.signals) == 100
@@ -705,12 +754,14 @@ async def test_popularity_fetch_failed_suppresses_low_popularity_signal():
     pop_client.supports_ecosystem.return_value = True
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(
-                is_typosquat=True, closest_match="lodash", distance=1, score=20,
-            ))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(
+            is_typosquat=True, closest_match="lodash", distance=1, score=20,
+        ))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert not any(s.name == "low_popularity" for s in report.signals)
 
@@ -725,12 +776,14 @@ async def test_popularity_transient_failure_stores_sentinel_suppresses_signal():
     pop_client.fetch = AsyncMock(return_value=PopularityFetchResult.FETCH_FAILED)
 
     engine = _make_engine(pop_client=pop_client, pop_cache=pop_cache)
-    with patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])):
-        with patch.object(engine, "_typosquat") as mock_typo:
-            mock_typo.analyze = AsyncMock(return_value=MagicMock(
-                is_typosquat=True, closest_match="lodash", distance=1, score=20,
-            ))
-            report = await engine.analyze(_event(), package_dir=None)
+    with (
+        patch.object(engine, "_run_heuristics", AsyncMock(return_value=[])),
+        patch.object(engine, "_typosquat") as mock_typo,
+    ):
+        mock_typo.analyze = AsyncMock(return_value=MagicMock(
+            is_typosquat=True, closest_match="lodash", distance=1, score=20,
+        ))
+        report = await engine.analyze(_event(), package_dir=None)
 
     assert not any(s.name == "low_popularity" for s in report.signals)
     pop_cache.store_failure_sentinel.assert_awaited_once()

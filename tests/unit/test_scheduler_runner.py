@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import datetime as dt
 import time
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from packagealert.scheduler.runner import ScheduledScanner, _is_due
+
+import pytest
+
 from packagealert.scheduler.db import ScheduledProject
+from packagealert.scheduler.runner import ScheduledScanner, _is_due
 
 
 def _make_project(schedule: str, last_scanned_at: float | None, scan_type: str = "project") -> ScheduledProject:
@@ -24,49 +26,49 @@ class TestIsDue:
     # daily_hour=2, weekly_day=6 (Sunday), weekly_hour=2 throughout.
 
     def test_never_scanned_is_always_due(self):
-        now = dt.datetime(2026, 1, 6, 15, 0)  # Tuesday 15:00
+        now = dt.datetime(2026, 1, 6, 15, 0)  # Tuesday 15:00  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("daily", None)
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_daily_due_after_scheduled_hour_passes(self):
         # Tuesday 15:00; last ran Monday 02:15 — today's 02:00 window is in the past, not yet hit
-        now = dt.datetime(2026, 1, 6, 15, 0)
-        last = dt.datetime(2026, 1, 5, 2, 15)
+        now = dt.datetime(2026, 1, 6, 15, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 5, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_daily_not_due_before_scheduled_hour(self):
         # Tuesday 01:00; daily_hour=2 hasn't arrived yet
-        now = dt.datetime(2026, 1, 6, 1, 0)
-        last = dt.datetime(2026, 1, 5, 2, 15)
+        now = dt.datetime(2026, 1, 6, 1, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 5, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_daily_not_due_already_ran_today(self):
         # Tuesday 15:00; already ran at Tuesday 02:15 — after today's window
-        now = dt.datetime(2026, 1, 6, 15, 0)
-        last = dt.datetime(2026, 1, 6, 2, 15)
+        now = dt.datetime(2026, 1, 6, 15, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 6, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_weekly_due_after_configured_day_and_hour(self):
         # Sunday 2026-01-11 15:00; last ran previous Sunday 02:15 — this week's window passed
-        now = dt.datetime(2026, 1, 11, 15, 0)   # Sunday, weekday=6
-        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15
+        now = dt.datetime(2026, 1, 11, 15, 0)   # Sunday, weekday=6  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_weekly_not_due_already_ran_this_week(self):
         # Monday 2026-01-12 15:00; ran Sunday 02:15 — already hit this week's slot
-        now = dt.datetime(2026, 1, 12, 15, 0)   # Monday, weekday=0
-        last = dt.datetime(2026, 1, 11, 2, 15)   # Sunday 02:15
+        now = dt.datetime(2026, 1, 12, 15, 0)   # Monday, weekday=0  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 11, 2, 15)   # Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_weekly_not_due_before_scheduled_hour_on_target_day(self):
         # Sunday 2026-01-11 01:00; weekly_hour=2 hasn't arrived yet today
-        now = dt.datetime(2026, 1, 11, 1, 0)    # Sunday, weekday=6, before 02:00
-        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15
+        now = dt.datetime(2026, 1, 11, 1, 0)    # Sunday, weekday=6, before 02:00  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
@@ -75,8 +77,8 @@ class TestScheduledScanner:
     @pytest.mark.asyncio
     async def test_run_due_scans_skips_nonexistent_project(self, tmp_path):
         from packagealert.config import AppConfig
-        from packagealert.storage.db import open_db
         from packagealert.scheduler.db import add_project
+        from packagealert.storage.db import open_db
 
         db = await open_db(tmp_path / "test.db")
         await add_project(db, path="/does/not/exist", schedule="daily", scan_type="project")
@@ -90,8 +92,8 @@ class TestScheduledScanner:
     @pytest.mark.asyncio
     async def test_run_due_scans_stores_result(self, tmp_path):
         from packagealert.config import AppConfig
-        from packagealert.storage.db import open_db
         from packagealert.scheduler.db import add_project, list_scan_results
+        from packagealert.storage.db import open_db
 
         db = await open_db(tmp_path / "test.db")
         project_dir = tmp_path / "myproject"
@@ -123,8 +125,8 @@ class TestScheduledScanner:
     async def test_both_scan_types_run_independently(self, tmp_path):
         """A project registered for both types runs both scanners independently."""
         from packagealert.config import AppConfig
-        from packagealert.storage.db import open_db
         from packagealert.scheduler.db import add_project, list_scan_results
+        from packagealert.storage.db import open_db
 
         db = await open_db(tmp_path / "test.db")
         project_dir = tmp_path / "myproject"
@@ -152,8 +154,8 @@ class TestScheduledScanner:
     @pytest.mark.asyncio
     async def test_run_due_scans_uses_scan_installed_for_installed_type(self, tmp_path):
         from packagealert.config import AppConfig
-        from packagealert.storage.db import open_db
         from packagealert.scheduler.db import add_project
+        from packagealert.storage.db import open_db
 
         db = await open_db(tmp_path / "test.db")
         project_dir = tmp_path / "myproject"
@@ -175,8 +177,12 @@ class TestScheduledScanner:
     @pytest.mark.asyncio
     async def test_run_due_scans_prunes_old_results(self, tmp_path):
         from packagealert.config import AppConfig
+        from packagealert.scheduler.db import (
+            add_project,
+            list_scan_results,
+            save_scan_result,
+        )
         from packagealert.storage.db import open_db
-        from packagealert.scheduler.db import add_project, save_scan_result, list_scan_results
 
         db = await open_db(tmp_path / "test.db")
         project_dir = tmp_path / "myproject"
@@ -205,8 +211,12 @@ class TestScheduledScanner:
     async def test_plugin_scan_store_skips_save_and_prune(self, tmp_path):
         """When a plugin handles scan storage, no row is written and existing history is not pruned."""
         from packagealert.config import AppConfig
+        from packagealert.scheduler.db import (
+            add_project,
+            list_scan_results,
+            save_scan_result,
+        )
         from packagealert.storage.db import open_db
-        from packagealert.scheduler.db import add_project, save_scan_result, list_scan_results
 
         db = await open_db(tmp_path / "test.db")
         project_dir = tmp_path / "myproject"
@@ -237,6 +247,7 @@ class TestScheduledScanner:
 async def test_scheduler_loop_calls_run_due_scans():
     """_scheduler_loop calls run_due_scans repeatedly until cancelled."""
     import asyncio
+
     from packagealert.daemon import _scheduler_loop
 
     call_count = 0
@@ -263,9 +274,10 @@ async def test_scheduler_loop_calls_run_due_scans():
 async def test_daemon_does_not_start_scheduler_when_disabled():
     """scheduler.enabled = False must prevent ScheduledScanner from being created."""
     import asyncio
+    from unittest.mock import AsyncMock, patch
+
     from packagealert.config import AppConfig
     from packagealert.daemon import Daemon
-    from unittest.mock import AsyncMock, patch
 
     cfg = AppConfig.model_validate({
         "scheduler": {"enabled": False},
@@ -291,7 +303,7 @@ async def test_daemon_does_not_start_scheduler_when_disabled():
         run_task.cancel()
         try:
             await run_task
-        except (asyncio.CancelledError, Exception):
+        except (asyncio.CancelledError, Exception):  # noqa: S110, BLE001 — test-only cleanup after cancelling the task
             pass
 
     MockScanner.assert_not_called()

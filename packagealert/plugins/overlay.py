@@ -35,7 +35,7 @@ def _strip_unsafe_keys(raw: dict) -> None:
         plugins.pop("enabled", None)
 
 
-def apply_overlay_to_config(toml_str: str, cfg: "AppConfig") -> None:
+def apply_overlay_to_config(toml_str: str, cfg: AppConfig) -> None:
     """Merge a TOML overlay string into *cfg* in-place.
 
     Strips plugin-control keys before merging so an overlay cannot activate

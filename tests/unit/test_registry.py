@@ -3,17 +3,18 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from packagealert.languages import registry as reg
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     LanguageBase,
     SandboxPaths,
     Snapshot,
 )
-from packagealert.languages import registry as reg
 
 
 @dataclass(eq=False)
@@ -143,8 +144,8 @@ def test_missing_contract_version_treated_as_one(caplog):
     # an old plugin that predates the contract_version field.
     class NoVersionLanguage:
         name = "mock"
-        ecosystems = ["Mock"]
-        process_names = ["mocktool"]
+        ecosystems: ClassVar[list[str]] = ["Mock"]
+        process_names: ClassVar[list[str]] = ["mocktool"]
 
         def parse_process_install(self, args): return None
         def parse_lockfile(self, path): return []
@@ -176,9 +177,11 @@ def test_failed_plugin_load_warns_and_continues(caplog):
     good_ep.name = "good"
     good_ep.load.return_value = lambda: good
 
-    with patch("importlib.metadata.entry_points", return_value=[bad_ep, good_ep]):
-        with caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"):
-            reg._load_plugins()
+    with (
+        patch("importlib.metadata.entry_points", return_value=[bad_ep, good_ep]),
+        caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"),
+    ):
+        reg._load_plugins()
 
     assert "bad" in caplog.text
     assert reg.get("good") is good
@@ -235,7 +238,7 @@ def test_for_process_buggy_plugin_skipped(caplog):
         def process_names(self):
             raise RuntimeError("boom")
 
-        ecosystems = ["Bad"]
+        ecosystems: ClassVar[list[str]] = ["Bad"]
         def lockfile_patterns(self): return []
         def parse_lockfile(self, p): return []
         def parse_process_install(self, a): return None
@@ -265,7 +268,7 @@ def test_for_ecosystem_buggy_plugin_skipped(caplog):
     class BrokenEcosystems:
         name = "bad"
         contract_version = 1
-        process_names = ["bad"]
+        process_names: ClassVar[list[str]] = ["bad"]
 
         @property
         def ecosystems(self):

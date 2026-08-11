@@ -15,6 +15,7 @@ def normalise_package_name(name: str) -> str:
 
 if TYPE_CHECKING:
     import httpx
+
     from packagealert.heuristics.base import AbstractHeuristic
 
 CURRENT_CONTRACT_VERSION = 4
@@ -526,15 +527,15 @@ class LanguageBase(Protocol):
 __all__ = [
     "CURRENT_CONTRACT_VERSION",
     "MAX_TOP_PACKAGES",
-    "normalise_package_name",
-    "PackageSpec",
+    "LanguageBase",
     "PackageMetadata",
+    "PackageSpec",
     "PreRunResult",
-    "SandboxPaths",
+    "ProcessInstall",
     "SandboxEnvError",
+    "SandboxPaths",
     "SandboxTargets",
     "ShellEnvironment",
     "Snapshot",
-    "ProcessInstall",
-    "LanguageBase",
+    "normalise_package_name",
 ]

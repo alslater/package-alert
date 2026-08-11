@@ -8,10 +8,9 @@ import time as _time
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from typer.testing import CliRunner
 
-from packagealert.cli.app import app, _is_pipx_install, _is_uv_tool_install
+from packagealert.cli.app import _is_pipx_install, _is_uv_tool_install, app
 
 runner = CliRunner()
 
@@ -23,9 +22,11 @@ def test_is_pipx_install_legacy_path(tmp_path):
     pipx_venvs = tmp_path / ".local" / "pipx" / "venvs"
     pipx_venvs.mkdir(parents=True)
     fake_exe = str(pipx_venvs / "package-alert" / "bin" / "python")
-    with patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_pipx_install() is True
+    with (
+        patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_pipx_install() is True
 
 
 def test_is_pipx_install_xdg_path(tmp_path):
@@ -35,17 +36,21 @@ def test_is_pipx_install_xdg_path(tmp_path):
     pipx_venvs = tmp_path / ".local" / "share" / "pipx" / "venvs"
     pipx_venvs.mkdir(parents=True)
     fake_exe = str(pipx_venvs / "package-alert" / "bin" / "python")
-    with patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_pipx_install() is True
+    with (
+        patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_pipx_install() is True
 
 
 def test_is_pipx_install_outside_pipx(tmp_path):
     pipx_venvs = tmp_path / ".local" / "pipx" / "venvs"
     fake_exe = str(tmp_path / "some_other_venv" / "bin" / "python")
-    with patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_pipx_install() is False
+    with (
+        patch("packagealert.cli.app._pipx_venvs_candidates", return_value=[pipx_venvs]),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_pipx_install() is False
 
 
 def test_is_pipx_install_respects_pipx_home(tmp_path):
@@ -54,9 +59,11 @@ def test_is_pipx_install_respects_pipx_home(tmp_path):
     pipx_venvs = custom_home / "venvs"
     pipx_venvs.mkdir(parents=True)
     fake_exe = str(pipx_venvs / "package-alert" / "bin" / "python")
-    with patch.dict("os.environ", {"PIPX_HOME": str(custom_home)}):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_pipx_install() is True
+    with (
+        patch.dict("os.environ", {"PIPX_HOME": str(custom_home)}),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_pipx_install() is True
 
 
 def test_is_pipx_install_relative_pipx_home(tmp_path, monkeypatch):
@@ -74,9 +81,11 @@ def test_is_pipx_install_relative_pipx_home(tmp_path, monkeypatch):
 
 
 def test_update_not_pipx_install():
-    with patch("packagealert.cli.app._is_pipx_install", return_value=False):
-        with patch("packagealert.cli.app._is_uv_tool_install", return_value=False):
-            result = runner.invoke(app, ["update"])
+    with (
+        patch("packagealert.cli.app._is_pipx_install", return_value=False),
+        patch("packagealert.cli.app._is_uv_tool_install", return_value=False),
+    ):
+        result = runner.invoke(app, ["update"])
     assert result.exit_code == 1
     assert "pipx or uv tool" in result.output
 
@@ -120,57 +129,71 @@ class TestPipxUpdate:
 
     @pytest.fixture(autouse=True)
     def pipx_install(self):
-        with patch("packagealert.cli.app._is_uv_tool_install", return_value=False):
-            with patch("packagealert.cli.app._is_pipx_install", return_value=True):
-                yield
+        with (
+            patch("packagealert.cli.app._is_uv_tool_install", return_value=False),
+            patch("packagealert.cli.app._is_pipx_install", return_value=True),
+        ):
+            yield
 
     def test_update_pipx_not_on_path(self):
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", side_effect=FileNotFoundError):
-                result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
         assert "pipx" in result.output.lower()
 
     def test_update_delegates_to_pipx_and_forwards_exit_code(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["pipx", "upgrade", "package-alert"], returncode=0)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run:
-                result = runner.invoke(app, ["update"])
-        mock_run.assert_called_once_with(["pipx", "upgrade", "package-alert"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = runner.invoke(app, ["update"])
+        mock_run.assert_called_once_with(["pipx", "upgrade", "package-alert"], check=False)
         assert result.exit_code == 0
 
     def test_update_forwards_nonzero_exit_code(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["pipx", "upgrade", "package-alert"], returncode=1)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result):
-                result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result),
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
 
     def test_force_calls_pipx_reinstall(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=0)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run:
-                result = runner.invoke(app, ["update", "--force"])
-        mock_run.assert_called_once_with(["pipx", "reinstall", "package-alert"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = runner.invoke(app, ["update", "--force"])
+        mock_run.assert_called_once_with(["pipx", "reinstall", "package-alert"], check=False)
         assert result.exit_code == 0
 
     def test_force_prints_reinstalled_message(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=0)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result):
-                result = runner.invoke(app, ["update", "--force"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result),
+        ):
+            result = runner.invoke(app, ["update", "--force"])
         assert "reinstalled" in result.output.lower()
 
     def test_force_forwards_nonzero_exit_code(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["pipx", "reinstall", "package-alert"], returncode=1)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result):
-                result = runner.invoke(app, ["update", "--force"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result),
+        ):
+            result = runner.invoke(app, ["update", "--force"])
         assert result.exit_code == 1
 
 
@@ -198,18 +221,22 @@ class TestDaemonRestart:
         import subprocess as sp
         cmd, is_uv = request.param
         ok = sp.CompletedProcess(args=cmd, returncode=0)
-        with patch("packagealert.cli.app._is_pipx_install", return_value=not is_uv):
-            with patch("packagealert.cli.app._is_uv_tool_install", return_value=is_uv):
-                with patch("packagealert.cli.app.subprocess.run", return_value=ok):
-                    yield cmd
+        with (
+            patch("packagealert.cli.app._is_pipx_install", return_value=not is_uv),
+            patch("packagealert.cli.app._is_uv_tool_install", return_value=is_uv),
+            patch("packagealert.cli.app.subprocess.run", return_value=ok),
+        ):
+            yield cmd
 
     def test_no_restart_when_version_unchanged(self):
         """Upgrade ran but version didn't change — no SIGTERM, no Popen."""
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.check_already_running", return_value=None):
-                with patch("packagealert.cli.app.subprocess.Popen") as mock_popen:
-                    with patch("packagealert.cli.app.os.kill") as mock_kill:
-                        result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.check_already_running", return_value=None),
+            patch("packagealert.cli.app.subprocess.Popen") as mock_popen,
+            patch("packagealert.cli.app.os.kill") as mock_kill,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_kill.assert_not_called()
         mock_popen.assert_not_called()
@@ -217,11 +244,13 @@ class TestDaemonRestart:
 
     def test_no_restart_when_daemon_not_running(self):
         """Version changed but daemon is not running — no SIGTERM, no Popen."""
-        with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-            with patch("packagealert.cli.app.check_already_running", return_value=None):
-                with patch("packagealert.cli.app.subprocess.Popen") as mock_popen:
-                    with patch("packagealert.cli.app.os.kill") as mock_kill:
-                        result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", return_value=None),
+            patch("packagealert.cli.app.subprocess.Popen") as mock_popen,
+            patch("packagealert.cli.app.os.kill") as mock_kill,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_kill.assert_not_called()
         mock_popen.assert_not_called()
@@ -230,14 +259,15 @@ class TestDaemonRestart:
         """Version changed, daemon running under systemd — systemctl restart called, no SIGTERM, no Popen."""
         upgrade_cmd = upgraded
         systemctl_cmd = ["systemctl", "--user", "restart", "package-alert"]
-        with patch("packagealert.cli.app.subprocess.run",
-                   side_effect=_make_run_dispatcher(upgrade_cmd)) as mock_run:
-            with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-                with patch("packagealert.cli.app.check_already_running", return_value=9999):
-                    with patch("packagealert.cli.app.is_started_by_systemd", return_value=True):
-                        with patch("packagealert.cli.app.os.kill") as mock_kill:
-                            with patch("packagealert.cli.app.subprocess.Popen") as mock_popen:
-                                result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app.subprocess.run", side_effect=_make_run_dispatcher(upgrade_cmd)) as mock_run,
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", return_value=9999),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=True),
+            patch("packagealert.cli.app.os.kill") as mock_kill,
+            patch("packagealert.cli.app.subprocess.Popen") as mock_popen,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_kill.assert_not_called()
         mock_popen.assert_not_called()
@@ -248,12 +278,13 @@ class TestDaemonRestart:
     def test_systemd_restart_failure_prints_warning(self, upgraded):
         """systemctl restart exits non-zero — warning shown, no crash."""
         upgrade_cmd = upgraded
-        with patch("packagealert.cli.app.subprocess.run",
-                   side_effect=_make_run_dispatcher(upgrade_cmd, systemctl_rc=1)):
-            with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-                with patch("packagealert.cli.app.check_already_running", return_value=9999):
-                    with patch("packagealert.cli.app.is_started_by_systemd", return_value=True):
-                        result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app.subprocess.run", side_effect=_make_run_dispatcher(upgrade_cmd, systemctl_rc=1)),
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", return_value=9999),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=True),
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         assert "journalctl" in result.output.lower()
 
@@ -267,14 +298,16 @@ class TestDaemonRestart:
         car_results = itertools.chain([9999, None], itertools.repeat(8888))
         pid_file = tmp_path / "package-alert.pid"
         # File absent — daemon stopped cleanly after SIGTERM
-        with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-            with patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)):
-                with patch("packagealert.cli.app.is_started_by_systemd", return_value=False):
-                    with patch("packagealert.cli.app._daemon_cmdline", return_value=original_cmd):
-                        with patch("packagealert.cli.app.PID_FILE", pid_file):
-                            with patch("packagealert.cli.app.os.kill") as mock_kill:
-                                with patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen:
-                                    result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=False),
+            patch("packagealert.cli.app._daemon_cmdline", return_value=original_cmd),
+            patch("packagealert.cli.app.PID_FILE", pid_file),
+            patch("packagealert.cli.app.os.kill") as mock_kill,
+            patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_kill.assert_called_once_with(9999, _sig.SIGTERM)
         mock_popen.assert_called_once_with(original_cmd, start_new_session=True)
@@ -288,14 +321,16 @@ class TestDaemonRestart:
         car_results = itertools.chain([9999, None], itertools.repeat(8888))
         pid_file = tmp_path / "package-alert.pid"
         # File absent — daemon stopped cleanly after SIGTERM
-        with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-            with patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)):
-                with patch("packagealert.cli.app.is_started_by_systemd", return_value=False):
-                    with patch("packagealert.cli.app._daemon_cmdline", return_value=None):
-                        with patch("packagealert.cli.app.PID_FILE", pid_file):
-                            with patch("packagealert.cli.app.os.kill"):
-                                with patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen:
-                                    result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=False),
+            patch("packagealert.cli.app._daemon_cmdline", return_value=None),
+            patch("packagealert.cli.app.PID_FILE", pid_file),
+            patch("packagealert.cli.app.os.kill"),
+            patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_popen.assert_called_once_with(["package-alert", "daemon"], start_new_session=True)
 
@@ -307,33 +342,34 @@ class TestDaemonRestart:
         car_results = itertools.repeat(9999)
         pid_file = tmp_path / "package-alert.pid"
         pid_file.write_text("9999")  # File persists — daemon never stops
-        with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-            with patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)):
-                with patch("packagealert.cli.app.is_started_by_systemd", return_value=False):
-                    with patch("packagealert.cli.app.PID_FILE", pid_file):
-                        # Each call returns a value 11 s higher than the last.
-                        # The stop-loop deadline is time()+10 and the confirm-loop
-                        # deadline is time()+5, so the very next time() call always
-                        # exceeds both, forcing an immediate timeout. Time is
-                        # strictly non-decreasing, so no backward-time anomalies.
-                        _clock = itertools.count(step=11)
-                        with patch("packagealert.cli.app.time.time", side_effect=lambda: float(next(_clock))):
-                            with patch("packagealert.cli.app.time.sleep"):
-                                with patch("packagealert.cli.app.os.kill"):
-                                    with patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen:
-                                        result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", side_effect=lambda: next(car_results)),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=False),
+            patch("packagealert.cli.app.PID_FILE", pid_file),
+        ):
+            _clock = itertools.count(step=11)
+            with (
+                patch("packagealert.cli.app.time.time", side_effect=lambda: float(next(_clock))),
+                patch("packagealert.cli.app.time.sleep"),
+                patch("packagealert.cli.app.os.kill"),
+                patch("packagealert.cli.app.subprocess.Popen", return_value=mock_proc) as mock_popen,
+            ):
+                result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_popen.assert_called_once()
         assert "timed out" in result.output.lower()
 
     def test_os_kill_error_prints_warning(self):
         """os.kill raises OSError — warning shown, no crash, exit 0."""
-        with patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()):
-            with patch("packagealert.cli.app.check_already_running", return_value=9999):
-                with patch("packagealert.cli.app.is_started_by_systemd", return_value=False):
-                    with patch("packagealert.cli.app.os.kill", side_effect=ProcessLookupError("no such process")):
-                        with patch("packagealert.cli.app.subprocess.Popen") as mock_popen:
-                            result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", side_effect=_make_version_side_effect()),
+            patch("packagealert.cli.app.check_already_running", return_value=9999),
+            patch("packagealert.cli.app.is_started_by_systemd", return_value=False),
+            patch("packagealert.cli.app.os.kill", side_effect=ProcessLookupError("no such process")),
+            patch("packagealert.cli.app.subprocess.Popen") as mock_popen,
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 0
         mock_popen.assert_not_called()
         assert "could not restart" in result.output.lower()
@@ -349,11 +385,13 @@ def test_cli_prints_notice_when_update_available(tmp_path):
         "latest": "9.9.9",
         "current": "0.1.2",
     }))
-    with patch("packagealert.cli.app._is_interactive", return_value=True):
-        with patch("packagealert.update_check.CACHE_FILE", cache):
-            with patch("packagealert.update_check.pkg_version", return_value="0.1.2"):
-                with patch("packagealert.cli.app._is_pipx_install", return_value=False):
-                    result = runner.invoke(app, ["update"])
+    with (
+        patch("packagealert.cli.app._is_interactive", return_value=True),
+        patch("packagealert.update_check.CACHE_FILE", cache),
+        patch("packagealert.update_check.pkg_version", return_value="0.1.2"),
+        patch("packagealert.cli.app._is_pipx_install", return_value=False),
+    ):
+        result = runner.invoke(app, ["update"])
     combined = result.output + (result.stderr if hasattr(result, "stderr") else "")
     assert "9.9.9" in combined
 
@@ -369,13 +407,15 @@ def test_cli_spawns_background_thread_when_cache_stale(tmp_path):
     async def fake_check():
         check_called.append(1)
 
-    with patch("packagealert.cli.app._is_interactive", return_value=True):
-        with patch("packagealert.update_check.CACHE_FILE", cache):
-            with patch("packagealert.update_check.check_and_cache", fake_check):
-                with patch("packagealert.cli.app._is_pipx_install", return_value=False):
-                    runner.invoke(app, ["update"])
-                    if _app._update_thread:
-                        _app._update_thread.join(timeout=2.0)
+    with (
+        patch("packagealert.cli.app._is_interactive", return_value=True),
+        patch("packagealert.update_check.CACHE_FILE", cache),
+        patch("packagealert.update_check.check_and_cache", fake_check),
+        patch("packagealert.cli.app._is_pipx_install", return_value=False),
+    ):
+        runner.invoke(app, ["update"])
+        if _app._update_thread:
+            _app._update_thread.join(timeout=2.0)
 
     assert len(check_called) >= 1
 
@@ -395,13 +435,15 @@ def test_cli_does_not_spawn_thread_when_cache_fresh(tmp_path):
     async def fake_check():
         check_called.append(1)
 
-    with patch("packagealert.cli.app._is_interactive", return_value=True):
-        with patch("packagealert.update_check.CACHE_FILE", cache):
-            with patch("packagealert.update_check.check_and_cache", fake_check):
-                with patch("packagealert.cli.app._is_pipx_install", return_value=False):
-                    runner.invoke(app, ["update"])
-                    if _app._update_thread:
-                        _app._update_thread.join(timeout=2.0)
+    with (
+        patch("packagealert.cli.app._is_interactive", return_value=True),
+        patch("packagealert.update_check.CACHE_FILE", cache),
+        patch("packagealert.update_check.check_and_cache", fake_check),
+        patch("packagealert.cli.app._is_pipx_install", return_value=False),
+    ):
+        runner.invoke(app, ["update"])
+        if _app._update_thread:
+            _app._update_thread.join(timeout=2.0)
 
     assert len(check_called) == 0
 
@@ -417,17 +459,21 @@ def test_is_uv_tool_install_with_injected_candidates(tmp_path, monkeypatch):
     uv_tools = tmp_path / ".local" / "share" / "uv" / "tools"
     uv_tools.mkdir(parents=True)
     fake_exe = str(uv_tools / "package-alert" / "bin" / "python")
-    with patch("packagealert.cli.app._uv_tool_dirs_candidates", return_value=[uv_tools]):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_uv_tool_install() is True
+    with (
+        patch("packagealert.cli.app._uv_tool_dirs_candidates", return_value=[uv_tools]),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_uv_tool_install() is True
 
 
 def test_is_uv_tool_install_outside_uv(tmp_path):
     uv_tools = tmp_path / ".local" / "share" / "uv" / "tools"
     fake_exe = str(tmp_path / "some_other_venv" / "bin" / "python")
-    with patch("packagealert.cli.app._uv_tool_dirs_candidates", return_value=[uv_tools]):
-        with patch.object(sys, "executable", fake_exe):
-            assert _is_uv_tool_install() is False
+    with (
+        patch("packagealert.cli.app._uv_tool_dirs_candidates", return_value=[uv_tools]),
+        patch.object(sys, "executable", fake_exe),
+    ):
+        assert _is_uv_tool_install() is False
 
 
 def test_is_uv_tool_install_respects_uv_tool_dir(tmp_path, monkeypatch):
@@ -473,41 +519,51 @@ class TestUvUpdate:
 
     @pytest.fixture(autouse=True)
     def uv_install(self):
-        with patch("packagealert.cli.app._is_pipx_install", return_value=False):
-            with patch("packagealert.cli.app._is_uv_tool_install", return_value=True):
-                yield
+        with (
+            patch("packagealert.cli.app._is_pipx_install", return_value=False),
+            patch("packagealert.cli.app._is_uv_tool_install", return_value=True),
+        ):
+            yield
 
     def test_update_delegates_to_uv_upgrade(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["uv", "tool", "upgrade", "package-alert"], returncode=0)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run:
-                result = runner.invoke(app, ["update"])
-        mock_run.assert_called_once_with(["uv", "tool", "upgrade", "package-alert"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = runner.invoke(app, ["update"])
+        mock_run.assert_called_once_with(["uv", "tool", "upgrade", "package-alert"], check=False)
         assert result.exit_code == 0
 
     def test_update_force_calls_uv_install_reinstall(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["uv", "tool", "install", "--reinstall", "package-alert"], returncode=0)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run:
-                result = runner.invoke(app, ["update", "--force"])
-        mock_run.assert_called_once_with(["uv", "tool", "install", "--reinstall", "package-alert"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result) as mock_run,
+        ):
+            result = runner.invoke(app, ["update", "--force"])
+        mock_run.assert_called_once_with(["uv", "tool", "install", "--reinstall", "package-alert"], check=False)
         assert result.exit_code == 0
 
     def test_update_uv_not_on_path(self):
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", side_effect=FileNotFoundError):
-                result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", side_effect=FileNotFoundError),
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
         assert "uv" in result.output.lower()
 
     def test_update_uv_forwards_nonzero_exit_code(self):
         import subprocess as sp
         mock_result = sp.CompletedProcess(args=["uv", "tool", "upgrade", "package-alert"], returncode=1)
-        with patch("packagealert.cli.app._pkg_version", return_value="0.1.2"):
-            with patch("packagealert.cli.app.subprocess.run", return_value=mock_result):
-                result = runner.invoke(app, ["update"])
+        with (
+            patch("packagealert.cli.app._pkg_version", return_value="0.1.2"),
+            patch("packagealert.cli.app.subprocess.run", return_value=mock_result),
+        ):
+            result = runner.invoke(app, ["update"])
         assert result.exit_code == 1
 
 

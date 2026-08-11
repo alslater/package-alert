@@ -3,8 +3,8 @@ import os
 import stat
 import time
 from unittest.mock import patch
-import pytest
 
+import pytest
 
 PA_FINGERPRINT = "# __pa_shim__"
 PA_REAL_SUFFIX = ".__pa_real"
@@ -41,7 +41,10 @@ class TestSetupProjectIntegration:
         assert os.access(shim, os.X_OK)
 
     def test_uninstall_restores(self, venv_project):
-        from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
+        from packagealert.cli.setup_cmd import (
+            install_project_shims,
+            uninstall_project_shims,
+        )
         install_project_shims(project_root=venv_project)
         uninstall_project_shims(project_root=venv_project)
         pip = venv_project / ".venv" / "bin" / "pip"
@@ -60,7 +63,11 @@ class TestSetupProjectIntegration:
 
 class TestCooldownAllowIntegration:
     def test_cooldown_allow_creates_cleared_record(self, tmp_path):
-        from packagealert.storage.db import open_db, get_cooldown_cleared_at, store_cooldown_cleared
+        from packagealert.storage.db import (
+            get_cooldown_cleared_at,
+            open_db,
+            store_cooldown_cleared,
+        )
 
         async def _run():
             db = await open_db(tmp_path / "test.db")

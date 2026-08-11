@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 import re
 import subprocess
-from urllib.parse import quote, unquote
 from pathlib import Path
+from typing import Any, ClassVar
+from urllib.parse import quote, unquote
 
 import httpx
 
@@ -60,7 +60,7 @@ class _NpmHeuristic(AbstractHeuristic):
 
         try:
             pkg = json.loads(pkg_json_path.read_bytes())
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed/unreadable package.json, no signals to extract
             return signals
 
         scripts: dict[str, str] = pkg.get("scripts", {})
@@ -144,8 +144,8 @@ class NodeLanguage:
     """Language module for Node.js / npm / yarn / pnpm."""
 
     name: str = "node"
-    ecosystems: list[str] = ["npm"]
-    process_names: list[str] = ["npm", "yarn", "pnpm", "node", "nodejs"]
+    ecosystems: ClassVar[list[str]] = ["npm"]
+    process_names: ClassVar[list[str]] = ["npm", "yarn", "pnpm", "node", "nodejs"]
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -163,7 +163,9 @@ class NodeLanguage:
 
     def parse_process_install(self, args: list[str]) -> ProcessInstall | None:
         from packagealert.parsers.process_args import (
-            parse_npm_args, parse_yarn_args, parse_pnpm_args,
+            parse_npm_args,
+            parse_pnpm_args,
+            parse_yarn_args,
         )
 
         result = parse_npm_args(args) or parse_yarn_args(args) or parse_pnpm_args(args)
@@ -223,7 +225,7 @@ class NodeLanguage:
                         is_dev = name in dev_names
                     result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=is_dev))
             return result
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed lockfile, best-effort parse
             log.debug("Failed to parse package-lock.json at %s", path)
             return []
 
@@ -239,7 +241,7 @@ class NodeLanguage:
         _DEP_ENTRY_RE = re.compile(r'^\s+"?(@?[^@"\s][^@"]*?)"?\s+"([^"]+)"')
         try:
             text = path.read_text()
-        except Exception:
+        except Exception:  # noqa: BLE001 — unreadable lockfile, best-effort parse
             log.debug("Failed to read yarn.lock at %s", path)
             return []
 
@@ -254,7 +256,7 @@ class NodeLanguage:
             dev_direct = dict(pkg_data.get("devDependencies", {}))
             pkg_json_available = True
         except Exception:
-            pass
+            log.debug("Failed to read package.json at %s for seed classification", pkg_json, exc_info=True)
 
         # First pass: parse all blocks to collect resolved versions and adjacency.
         # Block header selectors (name@range) are the keys by which parent blocks
@@ -383,7 +385,7 @@ class NodeLanguage:
         )
         try:
             text = path.read_text()
-        except Exception:
+        except Exception:  # noqa: BLE001 — unreadable lockfile, best-effort parse
             log.debug("Failed to read pnpm-lock.yaml at %s", path)
             return []
         lines = text.splitlines()
@@ -711,7 +713,7 @@ class NodeLanguage:
                     if name:
                         results.append(PackageMetadata(name=name, version=version, ecosystem="npm"))
                 except Exception:
-                    pass
+                    log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
             # Scoped packages (@scope/package)
             for pkg_json in node_modules.glob("@*/*/package.json"):
                 try:
@@ -721,7 +723,7 @@ class NodeLanguage:
                     if name:
                         results.append(PackageMetadata(name=name, version=version, ecosystem="npm"))
                 except Exception:
-                    pass
+                    log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
         except Exception:
             log.debug("node_modules scan failed at %s", root, exc_info=True)
         return results
@@ -756,7 +758,7 @@ class NodeLanguage:
         self,
         parsed: Any,
         cwd: Path,
-    ) -> "SandboxTargets":
+    ) -> SandboxTargets:
         targets = SandboxTargets()
         # node_modules lives under cwd, already covered by the cwd bind
         targets.scan_targets.append(cwd / "node_modules")
@@ -776,7 +778,7 @@ class NodeLanguage:
     # shell_environment
     # ------------------------------------------------------------------
 
-    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
         result = ShellEnvironment()
         nm_bin = cwd / "node_modules" / ".bin"
         if nm_bin.is_dir():
@@ -793,7 +795,7 @@ class NodeLanguage:
         self,
         new_paths: set[Path],
         walk_root: Path,
-    ) -> "list[PackageSpec]":
+    ) -> list[PackageSpec]:
         results = []
         for p in new_paths:
             if p.name != "package.json":
@@ -815,10 +817,10 @@ class NodeLanguage:
                 if name:
                     results.append(PackageSpec(name=name, version=version, ecosystem="npm"))
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", p, exc_info=True)
         return results
 
-    def home_ro_paths(self) -> "list[Path]":
+    def home_ro_paths(self) -> list[Path]:
         candidates = [Path.home() / ".npmrc"]
         return [p for p in candidates if p.exists()]
 
@@ -939,7 +941,7 @@ class NodeLanguage:
                 version = pkg_data.get("version") or ""
                 data[str(pkg_dir)] = version
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
         # Scoped packages (@scope/package)
         for pkg_json in node_modules.glob("@*/*/package.json"):
             pkg_dir = pkg_json.parent
@@ -948,7 +950,7 @@ class NodeLanguage:
                 version = pkg_data.get("version") or ""
                 data[str(pkg_dir)] = version
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
 
         return Snapshot(data=data)
 
@@ -969,5 +971,5 @@ class NodeLanguage:
                 if name:
                     results.append(PackageSpec(name=name, version=version, ecosystem="npm"))
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
         return results

@@ -1,6 +1,7 @@
 """Plugin management CLI: pa central list/enable/disable/configure/status."""
 from __future__ import annotations
 
+import logging
 import tomllib
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -10,6 +11,7 @@ import typer
 from rich.console import Console
 
 console = Console()
+log = logging.getLogger(__name__)
 
 central_app = typer.Typer(help="Manage package-alert plugins.")
 
@@ -63,7 +65,7 @@ def _read_config_dict(cfg_path: Path) -> dict:
         try:
             with open(cfg_path, "rb") as f:
                 return tomllib.load(f)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 — malformed/unreadable config, reported to user below
             console.print(f"Warning: could not read {cfg_path}: {e}", style="yellow", markup=False)
     return {}
 
@@ -124,6 +126,7 @@ def _restart_daemon_if_running() -> None:
     import signal
     import subprocess
     import time
+
     from packagealert.daemon_pid import find_daemon_pid, is_started_by_systemd
 
     pid = find_daemon_pid()
@@ -131,7 +134,7 @@ def _restart_daemon_if_running() -> None:
         console.print("[dim]Daemon is not running. Changes will take effect on next daemon start.[/dim]")
         return
     if is_started_by_systemd(pid):
-        r = subprocess.run(["systemctl", "--user", "restart", "package-alert"], capture_output=True)
+        r = subprocess.run(["systemctl", "--user", "restart", "package-alert"], capture_output=True, check=False)
         if r.returncode == 0:
             console.print("[green]Daemon restarted via systemd.[/green]")
         else:
@@ -218,7 +221,7 @@ def enable_cmd(
                 args = " ".join(f"--{f.name.replace('_', '-')} <value>" for f in fields)
                 console.print(f"  pa central configure {plugin_name} {args}")
     except Exception:
-        pass  # post-enable introspection is best-effort
+        log.debug("post-enable introspection failed for %s", plugin_name, exc_info=True)
 
     _restart_daemon_if_running()
 
@@ -243,7 +246,7 @@ def disable_cmd(
         try:
             _central_state._OVERLAY_PATH.unlink(missing_ok=True)
             console.print("[dim]Central config overlay removed.[/dim]")
-        except Exception:
+        except Exception:  # noqa: BLE001 — best-effort overlay cleanup, filesystem error already reported to user
             console.print("[yellow]Warning: could not remove central overlay file.[/yellow]")
     console.print(f"[dim]Plugin '{plugin_name}' disabled.[/dim]")
     _restart_daemon_if_running()
@@ -266,7 +269,7 @@ def configure_cmd(
     """
     cfg_path = _default_config_path()
     data = _read_config_dict(cfg_path)
-    plugins, enabled = _plugins_and_enabled(data)
+    _plugins, enabled = _plugins_and_enabled(data)
 
     raw_args = ctx.args
 
@@ -302,7 +305,7 @@ def configure_cmd(
                 console.print("[yellow]No values provided. Available options:[/yellow]")
                 for f in fields:
                     console.print(f"  --{f.name.replace('_', '-')}  {f.description}")
-        except Exception:
+        except Exception:  # noqa: BLE001 — third-party plugin class may fail unpredictably during introspection
             console.print("[yellow]No values provided.[/yellow]")
         raise typer.Exit(0)
 
@@ -345,9 +348,9 @@ def status_cmd(
                         display = str(val) if val != "" and val is not None else "(not set)"
                     console.print(f"  {f.name}: {display}")
         except Exception:
-            pass  # config_fields introspection is best-effort
+            log.debug("config_fields introspection failed for %s", plugin_name, exc_info=True)
 
     # Delegate pa-central-specific state rendering to the pa-central plugin
     if plugin_name == "pa-central":
         from packagealert.plugins.central.cli import render_status
-        render_status()
+        render_status(cfg_path)

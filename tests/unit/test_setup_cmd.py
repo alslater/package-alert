@@ -2,8 +2,8 @@ import os
 import stat
 from pathlib import Path
 from unittest.mock import patch
-import pytest
 
+import pytest
 
 PA_FINGERPRINT = "# __pa_shim__"
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
@@ -46,6 +46,7 @@ class TestSetupShellSnippet:
 
     def test_snippet_is_valid_bash_and_defines_functions(self):
         import subprocess
+
         from packagealert.cli.setup_cmd import generate_shell_snippet
         from packagealert.languages import registry
         registry.load()
@@ -57,7 +58,7 @@ class TestSetupShellSnippet:
         )
         result = subprocess.run(
             ["bash", "-c", f"{snippet}\n{check}"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         assert result.returncode == 0, f"bash rejected snippet or functions missing:\n{result.stderr}"
         assert "function" in result.stdout
@@ -137,7 +138,10 @@ class TestSetupProject:
         assert (venv / "pip.__pa_real").exists()
 
     def test_shim_embeds_version_marker(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_SHIM_VERSION_MARKER
+        from packagealert.cli.setup_cmd import (
+            PA_SHIM_VERSION_MARKER,
+            install_project_shims,
+        )
         self._make_venv(tmp_path)
         install_project_shims(project_root=tmp_path)
         content = (tmp_path / ".venv" / "bin" / "pip").read_text()
@@ -151,13 +155,19 @@ class TestSetupProject:
         assert "# __pa_bin__ /usr/local/bin/package-alert" in content
 
     def test_current_shim_not_reported_stale(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims
+        from packagealert.cli.setup_cmd import (
+            install_project_shims,
+            stale_project_shims,
+        )
         self._make_venv(tmp_path)
         install_project_shims(project_root=tmp_path)
         assert stale_project_shims(project_root=tmp_path) == []
 
     def test_old_version_shim_reported_stale(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, stale_project_shims
+        from packagealert.cli.setup_cmd import (
+            install_project_shims,
+            stale_project_shims,
+        )
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
         pip = venv / "pip"
@@ -170,8 +180,9 @@ class TestSetupProject:
 
     def test_wrong_pa_path_shim_reported_stale(self, tmp_path):
         from packagealert.cli.setup_cmd import (
-            install_project_shims, stale_project_shims,
             PA_SHIM_VERSION_MARKER,
+            install_project_shims,
+            stale_project_shims,
         )
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
@@ -189,8 +200,9 @@ class TestSetupProject:
 
     def test_stale_shim_updated_on_reinstall(self, tmp_path):
         from packagealert.cli.setup_cmd import (
-            install_project_shims, stale_project_shims,
             PA_SHIM_VERSION_MARKER,
+            install_project_shims,
+            stale_project_shims,
         )
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
@@ -210,7 +222,9 @@ class TestSetupProject:
     def test_alternate_entry_point_not_reported_stale(self, tmp_path):
         """Shim written via 'pa' must not be stale when checked via 'package-alert' (same inode)."""
         from packagealert.cli.setup_cmd import (
-            _shim_is_current, PA_FINGERPRINT, PA_SHIM_VERSION_MARKER,
+            PA_FINGERPRINT,
+            PA_SHIM_VERSION_MARKER,
+            _shim_is_current,
         )
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -242,7 +256,10 @@ class TestSetupProject:
             sc._pa_executable = original
 
     def test_uninstall_restores_original(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
+        from packagealert.cli.setup_cmd import (
+            install_project_shims,
+            uninstall_project_shims,
+        )
         self._make_venv(tmp_path)
         install_project_shims(project_root=tmp_path)
         uninstall_project_shims(project_root=tmp_path)
@@ -276,7 +293,7 @@ class TestSetupProject:
         assert PA_FINGERPRINT in shim.read_text()
 
     def test_interpreter_shim_routes_pip_to_pa_run(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+        from packagealert.cli.setup_cmd import PA_FINGERPRINT, install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
         shim = tmp_path / ".venv" / "bin" / "python3"
@@ -297,7 +314,7 @@ class TestSetupProject:
         assert 'exec "$real" "$@"' in content
 
     def test_interpreter_shim_hardcodes_real_path(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_REAL_SUFFIX
+        from packagealert.cli.setup_cmd import PA_REAL_SUFFIX, install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
         shim = tmp_path / ".venv" / "bin" / "python3"
@@ -326,6 +343,7 @@ class TestSetupProject:
     def test_interpreter_shim_routes_pip_with_u_flag(self, tmp_path):
         """python -u -m pip install foo must still route through pa run."""
         import subprocess
+
         from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
@@ -333,7 +351,7 @@ class TestSetupProject:
         script = self._patch_shim_for_routing_test(shim.read_text())
         result = subprocess.run(
             ["bash", "-c", script, "python3", "-u", "-m", "pip", "install", "foo"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         assert "ROUTE_PA_RUN" in result.stdout, (
             f"Expected -u -m pip to route through pa run, got:\n{result.stdout}\n{result.stderr}"
@@ -342,6 +360,7 @@ class TestSetupProject:
     def test_interpreter_shim_execs_real_with_u_flag_no_pip(self, tmp_path):
         """`python -u script.py` must NOT route through pa run."""
         import subprocess
+
         from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
@@ -349,7 +368,7 @@ class TestSetupProject:
         script = self._patch_shim_for_routing_test(shim.read_text())
         result = subprocess.run(
             ["bash", "-c", script, "python3", "-u", "script.py"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         assert "ROUTE_REAL" in result.stdout, (
             f"Expected -u script.py to exec real, got:\n{result.stdout}\n{result.stderr}"
@@ -358,6 +377,7 @@ class TestSetupProject:
     def test_interpreter_shim_c_flag_stops_scan(self, tmp_path):
         """`python -c '-m pip install foo'` must NOT route through pa run."""
         import subprocess
+
         from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
@@ -365,7 +385,7 @@ class TestSetupProject:
         script = self._patch_shim_for_routing_test(shim.read_text())
         result = subprocess.run(
             ["bash", "-c", script, "python3", "-c", "-m pip install foo"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         assert "ROUTE_REAL" in result.stdout, (
             f"Expected -c to stop scan and exec real, got:\n{result.stdout}\n{result.stderr}"
@@ -374,6 +394,7 @@ class TestSetupProject:
     def test_interpreter_shim_double_dash_stops_scan(self, tmp_path):
         """`python -- -m pip install foo` must NOT route through pa run."""
         import subprocess
+
         from packagealert.cli.setup_cmd import install_project_shims
         self._make_venv_with_python(tmp_path)
         install_project_shims(project_root=tmp_path)
@@ -381,14 +402,14 @@ class TestSetupProject:
         script = self._patch_shim_for_routing_test(shim.read_text())
         result = subprocess.run(
             ["bash", "-c", script, "python3", "--", "-m", "pip", "install", "foo"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         assert "ROUTE_REAL" in result.stdout, (
             f"Expected -- to stop scan and exec real, got:\n{result.stdout}\n{result.stderr}"
         )
 
     def test_binary_interpreter_is_shimmed(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+        from packagealert.cli.setup_cmd import PA_FINGERPRINT, install_project_shims
         venv = tmp_path / ".venv" / "bin"
         venv.mkdir(parents=True)
         python = venv / "python3"
@@ -412,7 +433,7 @@ class TestSetupProject:
         assert not (venv / "pip.__pa_real").exists()
 
     def test_interpreter_symlink_not_renamed(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, PA_FINGERPRINT
+        from packagealert.cli.setup_cmd import PA_FINGERPRINT, install_project_shims
         self._make_venv_with_python_symlink(tmp_path)
         install_project_shims(project_root=tmp_path)
         venv = tmp_path / ".venv" / "bin"
@@ -425,7 +446,10 @@ class TestSetupProject:
         assert os.readlink(venv / "python") == "python3"
 
     def test_interpreter_symlink_uninstall_leaves_symlink(self, tmp_path):
-        from packagealert.cli.setup_cmd import install_project_shims, uninstall_project_shims
+        from packagealert.cli.setup_cmd import (
+            install_project_shims,
+            uninstall_project_shims,
+        )
         self._make_venv_with_python_symlink(tmp_path)
         install_project_shims(project_root=tmp_path)
         uninstall_project_shims(project_root=tmp_path)
@@ -521,7 +545,7 @@ class TestResolveRealBinary:
 
     def test_symlink_to_shim_resolved_to_real(self, tmp_path):
         """python3 -> python (shim); python.__pa_real exists — must return python.__pa_real."""
-        from packagealert.sandbox.runner import _resolve_real_binary, _PA_REAL_SUFFIX
+        from packagealert.sandbox.runner import _PA_REAL_SUFFIX, _resolve_real_binary
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
 

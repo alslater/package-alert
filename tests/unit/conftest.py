@@ -4,6 +4,7 @@ get real language implementations rather than an empty registry."""
 from __future__ import annotations
 
 import pytest
+
 from packagealert.languages import registry as lang_registry
 
 

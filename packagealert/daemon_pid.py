@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 PID_FILE = Path.home() / ".local" / "share" / "package-alert" / "daemon.pid"
 
@@ -48,6 +51,7 @@ def find_daemon_pid() -> int | None:
                 ):
                     return proc.info["pid"]
             except Exception:
+                log.debug("Failed to inspect process %s", proc, exc_info=True)
                 continue
     except ImportError:
         pass

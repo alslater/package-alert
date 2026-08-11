@@ -1,11 +1,18 @@
 import textwrap
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
 
-from packagealert.config import AppConfig, SandboxConfig, SchedulerConfig, load_config, warn_missing_paths
+from packagealert.config import (
+    AppConfig,
+    SandboxConfig,
+    SchedulerConfig,
+    load_config,
+    warn_missing_paths,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -65,7 +72,7 @@ def test_fleet_overlay_applied_when_plugin_enabled(tmp_path, monkeypatch):
 def test_invalid_toml_raises(tmp_path):
     cfg_file = tmp_path / "config.toml"
     cfg_file.write_text("not valid toml ::::")
-    with pytest.raises(Exception):
+    with pytest.raises(tomllib.TOMLDecodeError):
         load_config(cfg_file)
 
 
@@ -134,6 +141,7 @@ def test_project_env_allowlist_defaults_empty():
 
 def test_project_env_allowlist_round_trips():
     import tomllib
+
     from packagealert.config import AppConfig
     toml = b'[sandbox]\nproject_env_allowlist = ["MY_TOKEN", "REGISTRY_URL"]\n'
     data = tomllib.loads(toml.decode())

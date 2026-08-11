@@ -6,23 +6,32 @@ import json
 import logging
 import socket
 import tomllib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from packagealert.plugins.base import AgentPlugin, ConfigField, ScanNotFound
-from packagealert.plugins.central.client import AlertPayload, CentralClient, ScanPayload
 from packagealert.plugins.central import outbox
+from packagealert.plugins.central.client import AlertPayload, CentralClient, ScanPayload
 from packagealert.plugins.central.outbox import OutboxEntry, OutboxKind
-from packagealert.plugins.central.state import read_state, read_overlay, write_state, write_overlay, strip_overlay_unsafe_keys, _STATE_PATH, _OVERLAY_PATH
+from packagealert.plugins.central.state import (
+    _OVERLAY_PATH,
+    _STATE_PATH,
+    read_overlay,
+    read_state,
+    strip_overlay_unsafe_keys,
+    write_overlay,
+    write_state,
+)
 from packagealert.storage.db import DEFAULT_DB_PATH, open_db
 
 if TYPE_CHECKING:
     import aiosqlite
+
     from packagealert.config import AppConfig
+    from packagealert.models.advisories import OsvResult
     from packagealert.models.events import PackageEvent
     from packagealert.models.risk import RiskReport
-    from packagealert.models.advisories import OsvResult
     from packagealert.models.scans import ScanResult
 
 log = logging.getLogger(__name__)
@@ -51,9 +60,9 @@ def _render_scans_table(records: list[dict], *, title: str, show_project: bool =
     for r in records:
         scanned_at = str(r.get("scanned_at") or "")
         try:
-            dt = datetime.fromisoformat(scanned_at.replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(scanned_at)
             date_str = dt.astimezone().strftime("%Y-%m-%d %H:%M")
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed timestamp, fall back to raw value for display
             date_str = escape(scanned_at[:16])
         status = r.get("status", "")
         colour = _STATUS_COLOUR.get(status, "dim")
@@ -83,17 +92,18 @@ def _log_unparseable_outbox_entry(entry_id: int, kind: str, outcome: str) -> Non
     display, project-filtered pending-sync display, drain) can't drift out
     of sync in wording.
     """
-    log.error(
+    log.exception(
         "BUG: central_outbox entry %d (kind=%s) has unparseable payload_json "
         "— this indicates a serialization or DB corruption bug, not a "
         "transient failure. %s",
-        entry_id, kind, outcome, exc_info=True,
+        entry_id, kind, outcome,
     )
 
 
 def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
     import json as jsonlib
     from datetime import datetime
+
     from rich.console import Console
     from rich.markup import escape
     from rich.table import Table
@@ -107,7 +117,7 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
     for e in entries:
         try:
             payload = jsonlib.loads(e.payload_json)
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed outbox entry, logged and skipped below
             # This is a read-only display path (unlike _drain_outbox, it must
             # not mutate the outbox), but an unparseable entry here is the
             # same underlying bug _drain_outbox already flags loudly — log
@@ -115,7 +125,7 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
             # silently producing a table with no rows under it.
             _log_unparseable_outbox_entry(e.id, e.kind, "Skipping in pending-sync display.")
             continue
-        queued_at = datetime.fromtimestamp(e.created_at).strftime("%Y-%m-%d %H:%M")
+        queued_at = datetime.fromtimestamp(e.created_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
         table.add_row(
             escape(str(payload.get("root") or "")),
             queued_at,
@@ -130,6 +140,7 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
 def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     import json as jsonlib
     from pathlib import Path
+
     from rich.console import Console
     from rich.markup import escape
     console = Console()
@@ -141,9 +152,9 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
-        dt = datetime.fromisoformat(scanned_at.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(scanned_at)
         date_str = dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed timestamp, fall back to raw value for display
         date_str = scanned_at
 
     if fmt == "json":
@@ -197,7 +208,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
                 console.print(f"  {escape(f.get('url') or '')}")
 
 
-def apply_overlay_to_config(toml_str: str, cfg: "AppConfig") -> None:
+def apply_overlay_to_config(toml_str: str, cfg: AppConfig) -> None:
     """Apply a fleet config overlay TOML to *cfg* in-place.
 
     Delegates generic overlay merging to ``packagealert.plugins.overlay``, then
@@ -253,7 +264,7 @@ class CentralPlugin(AgentPlugin):
         self._cfg_path: Path | None = None
         self._client: CentralClient | None = None
         self._task: asyncio.Task | None = None
-        self._db: "aiosqlite.Connection | None" = None  # long-lived connection, set in on_daemon_start()
+        self._db: aiosqlite.Connection | None = None  # long-lived connection, set in on_daemon_start()
         # Guards every use of self._db. aiosqlite serializes individual
         # execute()/commit() calls on its worker thread, but NOT an entire
         # multi-statement coroutine sequence — outbox.enqueue()'s BEGIN
@@ -288,7 +299,7 @@ class CentralPlugin(AgentPlugin):
             ConfigField("config_fetch_interval_seconds", "Seconds between config overlay fetches (default: 3600, min: 60)"),
         ]
 
-    def setup(self, cfg: "AppConfig", config_path: "Path | None" = None) -> None:
+    def setup(self, cfg: AppConfig, config_path: Path | None = None) -> None:
         self._state_path = _STATE_PATH      # read at setup time (allows test patching)
         self._overlay_path = _OVERLAY_PATH  # read at setup time (allows test patching)
         self._cfg = cfg
@@ -298,7 +309,7 @@ class CentralPlugin(AgentPlugin):
         # pre-overlay state. If this fails, baseline stays None and the fallback
         # in _clear_config_overlay is skipped rather than silently keeping stale
         # overlay values.
-        self._cfg_baseline: "AppConfig | None" = None
+        self._cfg_baseline: AppConfig | None = None
         try:
             from packagealert.config import load_config_without_overlay
             self._cfg_baseline = load_config_without_overlay(config_path)
@@ -315,7 +326,7 @@ class CentralPlugin(AgentPlugin):
             try:
                 self._last_config_fetch_at = datetime.fromisoformat(state["last_config_fetch_at"])
             except Exception:
-                pass
+                log.debug("Failed to parse last_config_fetch_at from state", exc_info=True)
 
     def _hostname(self) -> str:
         return socket.gethostname()
@@ -324,13 +335,13 @@ class CentralPlugin(AgentPlugin):
         try:
             from importlib.metadata import version
             return version("package-alert")
-        except Exception:
+        except Exception:  # noqa: BLE001 — version lookup may fail unpredictably, treat as unknown
             return None
 
     def _uptime_seconds(self) -> int | None:
         if self._start_time is None:
             return None
-        return int((datetime.now(timezone.utc) - self._start_time).total_seconds())
+        return int((datetime.now(UTC) - self._start_time).total_seconds())
 
     def _apply_config_overlay(self, toml_str: str) -> None:
         try:
@@ -359,7 +370,7 @@ class CentralPlugin(AgentPlugin):
             log.warning("Failed to remove fleet config overlay file", exc_info=True)
         if self._cfg is None:
             return
-        restored: "AppConfig | None" = None
+        restored: AppConfig | None = None
         try:
             from packagealert.config import load_config_without_overlay
             restored = load_config_without_overlay(self._cfg_path)
@@ -392,7 +403,7 @@ class CentralPlugin(AgentPlugin):
             daemon_status="running",
             uptime_seconds=0,
         )
-        self._record_heartbeat_result(ok, err, at=datetime.now(timezone.utc))
+        self._record_heartbeat_result(ok, err, at=datetime.now(UTC))
         await self._fetch_and_apply()
         # Long-lived connection reused by _enqueue_outbox/_drain_outbox for
         # the daemon's whole lifetime, instead of each call re-running
@@ -422,13 +433,13 @@ class CentralPlugin(AgentPlugin):
                     daemon_status="stopped",
                     uptime_seconds=self._uptime_seconds(),
                 )
-                self._record_heartbeat_result(ok, err, at=datetime.now(timezone.utc))
+                self._record_heartbeat_result(ok, err, at=datetime.now(UTC))
             await self._client.aclose()
         if self._db is not None:
             await self._db.close()
             self._db = None
 
-    async def on_alert(self, event: "PackageEvent", result: "OsvResult | RiskReport") -> None:
+    async def on_alert(self, event: PackageEvent, result: OsvResult | RiskReport) -> None:
         if self._client is None or not self._client.configured:
             return
         outcome = await self._client.report_alert(self._hostname(), event, result)
@@ -438,7 +449,7 @@ class CentralPlugin(AgentPlugin):
     def is_scan_store(self) -> bool:
         return self._client is not None and self._client.configured
 
-    async def on_scan_complete(self, scan: "ScanResult") -> None:
+    async def on_scan_complete(self, scan: ScanResult) -> None:
         if self._client is None or not self._client.configured:
             return
         outcome = await self._client.report_scan(self._hostname(), scan)
@@ -508,7 +519,7 @@ class CentralPlugin(AgentPlugin):
             for e in entries:
                 try:
                     payload = jsonlib.loads(e.payload_json)
-                except Exception:
+                except Exception:  # noqa: BLE001 — malformed outbox entry, logged and skipped below
                     # Same underlying bug _render_pending_outbox/_drain_outbox
                     # already flag loudly — log it here too, since this
                     # filter runs first and would otherwise silently drop
@@ -523,7 +534,7 @@ class CentralPlugin(AgentPlugin):
     async def _fetch_and_apply(self) -> None:
         assert self._client is not None
         hostname = self._hostname()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         state = read_state(self._state_path)
 
         toml_str, cfg_err = await self._client.fetch_config(hostname)
@@ -624,7 +635,7 @@ class CentralPlugin(AgentPlugin):
                 for i, entry in enumerate(entries):
                     try:
                         payload = json.loads(entry.payload_json)
-                    except Exception:
+                    except Exception:  # noqa: BLE001 — malformed outbox entry, logged and discarded below
                         # payload_json is written once at enqueue time and never
                         # mutated, so a parse failure here can never resolve on a
                         # future retry — retrying would just loop forever, wasting
@@ -678,7 +689,7 @@ class CentralPlugin(AgentPlugin):
         _last_heartbeat_at: datetime | None = None
         while True:
             await asyncio.sleep(tick)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             hostname = self._hostname()
 
             hb_due = (

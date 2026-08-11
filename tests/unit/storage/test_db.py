@@ -3,7 +3,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 from packagealert.plugins.base import AgentPlugin
-from packagealert.storage.db import open_db, _CORE_TABLE_NAMES
+from packagealert.storage.db import _CORE_TABLE_NAMES, open_db
 
 
 class _NoSchemaPlugin(AgentPlugin):
@@ -523,7 +523,8 @@ async def test_open_db_resolves_enabled_plugins_via_read_enabled_plugins_by_defa
 async def test_core_table_names_matches_actual_schema_tables():
     # Guards against _CORE_TABLE_NAMES drifting out of sync with SCHEMA if a
     # new core table is added later without updating the reserved set.
-    from packagealert.storage.db import SCHEMA
     import re
+
+    from packagealert.storage.db import SCHEMA
     declared = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
     assert declared == _CORE_TABLE_NAMES
