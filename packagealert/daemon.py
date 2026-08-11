@@ -4,15 +4,13 @@ import asyncio
 import logging
 import os
 import signal
+from datetime import UTC, datetime
 from pathlib import Path
-
-from datetime import datetime, timezone
 
 from packagealert.alerts.desktop import notify_malicious, notify_risk
 from packagealert.alerts.terminal import alert_malicious, alert_risk
 from packagealert.analyzers.risk import RiskEngine
 from packagealert.config import AppConfig, warn_missing_paths
-from packagealert.plugins.registry import plugin_registry
 from packagealert.daemon_pid import PID_FILE as _PID_FILE
 from packagealert.daemon_pid import check_already_running as _check_already_running
 from packagealert.heuristics.top_packages import TopPackagesCache
@@ -23,6 +21,7 @@ from packagealert.monitors.process import ProcessMonitor
 from packagealert.osv.cache import OsvCache
 from packagealert.osv.client import OsvClient
 from packagealert.osv.popularity import PopularityCache, PopularityClient
+from packagealert.plugins.registry import plugin_registry
 from packagealert.scheduler.runner import ScheduledScanner
 from packagealert.storage.db import open_db, store_alert
 from packagealert.update_check import check_and_cache
@@ -143,7 +142,7 @@ class Daemon:
         loop.add_signal_handler(signal.SIGTERM, _handle_signal)
 
         log.info("package-alert daemon started (%d monitor(s))", len(monitors))
-        await plugin_registry.fire_on_daemon_start(datetime.now(timezone.utc))
+        await plugin_registry.fire_on_daemon_start(datetime.now(UTC))
         consumer_tasks: list[asyncio.Task] = []
         try:
             consumer_tasks = [

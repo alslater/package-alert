@@ -15,9 +15,7 @@ import stat
 from pathlib import Path
 from unittest.mock import patch
 
-
 from packagealert.languages import registry as lang_registry
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -325,7 +323,7 @@ class TestResolveUvToolInstall:
         """Upgrading an existing tool venv must snapshot bin/ for rollback of entry-point scripts."""
         lang = _python_lang()
         uv_tools = tmp_path / ".local" / "share" / "uv" / "tools"
-        venv_root, sp = _make_venv(uv_tools, "ruff")
+        venv_root, _sp = _make_venv(uv_tools, "ruff")
         tool_bin = venv_root / "bin"
         local_bin = tmp_path / ".local" / "bin"
 
@@ -503,7 +501,7 @@ class TestResolvePipxInstall:
         """Upgrading an existing pipx tool venv must snapshot bin/ for rollback of entry-point scripts."""
         lang = _python_lang()
         pipx_venvs = tmp_path / "pipx" / "venvs"
-        venv_root, sp = _make_venv(pipx_venvs, "httpie")
+        venv_root, _sp = _make_venv(pipx_venvs, "httpie")
         tool_bin = venv_root / "bin"
         local_bin = tmp_path / "bin"
 

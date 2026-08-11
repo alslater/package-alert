@@ -4,9 +4,9 @@ import json
 import logging
 import os
 import re
-from typing import Any
 import subprocess
 from pathlib import Path
+from typing import Any, ClassVar
 
 import httpx
 
@@ -52,8 +52,8 @@ def _normalise_version(version: str | None) -> str | None:
 
 class PhpLanguage:
     name = "php"
-    ecosystems = ["Packagist"]
-    process_names = ["composer", "php", "php8", "php7"]
+    ecosystems: ClassVar[list[str]] = ["Packagist"]
+    process_names: ClassVar[list[str]] = ["composer", "php", "php8", "php7"]
     contract_version = CURRENT_CONTRACT_VERSION
     author = "builtin"
     repository = "builtin"
@@ -94,7 +94,7 @@ class PhpLanguage:
                     if name:
                         result.append(PackageSpec(name=name.lower(), version=version, ecosystem="Packagist", is_dev=is_dev))
             return result
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed lockfile, best-effort parse
             log.debug("Failed to parse composer.lock at %s", path)
             return []
 
@@ -133,7 +133,7 @@ class PhpLanguage:
                 PackageMetadata(name=pkg["name"].lower(), version=_normalise_version(pkg.get("version")), ecosystem="Packagist")
                 for pkg in data.get("installed", [])
             ]
-        except Exception:
+        except Exception:  # noqa: BLE001 — composer subprocess/parsing may fail unpredictably
             log.debug("composer show failed in %s, falling back to installed.json", root)
 
         # Fallback: vendor/composer/installed.json
@@ -148,7 +148,7 @@ class PhpLanguage:
                     for pkg in packages if pkg.get("name")
                 ]
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", installed_json, exc_info=True)
         return []
 
     def sandbox_paths(self) -> SandboxPaths:
@@ -176,7 +176,7 @@ class PhpLanguage:
         self,
         parsed: Any,
         cwd: Path,
-    ) -> "SandboxTargets":
+    ) -> SandboxTargets:
         targets = SandboxTargets()
         # vendor lives under cwd
         targets.scan_targets.append(cwd / "vendor")
@@ -194,7 +194,7 @@ class PhpLanguage:
     # shell_environment
     # ------------------------------------------------------------------
 
-    def shell_environment(self, cwd: Path) -> "ShellEnvironment":
+    def shell_environment(self, cwd: Path) -> ShellEnvironment:
         result = ShellEnvironment()
         if (cwd / "composer.json").exists():
             result.scan_targets.append(cwd / "vendor")
@@ -207,7 +207,7 @@ class PhpLanguage:
         self,
         new_paths: set[Path],
         walk_root: Path,
-    ) -> "list[PackageSpec]":
+    ) -> list[PackageSpec]:
         results = []
         for p in new_paths:
             if p.name != "composer.json":
@@ -228,10 +228,10 @@ class PhpLanguage:
                 if name and "/" in name:
                     results.append(PackageSpec(name=name, version=version, ecosystem="packagist"))
             except Exception:
-                pass
+                log.debug("Failed to read/parse %s", p, exc_info=True)
         return results
 
-    def home_ro_paths(self) -> "list[Path]":
+    def home_ro_paths(self) -> list[Path]:
         candidates = [Path.home() / ".config" / "composer"]
         return [p for p in candidates if p.exists()]
 
@@ -331,7 +331,7 @@ class PhpLanguage:
                     d = json.loads(composer_json.read_text())
                     data[str(composer_json.parent)] = (_normalise_version(d.get("version")) or "")
                 except Exception:
-                    pass
+                    log.debug("Failed to read/parse %s", composer_json, exc_info=True)
         return Snapshot(data=data)
 
     def detect_post_install(self, before: Snapshot, after: Snapshot) -> list[PackageSpec]:
@@ -345,7 +345,7 @@ class PhpLanguage:
                 version = _normalise_version(data.get("version"))
                 if name:
                     result.append(PackageSpec(name=name.lower(), version=version, ecosystem="Packagist"))
-            except Exception:
+            except Exception:  # noqa: BLE001 — malformed composer.json, fall back to deriving name from path
                 parts = Path(path_str).parts
                 if len(parts) >= 2:
                     name = f"{parts[-2]}/{parts[-1]}"

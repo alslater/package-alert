@@ -1,6 +1,8 @@
+import httpx
 import pytest
 import respx
-import httpx
+
+from packagealert.config import OsvConfig
 from packagealert.osv.client import (
     OsvClient,
     _cvss3_label,
@@ -9,8 +11,6 @@ from packagealert.osv.client import (
     _numeric_score_label,
     _severity_from_response,
 )
-from packagealert.config import OsvConfig
-
 
 MALICIOUS_RESPONSE = {
     "results": [

@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+
+import httpx
 import pytest
 import respx
-import httpx
-from datetime import datetime, timezone
 
+from packagealert.models.advisories import OsvAdvisory, OsvResult
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport, RiskSignal
-from packagealert.models.advisories import OsvResult, OsvAdvisory
 
 
 def _event(name: str = "evil-pkg") -> PackageEvent:
     return PackageEvent(
         ecosystem="pypi", package_name=name, version="1.0.0",
         source="process", manager="pip", project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -123,8 +124,8 @@ async def test_report_alert_risk():
 
 @respx.mock
 async def test_report_scan_with_findings():
-    from packagealert.plugins.central.client import CentralClient
     from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import CentralClient
     route = respx.post("https://fleet.example.com/api/ingest/scans").mock(
         return_value=httpx.Response(201, json={"id": 3})
     )
@@ -132,7 +133,7 @@ async def test_report_scan_with_findings():
     scan = ScanResult(
         project_path="/home/user/proj", scan_type="project",
         finding_count=1, findings=[{"package": "evil"}],
-        sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await client.report_scan("host", scan)
     await client.aclose()
@@ -145,8 +146,8 @@ async def test_report_scan_with_findings():
 
 @respx.mock
 async def test_report_scan_clean():
-    from packagealert.plugins.central.client import CentralClient
     from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import CentralClient
     route = respx.post("https://fleet.example.com/api/ingest/scans").mock(
         return_value=httpx.Response(201, json={"id": 4})
     )
@@ -154,7 +155,7 @@ async def test_report_scan_clean():
     scan = ScanResult(
         project_path="/home/user/proj", scan_type="project",
         finding_count=0, findings=[],
-        sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await client.report_scan("host", scan)
     await client.aclose()
@@ -164,15 +165,15 @@ async def test_report_scan_clean():
 
 @respx.mock
 async def test_report_scan_returns_true_on_success():
-    from packagealert.plugins.central.client import CentralClient
     from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import CentralClient
     respx.post("https://fleet.example.com/api/ingest/scans").mock(
         return_value=httpx.Response(201, json={"id": 5})
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
     scan = ScanResult(
         project_path="/proj", scan_type="project", finding_count=0,
-        findings=[], sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        findings=[], sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     result = await client.report_scan("host", scan)
     await client.aclose()
@@ -184,15 +185,15 @@ async def test_report_scan_returns_true_on_success():
 
 @respx.mock
 async def test_report_scan_returns_false_on_failure():
-    from packagealert.plugins.central.client import CentralClient
     from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import CentralClient
     respx.post("https://fleet.example.com/api/ingest/scans").mock(
         side_effect=httpx.ConnectError("refused")
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
     scan = ScanResult(
         project_path="/proj", scan_type="project", finding_count=0,
-        findings=[], sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        findings=[], sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     result = await client.report_scan("host", scan)
     await client.aclose()
@@ -242,12 +243,12 @@ async def test_report_alert_returns_false_on_failure():
 
 
 def test_build_scan_payload_matches_report_scan_shape():
-    from packagealert.plugins.central.client import build_scan_payload
     from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
     scan = ScanResult(
         project_path="/home/user/proj", scan_type="project", finding_count=1,
         findings=[{"package": "evil"}], sources=["pypi"],
-        scanned_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
     payload = build_scan_payload("host", scan)
     assert payload["hostname"] == "host"
@@ -564,8 +565,8 @@ async def test_get_scan_returns_record():
 
 @respx.mock
 async def test_get_scan_raises_scan_not_found_on_404():
-    from packagealert.plugins.central.client import CentralClient
     from packagealert.plugins.base import ScanNotFound
+    from packagealert.plugins.central.client import CentralClient
     respx.get("https://fleet.example.com/api/scans/99").mock(
         return_value=httpx.Response(404)
     )
@@ -641,5 +642,5 @@ def test_heartbeat_tuple_result_is_always_truthy_even_on_failure():
     # heartbeat's docstring, which calls this out explicitly.
     failure_result = (False, "HTTP 503")
     assert bool(failure_result) is True  # the hazard, demonstrated directly
-    ok, err = failure_result
+    ok, _err = failure_result
     assert ok is False  # the correct way to check outcome

@@ -1,8 +1,12 @@
+import httpx
 import pytest
 import respx
-import httpx
 
-from packagealert.osv.popularity import PackagePopularity, PopularityClient, PopularityFetchResult
+from packagealert.osv.popularity import (
+    PackagePopularity,
+    PopularityClient,
+    PopularityFetchResult,
+)
 
 _ECO_MAP = {"npm": "NPM"}
 _BASE = "https://api.deps.dev/v3alpha"

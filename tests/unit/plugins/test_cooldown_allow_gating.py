@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from typer.testing import CliRunner
 from unittest.mock import AsyncMock, patch
+
+from typer.testing import CliRunner
 
 runner = CliRunner()
 

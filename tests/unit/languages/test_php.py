@@ -6,8 +6,8 @@ from unittest.mock import patch
 
 import pytest
 
-from packagealert.languages.php import PhpLanguage
 from packagealert.languages.base import CURRENT_CONTRACT_VERSION, SandboxPaths
+from packagealert.languages.php import PhpLanguage
 
 
 @pytest.fixture

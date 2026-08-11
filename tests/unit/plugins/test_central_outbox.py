@@ -5,17 +5,17 @@ import json
 
 import pytest
 
-from packagealert.storage.db import open_db
 from packagealert.plugins.central import outbox
 from packagealert.plugins.central.outbox import (
     OutboxEntry,
-    enqueue,
-    dequeue_all,
-    delete,
-    mark_failed,
     count,
     count_by_kind,
+    delete,
+    dequeue_all,
+    enqueue,
+    mark_failed,
 )
+from packagealert.storage.db import open_db
 
 
 @pytest.fixture

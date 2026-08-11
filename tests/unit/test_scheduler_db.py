@@ -2,13 +2,22 @@
 from __future__ import annotations
 
 import time
+
 import pytest
-from packagealert.storage.db import open_db
+
 from packagealert.scheduler.db import (
-    add_project, remove_project, list_projects, get_project,
-    save_scan_result, list_scan_results, list_all_scan_results, get_scan_result,
-    prune_scan_results, update_last_scanned,
+    add_project,
+    get_project,
+    get_scan_result,
+    list_all_scan_results,
+    list_projects,
+    list_scan_results,
+    prune_scan_results,
+    remove_project,
+    save_scan_result,
+    update_last_scanned,
 )
+from packagealert.storage.db import open_db
 
 
 @pytest.fixture

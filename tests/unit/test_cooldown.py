@@ -1,8 +1,10 @@
 import asyncio
 import time
+from datetime import UTC
 from unittest.mock import MagicMock
 
 import pytest
+
 from packagealert.languages.base import PackageSpec
 from packagealert.storage.db import open_db
 
@@ -114,7 +116,12 @@ class TestPublicationCacheDB:
     def test_store_and_fetch_publication_date(self, tmp_path):
         import asyncio
         import time
-        from packagealert.storage.db import open_db, store_publication_date, get_publication_date
+
+        from packagealert.storage.db import (
+            get_publication_date,
+            open_db,
+            store_publication_date,
+        )
         pub_time = time.time() - (3 * 86400)
 
         async def _run():
@@ -129,7 +136,12 @@ class TestPublicationCacheDB:
 
     def test_not_found_cached_as_none(self, tmp_path):
         import asyncio
-        from packagealert.storage.db import open_db, store_publication_date, get_publication_date
+
+        from packagealert.storage.db import (
+            get_publication_date,
+            open_db,
+            store_publication_date,
+        )
 
         async def _run():
             db = await open_db(tmp_path / "test.db")
@@ -143,7 +155,8 @@ class TestPublicationCacheDB:
 
     def test_cache_miss_returns_sentinel(self, tmp_path):
         import asyncio
-        from packagealert.storage.db import open_db, get_publication_date
+
+        from packagealert.storage.db import get_publication_date, open_db
 
         async def _run():
             db = await open_db(tmp_path / "test.db")
@@ -159,7 +172,12 @@ class TestCooldownClearedDB:
     def test_store_and_fetch_cleared(self, tmp_path):
         import asyncio
         import time
-        from packagealert.storage.db import open_db, store_cooldown_cleared, get_cooldown_cleared_at
+
+        from packagealert.storage.db import (
+            get_cooldown_cleared_at,
+            open_db,
+            store_cooldown_cleared,
+        )
 
         async def _run():
             db = await open_db(tmp_path / "test.db")
@@ -174,7 +192,8 @@ class TestCooldownClearedDB:
 
     def test_miss_returns_none(self, tmp_path):
         import asyncio
-        from packagealert.storage.db import open_db, get_cooldown_cleared_at
+
+        from packagealert.storage.db import get_cooldown_cleared_at, open_db
 
         async def _run():
             db = await open_db(tmp_path / "test.db")
@@ -190,6 +209,7 @@ class TestFetchPublicationDate:
     def test_pypi_parses_upload_time(self):
         import asyncio
         from unittest.mock import AsyncMock, patch
+
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         pypi_response = {
@@ -212,14 +232,16 @@ class TestFetchPublicationDate:
                 return await fetch_publication_date("https://pypi.org/pypi/requests/2.31.0/json", ecosystem="PyPI")
 
         result = asyncio.run(_run())
-        from datetime import datetime, timezone
-        expected = datetime(2024, 1, 10, 11, 0, 0, tzinfo=timezone.utc).timestamp()
+        from datetime import datetime
+        expected = datetime(2024, 1, 10, 11, 0, 0, tzinfo=UTC).timestamp()
         assert result == pytest.approx(expected, abs=1)
 
     def test_returns_none_on_network_error(self):
         import asyncio
-        import httpx
         from unittest.mock import AsyncMock, patch
+
+        import httpx
+
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         async def _run():
@@ -236,6 +258,7 @@ class TestFetchPublicationDate:
     def test_returns_not_found_on_404(self):
         import asyncio
         from unittest.mock import AsyncMock, patch
+
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         mock_resp = MagicMock()
@@ -255,6 +278,7 @@ class TestFetchPublicationDate:
     def test_packagist_matches_requested_version(self):
         import asyncio
         from unittest.mock import AsyncMock, patch
+
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         packagist_response = {
@@ -283,13 +307,14 @@ class TestFetchPublicationDate:
                 )
 
         result = asyncio.run(_run())
-        from datetime import datetime, timezone
-        expected = datetime(2023, 6, 15, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        from datetime import datetime
+        expected = datetime(2023, 6, 15, 10, 0, 0, tzinfo=UTC).timestamp()
         assert result == pytest.approx(expected, abs=1)
 
     def test_packagist_returns_none_for_missing_version(self):
         import asyncio
         from unittest.mock import AsyncMock, patch
+
         from packagealert.sandbox.cooldown import fetch_publication_date
 
         packagist_response = {
@@ -330,8 +355,9 @@ class TestFetchLatestVersion:
     def test_pypi_returns_latest_version(self):
         import asyncio
         from unittest.mock import patch
-        from packagealert.sandbox.cooldown import fetch_latest_version
+
         from packagealert.languages.python import PythonLanguage
+        from packagealert.sandbox.cooldown import fetch_latest_version
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -349,8 +375,9 @@ class TestFetchLatestVersion:
     def test_returns_none_on_non_200(self):
         import asyncio
         from unittest.mock import patch
-        from packagealert.sandbox.cooldown import fetch_latest_version
+
         from packagealert.languages.python import PythonLanguage
+        from packagealert.sandbox.cooldown import fetch_latest_version
 
         mock_resp = MagicMock()
         mock_resp.status_code = 404
@@ -366,10 +393,12 @@ class TestFetchLatestVersion:
 
     def test_returns_none_on_network_error(self):
         import asyncio
-        import httpx
         from unittest.mock import AsyncMock, patch
-        from packagealert.sandbox.cooldown import fetch_latest_version
+
+        import httpx
+
         from packagealert.languages.python import PythonLanguage
+        from packagealert.sandbox.cooldown import fetch_latest_version
 
         async def _run():
             with patch("httpx.AsyncClient") as mock_client_cls:
@@ -386,8 +415,9 @@ class TestFetchLatestVersion:
     def test_returns_none_on_parse_error(self):
         import asyncio
         from unittest.mock import patch
-        from packagealert.sandbox.cooldown import fetch_latest_version
+
         from packagealert.languages.python import PythonLanguage
+        from packagealert.sandbox.cooldown import fetch_latest_version
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -405,8 +435,9 @@ class TestFetchLatestVersion:
     def test_npm_returns_latest_version(self):
         import asyncio
         from unittest.mock import patch
-        from packagealert.sandbox.cooldown import fetch_latest_version
+
         from packagealert.languages.node import NodeLanguage
+        from packagealert.sandbox.cooldown import fetch_latest_version
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200

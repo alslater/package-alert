@@ -12,33 +12,9 @@ import unittest.mock
 from pathlib import Path
 
 import pytest
-
-from packagealert.sandbox.backends.filesystem import FileSystemBackend, FileSystemSnapshot
-from packagealert.sandbox.bwrap import build_cmd
 from rich.console import Console
-from packagealert.sandbox.runner import (
-    SandboxRunner,
-    _collect_new_packages,
-    _home_ro_dirs,
-    _resolve_targets,
-    _restore_install_targets,
-    _restore_lock_files,
-    _snapshot_lock_files,
-    _try_parse,
-    _serialise_package_spec,
-    _build_sandbox_env,
-    _assert_scannable_lock_files_contained,
-    _LOCK_UNREADABLE,
-    _post_ro_tmpfs_dirs,
-    _restorable_lock_files,
-    _SANDBOX_ENV_COMMON,
-    _SHELL_NAMES,
-    _SHELL_RC_FILES,
-    _Context,
-    _is_safe_writable_bind_src,
-    _is_safe_writable_bind_dest,
-    _cleanup_writable_binds,
-)
+
+from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.languages.python import (
     _find_pipenv_venv,
     _find_site_packages,
@@ -47,8 +23,35 @@ from packagealert.languages.python import (
     _is_ssh_vcs_url,
     _req_file_has_ssh,
 )
-from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.parsers.process_args import ParsedInstall
+from packagealert.sandbox.backends.filesystem import (
+    FileSystemBackend,
+    FileSystemSnapshot,
+)
+from packagealert.sandbox.bwrap import build_cmd
+from packagealert.sandbox.runner import (
+    _LOCK_UNREADABLE,
+    _SANDBOX_ENV_COMMON,
+    _SHELL_NAMES,
+    _SHELL_RC_FILES,
+    SandboxRunner,
+    _assert_scannable_lock_files_contained,
+    _build_sandbox_env,
+    _cleanup_writable_binds,
+    _collect_new_packages,
+    _Context,
+    _home_ro_dirs,
+    _is_safe_writable_bind_dest,
+    _is_safe_writable_bind_src,
+    _post_ro_tmpfs_dirs,
+    _resolve_targets,
+    _restorable_lock_files,
+    _restore_install_targets,
+    _restore_lock_files,
+    _serialise_package_spec,
+    _snapshot_lock_files,
+    _try_parse,
+)
 
 
 @pytest.fixture(scope="session")
@@ -643,8 +646,8 @@ class TestHomeRoDirs:
         )
 
     def test_sandbox_env_allowlist_includes_pyenv_and_nvm(self):
-        from packagealert.languages.python import PythonLanguage
         from packagealert.languages.node import NodeLanguage
+        from packagealert.languages.python import PythonLanguage
         assert "PYENV_ROOT" in PythonLanguage().sandbox_env()
         assert "NVM_DIR" in NodeLanguage().sandbox_env()
 
@@ -779,8 +782,9 @@ class TestTryParse:
         bad_lang.parse_process_install.assert_called_once()
 
     def test_lockfile_hint_propagated(self):
-        from packagealert.languages.base import ProcessInstall
         from unittest.mock import MagicMock, patch
+
+        from packagealert.languages.base import ProcessInstall
         lang = MagicMock()
         lang.name = "node"
         lang.ecosystems = ["npm"]
@@ -1943,9 +1947,9 @@ class TestBuildSandboxEnv:
         assert "HTTP_PROXY" in _SANDBOX_ENV_COMMON
 
     def test_sandbox_env_language_specific_vars_come_from_modules(self):
-        from packagealert.languages.python import PythonLanguage
         from packagealert.languages.node import NodeLanguage
         from packagealert.languages.php import PhpLanguage
+        from packagealert.languages.python import PythonLanguage
         assert "VIRTUAL_ENV" in PythonLanguage().sandbox_env()
         assert "UV_INDEX_URL" in PythonLanguage().sandbox_env()
         assert "NPM_CONFIG_REGISTRY" in NodeLanguage().sandbox_env()
@@ -2195,6 +2199,7 @@ class TestPostRoTmpfsWiredIntoRunner:
     def _setup_common(self, monkeypatch, home_ro_dirs):
         """Patch bwrap_available, subprocess.run, and _home_ro_dirs; return cmd capture list."""
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
 
         bwrap_cmds: list[list[str]] = []
@@ -2346,9 +2351,10 @@ class TestConfigureSandboxWritableDispatch:
         Returns (bwrap_cmds, captured_writable_binds).
         """
         import subprocess
-        import packagealert.sandbox.runner as runner_mod
-        import packagealert.sandbox.bwrap as bwrap_mod
         from unittest.mock import MagicMock
+
+        import packagealert.sandbox.bwrap as bwrap_mod
+        import packagealert.sandbox.runner as runner_mod
 
         bwrap_cmds: list[list[str]] = []
         captured_writable_binds: list = []
@@ -2481,9 +2487,10 @@ class TestConfigureSandboxWritableDispatch:
     def test_install_cleans_up_temp_dirs_on_failure(self, tmp_path, monkeypatch):
         """_run_cs: src temp dirs are deleted in finally block even when subprocess exits non-zero."""
         import subprocess
-        import packagealert.sandbox.runner as runner_mod
-        import packagealert.sandbox.bwrap as bwrap_mod
         from unittest.mock import MagicMock
+
+        import packagealert.sandbox.bwrap as bwrap_mod
+        import packagealert.sandbox.runner as runner_mod
 
         project = tmp_path / "project"
         project.mkdir()
@@ -2597,8 +2604,9 @@ class TestConfigureSandboxWritableDispatch:
     def test_hook_exception_is_swallowed(self, tmp_path, monkeypatch):
         """configure_sandbox_writable exceptions are caught and logged; sandbox still runs."""
         import subprocess
-        import packagealert.sandbox.runner as runner_mod
         from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod
 
         project = tmp_path / "project"
         project.mkdir()
@@ -2695,8 +2703,9 @@ class TestConfigureSandboxWritableDispatch:
     def test_install_prints_warning_from_configure_sandbox_writable_warning(self, tmp_path, monkeypatch):
         """_run_cs: warning from configure_sandbox_writable_warning is printed via runner console."""
         import asyncio
-        import packagealert.sandbox.runner as runner_mod_inner
         from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod_inner
 
         project = tmp_path / "project"
         project.mkdir()
@@ -2730,8 +2739,9 @@ class TestConfigureSandboxWritableDispatch:
     def test_shell_prints_warning_from_configure_sandbox_writable_warning(self, tmp_path, monkeypatch):
         """_run_shell: warning from configure_sandbox_writable_warning is printed via runner console."""
         import asyncio
-        import packagealert.sandbox.runner as runner_mod_inner
         from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod_inner
 
         project = tmp_path / "project"
         project.mkdir()
@@ -2773,9 +2783,10 @@ class TestCollectWritableBindsValidation:
         )
 
     def _call(self, return_value, monkeypatch):
+        from unittest.mock import MagicMock
+
         import packagealert.sandbox.runner as runner_mod
         from packagealert.languages.base import SandboxTargets
-        from unittest.mock import MagicMock
 
         mock_lang = MagicMock()
         mock_lang.name = "testlang"
@@ -2931,6 +2942,7 @@ class TestExposeSSHKeysConfirmation:
 
     def _setup(self, monkeypatch):
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
         monkeypatch.setattr(subprocess, "run", lambda *a, **kw: type("R", (), {"returncode": 0})())
@@ -2965,6 +2977,7 @@ class TestRunExitCode:
 
     def _setup(self, monkeypatch, returncode: int):
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
         monkeypatch.setattr(
@@ -3022,6 +3035,7 @@ class TestNoChangeLockFileRestore:
 
     def _setup(self, monkeypatch, returncode: int):
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
         monkeypatch.setattr(
@@ -3129,6 +3143,7 @@ class TestInstallTargetRestoreIntegration:
 
     def _setup(self, monkeypatch, returncode: int, tmp_path):
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
         monkeypatch.setattr(
@@ -3251,6 +3266,7 @@ class TestSandboxBackendConfig:
 
     def test_filesystem_backend_explicit_toml(self):
         import tomllib
+
         from packagealert.config import AppConfig
         data = tomllib.loads(b'[sandbox]\nbackend = "filesystem"'.decode())
         cfg = AppConfig.model_validate(data)
@@ -3258,8 +3274,10 @@ class TestSandboxBackendConfig:
 
     def test_unknown_backend_rejected(self):
         import tomllib
+
         import pytest
         from pydantic import ValidationError
+
         from packagealert.config import AppConfig
         data = tomllib.loads(b'[sandbox]\nbackend = "zfs"'.decode())
         with pytest.raises(ValidationError, match="unknown sandbox backend"):
@@ -3275,6 +3293,7 @@ class TestSandboxBackendConfig:
 
     def test_build_backend_passes_size_limit(self):
         import tomllib
+
         from packagealert.config import AppConfig
         from packagealert.sandbox.backends.filesystem import FileSystemBackend
         from packagealert.sandbox.backends.registry import build_backend
@@ -3297,6 +3316,7 @@ class TestFileSystemBackendConfig:
 
     def test_custom_size_limit_parsed_from_toml(self):
         import tomllib
+
         from packagealert.config import AppConfig
         raw = b"""
 [sandbox.filesystem_backend]
@@ -3307,10 +3327,12 @@ snapshot_file_size_limit = 5242880
         assert cfg.sandbox.filesystem_backend.snapshot_file_size_limit == 5 * 1024 * 1024
 
     def test_negative_size_limit_rejected(self):
+        import tomllib
+
         import pytest
         from pydantic import ValidationError
+
         from packagealert.config import AppConfig
-        import tomllib
         raw = b"""
 [sandbox.filesystem_backend]
 snapshot_file_size_limit = -1
@@ -3321,6 +3343,7 @@ snapshot_file_size_limit = -1
 
     def test_zero_size_limit_allowed(self):
         import tomllib
+
         from packagealert.config import AppConfig
         raw = b"""
 [sandbox.filesystem_backend]
@@ -3343,6 +3366,7 @@ class TestRestorableLockFiles:
     def test_buggy_lockfile_patterns_skipped(self):
         """_restorable_lock_files() must skip a language whose lockfile_patterns() raises."""
         from unittest.mock import MagicMock, patch
+
         from packagealert.languages import registry as lang_registry
 
         lang_registry.load()
@@ -3851,6 +3875,7 @@ class TestPreflightContainment:
         instead of calling scan_project() (which would pick the wrong file via
         first-match-per-language in repos with multiple lockfiles for the same ecosystem)."""
         import asyncio
+
         import packagealert.sandbox.runner as runner_mod
 
         # Simulate a repo with both package-lock.json and yarn.lock.
@@ -3882,6 +3907,7 @@ class TestPreflightContainment:
     def test_no_lockfile_hint_falls_back_to_scan_project(self, tmp_path):
         """Without a lockfile_hint, _preflight() falls back to scan_project() as before."""
         import asyncio
+
         import packagealert.sandbox.runner as runner_mod
 
         (tmp_path / "package-lock.json").write_text('{"name":"pkg","lockfileVersion":2,"requires":true,"packages":{}}')
@@ -3911,6 +3937,7 @@ class TestPreflightContainment:
         """When lockfile_hint names a file that doesn't exist, _preflight() falls back
         to scan_project() so an existing lockfile for the same ecosystem isn't missed."""
         import asyncio
+
         import packagealert.sandbox.runner as runner_mod
 
         # yarn.lock is present but package-lock.json (the hint) is absent.
@@ -3942,6 +3969,7 @@ class TestPreflightContainment:
         """When the hinted file exists but yields no packages (e.g. empty lock file),
         _preflight() falls back to scan_project() rather than skipping the check."""
         import asyncio
+
         import packagealert.sandbox.runner as runner_mod
 
         (tmp_path / "package-lock.json").write_text('{"lockfileVersion":2,"packages":{}}')
@@ -4125,7 +4153,7 @@ class TestScanUpdatedLockFiles:
 
         seen_queries = []
 
-        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+        fake_open_db, _FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
 
         class CapturingClient:
             async def batch_query(self, queries):
@@ -4318,7 +4346,6 @@ class TestPreflightUnpinnedRequirements:
             def __init__(self, db, cfg): pass
             async def get(self, ecosystem, name, version):
                 seen_queries.append((ecosystem, name, version))
-                return None
             async def set(self, *a): pass
 
         class FakeClient:
@@ -4352,6 +4379,7 @@ def test_cooldown_blocks_non_interactive(tmp_path, monkeypatch):
     import asyncio
     import time
     from unittest.mock import AsyncMock, patch
+
     from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
     from packagealert.sandbox.runner import SandboxRunner
 
@@ -4393,9 +4421,10 @@ def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
     import asyncio
     import time
     from unittest.mock import AsyncMock, patch
+
     from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
-    from packagealert.sandbox.runner import SandboxRunner
     from packagealert.heuristics.typosquat import TyposquatResult
+    from packagealert.sandbox.runner import SandboxRunner
 
     cfg = AppConfig()
     cfg.sandbox = SandboxConfig(
@@ -4437,6 +4466,7 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
     """Unpinned install: if latest version fetch fails, cooldown is skipped gracefully."""
     import asyncio
     from unittest.mock import AsyncMock, patch
+
     from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
     from packagealert.sandbox.runner import SandboxRunner
 
@@ -4480,17 +4510,20 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
 class TestIsSafeSandboxPath:
     def test_rejects_filesystem_root(self, tmp_path):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         assert not _is_safe_sandbox_path(Path("/"), [tmp_path])
 
     def test_rejects_system_dirs(self, tmp_path):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         for bad in [Path("/etc"), Path("/usr"), Path("/bin"), Path("/etc/passwd")]:
             assert not _is_safe_sandbox_path(bad, [tmp_path]), f"should reject {bad}"
 
     def test_rejects_credential_dirs(self, tmp_path):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         home = Path.home()
         for cred in [home / ".ssh", home / ".aws", home / ".gnupg",
@@ -4518,6 +4551,7 @@ class TestIsSafeSandboxPath:
 
     def test_rejects_credential_dir_even_when_under_editable_root(self):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         home = Path.home()
         # .ssh is under home, and home might be an editable root — still blocked
@@ -4525,6 +4559,7 @@ class TestIsSafeSandboxPath:
 
     def test_rejects_ancestor_of_credential_dir(self):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         home = Path.home()
         # Mounting $HOME would re-expose ~/.ssh, ~/.aws, etc. as subdirectories
@@ -4532,6 +4567,7 @@ class TestIsSafeSandboxPath:
 
     def test_rejects_config_dir_ancestor_of_credential_subdir(self):
         from pathlib import Path
+
         from packagealert.sandbox.runner import _is_safe_sandbox_path
         home = Path.home()
         # ~/.config is an ancestor of ~/.config/gcloud — must be blocked
@@ -5150,6 +5186,7 @@ class TestFreshVenvFallbackSnapshot:
         """
         import asyncio
         import subprocess
+
         import packagealert.sandbox.runner as runner_mod
 
         venv = tmp_path / ".venv"
@@ -5952,6 +5989,7 @@ class TestCleanupWritableBinds:
     def test_oserror_from_lexists_is_caught_and_loop_continues(self, tmp_path, monkeypatch, caplog):
         """An OSError from os.path.lexists must not abort cleanup of remaining entries."""
         import logging
+
         import packagealert.sandbox.runner as runner_mod
 
         good_src = tmp_path / "pa-uv-auth-good"

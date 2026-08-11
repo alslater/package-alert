@@ -37,8 +37,8 @@ def _inotify_headroom() -> int:
             except OSError:
                 pass
         return limit - used
-    except Exception:
-        return _HEADROOM_NEEDED  # assume sufficient if we can't check
+    except Exception:  # noqa: BLE001 — best-effort headroom check, assume sufficient if we can't check
+        return _HEADROOM_NEEDED
 
 
 requires_inotify_headroom = pytest.mark.skipif(

@@ -13,6 +13,7 @@ import importlib.metadata
 import sys
 from importlib.metadata import DistributionFinder
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -22,8 +23,8 @@ from packagealert.osv.popularity import PopularityClient
 
 class _StubLanguage:
     name = "stub_lang"
-    ecosystems = ["stubeco"]
-    process_names = []
+    ecosystems: ClassVar[list[str]] = ["stubeco"]
+    process_names: ClassVar[list[str]] = []
     contract_version = 3
     author = "test"
     repository = ""
@@ -76,7 +77,7 @@ class _StubFinder(DistributionFinder):
     """sys.meta_path finder that exposes _StubDistribution."""
 
     def find_distributions(
-        self, context: DistributionFinder.Context = DistributionFinder.Context()
+        self, context: DistributionFinder.Context = DistributionFinder.Context()  # noqa: B008 — matches base class's real signature
     ):
         yield _StubDistribution()
 

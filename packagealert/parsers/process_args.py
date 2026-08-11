@@ -310,9 +310,8 @@ def _parse_pip_spec(spec: str) -> tuple[str, str | None]:
     spec = spec.partition(";")[0].strip()
     # Reject local paths, VCS URLs (scheme-based and scp-style), and direct URLs
     if (
-        spec.startswith((".", "/"))
+        spec.startswith((".", "/", "git+", "hg+", "svn+", "bzr+", "file:"))
         or "://" in spec
-        or spec.startswith(("git+", "hg+", "svn+", "bzr+", "file:"))
         or _SCP_VCS_RE.match(spec)
     ):
         return "", None
@@ -395,10 +394,8 @@ def _cmd(path: str) -> str:
          /usr/lib/node/npm-cli.js -> npm
     """
     name = _basename(path).lower()
-    if name.endswith(".exe"):
-        name = name[:-4]
-    if name.endswith("-cli.js"):
-        name = name[:-7]
+    name = name.removesuffix(".exe")
+    name = name.removesuffix("-cli.js")
     return _CMD_VERSION_SUFFIX_RE.sub("", name)
 
 
@@ -515,9 +512,8 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         if skip_value_for is not None:
             if skip_value_for in ("-r", "--requirement"):
                 req_files.append(arg)
-            elif skip_value_for in ("-e", "--editable"):
-                if _is_vcs_editable(arg):
-                    packages.append(arg)
+            elif skip_value_for in ("-e", "--editable") and _is_vcs_editable(arg):
+                packages.append(arg)
             skip_value_for = None
             continue
         if arg in ("-r", "--requirement"):
@@ -569,9 +565,8 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
             if skip_value_for is not None:
                 if skip_value_for in ("-r", "--requirement"):
                     req_files.append(arg)
-                elif skip_value_for in ("-e", "--editable"):
-                    if _is_vcs_editable(arg):
-                        packages.append(arg)
+                elif skip_value_for in ("-e", "--editable") and _is_vcs_editable(arg):
+                    packages.append(arg)
                 skip_value_for = None
                 continue
             if arg in ("-r", "--requirement"):

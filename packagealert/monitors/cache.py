@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from watchdog.events import FileCreatedEvent, FileSystemEventHandler
@@ -34,7 +34,7 @@ def _classify_distinfo_dir(path: Path) -> PackageEvent | None:
         source="cache",
         manager="unknown",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -63,7 +63,7 @@ class _Handler(FileSystemEventHandler):
                     source="cache",
                     manager="unknown",
                     project_path=None,
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=datetime.now(UTC),
                 )
                 asyncio.run_coroutine_threadsafe(self._queue.put(event_data), self._loop)
                 return
@@ -136,7 +136,7 @@ class CacheMonitor(AbstractMonitor):
             try:
                 self._observer.unschedule(watch)
             except Exception:
-                pass
+                log.debug("Failed to unschedule watch for %s", path, exc_info=True)
             log.info("Removed stale site-packages watch: %s", path)
 
     async def stop(self) -> None:
@@ -156,7 +156,7 @@ class CacheMonitor(AbstractMonitor):
             try:
                 event = await asyncio.wait_for(self._queue.get(), timeout=1.0)
                 yield event
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 self._cleanup_counter += 1
                 if self._cleanup_counter >= 60:  # ~every 60 seconds
                     self._cleanup_dead_watches()

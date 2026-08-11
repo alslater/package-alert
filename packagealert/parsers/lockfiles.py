@@ -250,7 +250,7 @@ def collect_requirements_packages(
         # Skip local paths (./pkg, ../pkg, /abs/path), VCS URLs — scheme-based
         # (git+https://, git+ssh://, etc.) and scp-style (git@host:path).
         # _UNPINNED_RE would otherwise extract "git" or "." as a package name.
-        if line.startswith((".", "/")) or "://" in line or line.startswith(("git+", "hg+", "svn+", "bzr+")) or _SCP_VCS_RE.match(line):
+        if line.startswith((".", "/", "git+", "hg+", "svn+", "bzr+")) or "://" in line or _SCP_VCS_RE.match(line):
             continue
         m = _PINNED_RE.match(line)
         if m:

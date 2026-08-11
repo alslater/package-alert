@@ -1,8 +1,9 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from packagealert.models.events import PackageEvent
+
 from packagealert.models.advisories import OsvAdvisory, OsvResult
-from packagealert.models.risk import RiskSignal, RiskReport
+from packagealert.models.events import PackageEvent
+from packagealert.models.risk import RiskReport, RiskSignal
 
 
 def test_package_event_defaults():
@@ -13,7 +14,7 @@ def test_package_event_defaults():
         source="process",
         manager="pip",
         project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     assert ev.package_name == "requests"
     assert ev.ecosystem == "pypi"
@@ -27,7 +28,7 @@ def test_package_event_normalizes_name():
         source="cache",
         manager="uv",
         project_path=Path("/tmp"),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     assert ev.package_name == "my-package"
 

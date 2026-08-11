@@ -12,15 +12,18 @@ import time
 import types
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from packagealert.config import load_config
+from packagealert.daemon_pid import (
+    PID_FILE,
+    check_already_running,
+    is_started_by_systemd,
+)
 from packagealert.logging_setup import configure_logging
-from packagealert.daemon_pid import check_already_running, is_started_by_systemd, PID_FILE
 from packagealert.plugins.registry import plugin_registry
 
 log = logging.getLogger(__name__)
@@ -95,14 +98,19 @@ app.add_typer(schedule_app, name="schedule")
 scans_app = typer.Typer(help="List and display completed scheduled scan results.")
 app.add_typer(scans_app, name="scans")
 
-from packagealert.cli.languages_cmd import languages_app  # noqa: E402
+from packagealert.cli.languages_cmd import languages_app
+
 app.add_typer(languages_app, name="languages")
 
-from packagealert.cli.setup_cmd import cooldown_app, setup_app  # noqa: E402
+from packagealert.cli.setup_cmd import cooldown_app, setup_app
+
 app.add_typer(setup_app, name="setup")
 app.add_typer(cooldown_app, name="cooldown")
 
-from packagealert.cli.plugins import central_app  # noqa: E402
+from datetime import UTC
+
+from packagealert.cli.plugins import central_app
+
 app.add_typer(central_app, name="central")
 
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
@@ -111,7 +119,7 @@ _verbose: bool = False
 _plugin_commands_registered: bool = False
 
 
-def _config_path_from_argv() -> "Path | None":
+def _config_path_from_argv() -> Path | None:
     """Extract --config / -c <path> from sys.argv without a full parse.
 
     Used during early plugin registration so that plugins enabled via
@@ -147,6 +155,7 @@ def _register_plugin_commands() -> None:
         return
     _plugin_commands_registered = True
     import logging as _logging
+
     from packagealert.config import read_enabled_plugins as _read_enabled_plugins
     from packagealert.plugins.registry import _load_entry_points as _lep
     argv_config = _config_path_from_argv()
@@ -172,7 +181,7 @@ def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log 
     if not _is_interactive():
         return
 
-    from packagealert.update_check import read_notice, check_and_cache, is_cache_stale
+    from packagealert.update_check import check_and_cache, is_cache_stale, read_notice
 
     notice = read_notice()
     if notice:
@@ -248,7 +257,7 @@ def _apply_config_veto(
     return config
 
 
-def _load(config: Optional[Path], *, daemon: bool = False):
+def _load(config: Path | None, *, daemon: bool = False):
     if config is not None:
         from packagealert.config import read_enabled_plugins as _rep
         from packagealert.plugins.registry import _load_entry_points as _lep
@@ -262,7 +271,7 @@ def _load(config: Optional[Path], *, daemon: bool = False):
 
 @app.command()
 def daemon(
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
     background: bool = typer.Option(False, "--background", "-b", help="Daemonise: fork into the background and return immediately."),
 ):
     """Start the package-alert monitoring daemon."""
@@ -295,7 +304,7 @@ def daemon(
 
 @app.command()
 def status(
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
     json_output: bool = typer.Option(False, "--json", help="Output as JSON."),
 ):
     """Show daemon running state, recent alerts, and configuration summary."""
@@ -306,20 +315,21 @@ def status(
 
 
 @app.command("scan-cache")
-def scan_cache(config: Optional[Path] = _cfg_option):
+def scan_cache(config: Path | None = _cfg_option):
     """Scan package manager caches for malicious packages."""
     cfg, _ = _load(config)
     asyncio.run(_run_scan_cache(cfg))
 
 
 async def _run_scan_cache(cfg):
-    from packagealert.osv.client import OsvClient
-    from packagealert.osv.cache import OsvCache
-    from packagealert.storage.db import open_db
-    from packagealert.models.events import PackageEvent, normalise_ecosystem
+    from datetime import datetime
+
     from packagealert.alerts.terminal import alert_malicious
     from packagealert.languages import registry as lang_registry
-    from datetime import datetime, timezone
+    from packagealert.models.events import PackageEvent, normalise_ecosystem
+    from packagealert.osv.cache import OsvCache
+    from packagealert.osv.client import OsvClient
+    from packagealert.storage.db import open_db
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     osv_client = OsvClient(cfg.osv)
@@ -376,7 +386,7 @@ async def _run_scan_cache(cfg):
                             source="cache",
                             manager="unknown",
                             project_path=None,
-                            timestamp=datetime.now(timezone.utc),
+                            timestamp=datetime.now(UTC),
                         )
                         alert_malicious(ev, result)
                         found += 1
@@ -389,18 +399,18 @@ async def _run_scan_cache(cfg):
 @app.command()
 def query(
     package: str = typer.Argument(..., help="Package name"),
-    version: Optional[str] = typer.Argument(None, help="Package version"),
+    version: str | None = typer.Argument(None, help="Package version"),
     ecosystem: str = typer.Option("pypi", "--ecosystem", "-e", help="OSV ecosystem identifier, e.g. pypi, npm, packagist, maven, crates.io, rubygems, nuget, go."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Query OSV for a specific package."""
     cfg, _ = _load(config)
     asyncio.run(_run_query(cfg, ecosystem, package, version))
 
 
-async def _run_query(cfg, ecosystem: str, package: str, version: Optional[str]):
-    from packagealert.osv.client import OsvClient
+async def _run_query(cfg, ecosystem: str, package: str, version: str | None):
     from packagealert.osv.cache import OsvCache
+    from packagealert.osv.client import OsvClient
     from packagealert.storage.db import open_db
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
@@ -440,7 +450,7 @@ async def _run_query(cfg, ecosystem: str, package: str, version: Optional[str]):
 @app.command()
 def alerts(
     limit: int = typer.Option(50, "--limit", "-n", help="Number of recent alerts to show"),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Show recent alerts from the database."""
     cfg, _ = _load(config)
@@ -449,6 +459,7 @@ def alerts(
 
 async def _run_alerts(cfg, limit: int):
     import datetime as dt
+
     from packagealert.storage.db import open_db
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
@@ -466,7 +477,7 @@ async def _run_alerts(cfg, limit: int):
         rows = await cur.fetchall()
 
     for row in rows:
-        ts = dt.datetime.fromtimestamp(row["alerted_at"]).isoformat(timespec="seconds")
+        ts = dt.datetime.fromtimestamp(row["alerted_at"]).isoformat(timespec="seconds")  # noqa: DTZ006 — local time for display
         advisory_or_score = row["advisory_id"] or (
             f"risk:{row['risk_score']}" if row["risk_score"] else ""
         )
@@ -503,10 +514,10 @@ def scan_project(
     scan_unpinned: bool = typer.Option(False, "--scan-unpinned", help="Query OSV for unpinned dependencies too."),
     scan_installed: bool = typer.Option(False, "--scan-installed", help="Scan venv/.venv or node_modules instead of lock files."),
     prod_only: bool = typer.Option(False, "--prod-only", help="Exclude dev dependencies from the scan. Mutually exclusive with --scan-installed. With --requirements, dev/prod is undetectable so all packages are included with a warning."),
-    requirements: Optional[Path] = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
+    requirements: Path | None = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Scan a project's lock files for malicious or vulnerable packages."""
     if fmt not in ("text", "json", "html", "browser"):
@@ -535,19 +546,24 @@ def scan_project(
 
 async def _run_scan_project(
     cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str,
-    requirements: Optional[Path] = None,
+    requirements: Path | None = None,
     prod_only: bool = False,
 ):
     import json as jsonlib
-    from packagealert.osv.client import OsvClient
+
     from packagealert.osv.cache import OsvCache
-    from packagealert.storage.db import open_db
+    from packagealert.osv.client import OsvClient
+    from packagealert.parsers.lockfiles import (
+        ProjectScan,
+        collect_requirements_packages,
+    )
+    from packagealert.parsers.lockfiles import (
+        scan_installed as detect_installed,
+    )
     from packagealert.parsers.lockfiles import (
         scan_project as detect_project,
-        scan_installed as detect_installed,
-        collect_requirements_packages,
-        ProjectScan,
     )
+    from packagealert.storage.db import open_db
 
     if requirements is not None:
         pinned, unpinned = collect_requirements_packages(requirements)
@@ -627,15 +643,16 @@ async def _run_scan_project(
     await osv_client.aclose()
     await db.close()
 
+    from datetime import datetime
+
     from packagealert.models.scans import ScanResult
-    from datetime import datetime, timezone
     scan = ScanResult(
         project_path=str(root),
         scan_type="installed" if installed else "project",
         finding_count=len(findings),
         findings=findings,
         sources=result.sources,
-        scanned_at=datetime.now(timezone.utc),
+        scanned_at=datetime.now(UTC),
     )
     await plugin_registry.fire_on_scan_complete(scan)
 
@@ -703,6 +720,7 @@ def open_html_in_browser(html: str) -> None:
     """Write *html* to a temp file and open it in the default browser."""
     import tempfile
     import webbrowser
+
     from rich.console import Console
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".html", prefix="package-alert-", dir="/tmp", delete=False
@@ -784,15 +802,15 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, s
 
 @app.command("clear-cache")
 def clear_cache(
-    ecosystem: Optional[str] = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear: pypi, npm, or packagist. Clears all if omitted."),
-    config: Optional[Path] = _cfg_option,
+    ecosystem: str | None = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear: pypi, npm, or packagist. Clears all if omitted."),
+    config: Path | None = _cfg_option,
 ):
     """Clear the OSV query cache, optionally filtered by ecosystem."""
     cfg, _ = _load(config)
     asyncio.run(_run_clear_cache(cfg, ecosystem))
 
 
-async def _run_clear_cache(cfg, ecosystem: Optional[str]):
+async def _run_clear_cache(cfg, ecosystem: str | None):
     from packagealert.storage.db import open_db
 
     if ecosystem and ecosystem not in ("pypi", "npm", "packagist"):
@@ -813,7 +831,7 @@ async def _run_clear_cache(cfg, ecosystem: Optional[str]):
 
 
 @app.command("config-show")
-def config_show(config: Optional[Path] = _cfg_option):
+def config_show(config: Path | None = _cfg_option):
     """Show current configuration as JSON."""
     cfg = load_config(config)
     console.print_json(cfg.model_dump_json(indent=2))
@@ -836,7 +854,7 @@ def _systemd_is_running() -> bool:
 def _systemctl(*args: str) -> subprocess.CompletedProcess:
     """Run systemctl --user <args>, raising typer.Exit on FileNotFoundError."""
     try:
-        return subprocess.run(["systemctl", "--user", *args], capture_output=True)
+        return subprocess.run(["systemctl", "--user", *args], capture_output=True, check=False)
     except FileNotFoundError:
         console.print("[red]systemctl not found on PATH.[/red]")
         raise typer.Exit(1)
@@ -1037,7 +1055,7 @@ def update_cmd(
         cmd = ["pipx", "reinstall", "package-alert"] if force else ["pipx", "upgrade", "package-alert"]
         tool_name = "pipx"
     try:
-        result = subprocess.run(cmd)
+        result = subprocess.run(cmd, check=False)
     except FileNotFoundError:
         console.print(f"[red]{tool_name} not found on PATH. Cannot self-update.[/red]")
         raise typer.Exit(1)
@@ -1145,7 +1163,7 @@ def run_cmd(
         help="Bypass the sandbox.project_env_allowlist check for env vars from .pa-run.toml. "
              "Use when you trust the repository's .pa-run.toml env entries for this run only.",
     ),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Run a package manager command inside a bubblewrap sandbox.
 
@@ -1208,7 +1226,10 @@ def run_cmd(
 
     cfg, _ = _load(config)
     # Apply .pa-run.toml project defaults (lowest precedence — CLI and PA_RUN_OPTS win).
-    from packagealert.project_config import find_project_run_config, ProjectRunConfigError
+    from packagealert.project_config import (
+        ProjectRunConfigError,
+        find_project_run_config,
+    )
     _project_flags_list: list[str] = []
     try:
         _proj_cfg = find_project_run_config(Path.cwd())
@@ -1284,7 +1305,7 @@ def run_cmd(
                 console.print(f"[yellow]PA_RUN_OPTS: unrecognised option {token!r} — ignored[/yellow]")
             _i += 1
 
-    from packagealert.sandbox.runner import _parse_flags, _FLAG_TOKEN_RE
+    from packagealert.sandbox.runner import _FLAG_TOKEN_RE, _parse_flags
 
     def _warn_invalid_flag_tokens(flags_str: str, source: str) -> None:
         for _token in flags_str.split(","):
@@ -1339,11 +1360,11 @@ def run_cmd(
 
 @schedule_app.command("add")
 def schedule_add(
-    path: Optional[Path] = typer.Argument(None, help="Project directory (default: current directory)."),
+    path: Path | None = typer.Argument(None, help="Project directory (default: current directory)."),
     daily: bool = typer.Option(False, "--daily", help="Scan daily."),
     weekly: bool = typer.Option(False, "--weekly", help="Scan weekly."),
     installed: bool = typer.Option(False, "--installed", help="Scan actually-installed packages (default: lock files)."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Add the project to the scheduled scan list."""
     cfg, _ = _load(config)
@@ -1360,8 +1381,8 @@ def schedule_add(
 
 
 async def _schedule_add(cfg, path: str, schedule: str, scan_type: str) -> None:
-    from packagealert.storage.db import open_db
     from packagealert.scheduler.db import add_project
+    from packagealert.storage.db import open_db
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         await add_project(db, path=path, schedule=schedule, scan_type=scan_type)
@@ -1372,10 +1393,10 @@ async def _schedule_add(cfg, path: str, schedule: str, scan_type: str) -> None:
 
 @schedule_app.command("remove")
 def schedule_remove(
-    path: Optional[Path] = typer.Argument(None, help="Project directory (default: current directory)."),
+    path: Path | None = typer.Argument(None, help="Project directory (default: current directory)."),
     installed: bool = typer.Option(False, "--installed", help="Remove only the installed-packages scan entry."),
     project: bool = typer.Option(False, "--project", help="Remove only the lock-file scan entry."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Remove the project from the scheduled scan list.
 
@@ -1385,7 +1406,7 @@ def schedule_remove(
     if installed and project:
         console.print("[red]Specify --installed or --project, not both.[/red]")
         raise typer.Exit(1)
-    scan_type: Optional[str] = "installed" if installed else ("project" if project else None)
+    scan_type: str | None = "installed" if installed else ("project" if project else None)
     removed = asyncio.run(_schedule_remove(cfg, str(root), scan_type))
     label = f" ({scan_type})" if scan_type else ""
     if removed:
@@ -1394,9 +1415,9 @@ def schedule_remove(
         console.print(f"[yellow]{root}[/yellow]{label} was not in the scheduled scan list.")
 
 
-async def _schedule_remove(cfg, path: str, scan_type: Optional[str]) -> bool:
-    from packagealert.storage.db import open_db
+async def _schedule_remove(cfg, path: str, scan_type: str | None) -> bool:
     from packagealert.scheduler.db import remove_project
+    from packagealert.storage.db import open_db
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
         return await remove_project(db, path, scan_type=scan_type)
@@ -1405,7 +1426,7 @@ async def _schedule_remove(cfg, path: str, scan_type: Optional[str]) -> bool:
 
 
 @schedule_app.command("list")
-def schedule_list(config: Optional[Path] = _cfg_option):
+def schedule_list(config: Path | None = _cfg_option):
     """List all projects registered for scheduled scans."""
     cfg, _ = _load(config)
     asyncio.run(_schedule_list(cfg))
@@ -1413,8 +1434,9 @@ def schedule_list(config: Optional[Path] = _cfg_option):
 
 async def _schedule_list(cfg) -> None:
     import datetime
-    from packagealert.storage.db import open_db
+
     from packagealert.scheduler.db import list_projects
+    from packagealert.storage.db import open_db
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     try:
@@ -1434,7 +1456,7 @@ async def _schedule_list(cfg) -> None:
 
     for p in projects:
         last = (
-            datetime.datetime.fromtimestamp(p.last_scanned_at).strftime("%Y-%m-%d %H:%M")
+            datetime.datetime.fromtimestamp(p.last_scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
             if p.last_scanned_at
             else "never"
         )
@@ -1445,9 +1467,9 @@ async def _schedule_list(cfg) -> None:
 
 @scans_app.command("list")
 def scans_list(
-    path: Optional[Path] = typer.Argument(None, help="Project directory (default: current directory)."),
+    path: Path | None = typer.Argument(None, help="Project directory (default: current directory)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Maximum number of scans to show."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """List completed scheduled scans for a project."""
     cfg, _ = _load(config)
@@ -1458,9 +1480,10 @@ def scans_list(
 async def _scans_list(cfg, project_path: str, limit: int) -> None:
     import datetime
     import socket
+
     from packagealert.plugins.registry import plugin_registry
-    from packagealert.storage.db import open_db
     from packagealert.scheduler.db import list_scan_results
+    from packagealert.storage.db import open_db
 
     hostname = socket.gethostname()
     if await plugin_registry.try_scans_list(project_path, hostname, limit):
@@ -1487,7 +1510,7 @@ async def _scans_list(cfg, project_path: str, limit: int) -> None:
     table.add_column("Highest Severity")
 
     for r in records:
-        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")
+        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
         sev = r.max_severity or "—"
         colour = _SEV_COLOUR.get(r.max_severity or "", "dim")
         table.add_row(
@@ -1505,7 +1528,7 @@ async def _scans_list(cfg, project_path: str, limit: int) -> None:
 @scans_app.command("listall")
 def scans_listall(
     limit: int = typer.Option(50, "--limit", "-n", help="Maximum number of scans to show."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """List completed scheduled scans across all projects."""
     cfg, _ = _load(config)
@@ -1515,9 +1538,10 @@ def scans_listall(
 async def _scans_listall(cfg, limit: int) -> None:
     import datetime
     import socket
+
     from packagealert.plugins.registry import plugin_registry
-    from packagealert.storage.db import open_db
     from packagealert.scheduler.db import list_all_scan_results
+    from packagealert.storage.db import open_db
 
     hostname = socket.gethostname()
     if await plugin_registry.try_scans_listall(hostname, limit):
@@ -1545,7 +1569,7 @@ async def _scans_listall(cfg, limit: int) -> None:
     table.add_column("Highest Severity")
 
     for r in records:
-        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")
+        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
         sev = r.max_severity or "—"
         colour = _SEV_COLOUR.get(r.max_severity or "", "dim")
         table.add_row(
@@ -1566,7 +1590,7 @@ def scans_show(
     scan_id: int = typer.Argument(..., help="Scan ID from 'scans list'."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html, browser."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
-    config: Optional[Path] = _cfg_option,
+    config: Path | None = _cfg_option,
 ):
     """Show findings from a completed scheduled scan."""
     cfg, _ = _load(config)
@@ -1576,9 +1600,10 @@ def scans_show(
 async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
     import datetime
     import json as jsonlib
+
     from packagealert.plugins.registry import plugin_registry
-    from packagealert.storage.db import open_db
     from packagealert.scheduler.db import get_scan_result
+    from packagealert.storage.db import open_db
 
     if await plugin_registry.try_scans_show(scan_id, fmt, show_details):
         return
@@ -1596,7 +1621,7 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
     findings = record.findings
     root_str = record.project_path
     sources = record.sources
-    date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")
+    date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")  # noqa: DTZ006 — local time for display
 
     if fmt == "json":
         print(jsonlib.dumps({
@@ -1661,6 +1686,6 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
 
 
 def main():
-    import sys
     import os
+    import sys
     app(prog_name=os.path.basename(sys.argv[0]))

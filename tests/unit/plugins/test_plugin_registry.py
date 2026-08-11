@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 from packagealert.config import AppConfig
-from packagealert.plugins.base import AgentPlugin, ConfigField
 from packagealert.models.events import PackageEvent
-from datetime import datetime, timezone
+from packagealert.plugins.base import AgentPlugin, ConfigField
 
 
 def _make_cfg(enabled: list[str] | None = None) -> AppConfig:
@@ -102,8 +102,8 @@ async def test_registry_loads_and_setups_enabled_plugin():
 
     event = PackageEvent(ecosystem="pypi", package_name="pkg", version="1.0",
                          source="process", manager="pip", project_path=None,
-                         timestamp=datetime.now(timezone.utc))
-    await registry.fire_on_daemon_start(datetime.now(timezone.utc))
+                         timestamp=datetime.now(UTC))
+    await registry.fire_on_daemon_start(datetime.now(UTC))
     await registry.fire_on_alert(event, MagicMock())
     await registry.fire_on_daemon_stop()
 
@@ -133,7 +133,7 @@ async def test_registry_isolates_exception(caplog):
 
     event = PackageEvent(ecosystem="pypi", package_name="pkg", version="1.0",
                          source="process", manager="pip", project_path=None,
-                         timestamp=datetime.now(timezone.utc))
+                         timestamp=datetime.now(UTC))
     with caplog.at_level(logging.WARNING, logger="packagealert.plugins.registry"):
         await registry.fire_on_alert(event, MagicMock())
     assert any("broken" in r.message or "boom" in r.message for r in caplog.records)

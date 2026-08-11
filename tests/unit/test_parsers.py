@@ -1,16 +1,18 @@
 import json
 from pathlib import Path
+
 import pytest
-from packagealert.parsers.process_args import (
-    parse_pip_args,
-    parse_uv_args,
-    parse_npm_args,
-    parse_yarn_args,
-    parse_pnpm_args,
-    parse_composer_args,
-    parse_package_spec,
-)
+
 from packagealert.parsers.lockfiles import collect_requirements_packages
+from packagealert.parsers.process_args import (
+    parse_composer_args,
+    parse_npm_args,
+    parse_package_spec,
+    parse_pip_args,
+    parse_pnpm_args,
+    parse_uv_args,
+    parse_yarn_args,
+)
 
 
 def test_pip_install_single():
@@ -300,7 +302,8 @@ def test_uv_tool_uninstall_not_sandboxed():
 
 def test_pipx_install_recognised():
     from pathlib import Path
-    from packagealert.parsers.process_args import parse_pipx_args, _pipx_home
+
+    from packagealert.parsers.process_args import _pipx_home, parse_pipx_args
     result = parse_pipx_args(["pipx", "install", "httpie"])
     assert result is not None
     assert result.manager == "pipx"
@@ -311,7 +314,7 @@ def test_pipx_install_recognised():
 
 
 def test_pipx_upgrade_recognised():
-    from packagealert.parsers.process_args import parse_pipx_args, _pipx_home
+    from packagealert.parsers.process_args import _pipx_home, parse_pipx_args
     result = parse_pipx_args(["pipx", "upgrade", "httpie"])
     assert result is not None
     assert result.packages == ["httpie"]
@@ -1315,6 +1318,7 @@ class TestScanLockfilesExceptionIsolation:
 
     def test_buggy_plugin_skipped_remaining_paths_still_scanned(self, tmp_path):
         from unittest.mock import MagicMock, patch
+
         from packagealert.parsers.lockfiles import scan_lockfiles
 
         self._setup_registry()
@@ -1346,6 +1350,7 @@ class TestScanLockfilesExceptionIsolation:
 
     def test_buggy_plugin_in_scan_project_continues_to_next_pattern(self, tmp_path):
         from unittest.mock import MagicMock, patch
+
         from packagealert.parsers.lockfiles import scan_project
 
         self._setup_registry()
@@ -1375,6 +1380,7 @@ class TestScanLockfilesExceptionIsolation:
     def test_buggy_lockfile_patterns_in_scan_project_skips_language(self, tmp_path):
         """scan_project() must skip a language whose lockfile_patterns() raises and keep scanning."""
         from unittest.mock import MagicMock, patch
+
         from packagealert.parsers.lockfiles import scan_project
 
         self._setup_registry()
@@ -1402,8 +1408,9 @@ class TestScanLockfilesExceptionIsolation:
 class TestScanInstalledExceptionIsolation:
     def test_buggy_plugin_skipped_good_lang_still_runs(self, tmp_path):
         from unittest.mock import MagicMock, patch
-        from packagealert.parsers.lockfiles import scan_installed
+
         from packagealert.languages import registry as lang_registry
+        from packagealert.parsers.lockfiles import scan_installed
         lang_registry.load()
 
         bad_lang = MagicMock()
@@ -1537,8 +1544,8 @@ class TestScanLockfilesSubdirPattern:
     """scan_lockfiles() must recognise lockfiles in subdirectory patterns."""
 
     def test_subdir_lockfile_is_scanned(self, tmp_path):
-        from packagealert.parsers.lockfiles import scan_lockfiles
         from packagealert.languages import registry as lang_registry
+        from packagealert.parsers.lockfiles import scan_lockfiles
         lang_registry.load()
 
         req_dir = tmp_path / "requirements"
@@ -1552,8 +1559,8 @@ class TestScanLockfilesSubdirPattern:
         assert "flask" in names
 
     def test_bare_filename_matching_subdir_pattern_is_not_misidentified(self, tmp_path):
-        from packagealert.parsers.lockfiles import scan_lockfiles
         from packagealert.languages import registry as lang_registry
+        from packagealert.parsers.lockfiles import scan_lockfiles
         lang_registry.load()
 
         # "base.txt" at the root should NOT match "requirements/base.txt"
@@ -1728,12 +1735,12 @@ class TestProdOnly:
         but all packages are dev-only, scan_project must treat it as the winning match
         and not fall through to a lower-priority pattern for the same language."""
         self._setup_registry()
-        from packagealert.parsers.lockfiles import scan_project
         from unittest.mock import patch
 
         # Patch node language to have two patterns: high-priority returns all dev,
         # low-priority returns a prod package. The low-priority must never be reached.
         from packagealert.languages.base import PackageSpec
+        from packagealert.parsers.lockfiles import scan_project
 
         all_dev = [PackageSpec(name="jest", version="29.0.0", ecosystem="npm", is_dev=True)]
         prod_pkg = [PackageSpec(name="express", version="4.18.0", ecosystem="npm", is_dev=False)]

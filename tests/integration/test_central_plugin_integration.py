@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import respx
 
-from packagealert.config import AppConfig, OsvConfig, HeuristicsConfig, AlertsConfig, WatchConfig, DaemonLogConfig
-from packagealert.models.events import PackageEvent
+from packagealert.config import (
+    AlertsConfig,
+    AppConfig,
+    DaemonLogConfig,
+    HeuristicsConfig,
+    OsvConfig,
+    WatchConfig,
+)
 from packagealert.models.advisories import OsvAdvisory, OsvResult
+from packagealert.models.events import PackageEvent
 from packagealert.models.scans import ScanResult
 from packagealert.plugins.central.plugin import CentralPlugin
 
@@ -37,7 +44,7 @@ def _event(name: str = "evil-pkg") -> PackageEvent:
     return PackageEvent(
         ecosystem="pypi", package_name=name, version="1.0.0",
         source="process", manager="pip", project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -82,7 +89,7 @@ async def test_scan_with_findings_reported(tmp_path):
     scan = ScanResult(
         project_path="/home/user/proj", scan_type="project",
         finding_count=1, findings=[{"package": "evil"}],
-        sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await plugin.on_scan_complete(scan)
     await plugin._client.aclose()
@@ -99,7 +106,7 @@ async def test_scan_without_findings_is_reported(tmp_path):
     scan = ScanResult(
         project_path="/home/user/proj", scan_type="project",
         finding_count=0, findings=[],
-        sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await plugin.on_scan_complete(scan)
     await plugin._client.aclose()
@@ -177,7 +184,7 @@ async def test_config_fetch_failure_recorded_in_state(tmp_path):
     respx.get(f"{FLEET_URL}/api/ingest/cooldown").mock(return_value=httpx.Response(200, json=[]))
 
     plugin = _make_plugin(tmp_path, _cfg(tmp_path))
-    plugin._start_time = datetime.now(timezone.utc)
+    plugin._start_time = datetime.now(UTC)
 
     await plugin._fetch_and_apply()
 
@@ -191,7 +198,7 @@ async def test_heartbeat_failure_recorded_in_state(tmp_path):
     respx.post(f"{FLEET_URL}/api/ingest/heartbeat").mock(return_value=httpx.Response(401))
 
     plugin = _make_plugin(tmp_path, _cfg(tmp_path))
-    plugin._start_time = datetime.now(timezone.utc)
+    plugin._start_time = datetime.now(UTC)
     plugin._task = None
 
     await plugin.on_daemon_stop()
@@ -203,8 +210,8 @@ async def test_heartbeat_failure_recorded_in_state(tmp_path):
 
 @respx.mock
 async def test_plugin_exception_does_not_crash_registry(tmp_path):
-    from packagealert.plugins.registry import PluginRegistry
     from packagealert.plugins.base import AgentPlugin
+    from packagealert.plugins.registry import PluginRegistry
 
     class BoomPlugin(AgentPlugin):
         name = "boom"

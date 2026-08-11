@@ -8,7 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from packagealert.plugins.overlay import deep_merge  # noqa: F401 — re-exported for back-compat
+from packagealert.plugins.overlay import (
+    deep_merge,  # noqa: F401 — re-exported for back-compat
+)
 
 log = logging.getLogger(__name__)
 

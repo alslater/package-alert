@@ -1,15 +1,24 @@
 """Unit tests for the status command."""
 from __future__ import annotations
 
-import json
 import io
+import json
 import time
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 from rich.console import Console
-from packagealert.cli.status import _format_uptime, _severity_label, gather_status, render_status, StatusData, AlertRow
-from packagealert.daemon_pid import is_started_by_systemd as _started_by_systemd
+
+from packagealert.cli.status import (
+    AlertRow,
+    StatusData,
+    _format_uptime,
+    _severity_label,
+    gather_status,
+    render_status,
+)
 from packagealert.config import AppConfig
+from packagealert.daemon_pid import is_started_by_systemd as _started_by_systemd
 from packagealert.storage.db import open_db
 
 _FIXED_CONFIG = AppConfig()  # default thresholds: warning=40, critical=70
@@ -276,8 +285,9 @@ async def test_gather_status_no_db(tmp_path):
 @pytest.mark.asyncio
 async def test_gather_status_central_reports_outbox_counts_and_last_seen(mem_db, tmp_path):
     import json as jsonlib
+
     from packagealert.plugins.central import outbox as central_outbox
-    from packagealert.plugins.central.state import write_state, _default_state
+    from packagealert.plugins.central.state import _default_state, write_state
 
     await central_outbox.enqueue(mem_db, kind="scan", payload_json=jsonlib.dumps({"a": 1}))
     await central_outbox.enqueue(mem_db, kind="scan", payload_json=jsonlib.dumps({"a": 2}))

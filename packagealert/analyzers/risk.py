@@ -15,7 +15,12 @@ from packagealert.heuristics.typosquat import TyposquatDetector
 from packagealert.languages import registry as lang_registry
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import DampingContext, RiskReport, RiskSignal
-from packagealert.osv.popularity import PackagePopularity, PopularityCache, PopularityClient, PopularityFetchResult
+from packagealert.osv.popularity import (
+    PackagePopularity,
+    PopularityCache,
+    PopularityClient,
+    PopularityFetchResult,
+)
 
 log = logging.getLogger(__name__)
 

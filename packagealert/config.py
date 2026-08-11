@@ -212,7 +212,7 @@ def read_enabled_plugins(path: Path | None = None) -> list[str]:
         if not isinstance(enabled, list):
             return []
         return [x for x in enabled if isinstance(x, str)]
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed/unreadable config, fall back to no plugins enabled
         return []
 
 
@@ -265,6 +265,6 @@ def load_config(path: Path | None) -> AppConfig:
             merged = data.copy()
             deep_merge(merged, overlay)
             cfg = AppConfig.model_validate(merged)
-        except Exception:
+        except Exception:  # noqa: BLE001 — malformed overlay, fall back to validated base config
             log.warning("Could not apply fleet overlay %s — using base config", _OVERLAY_PATH)
     return cfg

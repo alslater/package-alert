@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import shutil
@@ -9,6 +10,8 @@ from pathlib import Path
 import typer
 
 from packagealert.languages import registry as lang_registry
+
+log = logging.getLogger(__name__)
 
 PA_FINGERPRINT = "# __pa_shim__"  # sentinel written into every shim by _write_shim
 PA_BLOCK_START = "# BEGIN package-alert shell integration"
@@ -126,6 +129,7 @@ def _tool_dirs(project_root: Path) -> list[Path]:
         try:
             candidates = lang.project_bin_dirs(project_root)
         except Exception:
+            log.debug("project_bin_dirs failed for language plugin %s", lang, exc_info=True)
             continue
         for p in candidates:
             _add(p)
@@ -180,7 +184,7 @@ def _interpreter_shim_script(tool_name: str, real: Path, pa: Path) -> str | None
         if tool_name in lang.interpreter_names():
             try:
                 return lang.interpreter_shim_script(real, pa)
-            except Exception:
+            except Exception:  # noqa: BLE001 — third-party language plugin may fail unpredictably
                 return None
     return None
 
@@ -424,13 +428,14 @@ def cooldown_allow(
     import asyncio
     import time
     from datetime import datetime
+
     from packagealert.config import load_config
     from packagealert.storage.db import open_db, store_cooldown_cleared
 
     if config is not None:
+        from packagealert.cli.app import _apply_config_veto
         from packagealert.config import read_enabled_plugins
         from packagealert.plugins.registry import _load_entry_points
-        from packagealert.cli.app import _apply_config_veto
         config = _apply_config_veto(config, read_enabled_plugins, _load_entry_points)
     cfg = load_config(config)
     if not cfg.sandbox.cooldown.allow_cooldown_allow:

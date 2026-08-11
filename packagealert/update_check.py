@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import time
+from importlib.metadata import version as pkg_version
 from pathlib import Path
 
 import httpx
-from importlib.metadata import version as pkg_version
 from packaging.version import Version
 
 log = logging.getLogger(__name__)
@@ -21,7 +21,7 @@ def is_cache_stale() -> bool:
     try:
         checked_at = json.loads(CACHE_FILE.read_text()).get("checked_at", 0)
         return (time.time() - checked_at) > _TTL
-    except Exception:
+    except Exception:  # noqa: BLE001 — malformed/unreadable cache, treat as stale
         return True
 
 
@@ -53,5 +53,5 @@ def read_notice() -> str | None:
                 f"(you have {current}). Run 'package-alert update' to upgrade."
             )
     except Exception:
-        pass
+        log.debug("failed to read update-check cache", exc_info=True)
     return None

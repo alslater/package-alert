@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from packagealert.config import AppConfig
+from packagealert.models.advisories import OsvAdvisory, OsvResult
 from packagealert.models.events import PackageEvent
-from packagealert.models.scans import ScanResult
 from packagealert.models.risk import RiskReport, RiskSignal
-from packagealert.models.advisories import OsvResult, OsvAdvisory
+from packagealert.models.scans import ScanResult
 from packagealert.plugins.central import outbox
 from packagealert.plugins.central.client import ReportResult, build_scan_payload
 from packagealert.storage.db import open_db
@@ -64,7 +64,7 @@ def _event() -> PackageEvent:
     return PackageEvent(
         ecosystem="pypi", package_name="evil", version="1.0",
         source="process", manager="pip", project_path=None,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -86,7 +86,7 @@ def _scan(*, finding_count: int = 0, findings: list | None = None) -> ScanResult
     return ScanResult(
         project_path="/proj", scan_type="project",
         finding_count=finding_count, findings=findings if findings is not None else [],
-        sources=["pypi"], scanned_at=datetime.now(timezone.utc),
+        sources=["pypi"], scanned_at=datetime.now(UTC),
     )
 
 
@@ -298,7 +298,7 @@ async def test_last_seen_at_survives_a_subsequent_failed_heartbeat(plugin, tmp_p
     plugin._client.fetch_cooldowns = AsyncMock(return_value=None)
     plugin._task = None
     try:
-        await plugin.on_daemon_start(datetime.now(timezone.utc))
+        await plugin.on_daemon_start(datetime.now(UTC))
         state_after_success = read_state(tmp_path / "central-state.json")
         last_seen_after_success = state_after_success["last_seen_at"]
         assert last_seen_after_success is not None
@@ -463,7 +463,7 @@ async def test_on_daemon_start_opens_long_lived_db_connection(tmp_path):
 
     with patch("packagealert.plugins.central.plugin.DEFAULT_DB_PATH", tmp_path / "pa.db"), \
          patch("packagealert.plugins.central.plugin.open_db", wraps=open_db) as wrapped_open_db:
-        await plugin.on_daemon_start(datetime.now(timezone.utc))
+        await plugin.on_daemon_start(datetime.now(UTC))
         try:
             assert plugin._db is not None
             wrapped_open_db.assert_called_once()

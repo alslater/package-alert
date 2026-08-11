@@ -54,7 +54,6 @@ import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 log = logging.getLogger(__name__)
 
 _CONFIG_FILENAME = ".pa-run.toml"
@@ -68,9 +67,7 @@ def _is_world_writable(path: Path) -> bool:
             return False
         # Sticky-bit directories (e.g. /tmp, mode 01777) restrict deletion to
         # the owner, so they are not meaningfully open for tampering.
-        if stat.S_ISDIR(mode) and (mode & 0o1000):
-            return False
-        return True
+        return not (stat.S_ISDIR(mode) and (mode & 0o1000))
     except OSError:
         return True
 

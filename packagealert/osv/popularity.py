@@ -74,7 +74,7 @@ class PopularityClient:
                     return PopularityFetchResult.FETCH_FAILED
 
             return PackagePopularity(version_count=version_count, dependent_count=dependent_count)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 — network/parsing failure, degrade to FETCH_FAILED
             log.debug("deps.dev lookup failed for %s/%s: %s", ecosystem, name, exc)
             return PopularityFetchResult.FETCH_FAILED
 

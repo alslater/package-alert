@@ -318,11 +318,11 @@ async def _apply_plugin_schema(conn: aiosqlite.Connection, enabled_plugins: set[
             # exception's own text (typically "not authorized"), included
             # for whatever extra signal it carries; exc_info still has the
             # full traceback for deeper diagnosis.
-            log.error(
+            log.exception(
                 "Plugin %r extra_schema() attempted a forbidden operation "
                 "during guarded schema application (%s) — its entire schema "
                 "contribution was rejected. This is a bug in the plugin.",
-                name, exc, exc_info=True,
+                name, exc,  # noqa: TRY401 — %s surfaces the short message inline; see comment above
             )
         except Exception:
             log.warning("Plugin %r raised while applying extra_schema — skipping", name, exc_info=True)
@@ -338,11 +338,11 @@ async def _apply_plugin_migrations(conn: aiosqlite.Connection, enabled_plugins: 
             # indexes, unconditionally-denied triggers/views, denied
             # PRAGMAs, transaction control), not only core-table
             # modification.
-            log.error(
+            log.exception(
                 "Plugin %r extra_migrate() attempted a forbidden operation "
                 "during guarded migration (%s) — its migration was rejected. "
                 "This is a bug in the plugin.",
-                name, exc, exc_info=True,
+                name, exc,  # noqa: TRY401 — %s surfaces the short message inline; see comment above
             )
         except Exception:
             log.warning("Plugin %r raised in extra_migrate — skipping", name, exc_info=True)

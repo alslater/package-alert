@@ -7,7 +7,6 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-
 _ECOSYSTEM_MAP: dict[str, Literal["pypi", "npm", "packagist"]] = {
     "pypi": "pypi",
     "npm": "npm",

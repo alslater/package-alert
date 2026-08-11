@@ -1,11 +1,12 @@
 import asyncio
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import pytest
-from packagealert.monitors.cache import CacheMonitor, _Handler, _classify_distinfo_dir
+
 from packagealert.config import WatchConfig
 from packagealert.languages.python import PythonLanguage
-from pathlib import Path
-
+from packagealert.monitors.cache import CacheMonitor, _classify_distinfo_dir, _Handler
 from tests.integration.conftest import requires_inotify_headroom
 
 
@@ -47,7 +48,7 @@ async def test_detects_new_wheel(tmp_path):
                 asyncio.wait_for(collect(), timeout=6.0),
                 drop_file(),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await monitor.stop()
 
     assert len(events) == 1
@@ -89,7 +90,7 @@ async def test_ignores_non_wheel_files(tmp_path):
                 asyncio.wait_for(collect(), timeout=6.0),
                 drop_non_wheel(),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await monitor.stop()
 
     # Only the wheel should be detected
@@ -161,7 +162,7 @@ async def test_detects_distinfo_dir_in_site_packages(tmp_path):
                 asyncio.wait_for(collect(), timeout=6.0),
                 drop_distinfo(),
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await monitor.stop()
 
     assert len(events) == 1
@@ -206,8 +207,8 @@ def test_on_created_skips_buggy_plugin_and_continues(tmp_path):
 @pytest.mark.asyncio
 async def test_cache_monitor_start_skips_buggy_cache_paths_plugin(tmp_path):
     """A plugin that raises in cache_paths()/cache_file_globs() must not abort CacheMonitor.start()."""
-    from packagealert.monitors.cache import CacheMonitor
     from packagealert.config import WatchConfig
+    from packagealert.monitors.cache import CacheMonitor
 
     bad_lang = MagicMock()
     bad_lang.name = "bad"
