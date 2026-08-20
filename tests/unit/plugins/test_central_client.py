@@ -257,6 +257,35 @@ def test_build_scan_payload_matches_report_scan_shape():
     assert payload["finding_count"] == 1
 
 
+def test_build_scan_payload_includes_risks():
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        risks=[{"package": "reqeusts", "ecosystem": "pypi", "version": "1.0.0",
+                "score": 46, "level": "warning", "signals": []}],
+        risk_failures=2,
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["risks"] == scan.risks
+    assert payload["risk_failures"] == 2
+
+
+def test_build_scan_payload_risks_default_empty():
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["risks"] == []
+    assert payload["risk_failures"] == 0
+
+
 def test_build_alert_payload_osv():
     from packagealert.plugins.central.client import build_alert_payload
     payload = build_alert_payload("host", _event(), _osv_result())
