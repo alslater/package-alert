@@ -451,3 +451,22 @@ class TestFetchLatestVersion:
                 )
 
         assert asyncio.run(_run()) == "4.17.21"
+
+
+def test_reason_mentions_risk_score_not_typosquat_score():
+    from packagealert.sandbox.cooldown import decide
+    d = decide(
+        _pkg(),
+        age_days=1.0,
+        risk_score=35,
+        cfg=_make_cfg(),
+        is_tty=True,
+    )
+    assert "risk score: 35" in d.reason
+    assert "typosquat score" not in d.reason
+
+
+def test_reason_omits_risk_label_when_score_zero():
+    from packagealert.sandbox.cooldown import decide
+    d = decide(_pkg(), age_days=1.0, risk_score=0, cfg=_make_cfg(), is_tty=True)
+    assert "risk score" not in d.reason

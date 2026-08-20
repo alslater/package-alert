@@ -1,6 +1,7 @@
 """Python/pip/uv/pipenv language module implementing the LanguageBase contract."""
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import os
@@ -27,6 +28,8 @@ from packagealert.languages.base import (
     SandboxTargets,
     ShellEnvironment,
     Snapshot,
+    normalise_package_name,
+    parse_registry_timestamp,
 )
 from packagealert.models.risk import RiskSignal
 from packagealert.parsers.lockfiles import _find_project_root
@@ -46,6 +49,34 @@ _PKG_NORM_RE = re.compile(r"[-_.]+")
 
 def _norm_pkg(name: str) -> str:
     return _PKG_NORM_RE.sub("_", name).lower()
+
+
+def _versions_equal(dist_version: str, wanted: str) -> bool:
+    """Compare a dist-info version against a requested one.
+
+    dist-info stems carry PEP 440 *normalised* versions, which can differ in form
+    from what a lock file or CLI reports for the same release — "1.0" vs "1.0.0",
+    or a stripped leading "v". Compare on the normalised form where possible and
+    fall back to a trailing-zero-insensitive string compare, so a genuine version
+    difference is still detected without rejecting equivalent spellings.
+    """
+    from packaging.version import InvalidVersion, Version
+
+    a, b = dist_version.strip().lstrip("vV"), wanted.strip().lstrip("vV")
+    if a == b:
+        return True
+    try:
+        return Version(a) == Version(b)
+    except InvalidVersion:
+        # Non-PEP 440 version (local build tag, VCS revision). Fall back to a
+        # trailing-zero-insensitive compare rather than rejecting outright.
+        def _trim(v: str) -> list[str]:
+            parts = v.split(".")
+            while len(parts) > 1 and parts[-1] == "0":
+                parts.pop()
+            return parts
+
+        return _trim(a) == _trim(b)
 _VALID_PKG_NAME_RE = re.compile(r"^[A-Za-z0-9]")
 
 # Heuristic regexes (mirrors heuristics/python.py logic)
@@ -297,13 +328,402 @@ def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
         return []
 
 
+# Conventional virtualenv directory names, searched in preference order.
+#
+# Defined once because several call sites need the same answer and had drifted
+# apart: installed-package detection scanned all four while the interpreter lookup
+# and site-packages discovery scanned only the first two, so packages in `env` or
+# `.env` were found by one code path and invisible to another.
+VENV_DIR_NAMES: tuple[str, ...] = (".venv", "venv", "env", ".env")
+
+
+def _venv_is_contained(venv_root: Path, project_root: Path) -> bool:
+    """True if *venv_root* is a real directory inside *project_root*.
+
+    The single gate every venv discovery path must pass. A ``.venv`` that is itself
+    a symlink to an external tree is the dangerous case: anchoring containment
+    checks on the venv root then validates the external contents against that
+    external root, so they pass — and detection would go on to **execute**
+    ``<external>/bin/python`` and trust its ``pip list`` output. A link that stays
+    inside the project (``.venv -> .venvs/py312``) is legitimate and accepted.
+    """
+    if not venv_root.is_dir():
+        return False
+    return _contained_in(venv_root, project_root)
+
+
 def _find_venv_python(root: Path) -> Path | None:
-    """Return the venv Python interpreter under root, or None."""
-    for candidate in (".venv/bin/python", "venv/bin/python"):
-        p = root / candidate
-        if p.exists():
-            return p
-    return None
+    """Return the first venv Python interpreter under root, or None.
+
+    Prefer :func:`find_venv_pythons` when enumerating installed packages — a
+    project can have several environments and stopping at the first hides the rest.
+    """
+    pythons = find_venv_pythons(root)
+    return pythons[0] if pythons else None
+
+
+def find_venv_pythons(root: Path) -> list[Path]:
+    """Return every venv Python interpreter under *root*, in preference order.
+
+    Only interpreters inside the project are returned: these paths get *executed*,
+    so a venv symlinked to an external tree would mean running an attacker-supplied
+    binary and trusting its output.
+    """
+    found: list[Path] = []
+    for name in VENV_DIR_NAMES:
+        venv_root = root / name
+        if not _venv_is_contained(venv_root, root):
+            continue
+        p = venv_root / "bin" / "python"
+        if p.exists() and _contained_in(p, root):
+            found.append(p)
+    return found
+
+
+def all_installed_site_packages(root: Path) -> list[Path]:
+    """Return every venv site-packages directory under *root*, in preference order.
+
+    Searches the same environments as ``PythonLanguage.detect_installed_packages``,
+    so anything that command can find, a caller resolving package directories can
+    also find.
+
+    All candidates are returned because a project may have more than one
+    environment: detection aggregates packages across them, so a resolver that
+    stopped at the first match would score a package 0 whenever an earlier, empty
+    venv shadowed the one actually containing it.
+
+    A venv whose ``pyvenv.cfg`` is malformed or unreadable is *not* skipped: its
+    ``lib/python*/site-packages`` trees are enumerated directly (see
+    :func:`_enumerate_site_packages`), matching what detection's dist-info scan does
+    — it never reads ``pyvenv.cfg``. Skipping made such packages detectable but
+    unresolvable, silently downgrading them to metadata-only scoring, which is the
+    worst outcome for an environment already flagged as possibly tampered with.
+
+    Every candidate must resolve to a location inside *root* — the **project**, not
+    the venv. ``is_dir()`` follows symlinks, so a crafted ``.venv``,
+    ``lib/pythonX.Y`` or ``site-packages`` link would otherwise hand the caller an
+    external directory, and the downstream ``resolve_package_dir`` treats whatever
+    it is given as its own containment root, so the escape would go unchecked.
+    Anchoring on the venv root is not enough: when ``.venv`` is itself the symlink,
+    its contents validate against the external root and pass.
+    """
+    found: list[Path] = []
+    for name in VENV_DIR_NAMES:
+        venv_root = root / name
+        if not _venv_is_contained(venv_root, root):
+            continue
+        try:
+            sp = venv_site_packages(venv_root)
+            if sp is not None and not _contained_in(sp, root):
+                # A crafted lib/pythonX.Y or site-packages symlink escapes the
+                # project. Applies to the primary path as much as the fallback
+                # below: an attacker who controls the venv can simply write a
+                # well-formed pyvenv.cfg.
+                sp = None
+        except ValueError:
+            # Invalid/unreadable pyvenv.cfg — already warned by the helper. Fall
+            # back to enumerating the site-packages trees directly, matching what
+            # detect_installed_packages' dist-info scan does: it never reads
+            # pyvenv.cfg, so it finds packages here regardless. Skipping the
+            # environment made those packages detectable but unresolvable, silently
+            # downgrading them to metadata-only scoring — and an invalid cfg is
+            # flagged as a possible sign of tampering, which is precisely when
+            # source-code heuristics matter most.
+            found.extend(_enumerate_site_packages(venv_root, root))
+            continue
+        # Union the primary result with every contained tree, rather than trusting
+        # venv_site_packages alone. Without a pyvenv.cfg it returns the *first*
+        # lib/python*/site-packages glob match, while detection's dist-info scan walks
+        # them all — so a venv holding two interpreter trees left every package in the
+        # others detectable but unresolvable, silently downgraded to metadata-only
+        # scoring. Detection and resolution must agree on what is in scope.
+        if sp is not None and sp.is_dir():
+            found.append(sp)
+        for extra in _enumerate_site_packages(venv_root, root):
+            if extra not in found:
+                found.append(extra)
+    return found
+
+
+def _safe_site_packages_child(
+    name: str, site_packages_dir: Path, sp_resolved: Path
+) -> Path | None:
+    """Return *name* as a directory directly inside site-packages, or None.
+
+    Applies the same containment rules as the top_level.txt path: no absolute paths,
+    no separators, no dot components, and the resolved result must still lie inside
+    site-packages so a symlink cannot walk out of the tree being scanned.
+    """
+    if not name or name.startswith("/") or os.sep in name or "/" in name:
+        return None
+    if name in (".", ".."):
+        return None
+    candidate = site_packages_dir / name
+    try:
+        if not candidate.resolve().is_relative_to(sp_resolved):
+            return None
+    except OSError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def _safe_site_packages_subpath(
+    parts: list[str], site_packages_dir: Path, sp_resolved: Path
+) -> Path | None:
+    """Return *parts* joined as a directory nested inside site-packages, or None.
+
+    Like :func:`_safe_site_packages_child`, but for a multi-segment path — needed
+    because a namespace-package distribution's owned directory can be several
+    levels deep (``google/auth``), not just one. Each segment is validated
+    individually against the same rules (no absolute paths, no path separators
+    within a segment, no dot components), so a crafted RECORD entry containing
+    ``..`` or an embedded separator is rejected exactly as it would be for a
+    single-segment name; containment is then checked once against the fully
+    joined, resolved path.
+    """
+    if not parts:
+        return None
+    for part in parts:
+        if not part or part.startswith("/") or os.sep in part or "/" in part:
+            return None
+        if part in (".", ".."):
+            return None
+    candidate = site_packages_dir.joinpath(*parts)
+    try:
+        if not candidate.resolve().is_relative_to(sp_resolved):
+            return None
+    except OSError:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+# Sentinel distinct from both `None` ("RECORD absent/unreadable — no manifest
+# at all") and `{}` ("RECORD present, parsed, genuinely has nothing for any
+# name"). RECORD is package-controlled data: a distribution can ship one that
+# exists but is deliberately unparseable (e.g. a line exceeding csv's field
+# size limit). Collapsing that into either of the other two states is unsafe
+# in the same way — `None` would re-enable the bare-name-guess fallback in
+# resolve_package_dir, and `{}` would let a name that happens to also appear
+# in top_level.txt be trusted as "RECORD legitimately says nothing about it",
+# when in truth RECORD said nothing about *anything* because it could not be
+# read at all. Both call sites in resolve_package_dir must check for this
+# sentinel and refuse to fall back to *any* bare-name guess — RECORD's
+# corruption forfeits trust in the distribution's whole manifest, not just
+# the names it happened to enumerate correctly.
+_RECORD_CORRUPT = object()
+
+
+def _record_paths_by_top_level(
+    dist_info: Path,
+) -> dict[str, list[list[str]]] | None | object:
+    """Group a distribution's RECORD entries by their top-level path segment.
+
+    Returns None if RECORD is absent or an I/O error prevents reading it at
+    all — genuinely no manifest to consult. Returns `_RECORD_CORRUPT` if
+    RECORD exists and was read but could not be *parsed* (malformed CSV) — see
+    that sentinel's own docstring for why this must not collapse into either
+    `None` or `{}`. The result feeds :func:`_owned_subpaths` per top-level
+    name in `resolve_package_dir`, so a namespace-package distribution's
+    ownership is judged from the full path depth RECORD provides rather than
+    the single flat name top_level.txt gives.
+
+    RECORD is CSV (path, hash, size), matching the format `importlib.metadata`
+    itself reads via `csv.reader` — used here too rather than a naive
+    ``line.split(",", 1)``, which mis-splits a path containing a literal comma
+    (legal, if rare, per RECORD's own CSV quoting rules) into garbage. Declared
+    paths are kept whether or not they currently exist on disk (unlike
+    `Distribution.files`, which silently drops missing ones) — RECORD's
+    declared shape is what `_owned_subpaths` needs to judge ownership
+    correctly, independent of what happens to be present on disk right now.
+    """
+    record = dist_info / "RECORD"
+    if not record.exists():
+        return None
+    try:
+        text = record.read_text(errors="replace")
+    except OSError:
+        return None
+
+    by_top: dict[str, list[list[str]]] = {}
+    try:
+        for row in csv.reader(text.splitlines()):
+            if not row:
+                continue
+            path = row[0].strip()
+            if not path:
+                continue
+            parts = path.replace("\\", "/").split("/")
+            head = parts[0]
+            if not head or head == dist_info.name:
+                continue
+            # Skip sibling .dist-info/.data trees.
+            if head.endswith((".dist-info", ".data")):
+                continue
+            by_top.setdefault(head, []).append(parts)
+    except csv.Error:
+        # Discard whatever was parsed before the error — a truncated partial
+        # read of a corrupted file is not trustworthy either.
+        return _RECORD_CORRUPT
+    return by_top
+
+
+def _owned_subpaths(file_parts: list[list[str]], depth: int = 0) -> list[list[str]]:
+    """Every distinct maximal common-prefix directory path among *file_parts*.
+
+    Stopping at the *first* divergence and returning a single shallow ancestor
+    would collapse a distribution owning both `google/auth/` and `google/oauth2/`
+    down to `["google"]` — the directory a sibling distribution's files also live
+    under. Recursing into each diverging branch instead yields
+    `[["google", "auth"], ["google", "oauth2"]]`: every directory this
+    distribution's files actually occupy, and nothing shared with a sibling.
+
+    A bare file terminating at `depth` (nothing beyond it) is ordinarily proof
+    that ownership goes no deeper here. But divergence within *this*
+    distribution's own RECORD proves nothing about *other* distributions —
+    `google/cloud/foo.py` (bare) alongside `google/cloud/storage/__init__.py`
+    diverges from `google/auth/...` at the top level, yet `google/cloud/` can
+    itself be a further-shared namespace root (`google-cloud-bigquery` installs
+    into `google/cloud/bigquery/` independently), just as `google/` is. A
+    directory only stops being potentially-shared once something marks it as a
+    *regular* package rather than a PEP 420 implicit namespace — its own
+    `__init__.py` — so that test applies at every depth, not just before the
+    first split: a bare file with no `__init__.py` sibling at the same
+    directory is dropped rather than reported as owned, no matter how many
+    levels of divergence led there.
+
+    *depth* is the number of leading path components already confirmed common
+    across all of *file_parts* on entry (0 at the top call); it is threaded through
+    recursive calls rather than re-derived, since the caller has already walked
+    that far to detect divergence. Because of that invariant, `parts[:depth]` is
+    identical for every `parts` in *file_parts* — taking it from the first entry
+    is equivalent to (but cheaper than) computing it across all of them.
+    """
+    # Any path with nothing beyond `depth` is a file directly in the directory this
+    # recursion has reached.
+    if any(depth >= len(parts) - 1 for parts in file_parts):
+        has_init = any(
+            depth == len(parts) - 1 and parts[depth] == "__init__.py"
+            for parts in file_parts
+        )
+        if has_init:
+            # A regular package directory (marked by its own __init__.py):
+            # this distribution's own regardless of what else the group
+            # contains, and not a namespace root another distribution could
+            # also share.
+            return [file_parts[0][:depth]]
+        # No __init__.py at this directory: an implicit namespace directory,
+        # at any depth — divergence from a sibling branch within this
+        # distribution's own RECORD says nothing about whether some other
+        # distribution also installs into this same directory. No marker
+        # proves exclusive ownership, so the unownable bare files are dropped
+        # rather than reporting the (possibly shared) directory as owned.
+        # Anything among the siblings that goes deeper is still handled below
+        # — only paths with nothing beyond `depth` are discarded.
+        file_parts = [parts for parts in file_parts if depth < len(parts) - 1]
+        if not file_parts:
+            return []
+
+    by_next: dict[str, list[list[str]]] = {}
+    order: list[str] = []
+    for parts in file_parts:
+        nxt = parts[depth]
+        if nxt not in by_next:
+            order.append(nxt)
+        by_next.setdefault(nxt, []).append(parts)
+
+    if len(order) == 1:
+        # No divergence at this depth: still one shared branch, so keep walking
+        # down together rather than recursing into a group of one.
+        return _owned_subpaths(file_parts, depth + 1)
+
+    # Diverged: each next-component group may itself still share more depth below
+    # it (google/auth/transport/... alongside google/auth/_helpers.py), so recurse
+    # into each rather than stopping at this single level. No prefix is re-added
+    # here: each group in by_next still carries the *full* original path (including
+    # everything up to `depth`), so the recursive call's own base case reconstructs
+    # the complete path via `parts[:depth]` once it stops — prepending anything here
+    # too would duplicate that prefix. Divergence bounds this branch to paths
+    # distinct from its siblings *within this distribution's own files* — it does
+    # not establish exclusivity against another distribution, so the __init__.py
+    # test above still applies independently at every depth reached from here.
+    results: list[list[str]] = []
+    for nxt in order:
+        results.extend(_owned_subpaths(by_next[nxt], depth + 1))
+    return results
+
+
+def _enumerate_site_packages(venv_root: Path, boundary: Path) -> list[Path]:
+    """Return every lib/python*/site-packages directory inside *venv_root*.
+
+    Used when pyvenv.cfg cannot tell us which one is active. A venv normally has
+    exactly one, but enumerating all of them is consistent with the dist-info scan
+    in detect_installed_packages.
+
+    Every candidate is resolved and required to stay beneath *boundary* — the
+    project root, not the venv. `is_dir()` alone follows symlinks, so a crafted
+    ``lib/python3.12`` (or ``site-packages``) link could point anywhere on disk —
+    and the downstream ``resolve_package_dir`` uses whatever site-packages path it
+    is handed as its *own* containment root, so an escaped root makes that check
+    vacuous and an external tree gets read. This is the same resolve-before-use
+    rule applied to lock files and sandbox binds. Reaching this code already means
+    the environment looked tampered with, so the check matters more here, not less.
+    """
+    lib = venv_root / "lib"
+    if not lib.is_dir():
+        return []
+    try:
+        entries = sorted(lib.iterdir())
+    except OSError:
+        return []
+
+    found: list[Path] = []
+    for pyver in entries:
+        sp = pyver / "site-packages"
+        try:
+            if not sp.is_dir():
+                continue
+        except OSError:
+            continue
+        if _contained_in(sp, boundary):
+            found.append(sp)
+    return found
+
+
+def _contained_in(candidate: Path, boundary: Path) -> bool:
+    """True if *candidate* resolves to a location beneath *boundary*.
+
+    Both are resolved first, so a symlinked component cannot smuggle the path out.
+    Returns False (and warns) on escape or on any resolution error, since an
+    unverifiable path must not be scanned or executed.
+
+    *boundary* must be a path the caller trusts — normally the **project root**.
+    Anchoring on the venv root instead is unsound when the venv root is itself a
+    symlink to an external tree: its contents then validate against that external
+    root and pass. See :func:`_venv_is_contained`.
+    """
+    try:
+        resolved = candidate.resolve()
+        root_resolved = boundary.resolve()
+    except OSError:
+        return False
+    if not resolved.is_relative_to(root_resolved):
+        log.warning(
+            "⚠ %s resolves outside %s (%s) — refusing to scan it. "
+            "This may indicate a tampered environment.", candidate, boundary, resolved,
+        )
+        return False
+    return True
+
+
+def find_installed_site_packages(root: Path) -> Path | None:
+    """Return the first venv site-packages directory under *root*, or None.
+
+    Convenience wrapper over :func:`all_installed_site_packages` for callers that
+    only need one. Prefer the plural form when resolving package directories — see
+    its docstring for why first-match-wins is not sufficient there.
+    """
+    candidates = all_installed_site_packages(root)
+    return candidates[0] if candidates else None
 
 
 def _distinfo_to_metadata(path: Path) -> PackageMetadata | None:
@@ -731,6 +1151,10 @@ class PythonLanguage:
             return ProcessInstall(
                 manager=result.manager,
                 packages=specs,
+                # defer_to_lockfile: any pipenv/uv-project command changes the
+                # lock file (install AND removal alike), so the daemon's
+                # process monitor must always read it back afterwards —
+                # correctly keyed on manager alone.
                 defer_to_lockfile=result.manager in _LOCKFILE_HINTS,
                 venv_exe=result.venv_exe,
                 lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
@@ -739,6 +1163,15 @@ class PythonLanguage:
                 suggested_env=suggested_env,
                 extra_write_home_dirs=result.extra_write_home_dirs,
                 target_env_name=result.target_env_name,
+                # Distinct from defer_to_lockfile: only True for the specific
+                # subcommand shapes parse_pipenv_args/parse_uv_args already
+                # classify as installing the existing lock file in full (bare
+                # `pipenv install`/`sync`, `uv sync`/`lock`) — not for a
+                # removal or a read-only/execution subcommand, even though
+                # those share the same manager and the same empty `packages`.
+                is_lockfile_install=result.is_lockfile_install,
+                should_gate=result.should_gate,
+                is_system_python_target=result.is_system_python_target,
             )
         return None
 
@@ -844,47 +1277,109 @@ class PythonLanguage:
     # detect_installed_packages
     # ------------------------------------------------------------------
 
-    def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
-        """Return installed packages under *root* by querying pip or scanning dist-info dirs."""
-        venv_python = _find_venv_python(root)
+    def _pip_list(self, venv_python: Path) -> list[PackageMetadata] | None:
+        """Ask one venv's pip for its installed packages. None if the query failed.
 
-        # Primary: ask pip for a JSON list
-        if venv_python is not None:
-            try:
-                raw = subprocess.check_output(
-                    [str(venv_python), "-m", "pip", "list", "--format=json"],
-                    stderr=subprocess.DEVNULL,
-                    timeout=15,
+        Returning None is what triggers the caller's dist-info fallback, so *every*
+        failure mode has to end up here rather than propagating. That includes
+        well-formed JSON of the wrong shape: this executes an interpreter from the
+        scanned project, so the output is attacker-influenced, and `{}` or
+        `["astring"]` previously raised out of detect_installed_packages entirely —
+        skipping the fallback and losing packages that the dist-info scan would have
+        found. The transformation is therefore inside the try, not after it.
+        """
+        try:
+            raw = subprocess.check_output(
+                [str(venv_python), "-m", "pip", "list", "--format=json"],
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+            pkgs = json.loads(raw)
+            if not isinstance(pkgs, list):
+                raise TypeError(f"expected a JSON array, got {type(pkgs).__name__}")
+            results = [
+                PackageMetadata(
+                    name=_normalize_name(p["name"]),
+                    version=p.get("version"),
+                    ecosystem="PyPI",
                 )
-                pkgs = json.loads(raw)
-                return [
-                    PackageMetadata(
-                        name=_normalize_name(p["name"]),
-                        version=p.get("version"),
-                        ecosystem="PyPI",
-                    )
-                    for p in pkgs
-                    if p.get("name")
-                ]
-            except Exception:
-                log.debug("pip list failed for venv at %s, falling back", venv_python, exc_info=True)
+                for p in pkgs
+                if isinstance(p, dict) and p.get("name")
+            ]
+            # A non-empty response that yields nothing usable is a failure, not an
+            # empty environment: returning [] would suppress the dist-info fallback
+            # and silently lose every package in this venv. A genuinely empty venv
+            # sends [], which correctly returns [] and skips the fallback.
+            if pkgs and not results:
+                raise ValueError("no usable entries in the pip list response")
+        except Exception:
+            log.debug("pip list failed for venv at %s, falling back", venv_python, exc_info=True)
+            return None
+        return results
 
-        # Fallback: scan *.dist-info in known venv site-packages locations.
-        # Restrict to conventional venv dirs to avoid traversing the whole project.
+    def _scan_dist_infos(self, venv_root: Path, boundary: Path) -> list[PackageMetadata]:
+        """Scan one venv's site-packages for *.dist-info metadata.
+
+        Shares :func:`_enumerate_site_packages` with the resolver so both apply the
+        same containment rule — a divergence here is what let packages be detected
+        in a location the resolver refused to read.
+        """
         results: list[PackageMetadata] = []
-        for venv_name in (".venv", "venv", "env", ".env"):
-            lib = root / venv_name / "lib"
-            if not lib.is_dir():
+        for site_pkgs in _enumerate_site_packages(venv_root, boundary):
+            for dist_info in site_pkgs.glob("*.dist-info"):
+                if dist_info.is_dir() and _contained_in(dist_info, boundary):
+                    meta = _distinfo_to_metadata(dist_info)
+                    if meta:
+                        results.append(meta)
+        return results
+
+    def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
+        """Return installed packages across *every* venv under *root*.
+
+        A project can hold several environments, and a package present in only one
+        of them is still installed. Previously the first working `pip list` returned
+        immediately, so anything living solely in a later venv/env/.env was
+        invisible — and duplicates across environments were never emitted, so the
+        scoring layer's duplicate handling never saw them.
+
+        Each environment is queried both ways and the results merged: `pip list`
+        (what is actually importable) plus that venv's own dist-info scan, deduped
+        by (name, version) within the venv. `pip list` output is executed from
+        <venv>/bin/python — an interpreter living inside the project being scanned —
+        so it is attacker-influenced, and an *empty* result is exactly as easy to
+        fabricate as any other. Trusting `[]` as "genuinely empty" let a tampered
+        interpreter print nothing and hide every real .dist-info package that a
+        disk scan would otherwise have found; the dist-info scan is therefore run
+        unconditionally rather than only as a fallback when `pip list` fails
+        outright.
+
+        Duplicates are deliberately *not* collapsed **across** environments — one
+        entry per environment is what lets the scorer inspect every copy — only
+        within the merge of the two sources for one venv.
+        """
+        results: list[PackageMetadata] = []
+        for venv_name in VENV_DIR_NAMES:
+            venv_root = root / venv_name
+            # Containment first, and against the *project* root: this path executes
+            # <venv>/bin/python, so a .venv symlinked to an external tree would run
+            # an attacker-supplied binary and trust its fabricated pip output.
+            if not _venv_is_contained(venv_root, root):
                 continue
-            for pyver in lib.iterdir():
-                site_pkgs = pyver / "site-packages"
-                if not site_pkgs.is_dir():
-                    continue
-                for dist_info in site_pkgs.glob("*.dist-info"):
-                    if dist_info.is_dir():
-                        meta = _distinfo_to_metadata(dist_info)
-                        if meta:
-                            results.append(meta)
+            venv_python = venv_root / "bin" / "python"
+            listed = (
+                self._pip_list(venv_python)
+                if venv_python.exists() and _contained_in(venv_python, root)
+                else None
+            )
+            from_disk = self._scan_dist_infos(venv_root, root)
+            if listed is None:
+                # pip list failed outright (missing/broken interpreter, unparseable
+                # output) — the disk scan is all there is for this venv.
+                results.extend(from_disk)
+                continue
+            results.extend(listed)
+            seen = {(m.name, m.version) for m in listed}
+            results.extend(m for m in from_disk if (m.name, m.version) not in seen)
         return results
 
     # ------------------------------------------------------------------
@@ -935,12 +1430,16 @@ class PythonLanguage:
         return "https://hugovk.dev/top-pypi-packages/top-pypi-packages-30-days.min.json"
 
     async def fetch_top_packages(self, client: httpx.AsyncClient, url: str) -> list[str] | None:
-        from packagealert.languages.base import MAX_TOP_PACKAGES, normalise_package_name
+        from packagealert.languages.base import MAX_TOP_PACKAGES
         resp = await client.get(url)
         resp.raise_for_status()
         data = resp.json()
         rows = data.get("rows", [])
-        packages = [normalise_package_name(r["project"]) for r in rows[:MAX_TOP_PACKAGES]]
+        # self.normalise_name, not the module-level normalise_package_name directly:
+        # they happen to be the same PEP 503 rule for PyPI, but calling the method
+        # keeps every fetcher's normalisation traceable to its own normalise_name
+        # hook rather than three independent call sites relying on the same helper.
+        packages = [self.normalise_name(r["project"]) for r in rows[:MAX_TOP_PACKAGES]]
         return packages if packages else None
 
     def top_packages_fallback(self) -> list[str]:
@@ -1553,62 +2052,215 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        """Earliest upload_time across the version's distribution files.
+
+        PyPI's per-version endpoint lists one entry per artifact (sdist, wheels);
+        the earliest is when the version was published.
+        """
+        if not isinstance(data, dict):
+            return None
+        times = [u["upload_time"] for u in data.get("urls", []) if "upload_time" in u]
+        if not times:
+            return None
+        # PyPI's `upload_time` is naive and documented as UTC, so attaching UTC is
+        # right; `upload_time_iso_8601` is Zulu. The helper handles both, so this
+        # stays correct if the field ever carries an offset.
+        earliest = min(parse_registry_timestamp(t) for t in times)
+        return earliest.timestamp()
+
+    def osv_ecosystem(self) -> str | None:
+        return "PyPI"
+
+    def normalise_name(self, name: str) -> str:
+        """PEP 503: lowercase and collapse runs of [-_.] to a single hyphen."""
+        return normalise_package_name(name)
+
     def popularity_ecosystem(self) -> str | None:
         return "PYPI"
 
-    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> list[Path]:
+        """Return every directory this distribution owns.
+
+        A distribution can install more than one top-level directory that is
+        genuinely all its own — pytest ships `_pytest`, `py` and `pytest` — so every
+        one found is returned rather than picking a single "best" candidate; a
+        heuristic scanning only one of the three would miss signals in the others.
+
+        A PEP 420 namespace-package distribution (`google-auth`) is the case that
+        needs care: it installs into a directory (`google/`) it does *not*
+        exclusively own — sibling distributions install into other subdirectories
+        of the same shared root. RECORD has full path depth, so for each top-level
+        name this distribution's own files are grouped by that name and resolved to
+        every distinct directory they actually occupy under it — see
+        `_owned_subpaths`. The real `google-auth` owns both `google/auth` and
+        `google/oauth2`; both are returned, and the shared `google/` root — which a
+        sibling distribution's files also live under — never is.
+        """
         if site_packages_dir is None or not site_packages_dir.exists():
-            return None
+            return []
         normalised = _norm_pkg(package_name)
         try:
             sp_resolved = site_packages_dir.resolve()
         except OSError:
-            return None
+            return []
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
-            # _DISTINFO_RE captures the name portion as group 1; it splits at
-            # the last "-\d" boundary so hyphenated names like
-            # "google-cloud-storage" are matched correctly.
+            # _DISTINFO_RE captures the name portion as group 1 and the version as
+            # group 2; it splits at the last "-\d" boundary so hyphenated names
+            # like "google-cloud-storage" are matched correctly.
             m = _DISTINFO_RE.match(entry.name)
             if not m:
                 continue
             dist_name = _norm_pkg(m.group(1))
             if dist_name != normalised:
                 continue
+            # When the caller names a version, it must match: a caller searching
+            # several venvs would otherwise get whichever is scanned first, and
+            # inspect the wrong source tree for the version it asked about.
+            if version is not None and not _versions_equal(m.group(2), version):
+                continue
+
+            by_top = _record_paths_by_top_level(entry)
+            # RECORD's own account is trustworthy only if it is a real dict —
+            # both "absent" (None) and "present but unparseable"
+            # (_RECORD_CORRUPT) mean there is no verified per-name data to key
+            # off, so top_names below draws solely from top_level.txt in
+            # either case, and no name is ever treated as "RECORD covered this
+            # and found it unsafe" vs. "RECORD legitimately never mentioned
+            # it" — that distinction cannot be trusted once RECORD could not
+            # be read at all.
+            by_top_dict = by_top if isinstance(by_top, dict) else None
+            top_names: list[str] = []
+            if by_top_dict is not None:
+                top_names.extend(by_top_dict.keys())
             top_level = entry / "top_level.txt"
             if top_level.exists():
                 try:
-                    lines = [ln.strip() for ln in top_level.read_text().splitlines() if ln.strip()]
-                    for name in lines:
-                        # Reject anything that could escape site-packages:
-                        # absolute paths, entries containing a path separator,
-                        # or '.' / '..' components.
-                        if (name.startswith("/")
-                                or os.sep in name
-                                or "/" in name
-                                or name in (".", "..")):
-                            continue
-                        candidate = site_packages_dir / name
-                        # Resolve and confirm the result is still within
-                        # site_packages_dir to guard against symlink traversal.
-                        try:
-                            if not candidate.resolve().is_relative_to(sp_resolved):
-                                continue
-                        except OSError:
-                            continue
-                        if candidate.is_dir():
-                            return candidate
+                    for line in top_level.read_text().splitlines():
+                        name = line.strip()
+                        if name and name not in top_names:
+                            top_names.append(name)
                 except OSError:
                     pass
-            # No usable top_level.txt in this dist-info dir — continue in case
-            # a duplicate dist-info from a previous install has a usable one.
+
+            owned: list[Path] = []
+            seen_paths: set[Path] = set()
+            for name in top_names:
+                candidates: list[Path] = []
+                if by_top_dict is not None and name in by_top_dict:
+                    # RECORD has full path depth for this name: find every distinct
+                    # directory this distribution actually owns under it, rather
+                    # than trusting the bare name — the namespace-package case, and
+                    # the reason this can be more than one path per name (google-auth
+                    # owns both google/auth and google/oauth2).
+                    for rel in _owned_subpaths(by_top_dict[name]):
+                        candidate = _safe_site_packages_subpath(rel, site_packages_dir, sp_resolved)
+                        if candidate is not None:
+                            candidates.append(candidate)
+                elif by_top is not _RECORD_CORRUPT:
+                    # top_level.txt named this but RECORD has no entries for it (or
+                    # RECORD itself is unavailable) — a single-segment name is all
+                    # there is to go on. Skipped entirely when RECORD is corrupt
+                    # rather than absent: RECORD's silence about this specific
+                    # name is only meaningful if RECORD could actually be read —
+                    # a corrupted RECORD has nothing verified to say about *any*
+                    # name, so trusting top_level.txt here would be exactly the
+                    # same unverified guess the bare-name fallback below refuses
+                    # to make.
+                    candidate = _safe_site_packages_child(name, site_packages_dir, sp_resolved)
+                    if candidate is not None:
+                        candidates.append(candidate)
+                for candidate in candidates:
+                    if candidate not in seen_paths:
+                        seen_paths.add(candidate)
+                        owned.append(candidate)
+            if owned:
+                return owned
+
+            # A readable RECORD is the authoritative manifest of what this
+            # distribution installs — including its silence about a name it
+            # never mentions. Guessing a bare name past that point (e.g.
+            # normalised == an unrelated distribution's own directory) would
+            # attribute someone else's files to this one, so the fallback below
+            # is reached only when RECORD itself was absent (by_top is None) —
+            # never when it was present but corrupt (_RECORD_CORRUPT), which is
+            # just as authoritative-and-untrustworthy as an empty RECORD — and
+            # top_level.txt (if present) yielded nothing resolvable either —
+            # there is genuinely no manifest to defer to.
+            if by_top is None:
+                # Last resort: the normalised distribution name often *is* the
+                # import name (checked only after RECORD/top_level.txt so a
+                # package whose import name differs, e.g. PyYAML -> yaml, is
+                # resolved correctly rather than by luck).
+                for guess in (m.group(1), normalised, normalised.replace("-", "_")):
+                    candidate = _safe_site_packages_child(guess, site_packages_dir, sp_resolved)
+                    if candidate is not None:
+                        return [candidate]
+            # Nothing usable in this dist-info — continue in case a duplicate
+            # dist-info from a previous install has something better.
+        return []
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        """Warn when RECORD exists but could not be parsed for any matching
+        distribution — see the base contract docstring for why this matters:
+        a manifest this broken is not something a normal build produces, and
+        `resolve_package_dir` correctly stays silent about it (refusing to
+        guess a directory) rather than raising it as a signal itself.
+
+        Reported independently of whether `resolve_package_dir` resolved a
+        directory from a *different* matching `.dist-info`. Two directories
+        matching the same normalised name and version are not proven to be
+        the same distribution — that's true for an innocuous leftover from a
+        broken reinstall, but nothing stops a malicious package from planting
+        a second `.dist-info` that collides on name/version with a clean
+        decoy specifically to hide behind it: `resolve_package_dir` would
+        resolve and scan only the decoy, and suppressing this warning because
+        *something* resolved would silence the one signal that the corrupt
+        sibling exists at all. The corrupt candidate's files are not scanned
+        either way — `resolve_package_dir` never resurrects a directory whose
+        own RECORD it rejected — so this warning is the only place that risk
+        is surfaced.
+        """
+        if site_packages_dir is None or not site_packages_dir.exists():
+            return None
+        normalised = _norm_pkg(package_name)
+        for entry in site_packages_dir.iterdir():
+            if not entry.is_dir() or not entry.name.endswith(".dist-info"):
+                continue
+            m = _DISTINFO_RE.match(entry.name)
+            if not m:
+                continue
+            if _norm_pkg(m.group(1)) != normalised:
+                continue
+            if version is not None and not _versions_equal(m.group(2), version):
+                continue
+            if _record_paths_by_top_level(entry) is _RECORD_CORRUPT:
+                return (
+                    f"{entry.name}/RECORD exists but could not be parsed — "
+                    "source-code heuristics were skipped for this distribution"
+                )
         return None
 
     def latest_version_url(self, name: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/json"
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
+        if not isinstance(data, dict):
+            return None
         return data.get("info", {}).get("version") or None
 
     def package_manager_names(self) -> list[str]:
@@ -1690,7 +2342,7 @@ esac
                     seen.add(resolved)
                     dirs.append(p)
 
-        for name in (".venv", "venv", "env", ".env"):
+        for name in VENV_DIR_NAMES:
             _add(root / name / "bin")
 
         return dirs

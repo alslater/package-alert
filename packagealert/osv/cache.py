@@ -13,27 +13,53 @@ from packagealert.models.advisories import OsvAdvisory, OsvResult
 log = logging.getLogger(__name__)
 
 
+def _cache_key_ecosystem(ecosystem: str) -> str:
+    """Canonicalise an ecosystem for use as an osv_cache row key.
+
+    Applied inside the cache rather than at each call site because there are a dozen
+    readers and writers across the daemon, scheduler, sandbox runner and CLI, and they
+    did not agree: parsers/lockfiles.py lowercases every ecosystem, so scan-project
+    wrote "nuget" rows for a plugin declaring "NuGet" while clear-cache deleted the
+    canonical "NuGet". Canonicalising here makes the key uniform for every caller,
+    including future ones.
+
+    Delegates to models.events.cache_key_ecosystem — see that function's docstring
+    for why the canonical form is lowercased and why the fallback never raises.
+    """
+    from packagealert.models.events import cache_key_ecosystem
+
+    return cache_key_ecosystem(ecosystem)
+
+
 class OsvCache:
     def __init__(self, db: aiosqlite.Connection, cfg: OsvConfig) -> None:
         self._db = db
         self._ttl = cfg.cache_ttl_hours * 3600
 
     async def get(self, ecosystem: str, package: str, version: str | None) -> OsvResult | None:
+        # Lowercased/canonicalised for the SQL key only — the result must echo
+        # back the caller's own requested casing (see _deserialize below), not
+        # the row key, or a cache hit would silently downcase OsvResult.ecosystem
+        # to whatever the DB key happens to be ("nuget") while a live query for
+        # the same request returns the caller's canonical casing ("NuGet"). That
+        # field reaches CLI and scheduler findings output directly.
+        cache_key_ecosystem = _cache_key_ecosystem(ecosystem)
         now = time.time()
         async with self._db.execute(
             "SELECT queried_at, payload FROM osv_cache WHERE ecosystem=? AND package=? AND COALESCE(version,'')=?",
-            (ecosystem, package, version or ""),
+            (cache_key_ecosystem, package, version or ""),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
             return None
         if now - row["queried_at"] > self._ttl:
-            log.debug("Cache expired for %s/%s %s", ecosystem, package, version)
+            log.debug("Cache expired for %s/%s %s", cache_key_ecosystem, package, version)
             return None
         payload = json.loads(row["payload"])
         return _deserialize(payload, package, ecosystem, version)
 
     async def set(self, ecosystem: str, package: str, version: str | None, result: OsvResult) -> None:
+        ecosystem = _cache_key_ecosystem(ecosystem)
         payload = json.dumps(_serialize(result))
         now = time.time()
         await self._db.execute(

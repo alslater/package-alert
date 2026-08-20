@@ -33,7 +33,7 @@ dependencies = [
     "watchdog>=4",
     "psutil>=6",
     "Levenshtein>=0.21",
-    "packaging>=20",
+    "packaging>=25",
     "tomli-w>=1.2.0",
 ]
 
@@ -70,6 +70,7 @@ dev = [
     "respx>=0.21",
     "hatch",
     "ruff>=0.15",
+    "pyright>=1.1.411",
 ]
 
 [tool.ruff.lint.flake8-bugbear]
@@ -77,3 +78,10 @@ dev = [
 # directly in the function signature's defaults; this is the documented pattern,
 # not a mutable-default bug.
 extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.pyright]
+include = ["packagealert", "tests"]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "basic"

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from typing import Any
 
 import httpx
@@ -83,9 +84,58 @@ class OsvClient:
         await self._client.aclose()
 
 
+# OSV's names for the built-in ecosystems. Kept as an explicit map so their exact
+# spelling is guaranteed regardless of registry state; plugin ecosystems come from the
+# `osv_ecosystem` contract hook via `resolve_osv_ecosystem` below.
+_BUILTIN_OSV_ECOSYSTEMS = {"pypi": "PyPI", "npm": "npm", "packagist": "Packagist"}
+
+
+def resolve_osv_ecosystem(ecosystem: str) -> str:
+    """Return the name OSV.dev uses for *ecosystem*, in OSV's own casing.
+
+    The single resolver for both OSV code paths. `_build_query` previously used a
+    hardcoded map that fell back to the raw ecosystem string, so a plugin declaring
+    `ecosystems = ["cargo"]` with `osv_ecosystem() == "crates.io"` was queried as
+    "cargo", matched nothing, and received no advisories at all — which also made the
+    correct resolution in `_extract_fixed_versions` unreachable.
+
+    Never raises: an unregistered ecosystem or a broken hook falls back to the raw
+    string, which is what a plugin whose OSV name matches its own ecosystem name needs
+    anyway.
+    """
+    from packagealert.languages import registry as lang_registry
+
+    lang = None
+    try:
+        lang_registry.load()
+        lang = lang_registry.for_ecosystem(ecosystem)
+    except Exception:
+        log.warning(
+            "The language registry is unavailable — using the raw ecosystem name %r "
+            "for the OSV query", ecosystem, exc_info=True,
+        )
+
+    if lang is not None:
+        try:
+            getter = getattr(lang, "osv_ecosystem", None)
+            osv_eco = getter() if callable(getter) else None
+        except Exception:
+            log.warning(
+                "osv_ecosystem raised for lang=%s — falling back to the raw name",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+        else:
+            if isinstance(osv_eco, str) and osv_eco:
+                return osv_eco
+
+    # Built-ins are pinned so their OSV casing ("PyPI") survives a registry failure.
+    return _BUILTIN_OSV_ECOSYSTEMS.get(ecosystem.lower(), ecosystem)
+
+
 def _build_query(ecosystem: str, package: str, version: str | None) -> dict[str, Any]:
-    eco_map = {"pypi": "PyPI", "npm": "npm", "packagist": "Packagist"}
-    q: dict[str, Any] = {"package": {"name": package, "ecosystem": eco_map.get(ecosystem, ecosystem)}}
+    q: dict[str, Any] = {
+        "package": {"name": package, "ecosystem": resolve_osv_ecosystem(ecosystem)}
+    }
     if version:
         q["version"] = version
     return q
@@ -275,20 +325,122 @@ def _normalize_pypi_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+_NAME_FOLD_RE = re.compile(r"[-_.]+")
+
+
+def _fold(name: str) -> tuple[bool, tuple[str, ...], bool]:
+    """The most aggressive folding any legitimate normaliser could apply.
+
+    Used only as a sanity check on a plugin's `normalise_name`: two raw names that
+    differ by more than case and separators must never normalise to the same value. It
+    is deliberately more permissive than any real rule (PyPI collapses separators, npm
+    does not), so it accepts every legitimate normalisation while still catching a hook
+    that maps unrelated names onto one another.
+
+    Separator substitutions and runs fold together, but the token boundaries — and any
+    leading or trailing separator — are preserved. Deleting separators outright made
+    foo-bar and foobar share a fold, so a broken hook collapsing those two distinct
+    names slipped past the guard and the unrelated advisory's fixed versions leaked
+    through: exactly the contamination the guard exists to stop.
+    """
+    parts = _NAME_FOLD_RE.split(name)
+    leading = parts[0] == ""
+    trailing = len(parts) > 1 and parts[-1] == ""
+    return (leading, tuple(p.lower() for p in parts if p), trailing)
+
+
 def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[str]:
     """Return fixed versions from OSV affected ranges for the queried package."""
-    eco_map = {"pypi": "PyPI", "npm": "npm", "packagist": "Packagist"}
-    canonical_eco = eco_map.get(ecosystem, ecosystem).lower()
-    is_pypi = ecosystem == "pypi"
-    query_name = _normalize_pypi_name(package_name) if is_pypi else package_name.lower()
+    # The OSV ecosystem name and the name-normalisation rules both belong to the
+    # language module: a hardcoded map here silently produced empty upgrade advice
+    # for any plugin ecosystem, because its advisories never matched.
+    from packagealert.languages import registry as lang_registry
+
+    # Guarded like resolve_osv_ecosystem: a registry failure must degrade to the
+    # built-in behaviour, not abort advisory parsing for every package.
+    lang = None
+    try:
+        lang_registry.load()
+        lang = lang_registry.for_ecosystem(ecosystem)
+    except Exception:
+        log.warning(
+            "The language registry is unavailable — falling back to default name "
+            "normalisation for %r", ecosystem, exc_info=True,
+        )
+    # The same resolver the outgoing query uses, so the ecosystem we match advisories
+    # against cannot drift from the one we asked about. Lowercased here only because
+    # this compares against whatever casing the OSV response carries; the query path
+    # needs OSV's exact spelling.
+    canonical_eco = resolve_osv_ecosystem(ecosystem).lower()
+
+    def _norm(value: str) -> str:
+        """Normalise a package name using the module's own rules.
+
+        PEP 503 collapsing is a PyPI rule, not a core one. `normalise_name` is the
+        existing contract method for this; falling back to lowercasing matches the
+        previous non-PyPI behaviour.
+
+        The return value is validated because this function's result is used on *both*
+        sides of a name equality check below. An unvalidated hook returning None — or
+        any constant — collapsed every name to the same value, so the queried package
+        matched advisories for unrelated packages in the same ecosystem and inherited
+        their fixed versions as upgrade advice.
+        """
+        if lang is not None:
+            _not_called = object()
+            result: object = _not_called
+            try:
+                normaliser = getattr(lang, "normalise_name", None)
+                if callable(normaliser):
+                    result = normaliser(value)
+            except Exception:
+                log.warning(
+                    "normalise_name raised for lang=%s — lowercasing instead",
+                    getattr(lang, "name", "?"), exc_info=True,
+                )
+                result = _not_called
+
+            if result is not _not_called:
+                if isinstance(result, str) and result:
+                    return result
+                log.warning(
+                    "normalise_name returned %s for %r (lang=%s) — lowercasing "
+                    "instead", type(result).__name__, value,
+                    getattr(lang, "name", "?"),
+                )
+        # PyPI keeps its PEP 503 rule even with no usable plugin. `lang` is None
+        # whenever the registry failed to load, and plain lowercasing there stopped
+        # a query for `zope-interface` matching an advisory named `zope.interface` —
+        # losing upgrade advice on exactly the path resolve_osv_ecosystem() keeps
+        # working for built-ins. Other ecosystems keep lowercase-only: npm treats
+        # `lodash.get` and `lodash-get` as distinct packages, so collapsing separators
+        # there would match the wrong advisory.
+        if canonical_eco == "pypi":
+            return _normalize_pypi_name(value)
+        return value.lower()
+
+    query_name = _norm(package_name)
     fixed: list[str] = []
     for affected in vuln.get("affected", []):
         pkg = affected.get("package", {})
         if pkg.get("ecosystem", "").lower() != canonical_eco:
             continue
         adv_name = pkg.get("name", "")
-        adv_name_norm = _normalize_pypi_name(adv_name) if is_pypi else adv_name.lower()
+        adv_name_norm = _norm(adv_name)
         if adv_name_norm != query_name:
+            continue
+        # Guard against a normaliser that collapses distinct names to one value. A
+        # type check on the hook's return cannot catch this: a constant *string* is
+        # well-typed but makes every advisory match, so this package would inherit
+        # upgrade advice from unrelated packages in the same ecosystem. Raw names that
+        # differ only by the separators/case a normaliser is meant to fold are still
+        # accepted; anything further apart is treated as a non-match.
+        if adv_name != package_name and _fold(adv_name) != _fold(package_name):
+            log.warning(
+                "Ignoring advisory for %r while resolving fixed versions for %r: "
+                "normalise_name (lang=%s) collapsed two different package names",
+                adv_name, package_name, getattr(lang, "name", "?"),
+            )
             continue
         for r in affected.get("ranges", []):
             if r.get("type") in ("SEMVER", "ECOSYSTEM"):

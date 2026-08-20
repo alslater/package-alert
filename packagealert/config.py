@@ -79,15 +79,82 @@ class HeuristicsConfig(BaseModel):
     combined_damping_floor: float = Field(0.1, ge=0.0, le=1.0)
 
 
+# The single definition of a gate action, shared by the cooldown gate, the pre-flight
+# risk gate and the post-install check. It lives in config.py because that is where
+# every configured action is declared and because this module imports nothing from
+# `packagealert` — the sandbox modules depend on config, so defining it here keeps that
+# direction intact.
+#
+# `sandbox.preflight_risk.RiskAction` is an alias of this, not a second Literal.
+# Previously three independent copies existed (here, preflight_risk, and an anonymous
+# one inside cooldown.RiskDecision); because `decide_risk` feeds configured values into
+# ACTION_RANK, adding a member to one copy alone produced a value with no rank and a
+# KeyError that aborted the gate.
 CooldownAction = Literal["allow", "warn", "prompt", "block"]
+
+# The escalation target for a `prompt` decision in a non-interactive context. It is
+# deliberately a *narrower* type: "prompt" here is a no-op that leaves the action as
+# `prompt`, and every gate then calls Confirm.ask() on stdin — hanging or failing CI,
+# which is the exact outcome this setting exists to prevent. allow/warn/block all
+# express a meaningful unattended policy.
+NonInteractiveAction = Literal["allow", "warn", "block"]
 
 
 class CooldownConfig(BaseModel):
     period_days: int = Field(7, ge=1)
     on_new_medium_risk: CooldownAction = "prompt"
     on_new_low_risk: CooldownAction = "warn"
-    non_interactive_escalation: CooldownAction = "block"
+    non_interactive_escalation: NonInteractiveAction = "block"
     allow_cooldown_allow: bool = True
+
+
+class PreflightRiskConfig(BaseModel):
+    """Risk-score gating for `package-alert run`.
+
+    Thresholds here are deliberately separate from HeuristicsConfig's
+    warning_threshold/critical_threshold. At pre-flight nothing is installed, so
+    only metadata signals (typosquat, low_popularity) are available and the
+    achievable score ceiling is ~40 — the daemon's 40/70 thresholds would make
+    the gate a no-op. post_install_threshold applies after extraction, where
+    source-code signals push scores much higher.
+    """
+
+    enabled: bool = True
+    risk_threshold: int = Field(25, ge=0)
+    on_typosquat: CooldownAction = "prompt"
+    # Only typosquat matches at or below this edit distance trigger on_typosquat;
+    # more distant matches are reported as warnings. Defaults to the detector's
+    # own threshold (2) because false positives are now handled by scoring rather
+    # than by distance: see typosquat_min_score.
+    typosquat_max_distance: int = Field(2, ge=1)
+    # Minimum typosquat signal score required to trigger on_typosquat. The raw
+    # score is 20 (distance 1) or 15 (distance 2); the risk engine reduces it in
+    # proportion to the suspect's own adoption, and a version-suffix variant
+    # (httpx2) deepens that reduction but never applies one on its own. Gating on
+    # the score rather than the bare match lets those reductions suppress the gate.
+    #
+    # The default of 15 means *any* reduction disqualifies a distance-2 match from
+    # gating, while an unreduced match at either distance still gates. Worked
+    # examples: httpx2 -> 3 (29k dependents + version suffix, allowed);
+    # respx -> 14 (52 dependents, allowed); reqeusts -> 15 (absent from the
+    # registry, gates); urlib3 -> 20 (gates). These figures are pinned by
+    # tests/unit/test_risk_engine.py::test_documented_httpx2_calibration_is_exact
+    # — update them together with the adoption constants in analyzers/risk.py.
+    typosquat_min_score: int = Field(15, ge=0)
+    on_high_risk: CooldownAction = "warn"
+    # See NonInteractiveAction: "prompt" is excluded because escalating prompt to
+    # prompt leaves Confirm.ask() to run against a non-TTY stdin.
+    non_interactive_escalation: NonInteractiveAction = "block"
+    # Calibrated against the actual source-heuristic score tables rather than
+    # guessed. The cheapest realistic payloads it must catch:
+    #   - any single PyPI setup.py signal (subprocess/network/credential) = 30
+    #   - an npm postinstall hook piping curl into a shell               = 35
+    #     (install_script 20 + curl_in_script 15)
+    # Damping reduces these further for packages with real publication history —
+    # an observed four-signal npm package landed at 46 — so a higher threshold
+    # silently misses genuine attacks.
+    post_install_threshold: int = Field(30, ge=0)
+    on_post_install_risk: CooldownAction = "warn"
 
 
 class FileSystemBackendConfig(BaseModel):
@@ -105,6 +172,7 @@ class SandboxConfig(BaseModel):
     extra_ro_paths: list[ExpandedPath] = Field(default_factory=list)
     editable_roots: list[ExpandedPath] = Field(default_factory=list)
     cooldown: CooldownConfig = Field(default_factory=CooldownConfig)
+    preflight_risk: PreflightRiskConfig = Field(default_factory=PreflightRiskConfig)
     filesystem_backend: FileSystemBackendConfig = Field(default_factory=FileSystemBackendConfig)
 
     @field_validator("backend")

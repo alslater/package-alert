@@ -528,3 +528,36 @@ async def test_core_table_names_matches_actual_schema_tables():
     from packagealert.storage.db import SCHEMA
     declared = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", SCHEMA))
     assert declared == _CORE_TABLE_NAMES
+
+
+async def test_open_db_migrates_legacy_top_packages_cache_missing_schema_version(tmp_path):
+    # Simulate an on-disk DB created before schema_version existed: a row
+    # written by the old (buggy) npm/Packagist normaliser must survive the
+    # migration itself, defaulting to schema_version=0 so TopPackagesCache
+    # treats it as stale on the next read rather than serving it forever.
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE top_packages_cache "
+        "(ecosystem TEXT NOT NULL PRIMARY KEY, fetched_at REAL NOT NULL, "
+        "package_count INTEGER NOT NULL, packages TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO top_packages_cache(ecosystem, fetched_at, package_count, packages) "
+        "VALUES ('npm', 0, 1, '[\"socket-io\"]')"
+    )
+    conn.commit()
+    conn.close()
+
+    with patch("packagealert.storage.db._load_entry_points", return_value={}):
+        conn = await open_db(db_path, enabled_plugins=set())
+    try:
+        async with conn.execute(
+            "SELECT schema_version FROM top_packages_cache WHERE ecosystem='npm'"
+        ) as cur:
+            row = await cur.fetchone()
+        assert row["schema_version"] == 0
+    finally:
+        await conn.close()

@@ -254,6 +254,54 @@ class ParsedInstall:
     # packages[0] (e.g. pipx inject httpie httpx → target_env_name="httpie").
     # None means the environment name is derived from packages[0] as normal.
     target_env_name: str | None = None
+    # True only for a command that installs/syncs the *existing* lock file's
+    # full contents with no explicit package names of its own (bare `npm
+    # install`, `yarn install`, `pnpm dedupe`, `pipenv sync`, `uv sync`/`lock`,
+    # `npm audit fix`) — the one case where scanning the current lock file
+    # for OSV advisories / typosquat / risk signals is actually checking what
+    # is *about to be installed*.
+    #
+    # `packages == [] and req_files == []` looks identical for that case and
+    # for a *removal* (`npm uninstall`, `yarn/pnpm remove`, `uv remove`) or an
+    # unrelated non-install subcommand (`pipenv shell`/`check`/`clean`, `uv
+    # run`/`cache`/`venv`, `pnpm fetch` is the one exception — see its own
+    # comment) — both also produce an empty packages/req_files ParsedInstall,
+    # but scanning the lock file there checks packages the command is not
+    # installing at all, and could block a legitimate uninstall or read-only
+    # command over a risk signal on a dependency the user is trying to remove
+    # or never asked to gate in the first place. Must be set explicitly by
+    # each parser rather than inferred from packages/req_files being empty.
+    is_lockfile_install: bool = False
+    # False for a command that is guaranteed to install/change nothing no
+    # matter what packages/req_files/is_lockfile_install say — a report-only
+    # or check-only invocation (`npm install <pkg> --dry-run`, `npm update
+    # --dry-run`, `npm audit fix --dry-run`, `uv sync --check`, `pnpm dedupe
+    # --check`, `pipenv update --dry-run`/`--outdated`). These flags don't
+    # change the command's *shape* (explicit packages stay in `packages`,
+    # `is_lockfile_install` reflects what the equivalent real command would
+    # do) — they only mean the pre-flight gates have nothing real to gate,
+    # since nothing will actually be installed. Consulting `packages`/
+    # `is_lockfile_install` alone is not enough: `npm install lodash
+    # --dry-run` still has a non-empty `packages`, which the gates would
+    # otherwise query and potentially block, even though the command installs
+    # nothing regardless of the answer. Checked before any other field by
+    # `_resolve_query_packages`/`_preflight`. Defaults to True (gate
+    # normally) so every existing/third-party parser that doesn't know about
+    # this field keeps its current behaviour.
+    should_gate: bool = True
+    # True when the command targets the system Python rather than an active
+    # venv/conda environment — `uv pip sync`/`uv pip install --system`, or
+    # the equivalent UV_SYSTEM_PYTHON env var (uv's own docs: `--system`
+    # "Install packages into the system Python environment", with
+    # `env: UV_SYSTEM_PYTHON`). Verified empirically (`uv pip sync -v`)
+    # that `--system` switches uv's interpreter discovery entirely — from
+    # "searching in virtual environments" (VIRTUAL_ENV/CONDA_PREFIX/.venv,
+    # what `_discover_target_python_version` models) to "searching in
+    # search path or managed installations", which explicitly *ignores* an
+    # active VIRTUAL_ENV even if one is set. Consumers must not apply
+    # VIRTUAL_ENV/CONDA_PREFIX-based version discovery when this is True —
+    # see `_collect_pylock_packages`'s use of `_TARGET_VERSION_UNKNOWN`.
+    is_system_python_target: bool = False
 
     @property
     def registry_name(self) -> str:
@@ -539,7 +587,43 @@ def parse_pip_args(argv: list[str]) -> ParsedInstall | None:
         if arg.startswith("-"):
             continue
         packages.append(arg)
-    return ParsedInstall(manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
+    # `--dry-run` resolves dependencies and reports what would happen without
+    # actually installing anything (pip's own docs) — nothing to gate,
+    # regardless of explicit packages or -r/--requirement files.
+    should_gate = "--dry-run" not in args[subcmd_idx + 1:]
+    return ParsedInstall(
+        manager="pip", packages=packages, ecosystem="pypi", venv_exe=venv_exe,
+        req_files=req_files, should_gate=should_gate,
+    )
+
+
+# Truthy string forms UV_SYSTEM_PYTHON accepts — verified empirically
+# against uv 0.12.2 (`uv pip sync -v` DEBUG output) across uv's complete
+# boolean vocabulary: "1"/"true"/"yes"/"on"/"y"/"t" (case-insensitive, e.g.
+# "TRUE"/"On"/"Y" all switch uv's interpreter discovery to system mode);
+# "0"/"false"/"no"/"off"/"n"/"f" don't. Any other value (e.g. "2", "") is a
+# hard error from uv itself, so it never reaches a successful invocation
+# for us to observe.
+_UV_SYSTEM_PYTHON_TRUTHY = frozenset({"1", "true", "yes", "on", "y", "t"})
+
+
+def _uv_targets_system_python(rest: list[str]) -> bool:
+    """True if this `uv pip sync`/`uv pip install` invocation targets the
+    system Python rather than an active venv/conda environment.
+
+    `--system` (uv's own docs: "Install packages into the system Python
+    environment") or its env-var equivalent UV_SYSTEM_PYTHON switches uv's
+    interpreter discovery entirely — verified empirically (`uv pip sync
+    -v`) to go from "searching in virtual environments" to "searching in
+    search path or managed installations", explicitly ignoring an active
+    VIRTUAL_ENV. See ParsedInstall.is_system_python_target's docstring for
+    why this matters to marker evaluation.
+    """
+    import os
+
+    if "--system" in rest:
+        return True
+    return os.environ.get("UV_SYSTEM_PYTHON", "").lower() in _UV_SYSTEM_PYTHON_TRUTHY
 
 
 def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
@@ -550,12 +634,82 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
     if not args:
         return None
     subcmd = args[0]
-    if subcmd in ("add", "remove"):
+    if subcmd == "add":
         packages = _positionals(args[1:], _UV_PROJECT_VALUE_FLAGS)
         req_files = _value_flag_args(args[1:], frozenset({"-r", "--requirements"}))
         return ParsedInstall(manager="uv-project", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
-    if subcmd in ("sync", "lock"):
+    if subcmd == "remove":
+        # Removal mutates uv.lock, but removes a package rather than
+        # installing one — putting the removed names into `packages` would
+        # make the risk/cooldown gates and OSV pre-flight query them as if
+        # they were about to be installed, and could block the removal of
+        # the very (suspicious) dependency the user is trying to get rid of.
+        # Not a lockfile-install case either. Matches the npm/yarn/pnpm
+        # `remove` branches below, which likewise return empty `packages`.
         return ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+    if subcmd == "sync":
+        # Materialises the project's existing lock file with no package names
+        # of its own — the one uv subcommand this scan should cover.
+        # Exception: `--check` only reports whether the environment is
+        # synchronized with the project, and `--dry-run` performs a dry run
+        # "without writing the lockfile or modifying the project environment"
+        # (both uv's own docs) — nothing to gate regardless of
+        # is_lockfile_install.
+        is_report_only = "--check" in args[1:] or "--dry-run" in args[1:]
+        return ParsedInstall(
+            manager="uv-project", packages=[], ecosystem="pypi", venv_exe=venv_exe,
+            is_lockfile_install=True,
+            should_gate=not is_report_only,
+        )
+    if subcmd == "lock":
+        # Regenerates uv.lock from pyproject.toml's declared dependencies —
+        # does not install anything into the environment, and does not even
+        # read the *existing* lock file as its surface (it resolves fresh).
+        # Scanning the current (about-to-be-replaced) uv.lock here would gate
+        # a lock-generation operation against stale contents. Not a
+        # lockfile-install case.
+        return ParsedInstall(manager="uv-project", packages=[], ecosystem="pypi", venv_exe=venv_exe)
+    if subcmd == "pip" and len(args) > 1 and args[1] == "sync":
+        # `uv pip sync <SRC_FILE>...` installs exactly the packages listed in
+        # the given requirements/pylock files (uv's own docs) — a real
+        # install, unlike `uv pip install`'s src files are positional
+        # arguments here, not values of a -r/--requirement flag.
+        rest = args[2:]
+        req_files: list[str] = []
+        skip_value_for: str | None = None
+        # Audited against: uv 0.12.2 `uv pip sync --help`.
+        _UV_PIP_SYNC_VALUE_FLAGS = frozenset({
+            "-c", "--constraints", "-b", "--build-constraints",
+            "--extra", "--group", "--cert", "--target", "-t",
+            "--python", "-p", "--python-version", "--python-platform",
+            "--index", "--default-index", "-i", "--index-url", "--extra-index-url",
+            "--index-strategy", "--keyring-provider", "--config-setting", "-C",
+            "--find-links", "-f", "--cache-dir", "--exclude-newer",
+            "--link-mode", "--prefix",
+            # --no-index is intentionally excluded: it is a boolean flag
+            # (uv's own docs) with no value of its own — including it here
+            # would consume the very next token (often the requirements
+            # filename itself, e.g. `uv pip sync --no-index requirements.txt`)
+            # as if it were --no-index's argument, silently dropping the
+            # requirements file from req_files.
+        })
+        for arg in rest:
+            if skip_value_for is not None:
+                skip_value_for = None
+                continue
+            if arg in _UV_PIP_SYNC_VALUE_FLAGS:
+                skip_value_for = arg
+                continue
+            if not arg.startswith("-"):
+                req_files.append(arg)
+        # `--dry-run` resolves dependencies and prints the plan without
+        # actually installing anything (uv's own docs) — nothing to gate.
+        should_gate = "--dry-run" not in rest
+        return ParsedInstall(
+            manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe,
+            req_files=req_files, should_gate=should_gate,
+            is_system_python_target=_uv_targets_system_python(rest),
+        )
     if subcmd == "pip" and len(args) > 1 and args[1] == "install":
         rest = args[2:]
         packages: list[str] = []
@@ -591,7 +745,15 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
                 continue
             if not arg.startswith("-"):
                 packages.append(arg)
-        return ParsedInstall(manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe, req_files=req_files)
+        # `--dry-run` resolves dependencies and prints the resulting plan
+        # without actually installing anything (uv's own docs) — nothing to
+        # gate, regardless of explicit packages or -r/--requirement files.
+        should_gate = "--dry-run" not in rest
+        return ParsedInstall(
+            manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe,
+            req_files=req_files, should_gate=should_gate,
+            is_system_python_target=_uv_targets_system_python(rest),
+        )
     if subcmd == "tool":
         tool_subcmd = args[1] if len(args) > 1 else None
         if tool_subcmd in ("install", "upgrade"):
@@ -606,11 +768,17 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
                 ],
             )
         if tool_subcmd == "run":
+            # Executes an already-installed tool — not installing anything.
             return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
         return None
     if subcmd in ("run", "python", "init", "build", "publish", "export",
                   "cache", "version", "generate-shell-completion", "self",
                   "pip", "venv"):
+        # None of these install from the lock file — `run`/`python` execute,
+        # `cache`/`version`/`venv`/`self` manage local state, `build`/`publish`
+        # produce or upload artifacts, `export`/`generate-shell-completion`
+        # only read. is_lockfile_install stays False (the default): scanning
+        # the lock file here would gate a command that installs nothing.
         return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
     return None
 
@@ -762,11 +930,22 @@ def parse_composer_args(argv: list[str]) -> ParsedInstall | None:
     if not args:
         return None
     subcmd = args[0]
+    # `--dry-run` outputs the operations but executes nothing (Composer's own
+    # docs) — nothing to gate, regardless of explicit packages or
+    # is_lockfile_install.
+    should_gate = "--dry-run" not in args[1:]
     if subcmd == "require":
         packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="composer", packages=packages, ecosystem="packagist")
+        return ParsedInstall(
+            manager="composer", packages=packages, ecosystem="packagist",
+            should_gate=should_gate,
+        )
     if subcmd in ("install", "update", "upgrade"):
-        return ParsedInstall(manager="composer", packages=[], ecosystem="packagist")
+        # Materialises/updates composer.lock with no explicit package names.
+        return ParsedInstall(
+            manager="composer", packages=[], ecosystem="packagist", is_lockfile_install=True,
+            should_gate=should_gate,
+        )
     return None
 
 
@@ -788,10 +967,51 @@ def parse_pipenv_args(argv: list[str]) -> ParsedInstall | None:
     # manages. The project venv path isn't known until pipenv resolves it at runtime.
     if subcmd in ("install", "sync"):
         packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=None)
-    if subcmd in ("create", "graph", "check", "lock", "update", "upgrade", "requirements",
+        # A bare `pipenv install`/`sync` (no explicit packages) installs the
+        # existing Pipfile.lock in full — that case should scan it. An
+        # explicit `pipenv install requests` already carries its own package
+        # name and does not need the lock-file branch at all.
+        return ParsedInstall(
+            manager="pipenv", packages=packages, ecosystem="pypi", venv_exe=None,
+            is_lockfile_install=not packages,
+        )
+    if subcmd == "update":
+        # `pipenv update` resolves/re-locks and then always syncs
+        # (installs) the result into the environment — a real install of
+        # the resulting lock file's contents. Exception: `--dry-run` and
+        # `--outdated` both route entirely to do_outdated() in pipenv's own
+        # do_update() (dry-run sets outdated=True), which only lists
+        # updatable packages and never locks or syncs anything — nothing to
+        # gate regardless of is_lockfile_install.
+        is_report_only = "--dry-run" in args[1:] or "--outdated" in args[1:]
+        return ParsedInstall(
+            manager="pipenv", packages=[], ecosystem="pypi", venv_exe=None,
+            is_lockfile_install=True,
+            should_gate=not is_report_only,
+        )
+    if subcmd == "upgrade":
+        # Unlike `update`, `upgrade` only re-resolves the named (or
+        # Pipfile-modified) packages and rewrites Pipfile.lock — it never
+        # calls pipenv's sync/install routine. Scanning the current lock
+        # file here would gate a command that installs nothing. Not a
+        # lockfile-install case.
+        return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=None)
+    if subcmd == "lock":
+        # Regenerates Pipfile.lock from Pipfile's declared requirements —
+        # does not install anything into the environment. Scanning the
+        # current (about-to-be-replaced) Pipfile.lock here would gate a
+        # lock-generation operation against stale contents. Not a
+        # lockfile-install case.
+        return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=None)
+    if subcmd in ("create", "graph", "check", "requirements",
                   "verify", "run", "shell", "scripts", "open", "uninstall",
                   "clean", "envs"):
+        # None of these install anything: create/envs manage the venv itself,
+        # graph/check/requirements/verify only read, run/shell execute,
+        # scripts/open are utilities, and uninstall removes — scanning the
+        # lock file here would gate a command that installs nothing, or
+        # block a legitimate removal over a signal on the package being
+        # removed.
         return ParsedInstall(manager="pipenv", packages=[], ecosystem="pypi", venv_exe=None)
     return None
 
@@ -805,15 +1025,17 @@ def parse_yarn_args(argv: list[str]) -> ParsedInstall | None:
     args = argv[1:]
     if not args:
         # bare `yarn` installs all deps from lockfile
-        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
+        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm", is_lockfile_install=True)
     subcmd = args[0]
     if subcmd == "add":
         packages = [a for a in args[1:] if not a.startswith("-")]
         return ParsedInstall(manager="yarn", packages=packages, ecosystem="npm")
     if subcmd in ("install", "dedupe"):
-        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
+        return ParsedInstall(manager="yarn", packages=[], ecosystem="npm", is_lockfile_install=True)
     if subcmd == "remove":
-        # Removal mutates yarn.lock; defer to lockfile scan.
+        # Removal mutates yarn.lock, but removes a package rather than
+        # installing one — scanning the lock file here would gate the very
+        # dependency being removed. Not a lockfile-install case.
         return ParsedInstall(manager="yarn", packages=[], ecosystem="npm")
     return None
 
@@ -832,11 +1054,36 @@ def parse_pnpm_args(argv: list[str]) -> ParsedInstall | None:
         packages = []
         if subcmd == "add":
             packages = [a for a in args[1:] if not a.startswith("-")]
-        return ParsedInstall(manager="pnpm", packages=packages, ecosystem="npm")
-    if subcmd in ("dedupe", "fetch", "import"):
+        # `install`/`i` with no explicit packages materialises the existing
+        # pnpm-lock.yaml in full; `add` always names its own packages.
+        return ParsedInstall(
+            manager="pnpm", packages=packages, ecosystem="npm",
+            is_lockfile_install=not packages,
+        )
+    if subcmd in ("dedupe", "fetch"):
+        # Both install from the existing lock file with no package names of
+        # their own (dedupe re-installs with newer-compatible versions;
+        # fetch populates the virtual store from it). Exception: `dedupe
+        # --check` only reports whether changes are possible "without
+        # installing packages or editing the lockfile" (pnpm's own docs) —
+        # nothing to gate regardless of is_lockfile_install.
+        is_check_only = subcmd == "dedupe" and "--check" in args[1:]
+        return ParsedInstall(
+            manager="pnpm", packages=[], ecosystem="npm",
+            is_lockfile_install=True,
+            should_gate=not is_check_only,
+        )
+    if subcmd == "import":
+        # Generates pnpm-lock.yaml from a *different* manager's lockfile
+        # (package-lock.json/yarn.lock) — writes only the lockfile, never
+        # touches node_modules. Scanning pnpm's own (unrelated, possibly
+        # nonexistent) lock file here would gate a command that installs
+        # nothing. Not a lockfile-install case.
         return ParsedInstall(manager="pnpm", packages=[], ecosystem="npm")
     if subcmd in ("remove", "rm", "uninstall", "un"):
-        # Removal mutates pnpm-lock.yaml; defer to lockfile scan.
+        # Removal mutates pnpm-lock.yaml, but removes a package rather than
+        # installing one — scanning the lock file here would gate the very
+        # dependency being removed. Not a lockfile-install case.
         return ParsedInstall(manager="pnpm", packages=[], ecosystem="npm")
     return None
 
@@ -859,16 +1106,40 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     if not args:
         return None
     subcmd = args[0]
+    # `--dry-run` reports what a command would do without doing it;
+    # `--package-lock-only` (install-family only) only rewrites
+    # package-lock.json without touching node_modules. Neither actually
+    # installs, no matter what packages/is_lockfile_install this subcommand
+    # would otherwise carry — nothing to gate.
+    is_noop_mode = "--dry-run" in args or "--package-lock-only" in args
     if subcmd in ("install", "i", "add", "ci"):
         packages = [a for a in args[1:] if not a.startswith("-")]
         is_global = "-g" in args or "--global" in args
-        return ParsedInstall(manager="npm", packages=packages, ecosystem="npm", global_install=is_global)
+        # `ci` and a package-less `install`/`i` materialise the existing
+        # package-lock.json in full; `add` (and `install`/`i` given explicit
+        # names) install only the packages named on the command line.
+        return ParsedInstall(
+            manager="npm", packages=packages, ecosystem="npm", global_install=is_global,
+            is_lockfile_install=not packages,
+            should_gate=not is_noop_mode,
+        )
     if subcmd in ("update", "up", "upgrade", "dedupe"):
-        return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
+        # Installs updated versions from the existing lock file with no
+        # explicit package names of its own.
+        return ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm", is_lockfile_install=True,
+            should_gate=not is_noop_mode,
+        )
     if subcmd in ("uninstall", "remove", "rm", "un", "r"):
-        # Removal mutates package-lock.json; defer to lockfile scan.
+        # Removal mutates package-lock.json, but removes a package rather
+        # than installing one — scanning the lock file here would gate the
+        # very dependency being removed. Not a lockfile-install case.
         return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
     if subcmd == "audit" and len(args) > 1 and args[1] == "fix":
-        # `npm audit fix` modifies package-lock.json; defer to lockfile scan.
-        return ParsedInstall(manager="npm", packages=[], ecosystem="npm")
+        # Rewrites package-lock.json to non-vulnerable versions — an install
+        # of (updated) dependencies, not a removal.
+        return ParsedInstall(
+            manager="npm", packages=[], ecosystem="npm", is_lockfile_install=True,
+            should_gate=not is_noop_mode,
+        )
     return None

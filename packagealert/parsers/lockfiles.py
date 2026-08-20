@@ -197,10 +197,367 @@ def _req_include(line: str) -> str | None:
     return None
 
 
+# PEP 751's exact naming rule: ``pylock.toml`` itself, or ``pylock.<name>.toml``
+# where <name> is non-empty and dot-free (distinguishes purpose-specific
+# lockfiles like ``pylock.dev.toml`` from an unrelated file that merely ends
+# in .toml, e.g. a requirements file someone named ``requirements.toml`` —
+# `-r`/`--requirement` places no restriction on the file's extension or name).
+_PYLOCK_NAME_RE = re.compile(r"^pylock(\.[^.]+)?\.toml$")
+
+
+def _is_pylock_filename(name: str) -> bool:
+    return bool(_PYLOCK_NAME_RE.match(name))
+
+
+class _TargetVersionUnknown:
+    """Sentinel: a target environment was selected (VIRTUAL_ENV/CONDA_PREFIX
+    set, or a .venv found) but its Python version could not be read.
+
+    Distinct from returning ``None`` (no target environment applies at all —
+    safe to fall back to evaluating markers against package-alert's own
+    interpreter, the closest available approximation). Here a target was
+    positively identified, so falling back to package-alert's own
+    interpreter would silently substitute an unrelated Python version — no
+    better than a coin flip on whether a `python_version`/
+    `python_full_version` marker happens to agree with the real target. The
+    caller must not supply *any* version override in this case, and must
+    treat a marker that references either variable as unresolvable (fail
+    open, keep the package) rather than let it evaluate against the wrong
+    interpreter.
+    """
+
+
+_TARGET_VERSION_UNKNOWN = _TargetVersionUnknown()
+
+# Marker grammar identifiers for the two PEP 508 version-comparison
+# variables. Checked against the marker string with quoted segments
+# stripped first, so a marker like `sys_platform == 'python_version'` (the
+# variable name only coincidentally appearing inside a string literal) is
+# correctly NOT treated as version-dependent.
+_VERSION_MARKER_VAR_RE = re.compile(r"\bpython_version\b|\bpython_full_version\b")
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _marker_references_python_version(marker: str) -> bool:
+    return bool(_VERSION_MARKER_VAR_RE.search(_QUOTED_RE.sub("", marker)))
+
+
+def _read_pyvenv_python_version(venv_root: Path) -> str | None:
+    """Read the Python version a venv was created for, from its pyvenv.cfg.
+
+    Static (no interpreter execution, matching THREAT_MODEL.md's "No code
+    execution" property): the venv's own creation-time metadata already
+    records this. Key name differs by creator — stdlib `venv` writes
+    ``version`` (full, e.g. "3.14.3"); `uv venv` writes ``version_info``
+    (short, e.g. "3.12"). Either is accepted; malformed/missing content
+    returns None. The caller (`_discover_target_python_version`) treats
+    that as "target selected but version unknown", not "no target" — see
+    `_TARGET_VERSION_UNKNOWN`.
+    """
+    cfg = venv_root / "pyvenv.cfg"
+    try:
+        text = cfg.read_text(errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if key in ("version", "version_info"):
+            value = value.strip()
+            if value:
+                return value
+    return None
+
+
+def _read_conda_python_version(env_root: Path) -> str | None:
+    """Read the Python version of a conda/mamba environment, from its own metadata.
+
+    Verified empirically against a real conda-compatible environment
+    (`micromamba create -p ./env python=3.11`): unlike a venv, a conda
+    environment has no `pyvenv.cfg` at all — its installed-package records
+    live under `conda-meta/<name>-<version>-<build>.json`, one file per
+    package. `python-3.11.15-h8ab3286_2_cpython.json` has top-level `name`
+    and `version` fields. The filename alone is not a safe match: real
+    conda-forge packages such as `python-dateutil` or `python-json-logger`
+    also produce `conda-meta/python-*.json` files, so every candidate is
+    opened and its `"name"` field is checked for the exact string
+    ``"python"`` before trusting its `"version"`.
+    """
+    import json
+
+    meta_dir = env_root / "conda-meta"
+    try:
+        candidates = list(meta_dir.glob("python-*.json"))
+    except OSError:
+        return None
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate.read_text(errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("name") != "python":
+            continue
+        version = data.get("version")
+        if isinstance(version, str) and version:
+            return version
+    return None
+
+
+def _discover_target_python_version(cwd: Path) -> str | _TargetVersionUnknown | None:
+    """Best-effort match of uv/pip's own bare-invocation interpreter discovery.
+
+    A bare `uv pip sync`/`uv pip install` (no --python/--python-version
+    flag) does not target package-alert's own running interpreter — uv
+    documents and this was verified empirically (`uv pip sync -v`, DEBUG
+    "Searching for default Python interpreter in virtual environments") to
+    resolve, in order: the `VIRTUAL_ENV` environment variable, then
+    `CONDA_PREFIX`, then a `.venv` directory found by walking up from *cwd*.
+    Only the version actually matters for marker evaluation
+    (`python_version`/`python_full_version`), so this reads it statically
+    rather than resolving/invoking the interpreter.
+
+    `VIRTUAL_ENV` and `CONDA_PREFIX` are each read with the metadata format
+    that actually matches what sets them: `VIRTUAL_ENV` names a venv
+    (`pyvenv.cfg`); `CONDA_PREFIX` names a conda/mamba environment
+    (`conda-meta/python-*.json` — conda environments routinely have no
+    `pyvenv.cfg` at all, verified against a real `micromamba`-created
+    environment).
+
+    Three-way return, not two: a target can be *positively selected*
+    (`VIRTUAL_ENV`/`CONDA_PREFIX` set, or a `.venv` directory found) with
+    its version still unreadable (corrupted/unusually-packaged
+    environment). That is not the same as *no target applying at all* —
+    conflating the two by returning `None` for both would let the caller
+    fall back to evaluating markers against package-alert's own
+    interpreter, an arbitrary, unrelated Python version with no better than
+    coincidental odds of matching the real target. So once a target is
+    selected, its outcome is terminal in both directions: a version return
+    stops here, and an unreadable one returns `_TARGET_VERSION_UNKNOWN`
+    (not `None`) rather than falling through to a lower-priority location —
+    uv itself does not fall back once it has committed to an environment
+    (uv's own docs), and neither should this. Plain `None` is reserved for
+    the genuine absence of any target: neither env var set, and no `.venv`
+    found anywhere walking up from *cwd* — which also covers plain `pip`
+    (no venv/conda discovery of its own).
+    """
+    import os
+
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        version = _read_pyvenv_python_version(Path(virtual_env))
+        return version if version is not None else _TARGET_VERSION_UNKNOWN
+
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        version = _read_conda_python_version(Path(conda_prefix))
+        return version if version is not None else _TARGET_VERSION_UNKNOWN
+
+    current = cwd.resolve()
+    while True:
+        venv_dir = current / ".venv"
+        if venv_dir.is_dir():
+            # A .venv directory here IS the target (uv doesn't keep
+            # searching parents for a different one once it finds one) —
+            # so an unreadable pyvenv.cfg is terminal too, not "not found."
+            version = _read_pyvenv_python_version(venv_dir)
+            return version if version is not None else _TARGET_VERSION_UNKNOWN
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
+
+
+def _collect_pylock_packages(
+    path: Path, *, cwd: Path | None = None, is_system_python_target: bool = False
+) -> tuple[list[LockedPackage], list[LockedPackage]]:
+    """Parse a PEP 751 pylock.toml file (e.g. ``pylock.toml``, ``pylock.dev.toml``).
+
+    Structurally unrelated to requirements.txt — a line-oriented read of a
+    pylock.toml (as `collect_requirements_packages` does) matches TOML syntax
+    like ``name = "requests"`` against the same regexes used for requirements
+    lines, producing bogus packages literally named "name"/"version" while
+    never surfacing the real ones. See PEP 751 for the schema:
+    https://packaging.python.org/en/latest/specifications/pylock-toml/
+
+    Honours ``packages.marker``: PEP 751's installation algorithm requires
+    "If packages.marker is specified, check if it is satisfied; if it
+    isn't, skip to the next package." A universal (multi-platform) pylock
+    routinely contains mutually-exclusive platform variants of the same or
+    different packages (e.g. a Windows-only package alongside its Linux
+    counterparts) — evaluating every entry unconditionally would gate a
+    package that uv/pip will never actually install on this environment.
+
+    Evaluated against the *target* environment, not necessarily
+    package-alert's own running interpreter: a bare `uv pip sync`/`uv pip
+    install` (no --python/--python-version flag) does not target
+    package-alert's interpreter — it targets whatever `VIRTUAL_ENV`/
+    `CONDA_PREFIX` names, or a `.venv` found by walking up from *cwd*
+    (verified empirically via `uv pip sync -v`'s own DEBUG output; see
+    `_discover_target_python_version`). If package-alert runs under a
+    different Python than that target — the common case whenever a
+    project's `.venv` pins a version other than package-alert's own — a
+    marker like `python_version == '3.12'` must be evaluated against the
+    *target's* version, or a real dependency the sync installs gets
+    silently excluded from every gate. Only the version is overridden
+    (`python_version`/`python_full_version`, read statically from the
+    target's own metadata — no interpreter execution); *cwd* is optional
+    and omitting it (or a target genuinely not applying at all) falls back
+    to evaluating against package-alert's own interpreter, matching the
+    prior, narrower behaviour.
+
+    A target can also be *positively selected* (`VIRTUAL_ENV`/
+    `CONDA_PREFIX` set, or a `.venv` found) with its version unreadable
+    (see `_discover_target_python_version`'s three-way return and
+    `_TARGET_VERSION_UNKNOWN`). That is not treated the same as no target
+    applying: falling back to package-alert's own interpreter there would
+    silently compare against an unrelated Python version with no better
+    than coincidental odds of being right. Instead, any marker referencing
+    `python_version`/`python_full_version` (`_marker_references_python_version`,
+    quote-stripped so a string literal that merely contains the substring
+    isn't mistaken for the variable) fails open in this case — retained
+    rather than excluded on a guess — while markers that don't reference
+    either variable (platform, extras, dependency-group markers) are still
+    evaluated normally.
+
+    *is_system_python_target=True* (the caller's `uv pip sync`/`uv pip
+    install --system` or UV_SYSTEM_PYTHON) short-circuits straight to this
+    same target-unknown, fail-open treatment, skipping VIRTUAL_ENV/
+    CONDA_PREFIX/`.venv` discovery entirely — `--system` switches uv's own
+    interpreter discovery to a PATH-walk/managed-installation search that
+    explicitly ignores any active venv (verified empirically), so applying
+    VIRTUAL_ENV-based discovery here would evaluate markers against an
+    environment uv was never going to use for this invocation.
+
+    `--python-platform`/an explicit `--python <path>` override are
+    separate, still-undocumented-and-unfixed gaps — see THREAT_MODEL.md's
+    Out of Scope.
+
+    An unparseable or unresolvable marker fails open (kept, not skipped) so
+    a malformed pylock still gets the package scanned rather than silently
+    ignored — covers all three of Marker.evaluate()'s documented raises:
+    InvalidMarker (construction-time syntax error), UndefinedEnvironmentName
+    (references an environment variable this evaluation doesn't provide),
+    and UndefinedComparison (parses fine but applies an operator to values
+    it can't compare, e.g. `python_version ~= 'dog'` — ~= requires a valid
+    version on both sides). Letting any of these three propagate would
+    abort the whole pylock scan instead of failing open on the one bad
+    entry.
+
+    Evaluated with context="lock_file" (packaging>=25 — see pyproject.toml's
+    floor), which PEP 751 requires: a marker can reference the `extra`/
+    `dependency_groups` variables (PEP 751's own extension covering
+    packages.marker's use of dependency-group selection), and per the
+    spec's install algorithm these default to the empty set unless the
+    installing command selects specific extras/groups, OR — for
+    dependency_groups specifically — unless the pylock's own top-level
+    `default-groups` key names groups to install by default even on a bare
+    sync/install. PEP 751: "dependency_groups SHOULD be the set created
+    from default-groups by default." A package marked e.g. `marker =
+    "'runtime' in dependency_groups"` is meant to represent what a bare
+    install pulls in implicitly (the key's own doc: "meant to be used in
+    situations where packages.marker necessitates such a group to exist") —
+    seeding dependency_groups from default-groups here (still ∅ if the key
+    is absent, its own spec default) is what makes a bare `uv pip sync
+    pylock.toml` see it, without needing any --group flag from the
+    invocation. Evaluating with the default "metadata" context instead
+    leaves `extra`/`dependency_groups` undefined, so any such marker raises
+    UndefinedEnvironmentName and gets caught by the fail-open fallback
+    below — incorrectly retaining a package the extras default (empty set)
+    would exclude, and which `uv pip sync`'s own `--extra`/`--group`
+    selection (not yet threaded through this parser — see the module's
+    callers) would need to explicitly opt into.
+    """
+    import tomllib
+
+    from packaging.markers import (
+        InvalidMarker,
+        Marker,
+        UndefinedComparison,
+        UndefinedEnvironmentName,
+    )
+
+    pinned: list[LockedPackage] = []
+    unpinned: list[LockedPackage] = []
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return pinned, unpinned
+
+    default_groups = data.get("default-groups")
+    marker_environment: dict[str, object] = (
+        {"dependency_groups": frozenset(default_groups)}
+        if isinstance(default_groups, list) and all(isinstance(g, str) for g in default_groups)
+        else {}
+    )
+
+    target_version_unknown = False
+    if is_system_python_target:
+        # `uv pip sync`/`uv pip install --system` (or UV_SYSTEM_PYTHON)
+        # switches uv's interpreter discovery to ignore any active
+        # VIRTUAL_ENV/CONDA_PREFIX entirely (verified empirically — see
+        # ParsedInstall.is_system_python_target's docstring) in favour of a
+        # PATH-walk/managed-installation search this module does not
+        # attempt to reproduce. Applying VIRTUAL_ENV/CONDA_PREFIX-based
+        # discovery here would evaluate markers against an environment uv
+        # was never going to use, so treat the target version as unknown
+        # and fail open on version-dependent markers instead of guessing.
+        target_version_unknown = True
+    elif cwd is not None:
+        target_python_version = _discover_target_python_version(cwd)
+        if isinstance(target_python_version, str):
+            marker_environment["python_full_version"] = target_python_version
+            # python_version is the major.minor pair only — derive it rather
+            # than trust a pyvenv.cfg that already recorded the short form
+            # (uv's version_info) at face value for both keys.
+            parts = target_python_version.split(".")
+            marker_environment["python_version"] = ".".join(parts[:2])
+        elif target_python_version is _TARGET_VERSION_UNKNOWN:
+            # A target was positively selected (VIRTUAL_ENV/CONDA_PREFIX set,
+            # or a .venv found) but its version couldn't be read. Evaluating
+            # a python_version/python_full_version marker here would compare
+            # against package-alert's own interpreter — an arbitrary,
+            # unrelated Python version — so any such marker must fail open
+            # instead (see the loop below).
+            target_version_unknown = True
+
+    for entry in data.get("packages", []):
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        marker = entry.get("marker")
+        if isinstance(marker, str) and marker:
+            if target_version_unknown and _marker_references_python_version(marker):
+                pass  # target's version unknown: fail open, don't guess
+            else:
+                try:
+                    if not Marker(marker).evaluate(marker_environment, context="lock_file"):
+                        continue
+                except (InvalidMarker, UndefinedEnvironmentName, UndefinedComparison):
+                    pass  # malformed/unresolvable marker: fail open, still scan the package
+        version = entry.get("version")
+        if isinstance(version, str) and version:
+            pinned.append(LockedPackage(name=name, version=version, ecosystem="pypi"))
+        else:
+            # A pylock.toml entry can be VCS/directory/archive-sourced with no
+            # PyPI version string — same "no fixed version" concept as an
+            # unpinned requirements.txt line.
+            unpinned.append(LockedPackage(name=name, version=None, ecosystem="pypi"))
+    return pinned, unpinned
+
+
 def collect_requirements_packages(
     path: Path,
     visited: set[Path] | None = None,
     allowed_root: Path | None = None,
+    *,
+    is_system_python_target: bool = False,
 ) -> tuple[list[LockedPackage], list[LockedPackage]]:
     """Parse *path* and all transitively included requirement files.
 
@@ -213,6 +570,25 @@ def collect_requirements_packages(
     ``requirements/base.txt`` including ``../root.txt`` work, while traversal
     to ``../../../../etc/passwd`` is blocked.  Defaults to the parent of the
     initial *path* when not provided.
+
+    *is_system_python_target* should be the invoking command's
+    `ParsedInstall.is_system_python_target` (`uv pip sync`/`uv pip install
+    --system` or UV_SYSTEM_PYTHON) — forwarded to `_collect_pylock_packages`
+    so it never applies VIRTUAL_ENV/CONDA_PREFIX-based version discovery
+    when uv itself would ignore an active venv for this invocation.
+
+    A filename matching PEP 751's pylock.toml convention (``pylock.toml`` or
+    ``pylock.<name>.toml`` — uv's own `pip sync`/`pip install` accept such a
+    file wherever a requirements.txt is accepted) is delegated to
+    `_collect_pylock_packages` instead of being read as requirements.txt —
+    the two formats are structurally unrelated and parsing one as the other
+    silently drops every real package (see `_collect_pylock_packages`'s
+    docstring). Matched by filename, not merely a ``.toml`` suffix: `-r`/
+    `--requirement` places no restriction on the requirements file's name or
+    extension, so an unrelated file that happens to end in .toml (e.g.
+    ``requirements.toml``) must still be read as requirements.txt. Not
+    itself recursive (a pylock.toml has no -r-style include directive), so
+    *visited*/*allowed_root* don't apply to it.
     """
     if visited is None:
         visited = set()
@@ -222,6 +598,11 @@ def collect_requirements_packages(
     if path in visited:
         return [], []
     visited.add(path)
+
+    if _is_pylock_filename(path.name):
+        return _collect_pylock_packages(
+            path, cwd=allowed_root, is_system_python_target=is_system_python_target
+        )
 
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
@@ -241,7 +622,9 @@ def collect_requirements_packages(
             ref_path = (path.parent / include).resolve()
             if not ref_path.is_relative_to(allowed_root):
                 continue
-            p, u = collect_requirements_packages(ref_path, visited, allowed_root)
+            p, u = collect_requirements_packages(
+                ref_path, visited, allowed_root, is_system_python_target=is_system_python_target
+            )
             pinned.extend(p)
             unpinned.extend(u)
             continue

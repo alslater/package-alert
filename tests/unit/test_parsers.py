@@ -3,7 +3,10 @@ from pathlib import Path
 
 import pytest
 
-from packagealert.parsers.lockfiles import collect_requirements_packages
+from packagealert.parsers.lockfiles import (
+    _is_pylock_filename,
+    collect_requirements_packages,
+)
 from packagealert.parsers.process_args import (
     parse_composer_args,
     parse_npm_args,
@@ -136,6 +139,13 @@ def test_pip_install_editable_relative_path_not_in_packages():
 class TestUvProjectSubcommands:
     """Parametrized coverage of uv add/remove positional extraction.
 
+    `remove` never populates `packages`: removal is not an install, and
+    letting the removed names flow into `packages` would make the
+    risk/cooldown gates and OSV pre-flight query them as if they were about
+    to be installed — see the `remove` branch in `parse_uv_args` and
+    `TestUvRemoveNeverPopulatesQueries` below for the end-to-end regression
+    coverage. Only `add` extracts positionals into `packages`.
+
     All cases assert manager=="uv-project".  Structural edge cases that need
     their own assertion (end-of-options marker, sync/lock empty packages) are
     kept as dedicated test methods below the parametrized matrix.
@@ -145,27 +155,19 @@ class TestUvProjectSubcommands:
         # --- basic positionals ---
         (["add", "httpx"],                                                        ["httpx"]),
         (["add", "httpx", "rich"],                                                ["httpx", "rich"]),
-        (["remove", "httpx"],                                                     ["httpx"]),
-        (["remove", "httpx", "rich"],                                             ["httpx", "rich"]),
         # --- boolean flags stripped ---
         (["add", "--dev", "httpx"],                                               ["httpx"]),
         (["add", "httpx", "--dev"],                                               ["httpx"]),
-        (["remove", "--dev", "httpx"],                                            ["httpx"]),
-        (["remove", "httpx", "--dev"],                                            ["httpx"]),
         # --- value-consuming flags (space-separated form) ---
         (["add", "--index-url", "https://pypi.org/simple", "httpx"],             ["httpx"]),
         (["add", "httpx", "--extra", "security"],                                 ["httpx"]),
-        (["remove", "--package", "mylib", "httpx"],                               ["httpx"]),
-        (["remove", "httpx", "--package", "mylib"],                               ["httpx"]),
         (["add", "--group", "dev", "httpx"],                                      ["httpx"]),
-        (["remove", "--group", "dev", "httpx"],                                   ["httpx"]),
         (["add", "--marker", "python_version>='3.11'", "httpx"],                  ["httpx"]),
         (["add", "-r", "requirements.txt", "httpx"],                              ["httpx"]),
         (["add", "--script", "myscript.py", "httpx"],                             ["httpx"]),
         (["add", "--upgrade-package", "rich", "httpx"],                           ["httpx"]),
         # --- equals-form flags (single token, value must not bleed) ---
         (["add", "--index-url=https://pypi.org/simple", "httpx"],                 ["httpx"]),
-        (["remove", "--python=3.12", "httpx"],                                    ["httpx"]),
         # --- combined short flag (single token, no value consumed) ---
         (["add", "-p3.12", "httpx"],                                              ["httpx"]),
         # --- package sandwiched between flags ---
@@ -177,6 +179,26 @@ class TestUvProjectSubcommands:
         assert result.manager == "uv-project"
         assert result.packages == expected
 
+    @pytest.mark.parametrize("argv_suffix", [
+        ["remove", "httpx"],
+        ["remove", "httpx", "rich"],
+        ["remove", "--dev", "httpx"],
+        ["remove", "httpx", "--dev"],
+        ["remove", "--package", "mylib", "httpx"],
+        ["remove", "httpx", "--package", "mylib"],
+        ["remove", "--group", "dev", "httpx"],
+        ["remove", "--python=3.12", "httpx"],
+        ["remove", "--", "httpx"],
+    ])
+    def test_remove_never_populates_packages(self, argv_suffix):
+        # Removal is not an install: the removed names must never surface in
+        # `packages`, regardless of how they're positioned among flags.
+        result = parse_uv_args(["uv"] + argv_suffix)
+        assert result is not None
+        assert result.manager == "uv-project"
+        assert result.packages == []
+        assert result.is_lockfile_install is False
+
     def test_add_end_of_options_marker(self):
         # Tokens after -- are positionals even if they look like flags.
         result = parse_uv_args(["uv", "add", "--dev", "--", "httpx", "--not-a-flag"])
@@ -184,23 +206,29 @@ class TestUvProjectSubcommands:
         assert result.manager == "uv-project"
         assert result.packages == ["httpx", "--not-a-flag"]
 
-    def test_remove_end_of_options_marker(self):
-        result = parse_uv_args(["uv", "remove", "--", "httpx"])
-        assert result is not None
-        assert result.manager == "uv-project"
-        assert result.packages == ["httpx"]
-
     def test_sync_returns_empty_packages(self):
         result = parse_uv_args(["uv", "sync"])
         assert result is not None
         assert result.manager == "uv-project"
         assert result.packages == []
+        assert result.is_lockfile_install is True
 
     def test_lock_returns_empty_packages(self):
         result = parse_uv_args(["uv", "lock"])
         assert result is not None
         assert result.manager == "uv-project"
         assert result.packages == []
+
+    def test_lock_is_not_a_lockfile_install(self):
+        """REGRESSION: `uv lock` only regenerates uv.lock from pyproject.toml
+        (a fresh resolution) — it installs nothing and doesn't even read the
+        existing lock file. It was grouped with `sync` and marked
+        is_lockfile_install=True, so the pre-flight gates scanned the
+        current (about-to-be-replaced) uv.lock as if its contents were being
+        installed."""
+        result = parse_uv_args(["uv", "lock"])
+        assert result is not None
+        assert result.is_lockfile_install is False
 
     def test_add_req_files_captured(self):
         # -r/--requirements value must be recorded in req_files (not treated as a package).
@@ -722,6 +750,156 @@ def test_pip_full_path_recognized():
     assert result.packages == ["requests"]
 
 
+class TestUvPipSync:
+    """REGRESSION (P1): `uv pip sync <SRC_FILE>...` installs the packages
+    listed in the given requirements/pylock files (uv's own docs) — it used
+    to fall through to the `("run", "python", ..., "pip", "venv")` catch-all
+    (matched on `subcmd == "pip"` alone, without checking the sub-subcommand)
+    and return an empty ParsedInstall with no req_files at all, so risk,
+    cooldown, and OSV pre-flight all received zero queries for a real
+    install."""
+
+    def test_single_src_file_captured_as_req_file(self):
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt"])
+        assert result is not None
+        assert result.manager == "uv"
+        assert result.req_files == ["requirements.txt"]
+        assert result.packages == []
+
+    def test_multiple_src_files_all_captured(self):
+        result = parse_uv_args(["uv", "pip", "sync", "base.txt", "dev.txt"])
+        assert result is not None
+        assert result.req_files == ["base.txt", "dev.txt"]
+
+    def test_constraints_flag_value_not_treated_as_src_file(self):
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt", "-c", "constraints.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_constraints_long_flag_value_not_treated_as_src_file(self):
+        result = parse_uv_args(["uv", "pip", "sync", "--constraints", "constraints.txt", "requirements.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_boolean_flags_not_treated_as_src_files(self):
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt", "--require-hashes"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_no_index_before_src_file_does_not_consume_it(self):
+        """REGRESSION (P1): `--no-index` is a boolean flag with no value of
+        its own (uv's own docs) — it was wrongly listed among
+        value-consuming flags, so `uv pip sync --no-index requirements.txt`
+        treated "requirements.txt" as --no-index's argument and skipped it,
+        producing req_files=[] and bypassing risk/cooldown/OSV checks
+        entirely for a valid sync."""
+        result = parse_uv_args(["uv", "pip", "sync", "--no-index", "requirements.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_no_index_after_src_file_does_not_consume_next_token(self):
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt", "--no-index", "dev.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt", "dev.txt"]
+
+    def test_should_gate_true_by_default(self):
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt"])
+        assert result is not None
+        assert result.should_gate is True
+
+    def test_dry_run_should_not_gate(self):
+        """`--dry-run` resolves dependencies and prints the plan without
+        actually installing anything (uv's own docs)."""
+        result = parse_uv_args(["uv", "pip", "sync", "requirements.txt", "--dry-run"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+        assert result.should_gate is False
+
+
+class TestUvSystemPythonTarget:
+    """REGRESSION (P1): `uv pip sync`/`uv pip install --system` (or the
+    equivalent UV_SYSTEM_PYTHON env var) switches uv's own interpreter
+    discovery from "searching in virtual environments" to "searching in
+    search path or managed installations" — verified empirically (`uv pip
+    sync -v`) that this explicitly ignores an active VIRTUAL_ENV. Without
+    detecting this, `_discover_target_python_version` kept prioritizing
+    VIRTUAL_ENV, so `uv pip sync --system pylock.toml` with an active venv
+    evaluated packages.marker against the wrong (venv, not system) Python
+    version entirely."""
+
+    def test_pip_sync_system_flag_sets_is_system_python_target(self):
+        result = parse_uv_args(["uv", "pip", "sync", "pylock.toml", "--system"])
+        assert result is not None
+        assert result.is_system_python_target is True
+
+    def test_pip_install_system_flag_sets_is_system_python_target(self):
+        result = parse_uv_args(["uv", "pip", "install", "--system", "requests"])
+        assert result is not None
+        assert result.is_system_python_target is True
+
+    def test_no_system_flag_defaults_to_false(self):
+        result = parse_uv_args(["uv", "pip", "sync", "pylock.toml"])
+        assert result is not None
+        assert result.is_system_python_target is False
+
+    def test_uv_system_python_env_var_truthy_values(self, monkeypatch):
+        """REGRESSION (P1): uv's complete boolean vocabulary for
+        UV_SYSTEM_PYTHON, verified empirically against uv 0.12.2 (`uv pip
+        sync -v` DEBUG output) — "1"/"true"/"yes"/"on"/"y"/"t" all switch
+        interpreter discovery to system mode, case-insensitively. Only
+        checking "1"/"true"/"yes" left "on"/"y"/"t" (and their case
+        variants) undetected, so is_system_python_target stayed False and
+        marker evaluation could fall back to an active venv instead of the
+        system target for those forms."""
+        for value in (
+            "1", "true", "TRUE", "True", "yes", "Yes", "YES",
+            "on", "On", "ON", "y", "Y", "t", "T",
+        ):
+            monkeypatch.setenv("UV_SYSTEM_PYTHON", value)
+            result = parse_uv_args(["uv", "pip", "sync", "pylock.toml"])
+            assert result is not None
+            assert result.is_system_python_target is True, f"failed for {value!r}"
+
+    def test_uv_system_python_env_var_falsy_values(self, monkeypatch):
+        for value in (
+            "0", "false", "False", "FALSE", "no", "No", "NO",
+            "off", "Off", "OFF", "n", "N", "f", "F",
+        ):
+            monkeypatch.setenv("UV_SYSTEM_PYTHON", value)
+            result = parse_uv_args(["uv", "pip", "sync", "pylock.toml"])
+            assert result is not None
+            assert result.is_system_python_target is False, f"failed for {value!r}"
+
+    def test_uv_system_python_env_var_unset_defaults_to_false(self, monkeypatch):
+        monkeypatch.delenv("UV_SYSTEM_PYTHON", raising=False)
+        result = parse_uv_args(["uv", "pip", "sync", "pylock.toml"])
+        assert result is not None
+        assert result.is_system_python_target is False
+
+
+class TestUvSyncShouldGate:
+    """REGRESSION (P2): `uv sync --dry-run` performs a dry run "without
+    writing the lockfile or modifying the project environment" (uv's own
+    docs) — only `--check` was recognised as report-only, so `--dry-run`
+    was still classified as gating a real install."""
+
+    def test_dry_run_should_not_gate(self):
+        result = parse_uv_args(["uv", "sync", "--dry-run"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_check_still_should_not_gate(self):
+        result = parse_uv_args(["uv", "sync", "--check"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_bare_sync_should_gate(self):
+        result = parse_uv_args(["uv", "sync"])
+        assert result is not None
+        assert result.should_gate is True
+
+
 def test_pip3_full_path_recognized():
     result = parse_pip_args(["/usr/bin/pip3", "install", "flask"])
     assert result is not None
@@ -1110,6 +1288,1008 @@ class TestCollectRequirementsPackages:
         assert not any(n.startswith("/") for n in all_names)
         assert "requests" in [p.name for p in pinned]
 
+
+class TestIsPylockFilename:
+    """REGRESSION (P1): dispatch to the pylock TOML parser must match PEP
+    751's exact naming convention (pylock.toml or pylock.<name>.toml with a
+    dot-free <name>), not merely a `.toml` suffix — `-r`/`--requirement`
+    places no restriction on a requirements file's name or extension, so a
+    file like "requirements.toml" must still be read as requirements.txt."""
+
+    @pytest.mark.parametrize("name", [
+        "pylock.toml",
+        "pylock.dev.toml",
+        "pylock.prod.toml",
+        "pylock.test123.toml",
+    ])
+    def test_matches_pep751_names(self, name):
+        assert _is_pylock_filename(name) is True
+
+    @pytest.mark.parametrize("name", [
+        "requirements.toml",
+        "pyproject.toml",
+        "uv.toml",
+        "mypylock.toml",
+        "pylock.toml.bak",
+        "pylock.a.b.toml",
+        "pylock..toml",
+        "pylocktoml",
+        "PYLOCK.TOML",
+        "pylock.TOML",
+    ])
+    def test_rejects_non_pep751_names(self, name):
+        assert _is_pylock_filename(name) is False
+
+
+class TestCollectPylockPackages:
+    """REGRESSION (P1): `uv pip sync`/`uv pip install` accept a PEP 751
+    pylock.toml wherever a requirements.txt is accepted, but
+    collect_requirements_packages read every .toml file line-by-line as if
+    it were requirements.txt — TOML syntax like `name = "requests"` matched
+    the same pinned/unpinned regexes used for requirements lines, producing
+    bogus packages literally named "name"/"version"/"lock-version" while
+    never surfacing the real packages at all."""
+
+    # Trimmed excerpt of a real `uv pip compile --format pylock.toml` output.
+    _REAL_PYLOCK_TOML = '''\
+# This file was autogenerated by uv via the following command:
+#    uv pip compile requirements.txt --universal --format pylock.toml -o pylock.toml
+lock-version = "1.0"
+created-by = "uv"
+requires-python = ">=3.14"
+
+[[packages]]
+name = "certifi"
+version = "2026.7.22"
+sdist = { url = "https://files.pythonhosted.org/packages/a3/certifi-2026.7.22.tar.gz", hashes = { sha256 = "741e2c3b" } }
+
+[[packages]]
+name = "requests"
+version = "2.31.0"
+sdist = { url = "https://files.pythonhosted.org/packages/9d/requests-2.31.0.tar.gz", hashes = { sha256 = "942c5a75" } }
+wheels = [{ url = "https://files.pythonhosted.org/packages/70/requests-2.31.0-py3-none-any.whl", hashes = { sha256 = "58cd2187" } }]
+'''
+
+    def test_real_pylock_toml_extracts_actual_packages(self, tmp_path):
+        """The exact reported failure mode: before the fix, this file
+        produced pinned=[] and unpinned=[name, version, ...] garbage."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(self._REAL_PYLOCK_TOML)
+        pinned, unpinned = collect_requirements_packages(f)
+        names_versions = {(p.name, p.version) for p in pinned}
+        assert ("certifi", "2026.7.22") in names_versions
+        assert ("requests", "2.31.0") in names_versions
+        assert unpinned == []
+
+    def test_bogus_toml_key_names_not_recorded_as_packages(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(self._REAL_PYLOCK_TOML)
+        pinned, unpinned = collect_requirements_packages(f)
+        all_names = [p.name for p in pinned + unpinned]
+        assert "name" not in all_names
+        assert "version" not in all_names
+        assert "lock-version" not in all_names
+        assert "created-by" not in all_names
+
+    def test_pylock_dev_toml_name_variant_also_parsed_as_toml(self, tmp_path):
+        # PEP 751 also allows pylock.<name>.toml (e.g. pylock.dev.toml).
+        f = tmp_path / "pylock.dev.toml"
+        f.write_text(self._REAL_PYLOCK_TOML)
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "requests" and p.version == "2.31.0" for p in pinned)
+
+    def test_package_without_version_is_unpinned(self, tmp_path):
+        # A VCS/directory/archive-sourced entry has no PyPI version string.
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "mylocalpkg"\n'
+            'directory = { path = "../mylocalpkg" }\n'
+        )
+        pinned, unpinned = collect_requirements_packages(f)
+        assert pinned == []
+        assert any(p.name == "mylocalpkg" and p.version is None for p in unpinned)
+
+    def test_malformed_toml_does_not_raise(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text("this is not valid toml [[[\n")
+        pinned, unpinned = collect_requirements_packages(f)
+        assert pinned == []
+        assert unpinned == []
+
+    def test_missing_toml_file_returns_empty(self, tmp_path):
+        pinned, unpinned = collect_requirements_packages(tmp_path / "pylock.toml")
+        assert pinned == []
+        assert unpinned == []
+
+    def test_requirements_txt_still_parsed_as_text_not_toml(self, tmp_path):
+        # Regression guard: only a PEP 751 pylock filename is dispatched to
+        # the pylock parser — a plain .txt file must still go through the
+        # requirements.txt path.
+        f = tmp_path / "requirements.txt"
+        f.write_text("requests==2.31.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "requests" and p.version == "2.31.0" for p in pinned)
+
+    def test_requirements_toml_is_not_treated_as_pylock(self, tmp_path):
+        """REGRESSION (P1 follow-up): dispatch was keyed on any `.toml`
+        suffix, not the PEP 751 filename convention. `-r`/`--requirement`
+        places no restriction on the requirements file's name or extension,
+        so a real requirements file merely named "requirements.toml" was
+        misrouted to the pylock parser (which found no [[packages]] table
+        and returned zero packages), silently bypassing risk/cooldown/OSV
+        checks for a valid `pip install -r requirements.toml`."""
+        f = tmp_path / "requirements.toml"
+        f.write_text("requests==2.31.0\nflask==3.0.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        names_versions = {(p.name, p.version) for p in pinned}
+        assert ("requests", "2.31.0") in names_versions
+        assert ("flask", "3.0.0") in names_versions
+
+    def test_similarly_named_toml_file_not_treated_as_pylock(self, tmp_path):
+        # "mypylock.toml" / "pylock.toml.bak"-shaped names must not match —
+        # only the exact PEP 751 convention should dispatch to the TOML parser.
+        f = tmp_path / "mypylock.toml"
+        f.write_text("requests==2.31.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "requests" and p.version == "2.31.0" for p in pinned)
+
+    def test_pylock_multi_dot_name_not_treated_as_pylock(self, tmp_path):
+        # PEP 751 requires the <name> segment to be dot-free; "a.b" has a dot.
+        f = tmp_path / "pylock.a.b.toml"
+        f.write_text("requests==2.31.0\n")
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "requests" and p.version == "2.31.0" for p in pinned)
+
+
+class TestCollectPylockPackagesMarkers:
+    """REGRESSION (P1): PEP 751's installation algorithm requires "If
+    packages.marker is specified, check if it is satisfied; if it isn't,
+    skip to the next package." A universal (multi-platform) pylock.toml —
+    the common case, e.g. `uv pip compile --universal` — routinely contains
+    mutually-exclusive platform variants (verified against a real
+    `uv pip compile --universal --format pylock.toml` run: a Windows-only
+    dependency like colorama gets `marker = "sys_platform == 'win32'"`).
+    Without evaluating packages.marker, every entry was queried regardless
+    of platform, so a vulnerable Windows-only package could incorrectly
+    block `uv pip sync` on Linux even though uv itself would never install
+    it there. Markers below use conditions that are unambiguously
+    true/false on every platform (python_version, a nonexistent platform
+    name) so these tests are portable across CI runners."""
+
+    def test_unsatisfied_marker_package_is_excluded(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "windows-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "sys_platform == \'nonexistent-platform-xyz\'"\n'
+        )
+        pinned, unpinned = collect_requirements_packages(f)
+        assert pinned == []
+        assert unpinned == []
+
+    def test_satisfied_marker_package_is_included(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "always-present-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version >= \'3.0\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "always-present-pkg" and p.version == "1.0.0" for p in pinned)
+
+    def test_package_without_marker_is_always_included(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "unconditional-pkg"\n'
+            'version = "1.0.0"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "unconditional-pkg" for p in pinned)
+
+    def test_mixed_universal_lockfile_only_returns_satisfied_packages(self, tmp_path):
+        """The exact scenario reported: a universal pylock with mutually
+        exclusive platform variants must only surface the ones satisfied on
+        this environment."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "cross-platform-pkg"\n'
+            'version = "1.0.0"\n\n'
+            '[[packages]]\n'
+            'name = "windows-only-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "sys_platform == \'nonexistent-platform-xyz\'"\n\n'
+            '[[packages]]\n'
+            'name = "always-satisfied-pkg"\n'
+            'version = "3.0.0"\n'
+            'marker = "python_version >= \'3.0\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        names = {p.name for p in pinned}
+        assert names == {"cross-platform-pkg", "always-satisfied-pkg"}
+        assert "windows-only-pkg" not in names
+
+    def test_malformed_marker_fails_open(self, tmp_path):
+        """An unparseable marker must not silently drop the package — fail
+        open (still scan it) rather than fail closed (silently skip a real
+        dependency and lose OSV/risk coverage on it)."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "badmarker-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "this is not [[[ a valid marker"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "badmarker-pkg" and p.version == "1.0.0" for p in pinned)
+
+    def test_undefined_comparison_marker_fails_open_instead_of_crashing(self, tmp_path):
+        """REGRESSION (P2): `python_version ~= 'dog'` parses successfully as
+        a well-formed marker (InvalidMarker is not raised), but evaluating
+        it raises UndefinedComparison — packaging.markers.Marker.evaluate()
+        applies `~=` to a value ('dog') that isn't a valid version, and its
+        own docstring documents this as a distinct raise from
+        UndefinedEnvironmentName. Only the latter was caught, so this
+        scenario propagated uncaught and aborted the whole pylock scan
+        (collect_requirements_packages and every caller) instead of failing
+        open on the one malformed entry, exactly like any other
+        unparseable marker."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "bad-comparison-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version ~= \'dog\'"\n\n'
+            '[[packages]]\n'
+            'name = "unaffected-pkg"\n'
+            'version = "2.0.0"\n'
+        )
+        # Must not raise — this call crashing (instead of returning) is the
+        # exact reported failure mode.
+        pinned, _ = collect_requirements_packages(f)
+        names_versions = {(p.name, p.version) for p in pinned}
+        assert ("bad-comparison-pkg", "1.0.0") in names_versions
+        assert ("unaffected-pkg", "2.0.0") in names_versions
+
+    def test_unpinned_package_with_unsatisfied_marker_is_excluded(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "windows-only-vcs-pkg"\n'
+            'marker = "sys_platform == \'nonexistent-platform-xyz\'"\n'
+            'directory = { path = "../winpkg" }\n'
+        )
+        pinned, unpinned = collect_requirements_packages(f)
+        assert pinned == []
+        assert unpinned == []
+
+    def test_unselected_extra_marker_package_is_excluded(self, tmp_path):
+        """REGRESSION (P2): PEP 751 requires evaluating packages.marker in
+        the lock_file context, where `extras` defaults to the empty set
+        (matching the spec's install algorithm default: "extras SHOULD be
+        set to the empty set by default"). Evaluating with packaging's
+        default "metadata" context instead left `extras`/`dependency_groups`
+        undefined, so this marker raised UndefinedEnvironmentName and the
+        fail-open handler incorrectly retained a package that a real `uv
+        pip sync pylock.toml` (no --extra flag) would never install."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "dev-extra-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'dev\' in extras"\n'
+        )
+        pinned, unpinned = collect_requirements_packages(f)
+        assert pinned == []
+        assert unpinned == []
+
+    def test_unselected_dependency_group_marker_package_is_excluded(self, tmp_path):
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "testing-group-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'testing\' in dependency_groups"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert pinned == []
+
+    def test_package_without_extras_marker_is_still_included(self, tmp_path):
+        # Control: an unconditional package alongside extras-gated ones must
+        # still surface, confirming the fix doesn't over-exclude.
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "core-pkg"\n'
+            'version = "2.0.0"\n\n'
+            '[[packages]]\n'
+            'name = "dev-extra-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'dev\' in extras"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        names = {p.name for p in pinned}
+        assert names == {"core-pkg"}
+
+    def test_nonstandard_singular_extra_marker_fails_open(self, tmp_path):
+        """`extra == 'dev'` (PEP 508's singular, metadata-only variable) is
+        not a valid lock_file-context marker per PEP 751 (which uses the
+        plural, set-valued `extras`) — it still raises
+        UndefinedEnvironmentName under context="lock_file" and must keep
+        failing open (retained, not silently dropped) like any other
+        unparseable/unresolvable marker."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "legacy-extra-marker-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "extra == \'dev\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "legacy-extra-marker-pkg" and p.version == "1.0.0" for p in pinned)
+
+    def test_default_group_marker_package_is_included_on_bare_sync(self, tmp_path):
+        """REGRESSION (P1): PEP 751's install algorithm requires
+        "dependency_groups SHOULD be the set created from default-groups by
+        default" — the top-level default-groups key (not a CLI flag)
+        represents what a *bare* sync/install pulls in implicitly (the
+        key's own doc: "meant to be used in situations where
+        packages.marker necessitates such a group to exist"). Without
+        seeding dependency_groups from it, a package marked e.g. `marker =
+        "'runtime' in dependency_groups"` was omitted from every gate even
+        though a bare `uv pip sync pylock.toml` (no --group flag at all)
+        genuinely installs it — contradicting the documented claim that a
+        bare sync is fully scanned."""
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n'
+            'default-groups = ["runtime"]\n\n'
+            '[[packages]]\n'
+            'name = "runtime-group-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'runtime\' in dependency_groups"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert any(p.name == "runtime-group-pkg" and p.version == "1.0.0" for p in pinned)
+
+    def test_non_default_group_marker_package_still_excluded(self, tmp_path):
+        # A group named in default-groups is seeded; one that isn't must
+        # still require an explicit --group selection (out of scope here).
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n'
+            'default-groups = ["runtime"]\n\n'
+            '[[packages]]\n'
+            'name = "runtime-group-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'runtime\' in dependency_groups"\n\n'
+            '[[packages]]\n'
+            'name = "dev-group-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "\'dev\' in dependency_groups"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        names = {p.name for p in pinned}
+        assert names == {"runtime-group-pkg"}
+
+    def test_absent_default_groups_key_still_excludes_group_marker_package(self, tmp_path):
+        # Regression guard: no default-groups key at all must still default
+        # dependency_groups to the empty set, not silently include everything.
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "dev-group-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "\'dev\' in dependency_groups"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert pinned == []
+
+    def test_malformed_default_groups_key_falls_back_to_empty_set(self, tmp_path):
+        # A default-groups key that isn't an array of strings must not crash
+        # or be trusted — fall back to packaging's own empty-set default.
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n'
+            'default-groups = "runtime"\n\n'
+            '[[packages]]\n'
+            'name = "runtime-group-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "\'runtime\' in dependency_groups"\n'
+        )
+        pinned, _ = collect_requirements_packages(f)
+        assert pinned == []
+
+
+class TestDiscoverTargetPythonVersion:
+    """REGRESSION (P1): a bare `uv pip sync`/`uv pip install` (no
+    --python/--python-version flag) does not target package-alert's own
+    running interpreter — verified empirically against a real `uv` install
+    (`uv pip sync -v`'s own DEBUG output: "Searching for default Python
+    interpreter in virtual environments") to resolve, in order,
+    VIRTUAL_ENV, then CONDA_PREFIX, then a `.venv` found by walking up from
+    cwd. If package-alert runs under a different Python than that target —
+    the common case whenever a project's `.venv` pins a version other than
+    package-alert's own — a marker like `python_version == '3.12'` must be
+    evaluated against the target's version, not package-alert's, or a real
+    dependency the sync installs is silently excluded from every gate.
+
+    Every test here explicitly monkeypatches VIRTUAL_ENV/CONDA_PREFIX
+    (delenv'd first) since the pytest process itself may be running with
+    its own VIRTUAL_ENV set — see feedback_test_patterns for the
+    delenv-based env-var isolation this session already uses elsewhere.
+    """
+
+    def _write_pyvenv_cfg(self, venv_dir, *, version_info=None, version=None):
+        venv_dir.mkdir(parents=True, exist_ok=True)
+        lines = []
+        if version_info is not None:
+            lines.append(f"version_info = {version_info}")
+        if version is not None:
+            lines.append(f"version = {version}")
+        (venv_dir / "pyvenv.cfg").write_text("\n".join(lines) + "\n")
+
+    def _write_conda_meta(self, env_dir, *, python_version, build="h8ab3286_2_cpython", extra_packages=()):
+        # Matches the real structure verified against a `micromamba create`
+        # environment: no pyvenv.cfg at all, one JSON record per installed
+        # package under conda-meta/, each with top-level name/version keys.
+        import json
+
+        meta_dir = env_dir / "conda-meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        (meta_dir / f"python-{python_version}-{build}.json").write_text(
+            json.dumps({"name": "python", "version": python_version})
+        )
+        for name, version in extra_packages:
+            (meta_dir / f"{name}-{version}-0.json").write_text(
+                json.dumps({"name": name, "version": version})
+            )
+
+    def test_virtual_env_pyvenv_cfg_short_version_info_key(self, tmp_path, monkeypatch):
+        # uv venv writes the short `version_info` key (e.g. "3.12").
+        venv_dir = tmp_path / "target_venv"
+        self._write_pyvenv_cfg(venv_dir, version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py312-only-pkg" for p in pinned)
+
+    def test_virtual_env_pyvenv_cfg_full_version_key(self, tmp_path, monkeypatch):
+        # stdlib `venv` writes the full `version` key (e.g. "3.13.1").
+        venv_dir = tmp_path / "target_venv"
+        self._write_pyvenv_cfg(venv_dir, version="3.13.1")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py313-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.13\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py313-only-pkg" for p in pinned)
+
+    def test_target_version_excludes_package_alert_own_version(self, tmp_path, monkeypatch):
+        """The exact reported scenario: package-alert running under one
+        Python (simulated here as 3.99, guaranteed not to match) while the
+        target venv pins a different version (3.12) — a package gated on
+        package-alert's own version must be excluded, since that is not
+        what will actually be installed."""
+        venv_dir = tmp_path / "target_venv"
+        self._write_pyvenv_cfg(venv_dir, version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "runs-on-3.12-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n\n'
+            '[[packages]]\n'
+            'name = "runs-on-3.99-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.99\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        names = {p.name for p in pinned}
+        assert names == {"runs-on-3.12-pkg"}
+
+    def test_conda_prefix_takes_precedence_when_virtual_env_absent(self, tmp_path, monkeypatch):
+        conda_env = tmp_path / "conda_env"
+        self._write_conda_meta(conda_env, python_version="3.11.15")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py311-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py311-only-pkg" for p in pinned)
+
+    def test_virtual_env_takes_precedence_over_conda_prefix(self, tmp_path, monkeypatch):
+        virtual_env_dir = tmp_path / "venv_target"
+        conda_dir = tmp_path / "conda_target"
+        self._write_pyvenv_cfg(virtual_env_dir, version_info="3.12")
+        self._write_conda_meta(conda_dir, python_version="3.11.15")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(virtual_env_dir))
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n\n'
+            '[[packages]]\n'
+            'name = "py311-only-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        names = {p.name for p in pinned}
+        assert names == {"py312-only-pkg"}
+
+    def test_local_venv_discovered_by_walking_up_from_cwd(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        self._write_pyvenv_cfg(project_dir / ".venv", version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+        f = project_dir / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=project_dir)
+        assert any(p.name == "py312-only-pkg" for p in pinned)
+
+    def test_local_venv_discovered_from_a_subdirectory(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        subdir = project_dir / "subdir"
+        subdir.mkdir(parents=True)
+        self._write_pyvenv_cfg(project_dir / ".venv", version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+        f = subdir / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=subdir)
+        assert any(p.name == "py312-only-pkg" for p in pinned)
+
+    def test_virtual_env_takes_precedence_over_local_venv(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "project"
+        self._write_pyvenv_cfg(project_dir / ".venv", version_info="3.12")
+        env_venv = tmp_path / "active_env"
+        self._write_pyvenv_cfg(env_venv, version_info="3.13")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(env_venv))
+
+        f = project_dir / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py313-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.13\'"\n\n'
+            '[[packages]]\n'
+            'name = "py312-only-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=project_dir)
+        names = {p.name for p in pinned}
+        assert names == {"py313-only-pkg"}
+
+    def test_no_venv_discoverable_anywhere_leaves_marker_environment_unset(self, tmp_path, monkeypatch):
+        # No VIRTUAL_ENV/CONDA_PREFIX, no .venv anywhere under tmp_path —
+        # must not crash, and must fall back to evaluating without a
+        # python_version override (package-alert's own interpreter).
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "unconditional-pkg"\n'
+            'version = "1.0.0"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "unconditional-pkg" for p in pinned)
+
+    def test_malformed_pyvenv_cfg_falls_back_gracefully(self, tmp_path, monkeypatch):
+        venv_dir = tmp_path / "broken_venv"
+        venv_dir.mkdir()
+        (venv_dir / "pyvenv.cfg").write_text("not a valid = key = value line\ngarbage\n")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "unconditional-pkg"\n'
+            'version = "1.0.0"\n'
+        )
+        # Must not raise despite the malformed pyvenv.cfg.
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "unconditional-pkg" for p in pinned)
+
+    def test_conda_prefix_read_from_conda_meta_not_pyvenv_cfg(self, tmp_path, monkeypatch):
+        """REGRESSION (P1): a real conda/mamba environment has no
+        pyvenv.cfg at all (verified against a `micromamba create -p ./env
+        python=3.11` environment) — its Python version instead lives in
+        conda-meta/python-<version>-<build>.json. The discovery function
+        used to call the venv-only pyvenv.cfg reader for CONDA_PREFIX too,
+        so an active conda environment's version was never actually read."""
+        conda_env = tmp_path / "conda_env"
+        self._write_conda_meta(conda_env, python_version="3.11.15")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py311-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py311-only-pkg" for p in pinned)
+
+    def test_conda_meta_python_dateutil_not_mistaken_for_interpreter(self, tmp_path, monkeypatch):
+        """A conda-forge package literally named `python-dateutil` (a real,
+        common package) produces a conda-meta/python-*.json file too — the
+        filename alone must not be trusted; only a record whose own "name"
+        field is exactly "python" may supply the interpreter version."""
+        conda_env = tmp_path / "conda_env"
+        self._write_conda_meta(
+            conda_env, python_version="3.11.15",
+            extra_packages=[("python-dateutil", "2.9.0")],
+        )
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py311-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py311-only-pkg" for p in pinned)
+
+    def test_conda_only_has_python_dateutil_no_real_interpreter_record(self, tmp_path, monkeypatch):
+        """Defensive: if somehow only the dateutil-shaped file exists (no
+        real python package record), "2.9.0" must never be mistaken for the
+        interpreter version. CONDA_PREFIX is still positively selected
+        here, so the correct outcome per the target-version-unknown fix is
+        fail-open retention (see test_unreadable_conda_prefix_...), not
+        silent exclusion — package-alert genuinely doesn't know this
+        conda environment's real Python version and must not guess."""
+        conda_env = tmp_path / "conda_env"
+        meta_dir = conda_env / "conda-meta"
+        meta_dir.mkdir(parents=True)
+        import json
+        (meta_dir / "python-dateutil-2.9.0-pyhd8ed1ab_0.json").write_text(
+            json.dumps({"name": "python-dateutil", "version": "2.9.0"})
+        )
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py-two-nine-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'2.9\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        assert any(p.name == "py-two-nine-only-pkg" for p in pinned)
+
+    def test_active_conda_env_excludes_project_venv_marker(self, tmp_path, monkeypatch):
+        """The exact reported scenario: an active conda environment (3.11)
+        alongside a project .venv pinning a different version (3.12). uv
+        gives CONDA_PREFIX precedence over a discovered .venv, so a package
+        marked for the venv's version must NOT be included, and one marked
+        for the conda environment's actual version must be."""
+        conda_env = tmp_path / "conda_env"
+        self._write_conda_meta(conda_env, python_version="3.11.15")
+        self._write_pyvenv_cfg(tmp_path / ".venv", version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py311-conda-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n\n'
+            '[[packages]]\n'
+            'name = "py312-venv-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        names = {p.name for p in pinned}
+        assert names == {"py311-conda-pkg"}
+
+    def test_unreadable_conda_prefix_does_not_fall_through_to_local_venv(self, tmp_path, monkeypatch):
+        """REGRESSION (P1): once CONDA_PREFIX is set, its version lookup
+        must be terminal — a set-but-unreadable conda environment (no
+        conda-meta at all here) must NOT fall through to a lower-priority
+        .venv discovery, since uv itself already committed to CONDA_PREFIX
+        as the active environment and would never silently prefer a
+        different location. Both packages below are gated on a
+        python_version marker, so both must be retained by fail-open
+        (target version unknown) — if the fallthrough bug were reintroduced
+        and the .venv's 3.12 were silently adopted, only the 3.12-marked
+        package would survive, distinguishing the two failure modes."""
+        broken_conda_env = tmp_path / "broken_conda_env"
+        broken_conda_env.mkdir()  # no conda-meta directory at all
+        self._write_pyvenv_cfg(tmp_path / ".venv", version_info="3.12")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(broken_conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-venv-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n\n'
+            '[[packages]]\n'
+            'name = "py311-other-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        # Both retained (fail-open, target unknown) — NOT just the 3.12 one,
+        # which is what a silent .venv fallthrough would have produced.
+        names = {p.name for p in pinned}
+        assert names == {"py312-venv-pkg", "py311-other-pkg"}
+
+    def test_unreadable_virtual_env_is_target_version_unknown_not_none(self, tmp_path, monkeypatch):
+        """REGRESSION (P1): a set-but-unreadable VIRTUAL_ENV must return the
+        _TARGET_VERSION_UNKNOWN sentinel, distinct from None. Conflating
+        the two (both previously returned None) let the caller fall back
+        to evaluating markers against package-alert's own interpreter —
+        an arbitrary, unrelated Python version — instead of recognising
+        that a target WAS selected and its version is simply unknown."""
+        from packagealert.parsers.lockfiles import (
+            _TARGET_VERSION_UNKNOWN,
+            _discover_target_python_version,
+        )
+
+        broken_venv = tmp_path / "broken_venv"
+        broken_venv.mkdir()  # no pyvenv.cfg at all
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(broken_venv))
+
+        result = _discover_target_python_version(tmp_path)
+        assert result is _TARGET_VERSION_UNKNOWN
+        assert result is not None
+
+    def test_no_target_anywhere_returns_none_not_the_sentinel(self, tmp_path, monkeypatch):
+        # The genuine "nothing applies" case must stay distinct from the
+        # sentinel too, so the caller keeps its existing safe fallback
+        # (package-alert's own interpreter) rather than treating every
+        # bare invocation as target-unknown.
+        from packagealert.parsers.lockfiles import (
+            _TARGET_VERSION_UNKNOWN,
+            _discover_target_python_version,
+        )
+
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+        result = _discover_target_python_version(tmp_path)
+        assert result is None
+        assert result is not _TARGET_VERSION_UNKNOWN
+
+    def test_existing_but_unreadable_local_venv_is_terminal_too(self, tmp_path, monkeypatch):
+        """A .venv directory found during walk-up IS the target (uv doesn't
+        keep searching parent directories for a different one once it
+        finds one) — so an unreadable pyvenv.cfg inside it must also
+        become target-unknown, not silently continue walking up to a
+        parent .venv."""
+        project_dir = tmp_path / "project"
+        (project_dir / ".venv").mkdir(parents=True)  # exists, but no pyvenv.cfg
+        # A parent .venv that IS readable — must NOT be adopted instead.
+        self._write_pyvenv_cfg(tmp_path / ".venv", version_info="3.10")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+
+        f = project_dir / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py310-parent-venv-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.10\'"\n\n'
+            '[[packages]]\n'
+            'name = "py311-other-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=project_dir)
+        # Both retained (fail-open) — the parent's 3.10 must NOT be
+        # silently adopted just because the nearer .venv was unreadable.
+        names = {p.name for p in pinned}
+        assert names == {"py310-parent-venv-pkg", "py311-other-pkg"}
+
+    def test_target_unknown_still_evaluates_non_version_markers_normally(self, tmp_path, monkeypatch):
+        """Only python_version/python_full_version markers must fail open
+        when the target's version is unknown — a platform/extras/
+        dependency-group marker has nothing to do with the unresolved
+        Python version and must still be evaluated for real."""
+        broken_conda_env = tmp_path / "broken_conda_env"
+        broken_conda_env.mkdir()  # no conda-meta at all
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("CONDA_PREFIX", str(broken_conda_env))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "windows-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "sys_platform == \'nonexistent-platform-xyz\'"\n\n'
+            '[[packages]]\n'
+            'name = "unconditional-pkg"\n'
+            'version = "2.0.0"\n\n'
+            '[[packages]]\n'
+            'name = "unknown-version-pkg"\n'
+            'version = "3.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(f, allowed_root=tmp_path)
+        names = {p.name for p in pinned}
+        # windows-only-pkg's platform marker is still genuinely evaluated
+        # and correctly excludes it; the version-dependent marker fails
+        # open instead of guessing.
+        assert names == {"unconditional-pkg", "unknown-version-pkg"}
+
+    def test_marker_references_python_version_ignores_string_literal_match(self):
+        from packagealert.parsers.lockfiles import _marker_references_python_version
+
+        assert _marker_references_python_version("python_version == '3.12'") is True
+        assert _marker_references_python_version("python_full_version >= '3.10'") is True
+        assert _marker_references_python_version("sys_platform == 'python_version'") is False
+        assert _marker_references_python_version("'dev' in extras") is False
+
+    def test_system_python_target_retains_version_marked_package_despite_active_venv(self, tmp_path, monkeypatch):
+        """REGRESSION (P1): the exact reported scenario — an active Python
+        3.12 venv (VIRTUAL_ENV set) alongside `uv pip sync --system
+        pylock.toml` targeting the system Python (3.11 in the report's
+        example). uv's own --system discovery ignores VIRTUAL_ENV entirely
+        (verified empirically), so a package marked for the system's real
+        version must be retained (fail-open, target unknown) rather than
+        excluded by evaluating against the active venv's version."""
+        venv_dir = tmp_path / ".venv"
+        venv_dir.mkdir()
+        (venv_dir / "pyvenv.cfg").write_text("version_info = 3.12\n")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py311-system-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n\n'
+            '[[packages]]\n'
+            'name = "py312-venv-only-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(
+            f, allowed_root=tmp_path, is_system_python_target=True
+        )
+        # Both retained (fail-open, target unknown) — NOT just the 3.12
+        # one, which is what evaluating against the active venv would give.
+        names = {p.name for p in pinned}
+        assert names == {"py311-system-only-pkg", "py312-venv-only-pkg"}
+
+    def test_system_python_target_false_still_uses_venv_discovery(self, tmp_path, monkeypatch):
+        # Control: without is_system_python_target, the active venv's
+        # version must still be used normally (regression guard for the
+        # existing VIRTUAL_ENV-discovery fix).
+        venv_dir = tmp_path / ".venv"
+        venv_dir.mkdir()
+        (venv_dir / "pyvenv.cfg").write_text("version_info = 3.12\n")
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.delenv("CONDA_PREFIX", raising=False)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv_dir))
+
+        f = tmp_path / "pylock.toml"
+        f.write_text(
+            'lock-version = "1.0"\n\n'
+            '[[packages]]\n'
+            'name = "py312-venv-only-pkg"\n'
+            'version = "1.0.0"\n'
+            'marker = "python_version == \'3.12\'"\n\n'
+            '[[packages]]\n'
+            'name = "py311-other-pkg"\n'
+            'version = "2.0.0"\n'
+            'marker = "python_version == \'3.11\'"\n'
+        )
+        pinned, _ = collect_requirements_packages(
+            f, allowed_root=tmp_path, is_system_python_target=False
+        )
+        names = {p.name for p in pinned}
+        assert names == {"py312-venv-only-pkg"}
+
+
+class TestCollectRequirementsPackagesTraversal:
     def test_absolute_include_is_rejected(self, tmp_path):
         secret = tmp_path / "secret.txt"
         secret.write_text("evil==1.0.0\n")

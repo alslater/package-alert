@@ -20,6 +20,7 @@ from packagealert.languages.base import (
     SandboxTargets,
     ShellEnvironment,
     Snapshot,
+    parse_registry_timestamp,
 )
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,11 @@ class PhpLanguage:
             manager="composer",
             packages=specs,
             defer_to_lockfile=True,
+            # composer has no removal subcommand of its own that parse_composer_args
+            # recognises (it returns None for anything but require/install/update/
+            # upgrade), so this only needs to reflect what that parser already set.
+            is_lockfile_install=parsed.is_lockfile_install,
+            should_gate=parsed.should_gate,
         )
 
     def parse_lockfile(self, path: Path) -> list[PackageSpec]:
@@ -239,7 +245,7 @@ class PhpLanguage:
         return "https://packagist.org/explore/popular.json?per_page=100"
 
     async def fetch_top_packages(self, client: httpx.AsyncClient, url: str) -> list[str] | None:
-        from packagealert.languages.base import MAX_TOP_PACKAGES, normalise_package_name
+        from packagealert.languages.base import MAX_TOP_PACKAGES
         packages: list[str] = []
         next_url: str | None = url
         while next_url and len(packages) < MAX_TOP_PACKAGES:
@@ -247,7 +253,11 @@ class PhpLanguage:
             resp.raise_for_status()
             data = resp.json()
             for pkg in data.get("packages", []):
-                packages.append(normalise_package_name(pkg["name"]))
+                # normalise_name, not the PEP-503-folding normalise_package_name:
+                # Packagist does not collapse separators, so folding a dotted
+                # vendor/package name here would store a form TyposquatDetector's
+                # later per-ecosystem normalisation could never recover.
+                packages.append(self.normalise_name(pkg["name"]))
                 if len(packages) >= MAX_TOP_PACKAGES:
                     break
             next_url = data.get("next")
@@ -288,26 +298,73 @@ class PhpLanguage:
         vendor, package = name.split("/", 1)
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
 
-    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
-        if project_path is None:
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        """Find the matching version entry in the p2 metadata document."""
+        if not isinstance(data, dict):
             return None
+        for pkg_versions in data.get("packages", {}).values():
+            for entry in pkg_versions:
+                if entry.get("version") != version:
+                    continue
+                t = entry.get("time")
+                if t:
+                    # Packagist emits a real offset ("+00:00"), so this must convert
+                    # rather than replace — a non-zero offset would otherwise skew the
+                    # package's apparent age and with it the cooldown decision.
+                    return parse_registry_timestamp(t).timestamp()
+        return None
+
+    def osv_ecosystem(self) -> str | None:
+        return "Packagist"
+
+    def normalise_name(self, name: str) -> str:
+        """Lowercase only — this registry does not collapse separators."""
+        return name.lower()
+
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> list[Path]:
+        # *version* is accepted for signature compatibility but not used:
+        # Composer installs each requirement at vendor/<vendor>/<package>, one
+        # directory per name, so a second version cannot occupy the same path and
+        # the name alone identifies the tree unambiguously. Contrast Python, where
+        # several venvs under one project can each hold a different version.
+        if project_path is None:
+            return []
         # Packagist names are always "vendor/package" — exactly one slash,
         # no traversal components, no OS path separators in either component.
         parts = package_name.split("/")
         if len(parts) != 2 or not parts[0] or not parts[1]:
-            return None
+            return []
         if any(p.startswith(".") or "\\" in p or os.sep in p for p in parts):
-            return None
+            return []
         vendor_dir = (project_path / "vendor").resolve()
         try:
             candidate = (project_path / "vendor" / parts[0] / parts[1]).resolve()
             if not candidate.is_relative_to(vendor_dir):
-                return None
+                return []
         except OSError:
-            return None
+            return []
         if not candidate.is_dir():
-            return None
-        return candidate
+            return []
+        return [candidate]
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        """vendor/<vendor>/<package> is a direct, unambiguous path —
+        resolve_package_dir above parses no manifest file to distrust, unlike
+        PyPI's RECORD. Nothing here can be corrupted to force a
+        shared-namespace-style misattribution."""
+        return None
 
     def latest_version_url(self, name: str) -> str | None:
         if "/" not in name:
@@ -315,8 +372,10 @@ class PhpLanguage:
         vendor, package = name.split("/", 1)
         return f"https://repo.packagist.org/p2/{vendor}/{package}.json"
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
         # p2 endpoint lists versions newest-first; first entry is latest.
+        if not isinstance(data, dict):
+            return None
         for versions in data.get("packages", {}).values():
             if versions:
                 return versions[0].get("version") or None

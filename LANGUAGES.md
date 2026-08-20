@@ -8,9 +8,24 @@ package-alert supports multiple package ecosystems through **language modules** 
 
 All language modules must satisfy the `LanguageBase` protocol defined in [`packagealert/languages/base.py`](packagealert/languages/base.py).
 
+### Ecosystems are registry-driven
+
+Whatever a module declares in `ecosystems` becomes a first-class ecosystem across the whole pipeline — events, risk scoring, typosquat detection and the `pa run` gates. `normalise_ecosystem()` and `PackageEvent.ecosystem` resolve their vocabulary from the registry, so a plugin does **not** need to be added to any core list.
+
+Two rules apply:
+
+- **Matching is case-insensitive; the declared spelling is canonical.** Declaring `["crates.io"]` means `"Crates.IO"` and `"crates.io"` both resolve to `crates.io`, and that is the form stored on events and used as a cache key. Cache keys are canonicalised inside `OsvCache` rather than by its callers — there are a dozen readers and writers across the daemon, scheduler, sandbox runner and CLI, and `parsers/lockfiles.py` lowercases every ecosystem it parses, so a caller-side rule would leave `scan-project` writing `nuget` rows that `clear-cache --ecosystem NuGet` could not find.
+- **Built-ins cannot be redefined.** `pypi`, `npm` and `packagist` keep their canonical lowercase form even if a plugin declares a different casing.
+
+An ecosystem that *no* registered module claims is still rejected — that indicates a typo or a plugin that failed to load, not a supported state.
+
+> Before this was registry-driven, `PackageEvent.ecosystem` was a closed `Literal["pypi", "npm", "packagist"]`. A plugin's ecosystem parsed and scanned correctly but could never be risk-scored: every scoring entry point funnels through `normalise_ecosystem` into a `PackageEvent`, so those packages were counted as scoring failures.
+
 ### Contract Version
 
-Each module declares `contract_version: int` set to `CURRENT_CONTRACT_VERSION` (currently `4`). When a module is registered the registry checks this value:
+Each module declares `contract_version: int` — a **fixed declaration of the highest contract version this module fully implements**, checked by the registry at registration time. The current value lives in [`base.py`](packagealert/languages/base.py); the [changelog](#contract-version-changelog) at the bottom of this file records what each version added.
+
+In-tree modules ([`python.py`](packagealert/languages/python.py), [`node.py`](packagealert/languages/node.py), [`php.py`](packagealert/languages/php.py)) import `CURRENT_CONTRACT_VERSION` and assign it directly, because they are released in lockstep with the same version of package-alert that defines the constant — a contract bump and the work to implement it land in the same PR. **External plugins must not do this.** They are packaged, versioned and released independently, so an external plugin's `contract_version` must be a hardcoded integer literal matching the highest version it has actually implemented and verified — not an import of `CURRENT_CONTRACT_VERSION`. If it auto-tracks the constant, upgrading package-alert alone (without also upgrading the plugin) silently re-evaluates the plugin's declared version upward, falsely claiming compliance with hooks the plugin was never updated to implement — bypassing both the deprecation warning and the shim/adapter safety net a correctly-lower declaration would otherwise trigger, since the registry only shims/adapts a plugin declaring a version *below* the one that changed (see the table below: "Equal to current" gets no adaptation at all). When a module is registered the registry checks this value:
 
 | Declared version | Behaviour |
 |-----------------|-----------|
@@ -129,25 +144,80 @@ class LanguageBase(Protocol):
         package_name: str,
         project_path: Path | None,
         site_packages_dir: Path | None,
-    ) -> Path | None:
-        """Return the on-disk directory for an installed package, or None if not resolvable.
+        version: str | None = None,
+    ) -> list[Path]:
+        """Return every on-disk directory this distribution owns, or [] if none resolvable.
 
-        Called by the daemon after a process-monitor event so that file-content
-        heuristics can be run against the extracted package directory. Only called
-        for ``source="process"`` events — cache-monitor events fire while the
-        tarball is still in the download cache, before extraction.
+        Called by the daemon after a process-monitor event, and by
+        ``--scan-installed``, to locate the extracted package directory(ies) so
+        file-content heuristics can be run against them. Only called for
+        ``source="process"`` events — cache-monitor events fire while the tarball
+        is still in the download cache, before extraction.
+
+        Returns a *list* — plural — because a single directory is not always a
+        distribution's whole footprint. A PEP 420 implicit namespace package
+        distribution (``google-auth``) installs into more than one subdirectory
+        (``google/auth/``, ``google/oauth2/``) of a top-level directory
+        (``google/``) it does not exclusively own — sibling distributions
+        (``google-cloud-storage``) install into other subdirectories of the same
+        shared root, with no file at the shared level to mark it as shared.
+        Returning that shared root hands source-code heuristics every sibling
+        distribution's files too, misattributing one distribution's signals to
+        another. Every directory in the returned list must therefore actually
+        belong to *this* distribution and no other's.
 
         *project_path* is the cwd of the install process (the project root for
         npm/composer installs, or None if unknown). *site_packages_dir* is the
         active venv's site-packages directory (set for PyPI events when detectable,
         None otherwise).
 
-        Typical implementations:
-        - npm: ``return project_path / "node_modules" / package_name``
-        - PyPI: find the matching ``.dist-info`` dir, read ``top_level.txt``, return the importable dir
-        - Packagist: ``return project_path / "vendor" / Path(package_name)``
+        *version*, when given, must be matched as well as the name — return ``[]``
+        rather than a name-only match if that version is not present. A caller may
+        search several environments (``scan-project --scan-installed`` aggregates
+        every venv it finds) and two of them can hold different versions of one
+        package; matching on name alone returns whichever was searched first, so
+        heuristics inspect the wrong source tree and a malicious version can be
+        scored against a benign one. Accept the parameter even where your layout
+        cannot hold two versions at one path, so the signature matches the contract
+        version you declare.
 
-        Return None if the path cannot be determined. Default returns None."""
+        Typical implementations:
+        - npm: ``return [project_path / "node_modules" / package_name]`` (one
+          version per path, so *version* needs no check; ``[]`` if it doesn't exist)
+        - PyPI: find the ``.dist-info`` dir whose name **and version** match, read
+          ``RECORD``/``top_level.txt``, return every importable directory this
+          distribution's own files occupy — never a shared namespace root another
+          distribution also installs into
+        - Packagist: ``return [project_path / "vendor" / Path(package_name)]`` (one
+          version per path)
+
+        Return ``[]`` if no directory can be determined. Default returns ``[]``."""
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        """Return a risk-signal warning if this distribution's install manifest
+        could not be fully trusted while resolving its package directory.
+
+        Called with the same arguments as ``resolve_package_dir``, immediately
+        after it, on the matched distribution. Exists because
+        ``resolve_package_dir`` correctly refusing to guess a directory for an
+        unverifiable manifest (e.g. PyPI's RECORD present but unparseable) is,
+        on its own, indistinguishable from an ordinary "nothing to scan here" —
+        silently downgrading a manifest a legitimate build tool essentially
+        never produces to a clean scan. Implement this whenever your
+        ``resolve_package_dir`` consults a manifest file that could plausibly be
+        corrupted or crafted — most in-tree implementations have no such file
+        (npm/Composer resolve a direct, unambiguous path with nothing to parse)
+        and correctly return ``None`` unconditionally.
+
+        Return ``None`` when the manifest was absent, empty, or fully trusted —
+        including when this hook is simply not overridden. Default returns
+        ``None``."""
 
     # ── Installed-package scanning ─────────────────────────────────────────
     def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
@@ -200,6 +270,39 @@ class LanguageBase(Protocol):
         Return None to opt out of cooldown enforcement for this ecosystem.
         Default implementation returns None."""
 
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        """Extract a Unix publication timestamp from the publication_date_url() reply.
+
+        *data* is typed ``object``, not ``dict``: a JSON document's root is not
+        always an object — RubyGems' versions.json, for one, returns a JSON
+        array. Narrow with ``isinstance`` before indexing/iterating.
+
+        Implement this whenever you implement publication_date_url: without it the
+        cooldown policy cannot determine a package's age, so it fails open and never
+        blocks or prompts however recently the package was published.
+        Default implementation returns None."""
+
+    def osv_ecosystem(self) -> str | None:
+        """The ecosystem name OSV.dev uses, e.g. "PyPI", "npm", "Packagist".
+
+        Used to match advisory entries when extracting fixed versions. Without it
+        the raw ecosystem string is used as a best-effort fallback, so upgrade
+        advice may be missing. Default implementation returns None."""
+
+    def normalise_name(self, name: str) -> str:
+        """Normalise a package name for equality comparison against advisories.
+
+        The registry's own casing and separator rules decide whether two names are
+        the same package. PyPI collapses runs of ``[-_.]`` per PEP 503; most
+        ecosystems only lowercase, which is the default.
+
+        Implement this if your registry treats separators as interchangeable. When
+        this hook is missing or raises, core falls back to lowercase-only for every
+        ecosystem except PyPI — deliberately, because folding two distinct names
+        together would make a typosquat an exact corpus match and report it as clean.
+        A missing equivalence is visible (a distance-1 finding for two spellings of one
+        package); a wrongly-merged pair is silent."""
+
     def latest_version_url(self, name: str) -> str | None:
         """Registry API URL that resolves the latest published version of a package.
 
@@ -208,8 +311,12 @@ class LanguageBase(Protocol):
         to skip version resolution for unpinned installs in this ecosystem.
         Default implementation returns None."""
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
         """Extract the latest version string from the response of latest_version_url().
+
+        *data* is typed ``object``, not ``dict``, for the same reason as
+        publication_date_parse: a JSON document's root is not always an
+        object. Narrow with ``isinstance`` before indexing/iterating.
 
         Return None if the version cannot be determined. Called with the parsed JSON
         body and the package name. Default implementation returns None."""
@@ -513,6 +620,10 @@ In-tree modules live in [`packagealert/languages/`](packagealert/languages/). Us
 
 External plugins are auto-discovered at startup via Python entry points.
 
+See [Contract Version](#contract-version) above: unlike in-tree modules, an external
+plugin must declare `contract_version` as a fixed integer literal matching what it has
+actually implemented, not `CURRENT_CONTRACT_VERSION`.
+
 ### 1. Implement the contract
 
 ```python
@@ -521,7 +632,6 @@ from pathlib import Path
 from typing import Any
 import httpx
 from packagealert.languages.base import (
-    CURRENT_CONTRACT_VERSION,
     MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
@@ -538,7 +648,13 @@ class RubyLanguage:
     name = "ruby"
     ecosystems = ["RubyGems"]
     process_names = ["gem", "bundle", "bundler"]
-    contract_version = CURRENT_CONTRACT_VERSION
+    # A hardcoded literal — the highest contract version this plugin has
+    # actually implemented and verified, NOT an import of
+    # CURRENT_CONTRACT_VERSION. This plugin is released independently of
+    # package-alert, so nothing keeps its declared version in sync with a
+    # future contract bump; only bump this by hand once you've implemented
+    # whatever that version adds.
+    contract_version = 5
 
     def parse_process_install(self, args: list[str]) -> ProcessInstall | None:
         return None  # implement me
@@ -592,6 +708,25 @@ class RubyLanguage:
         # Used by the cooldown policy. Return None to opt out.
         return f"https://rubygems.org/api/v1/versions/{name}.json"  # implement me
 
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        # Parse the response from publication_date_url() into a Unix timestamp.
+        # RubyGems' versions.json returns a JSON array at the root (not an
+        # object), which is exactly why this hook is typed `object` rather
+        # than `dict` — narrow with isinstance before use, as here.
+        for entry in data if isinstance(data, list) else []:
+            if entry.get("number") == version:
+                created_at = entry.get("created_at")
+                if created_at:
+                    from datetime import datetime
+                    return datetime.fromisoformat(created_at).timestamp()
+        return None
+
+    def osv_ecosystem(self) -> str | None:
+        return "RubyGems"
+
+    def normalise_name(self, name: str) -> str:
+        return name.lower()
+
     def package_manager_names(self) -> list[str]:
         # Binaries to wrap as shell functions and shim in project bin dirs.
         return ["gem", "bundle", "bundler"]
@@ -614,8 +749,12 @@ class RubyLanguage:
     def latest_version_url(self, name: str) -> str | None:
         return f"https://rubygems.org/api/v2/rubygems/{name}/versions/latest.json"
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
-        # Adapt to your registry's actual response shape.
+    def latest_version_parse(self, data: object, name: str) -> str | None:
+        # Adapt to your registry's actual response shape. Narrow first: data
+        # is `object`, not `dict` — this endpoint happens to return a JSON
+        # object, but the contract does not guarantee that for every registry.
+        if not isinstance(data, dict):
+            return None
         return data.get("version") or None
 
     def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
@@ -660,13 +799,34 @@ class RubyLanguage:
         package_name: str,
         project_path: Path | None,
         site_packages_dir: Path | None,
-    ) -> Path | None:
-        # Return the directory where package_name was extracted after install,
-        # so the daemon can run file-content heuristics against it.
-        # Return None if the path cannot be determined for this ecosystem.
+        version: str | None = None,
+    ) -> list[Path]:
+        # Return every directory where package_name was extracted after install,
+        # so the daemon can run file-content heuristics against them.
+        # Return [] if no directory can be determined for this ecosystem.
+        #
+        # Accept `version` even if you do not use it, so the signature matches the
+        # contract version you declare. Bundler installs one version per gem at a
+        # given path, so the name alone identifies the tree here — but a layout
+        # where two environments can hold different versions of one package must
+        # match it, or heuristics inspect the wrong source.
         if project_path is None:
-            return None
-        return project_path / "vendor" / "bundle" / "ruby" / package_name  # example
+            return []
+        return [project_path / "vendor" / "bundle" / "ruby" / package_name]  # example
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        # Bundler resolves a direct, unambiguous path above with no manifest
+        # file to parse — nothing here can be corrupted the way PyPI's RECORD
+        # can, so there is nothing to warn about. Override this only if your
+        # resolve_package_dir consults a manifest that could plausibly be
+        # crafted or corrupted to evade heuristics.
+        return None
 
     def snapshot(self, install_root: Path) -> Snapshot:
         return Snapshot({})
@@ -839,3 +999,4 @@ def resolve_sandbox_targets(self, parsed, cwd):
 | 2 | `SandboxTargets` and `ShellEnvironment` dataclasses added. `pre_run_check`, `resolve_sandbox_targets`, `prepare_sandbox_env`, `shell_environment`, `resolve_package_dir`, and `interpreter_shim_script` added as optional hooks with default no-op implementations (no version bump required for existing plugins). `interpreter_shim_script(real, pa)` lets language modules supply their own interpreter shim script; the default returns None (plain passthrough shim). |
 | 3 | Added `popularity_ecosystem() -> str | None` optional hook. Plugins returning `None` (the default) are unaffected; implement to enable popularity dampening for your ecosystem. Added `PreRunResult` dataclass (`ok`, `message`, `required_flag`). `pre_run_check` now accepts a `flags: frozenset[str]` parameter and returns `PreRunResult` instead of `str | None`; the `expose_ssh_keys: bool` parameter is deprecated. Added `configure_sandbox(parsed, cwd, flags, targets, home_ro, sandbox_env) -> None` hook for flag-driven sandbox configuration; default is a no-op. |
 | 4 | Added optional `configure_sandbox_writable(parsed, cwd, flags, targets) -> list[tuple[Path, Path]]` hook. Default returns `[]`. Runner collects `(src, dest)` pairs from all active language modules, binds them writably into the sandbox, and deletes *src* in a `finally` block after the sandbox exits. Use for resources that require write access inside the sandbox but must not be modified on the host (snapshot pattern). |
+| 5 | Moved ecosystem-specific registry-response parsing out of core modules and onto the contract, so adding a language no longer requires editing core code. Added three optional hooks: `publication_date_parse(data, version) -> float \| None` (parses the reply from `publication_date_url()`; **without it the cooldown policy cannot determine package age and fails open, never blocking or prompting**), `osv_ecosystem() -> str \| None` (the name OSV.dev uses, e.g. `"PyPI"`; without it advisory matching falls back to the raw ecosystem string and upgrade advice may be empty), and `normalise_name(name) -> str` (name-equality rules for advisory matching; defaults to lowercasing, PyPI overrides with PEP 503 collapsing). Plugins declaring v4 or earlier receive shims reproducing their previous behaviour exactly, so no plugin breaks — but implementing `publication_date_parse` is strongly recommended if you implement `publication_date_url`. Also added an optional 4th parameter to `resolve_package_dir`: `version: str \| None = None`. Declare it however you like — `version=None`, `*, version=None`, or absorb it with `**kwargs`; callers inspect the signature and pass it by keyword unless only positional passing is possible (positional-only parameters or a bare `*args`). Whether you *use* it depends on your install layout: one directory per package name (npm's `node_modules`, Composer's `vendor/`) needs no version check, since a second version cannot occupy the same path; layouts where several environments under one project can each hold a different version (Python venvs) must match it. Accept the parameter either way, so the signature matches the contract you declare. When given it **must** be matched as well as the name: a caller may search several environments — `scan-project --scan-installed` aggregates packages across every venv it finds — and two of them can hold different versions of the same package. Matching on name alone returned whichever environment was searched first, so heuristics inspected the wrong source tree and a malicious version was scored against a benign one. Return `[]` rather than a name-only match when the requested version is absent. No shim is required for the `version` parameter itself: callers inspect the signature and omit the argument for plugins that predate it, preserving the previous name-only behaviour. **`resolve_package_dir`'s return type is `list[Path]`, not `Path \| None`** — `[]` replaces `None` as the "not resolvable" case. A single directory is not always a distribution's whole footprint: a PEP 420 namespace package (`google-auth`) can own more than one subdirectory (`google/auth/`, `google/oauth2/`) of a shared root it does not exclusively own, and returning that shared root hands heuristics every sibling distribution's files too. Every directory returned must belong to *this* distribution and no other's. Unlike the parameter addition, this **does** require a shim: a plugin declaring contract version 4 or earlier whose `resolve_package_dir` still returns a bare `Path` or `None` is adapted automatically — its return value is wrapped (`None` → `[]`, `Path` → `[Path]`) by calling through to the plugin's real implementation, so the plugin's own resolution logic still runs and only the return shape changes. A plugin declaring `contract_version = 5` (or a later value, once one exists) must implement `list[Path]`/`[]` itself; the adapter only covers plugins declaring a version below the one at which this changed. Also added an optional fourth hook, `resolve_package_dir_manifest_warning(package_name, project_path, site_packages_dir, version=None) -> str \| None`, called alongside `resolve_package_dir` on the matched distribution: without it, `resolve_package_dir` correctly refusing to guess a directory for a manifest it cannot trust (e.g. PyPI's RECORD present but unparseable — a shape a legitimate build tool essentially never produces) is indistinguishable from an ordinary clean scan, silently downgrading a probable evasion attempt to "nothing to report." A non-`None` return becomes an undampened `unverifiable_manifest` risk signal. Plugins declaring v4 or earlier are shimmed to return `None` unconditionally; most in-tree implementations (npm, Composer) have no manifest file to distrust and also return `None` unconditionally by design, not merely by the shim. |

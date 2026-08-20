@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -128,7 +129,13 @@ def test_older_contract_version_warns_and_registers(caplog):
     with caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"):
         reg.register(old)
     assert "contract version" in caplog.text.lower()
-    assert reg.get("mock") is old
+    # Identity is not asserted: a plugin missing post-v0 contract methods is served
+    # through a _ShimmedLanguage proxy rather than being mutated, so `is old` would
+    # fail. What must hold is that the registered object behaves as the plugin.
+    registered = reg.get("mock")
+    assert registered is not None
+    assert registered.name == old.name
+    assert registered.ecosystems == old.ecosystems
 
 
 def test_newer_contract_version_warns_but_registers(caplog):
@@ -429,3 +436,534 @@ def test_php_latest_version_parse_empty_returns_none():
     from packagealert.languages.php import PhpLanguage
     lang = PhpLanguage()
     assert lang.latest_version_parse({}, "monolog/monolog") is None
+
+
+# --- version shims must be attached as bound methods ---------------------------
+#
+# _VERSION_SHIMS entries are `lambda self, ...` callables, which is only correct
+# because _apply_shims attaches them with types.MethodType(fn, lang) so `self` is
+# injected. A plain setattr would leave them unbound and every call would raise
+# TypeError — silently disabling the shimmed capability for older plugins, since
+# every call site guards with try/except. Nothing pinned that coupling.
+
+
+class _V4Plugin:
+    """A plugin predating every v5 hook."""
+
+    name = "shimtest"
+    ecosystems: ClassVar[list[str]] = ["shimtest-eco"]
+    process_names: ClassVar[list[str]] = ["shimtool"]
+    contract_version = 4
+    author = "third-party"
+    repository = "example.com"
+
+
+def _register_v4(monkeypatch):
+    from packagealert.languages import registry as reg
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    plugin = _V4Plugin()
+    reg.register(plugin)
+    return reg.for_ecosystem("shimtest-eco")
+
+
+def test_shimmed_methods_are_callable_with_the_real_signatures(monkeypatch):
+    lang = _register_v4(monkeypatch)
+    # Each is called exactly as its production call site does — no explicit self.
+    assert lang.publication_date_parse({"any": 1}, "1.0") is None
+    assert lang.osv_ecosystem() is None
+    assert lang.normalise_name("A.B_c") == "a.b_c"
+
+
+def test_shims_are_bound_methods_not_bare_functions(monkeypatch):
+    """Pins the MethodType attachment: a bare setattr would break the calls above."""
+    import inspect
+
+    lang = _register_v4(monkeypatch)
+    for name in ("publication_date_parse", "osv_ecosystem", "normalise_name"):
+        attr = getattr(lang, name)
+        assert inspect.ismethod(attr), f"{name} is not bound — self will not be injected"
+        # Bound to the *wrapped plugin*, not the proxy serving the shim: a shim that
+        # calls another contract method must reach the real implementation.
+        assert attr.__self__ is getattr(lang, "_lang", lang)
+
+
+def test_shimmed_plugin_works_through_the_cooldown_call_site(monkeypatch):
+    from packagealert.sandbox.cooldown import _parse_publication_date
+
+    _register_v4(monkeypatch)
+    # Fails open (no publication date) rather than raising.
+    assert _parse_publication_date({"x": 1}, ecosystem="shimtest-eco", version="1.0") is None
+
+
+def test_shimmed_plugin_still_gets_fixed_versions(monkeypatch):
+    """osv_ecosystem() shimmed to None must fall back to the raw ecosystem name."""
+    from packagealert.osv.client import _extract_fixed_versions
+
+    _register_v4(monkeypatch)
+    vuln = {
+        "affected": [
+            {
+                "package": {"ecosystem": "shimtest-eco", "name": "serde"},
+                "ranges": [
+                    {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.2.3"}]}
+                ],
+            }
+        ]
+    }
+    assert _extract_fixed_versions(vuln, "serde", "shimtest-eco") == ["1.2.3"]
+
+
+def test_a_plugin_implementing_a_hook_is_not_shimmed(monkeypatch):
+    """Shims must never override a real implementation."""
+    from packagealert.languages import registry as reg
+
+    class _V4WithHook(_V4Plugin):
+        ecosystems: ClassVar[list[str]] = ["shimtest-impl"]
+
+        def osv_ecosystem(self):
+            return "MyRegistry"
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    reg.register(_V4WithHook())
+    assert reg.for_ecosystem("shimtest-impl").osv_ecosystem() == "MyRegistry"
+
+
+def test_raising_descriptor_does_not_abort_registration(monkeypatch):
+    """REGRESSION: both `hasattr` and `getattr(obj, name, default)` only
+    suppress AttributeError. A legacy plugin exposing a v5 hook through a
+    descriptor/property that raises something else must still be treated as
+    "missing" and shimmed — not left to blow up registration, contrary to
+    every call site's fail-open convention elsewhere for exactly this kind of
+    lookup failure."""
+    from packagealert.languages import registry as reg
+
+    class _RaisesOnLookup(_V4Plugin):
+        ecosystems: ClassVar[list[str]] = ["shimtest-raises"]
+
+        @property
+        def osv_ecosystem(self):
+            raise RuntimeError("plugin exploded on attribute access")
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    reg.register(_RaisesOnLookup())  # must not raise
+    lang = reg.for_ecosystem("shimtest-raises")
+    # The shim default was installed despite the raising descriptor, and the
+    # other two v5-only hooks were still shimmed normally alongside it.
+    assert lang.osv_ecosystem() is None
+    assert lang.publication_date_parse({"any": 1}, "1.0") is None
+    assert lang.normalise_name("A.B_c") == "a.b_c"
+
+
+# --- resolve_package_dir's return-type adapter must not double-wrap -------------
+#
+# REGRESSION: _adapt_resolve_package_dir_to_list wrapped any non-None result in a
+# list unconditionally. A pre-5 plugin is only obligated to return `Path | None`,
+# but nothing stops one from already returning a list or tuple ahead of its
+# declared contract version — and wrapping that again produced `[[Path, Path]]`,
+# which breaks every downstream `Path` method (`.exists()` etc. raise
+# AttributeError on the inner list) and is silently swallowed as "no heuristics"
+# by every caller's fail-open handling.
+
+
+def test_return_adapter_wraps_a_bare_path():
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    adapted = _adapt_resolve_package_dir_to_list(lambda *a, **kw: Path("/a"))
+    assert adapted() == [Path("/a")]
+
+
+def test_return_adapter_wraps_none_as_empty_list():
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    adapted = _adapt_resolve_package_dir_to_list(lambda *a, **kw: None)
+    assert adapted() == []
+
+
+def test_return_adapter_passes_through_an_existing_list_unchanged():
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    paths = [Path("/a"), Path("/b")]
+    adapted = _adapt_resolve_package_dir_to_list(lambda *a, **kw: paths)
+    result = adapted()
+    assert result == paths
+    assert all(isinstance(p, Path) for p in result), "must not double-wrap into [[Path, Path]]"
+
+
+def test_return_adapter_passes_through_an_existing_tuple_as_a_list():
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    adapted = _adapt_resolve_package_dir_to_list(
+        lambda *a, **kw: (Path("/a"), Path("/b"))
+    )
+    result = adapted()
+    assert result == [Path("/a"), Path("/b")]
+    assert all(isinstance(p, Path) for p in result)
+
+
+def test_return_adapter_passes_through_an_empty_list_unchanged():
+    """An empty list must stay [], not become [[]]."""
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    adapted = _adapt_resolve_package_dir_to_list(lambda *a, **kw: [])
+    assert adapted() == []
+
+
+# --- return adapter must not forward non-Path values into the list[Path] contract
+#
+# REGRESSION: a buggy pre-5 plugin returning a bare str (e.g. "/sp/pkg" instead of
+# Path("/sp/pkg")) was wrapped as ["/sp/pkg"] — a str, not a Path — and a list
+# already containing a stray None or str alongside real Paths passed through
+# entirely unfiltered. Both reach RiskEngine._run_heuristics, which calls
+# `.exists()` on every entry and raises AttributeError on anything that is not a
+# Path — silently disabling every source-code heuristic for that plugin's
+# packages, since every caller's fail-open handling swallows the exception.
+
+
+def test_return_adapter_rejects_a_bare_str_result(caplog):
+    """A str is iterable, so treating it as a sequence would expand it into one
+    bogus single-character 'path' per character — it must be rejected outright."""
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    adapted = _adapt_resolve_package_dir_to_list(lambda *a, **kw: "/sp/pkg")
+    with caplog.at_level("WARNING"):
+        result = adapted()
+    assert result == []
+    assert "str" in caplog.text
+
+
+def test_return_adapter_drops_non_path_entries_from_a_mixed_list(caplog):
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    good = Path("/sp/good")
+    adapted = _adapt_resolve_package_dir_to_list(
+        lambda *a, **kw: [good, None, "/sp/bad"]
+    )
+    with caplog.at_level("WARNING"):
+        result = adapted()
+    assert result == [good], "only the real Path must survive"
+    assert all(isinstance(p, Path) for p in result)
+    assert "non-Path" in caplog.text
+
+
+def test_return_adapter_rejects_other_non_path_types(caplog):
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    for bad in (42, {"a": 1}, object()):
+        adapted = _adapt_resolve_package_dir_to_list(lambda *a, _bad=bad, **kw: _bad)
+        with caplog.at_level("WARNING"):
+            result = adapted()
+        assert result == [], f"expected [] for {type(bad).__name__}, got {result}"
+
+
+def test_pre_v5_plugin_returning_a_bad_shape_end_to_end_is_not_crash(monkeypatch):
+    """End-to-end through the real registry and _ShimmedLanguage proxy: a v4
+    plugin's buggy resolve_package_dir returning a bare str must not reach a
+    caller as anything but a real, usable list[Path]."""
+
+    class _V4ReturningStr(_V4Plugin):
+        ecosystems: ClassVar[list[str]] = ["shimtest-strreturn"]
+
+        def resolve_package_dir(self, package_name, project_path, site_packages_dir, version=None):
+            return "/sp/pkg"
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    reg.register(_V4ReturningStr())
+    lang = reg.for_ecosystem("shimtest-strreturn")
+
+    result = lang.resolve_package_dir("foo", None, None)
+    assert result == []
+    assert isinstance(result, list)
+
+
+def test_pre_v5_plugin_returning_a_list_early_is_not_double_wrapped(monkeypatch):
+    """End-to-end through the real registry and _ShimmedLanguage proxy: a v4
+    plugin that already returns list[Path] (ahead of its declared contract) must
+    not have its result nested."""
+
+    class _V4ReturningList(_V4Plugin):
+        ecosystems: ClassVar[list[str]] = ["shimtest-listreturn"]
+
+        def resolve_package_dir(self, package_name, project_path, site_packages_dir, version=None):
+            return [Path("/venv/foo"), Path("/venv/bar")]
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    reg.register(_V4ReturningList())
+    lang = reg.for_ecosystem("shimtest-listreturn")
+
+    result = lang.resolve_package_dir("foo", None, None)
+    assert result == [Path("/venv/foo"), Path("/venv/bar")]
+    assert all(isinstance(p, Path) for p in result)
+
+
+# --- return adapter must preserve the wrapped method's signature ------------------
+#
+# REGRESSION: the adapter closure's own signature is `(*args, **kwargs)`. Without
+# preserving the original's signature, sandbox/runner.py's _version_passing_style
+# (which inspects the callable it's about to call) sees **kwargs and concludes
+# "accepts version by keyword" for every adapted plugin — even a genuine pre-v5
+# plugin whose real resolve_package_dir takes only three arguments. That version=
+# then reaches the plugin's own method and raises TypeError, which callers' fail-
+# open handling swallows as "skip source heuristics" for that package.
+
+
+def test_return_adapter_preserves_the_original_signature():
+    import inspect
+
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+
+    def original(package_name, project_path, site_packages_dir):
+        return None
+
+    adapted = _adapt_resolve_package_dir_to_list(original)
+    assert inspect.signature(adapted) == inspect.signature(original)
+
+
+def test_version_passing_style_is_none_for_an_adapted_legacy_plugin():
+    """The exact mechanism the bug relied on: a wrapped legacy method must be
+    classified the same way as the bare method it wraps."""
+    from packagealert.languages.registry import _adapt_resolve_package_dir_to_list
+    from packagealert.sandbox.runner import _version_passing_style
+
+    def original(package_name, project_path, site_packages_dir):
+        return None
+
+    adapted = _adapt_resolve_package_dir_to_list(original)
+    assert _version_passing_style(adapted) == "none"
+
+
+def test_pre_v5_plugin_without_version_param_resolves_through_adapter_end_to_end(
+    monkeypatch,
+):
+    """End-to-end through the real registry, _ShimmedLanguage proxy, and
+    call_resolve_package_dir: a v4 plugin with a genuine three-argument
+    resolve_package_dir (no `version`) must not raise TypeError when a caller
+    passes a version — it must simply be resolved without it."""
+    from packagealert.sandbox.runner import call_resolve_package_dir
+
+    class _V4NoVersionParam(_V4Plugin):
+        ecosystems: ClassVar[list[str]] = ["shimtest-noversion"]
+
+        def resolve_package_dir(self, package_name, project_path, site_packages_dir):
+            return Path("/sp") / package_name
+
+    monkeypatch.setattr(reg, "_registry", dict(reg._registry))
+    reg.register(_V4NoVersionParam())
+    lang = reg.for_ecosystem("shimtest-noversion")
+
+    result = call_resolve_package_dir(
+        lang.resolve_package_dir, "foo", None, None, version="1.2.3"
+    )
+    assert result == [Path("/sp/foo")]
+
+
+# --- shims must not require the plugin to accept new attributes -------------------
+#
+# REGRESSION: _apply_shims used setattr on the plugin instance. That assumes a
+# third-party object accepts arbitrary attributes, which a __slots__ class or a frozen
+# dataclass does not — registration raised AttributeError/FrozenInstanceError. Those
+# plugins registered fine before v5 added the first shims, so the compatibility
+# mechanism became a hard failure for exactly the older plugins it exists to support.
+
+
+class _SlotsV4:
+    __slots__ = ()
+    name = "slotsv4"
+    ecosystems: ClassVar[list[str]] = ["slotsv4eco"]
+    process_names: ClassVar[list[str]] = []
+    contract_version = 4
+    author = "third-party"
+    repository = "example"
+
+    def top_packages_fallback(self):
+        return ["alpha"]
+
+
+@dataclass(frozen=True)
+class _FrozenV4:
+    name: str = "frozenv4"
+    ecosystems: ClassVar[list[str]] = ["frozenv4eco"]
+    process_names: ClassVar[list[str]] = []
+    contract_version: int = 4
+    author: str = "third-party"
+    repository: str = "example"
+
+
+@pytest.mark.parametrize("cls", [_SlotsV4, _FrozenV4])
+def test_immutable_v4_plugins_still_register(cls, monkeypatch):
+    """A plugin that cannot accept new attributes must still register."""
+    monkeypatch.setattr(reg, "_registry", {})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(cls())  # must not raise
+    assert reg.get(cls.name) is not None
+
+
+@pytest.mark.parametrize("cls", [_SlotsV4, _FrozenV4])
+def test_immutable_v4_plugins_get_the_shim_defaults(cls, monkeypatch):
+    monkeypatch.setattr(reg, "_registry", {})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(cls())
+    lang = reg.get(cls.name)
+    assert lang.publication_date_parse({}, "1.0") is None
+    assert lang.osv_ecosystem() is None
+    assert lang.normalise_name("Foo.Bar") == "foo.bar"
+
+
+def test_shimming_does_not_mutate_the_plugin_instance(monkeypatch):
+    """The plugin object must be left exactly as the author wrote it."""
+    monkeypatch.setattr(reg, "_registry", {})
+
+    class Plain:
+        name = "plainv4"
+        ecosystems: ClassVar[list[str]] = ["plainv4eco"]
+        process_names: ClassVar[list[str]] = []
+        contract_version = 4
+        author = "x"
+        repository = "x"
+
+    plugin = Plain()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(plugin)
+
+    for name in ("publication_date_parse", "osv_ecosystem", "normalise_name"):
+        assert name not in plugin.__dict__, f"{name} was written onto the plugin"
+
+
+def test_shim_proxy_forwards_real_attributes(monkeypatch):
+    """Everything the plugin does define must still reach it."""
+    monkeypatch.setattr(reg, "_registry", {})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(_SlotsV4())
+    lang = reg.get("slotsv4")
+    assert lang.name == "slotsv4"
+    assert lang.ecosystems == ["slotsv4eco"]
+    assert lang.top_packages_fallback() == ["alpha"]
+    assert lang.contract_version == 4
+
+
+def test_a_plugins_own_implementation_is_never_replaced(monkeypatch):
+    monkeypatch.setattr(reg, "_registry", {})
+
+    class OwnImpl:
+        name = "ownimpl"
+        ecosystems: ClassVar[list[str]] = ["ownimpleco"]
+        process_names: ClassVar[list[str]] = []
+        contract_version = 4
+        author = "x"
+        repository = "x"
+
+        def osv_ecosystem(self):
+            return "MyEco"
+
+        def normalise_name(self, name):
+            return name.upper()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(OwnImpl())
+    lang = reg.get("ownimpl")
+    assert lang.osv_ecosystem() == "MyEco"
+    assert lang.normalise_name("abc") == "ABC"
+    # Only the genuinely missing one is defaulted.
+    assert lang.publication_date_parse({}, "1.0") is None
+
+
+def test_a_fully_implementing_plugin_is_not_wrapped(monkeypatch):
+    """No proxy when nothing is missing — the plugin is registered as-is."""
+    monkeypatch.setattr(reg, "_registry", {})
+
+    class Complete:
+        name = "completev4"
+        ecosystems: ClassVar[list[str]] = ["completev4eco"]
+        process_names: ClassVar[list[str]] = []
+        contract_version = 4
+        author = "x"
+        repository = "x"
+
+        def publication_date_parse(self, data, version):
+            return 1.0
+
+        def osv_ecosystem(self):
+            return "Complete"
+
+        def normalise_name(self, name):
+            return name.lower()
+
+        def resolve_package_dir_manifest_warning(self, package_name, project_path, site_packages_dir, version=None):
+            return None
+
+    plugin = Complete()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(plugin)
+    assert reg.get("completev4") is plugin
+
+
+def test_current_version_plugins_are_never_wrapped():
+    """Built-ins declare the current version, so they must be registered directly."""
+    from packagealert.languages.python import PythonLanguage
+
+    reg.load()
+    assert isinstance(reg.for_ecosystem("pypi"), PythonLanguage)
+
+
+# --- contract assertions must not fail on a supported v4 plugin -------------------
+#
+# REGRESSION: tests named "builtin ... declares the current contract version" iterated
+# all_languages(), which load() populates from third-party entry points too. A plugin
+# legitimately staying on v4 — exactly what the compatibility shims exist for — turned
+# a supported configuration into a test failure for anyone who had one installed.
+
+
+class _LegacyV4Plugin:
+    name = "legacyv4"
+    ecosystems: ClassVar[list[str]] = ["legacyv4eco"]
+    process_names: ClassVar[list[str]] = ["legacytool"]
+    contract_version = 4
+    author = "third-party"
+    repository = "example"
+
+
+def test_all_languages_includes_third_party_plugins(monkeypatch):
+    """The premise: all_languages() is not a built-ins-only view."""
+    monkeypatch.setattr(reg, "_registry", {})
+    reg.load()
+    builtins = {lang.name for lang in reg.all_languages()}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(_LegacyV4Plugin())
+    assert {lang.name for lang in reg.all_languages()} == builtins | {"legacyv4"}
+
+
+def test_builtins_are_reachable_by_name_regardless_of_plugins(monkeypatch):
+    """Scoping contract assertions by name is what keeps them plugin-independent."""
+    monkeypatch.setattr(reg, "_registry", {})
+    reg.load()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(_LegacyV4Plugin())
+
+    for name in ("python", "node", "php"):
+        lang = reg.get(name)
+        assert lang is not None, f"built-in {name!r} is not registered"
+        assert lang.contract_version == CURRENT_CONTRACT_VERSION
+
+
+def test_a_v4_plugin_is_a_supported_configuration(monkeypatch):
+    """It registers, keeps its declared version, and gets the shim defaults."""
+    monkeypatch.setattr(reg, "_registry", {})
+    reg.load()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        reg.register(_LegacyV4Plugin())
+
+    lang = reg.get("legacyv4")
+    assert lang is not None
+    assert lang.contract_version == 4, "the plugin's declared version must be preserved"
+    # The shims make it usable despite lagging the contract.
+    assert lang.osv_ecosystem() is None
+    assert lang.publication_date_parse({}, "1.0") is None

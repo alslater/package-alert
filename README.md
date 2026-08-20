@@ -342,13 +342,33 @@ package-alert scan-project [PATH] [OPTIONS]
 | `--scan-installed` | off | Scan `venv/.venv` site-packages or `node_modules` instead of lock files |
 | `--prod-only` | off | Exclude dev dependencies from the scan (lock file scanning only; mutually exclusive with `--scan-installed`) |
 | `--requirements` / `-r` | — | Explicit requirements file to scan instead of auto-detecting lock files (mutually exclusive with `--scan-installed`) |
-| `--details` / `-d` | off | Show full advisory details and URL |
+| `--details` / `-d` | off | Show full advisory details and URL; also reveals suppressed low-signal risk rows |
+| `--no-risk` | off | Skip heuristic risk scoring (typosquat, popularity). Scoring is **on by default** |
 | `--format` / `-f` | `text` | Output format: `text`, `json`, `html`, `browser` |
+
+**Risk scoring.** In addition to OSV advisories, `scan-project` scores each queried package with the heuristic risk engine and prints a `Risk signals` section. Which signals can fire depends on the scan mode:
+
+| mode | signals available |
+|---|---|
+| lock files (default), `--requirements` | typosquat and popularity only — the packages are declared, not extracted, so there is no source to inspect |
+| `--scan-installed` | the above **plus** the full source-code heuristics: install scripts, `eval`, `subprocess`/`socket` in `setup.py`, embedded binaries |
+
+`--scan-installed` reads the real venv/`site-packages` or `node_modules`, so the extracted source is available and a malicious package is scored on what it actually contains. A package with a `setup.py` that shells out and opens a socket scores 80 (`critical`) in that mode versus 0 from its metadata alone — so prefer it when you want to know what is *installed* rather than what is *declared*.
+
+Because source signals push scores much higher, the `warning` boundary for `--scan-installed` is `sandbox.preflight_risk.post_install_threshold` (default 30) rather than `risk_threshold` (25); see the level note below.
+
+Scoring adds one deps.dev lookup per uncached package, bounded to 10 concurrent requests, with a progress bar. Per-package failures degrade to "no score" and are summarised at the end — risk scoring never fails a scan. Use `--no-risk` for offline or CI runs where the extra round-trips are unwanted.
+
+The risk section prints one line per package by default, carrying the single most actionable reason — a typosquat match takes precedence over a low-popularity note, since naming the impersonated package is the point. `--details` expands the per-signal breakdown beneath each line, showing which named signals contributed and how much each scored (e.g. `typosquat (15)` + `low_popularity (20)` = 35).
+
+Rows whose only signal is a minimal `low_popularity` hit (score 5) are hidden by default, since most small legitimate libraries trip it; they are still counted in the footer and shown with `--details`. This applies to the HTML report as well as the terminal output. JSON always contains every row and signal regardless of `--details`, since it is meant for machine consumption.
 
 **Formats:**
 
-- `text` — colour-coded terminal output; severity badge on the advisory line (`[HIGH] GHSA-…`)
-- `json` — machine-readable JSON with all findings, unpinned packages, and sources
+- `text` — colour-coded terminal output; severity badge on the advisory line (`[HIGH] GHSA-…`), plus a `Risk signals` section
+- `json` — machine-readable JSON with all findings, unpinned packages, sources, and a sibling `risks` array (per-package, one row each, with the full signal breakdown). `findings` remains advisory-shaped — one row per advisory — so existing consumers are unaffected
+
+Each risk row carries a `level` of `info`, `warning`, or `critical`. These are calibrated to the thresholds that actually govern this surface, not to the daemon's. `warning` starts at `sandbox.preflight_risk.risk_threshold` (default 25) for lock-file scans, so anything that would gate `pa run` is visually distinct from informational noise; a metadata-only score of 35 is a `warning` here even though the daemon — which reaches much higher scores — would call 35 informational. Under `--scan-installed` the source-code signals put the range on a par with the post-install scan, so `warning` starts at `post_install_threshold` (default 30) instead. `critical` is `heuristics.critical_threshold` (default 70) in both modes.
 - `html` — self-contained HTML report printed to stdout
 - `browser` — writes HTML to `/tmp/package-alert-*.html` and opens it in the default browser
 
@@ -472,6 +492,43 @@ package-alert cooldown allow lodash 4.17.21 --ecosystem npm
 ```
 
 Clearances expire after `sandbox.cooldown.period_days` (default 7 days) and are recorded only after a successful install.
+
+### Risk gating for `run`
+
+`[sandbox.preflight_risk]` controls how `package-alert run` reacts to typosquat matches and high heuristic risk scores. It is **independent of the cooldown policy**: a typosquat match is caught whether or not the package is inside the cooldown window, and whether or not its ecosystem exposes a publication date.
+
+The gate runs before the cooldown check, so you are never asked to answer a cooldown prompt about a package you are then told is a typosquat.
+
+**Why the thresholds differ from `[heuristics]`.** At pre-flight nothing is installed, so only metadata signals can fire (typosquat, low popularity) and scores top out around 40. The daemon's `warning_threshold` of 40 would make the gate a no-op, so pre-flight has its own `risk_threshold` (default 25). `post_install_threshold` (default 30) applies after extraction, where install-script, `eval`, and embedded-binary signals are also available.
+
+The post-install default is calibrated against the actual heuristic score tables rather than picked round: any single PyPI `setup.py` signal — `subprocess_in_setup`, `network_in_setup`, `credential_in_setup` — scores 30, and an npm postinstall hook piping `curl` into a shell scores 35 (`install_script` 20 + `curl_in_script` 15). Damping reduces these further for packages with real publication history, so a higher threshold silently misses genuine attacks.
+
+**Typosquat false positives.** Pure edit distance flags many legitimate packages: `httpx2` and `httpcore2` are distance 1 from `httpx`/`httpcore`, and `respx` is distance 2 from `regex`. Two signals corroborate the match before it gates:
+
+1. **Adoption of the suspect itself.** A typosquat is by definition a new, unadopted package wearing a popular name. The risk engine scales the typosquat score down by the suspect's own `dependent_count` (from the deps.dev data it already fetches, so no extra network calls). `httpx2` has tens of thousands of dependents; `reqeusts` does not exist on deps.dev at all. The reduction is driven by dependents rather than release count, because publishing many versions is cheap for an attacker — `numpi` has 36 releases and 6 dependents and earns no reduction. It is graded rather than a veto, and floored at 1, so a finding is never silenced and registry data gaps cannot create false negatives.
+
+2. **Version-suffix variants — only in combination with adoption.** A name differing from a popular package only by a trailing version digit (`httpx2`, `psycopg2`, `jinja3` vs `jinja2`) follows a conventional release-line naming pattern rather than the character-level corruption attacks use. This *deepens* the reduction from signal 1, but never applies on its own: a version-suffixed name is equally consistent with a genuine successor release and with a brand-new squat, so a newly published `requests2` or `numpy2` keeps its full score and is gated exactly like `reqeusts`. Treating the suffix as exculpatory by itself would make appending a digit a one-character bypass of the whole gate.
+
+   Longer conventional affixes (`types-`, `python-`, `-async`) need no handling at all: they are 3+ characters, so they exceed the distance threshold on their own and never produce a match.
+
+Gating then keys on the resulting **score** (`typosquat_min_score`, default 15) rather than the bare match, so those reductions actually suppress the gate. Worked examples: `httpx2` → 3 (allowed), `respx` → 14 (allowed), `reqeusts` → 15 (gated), `urlib3` → 20 (gated). Because gating is score-based, `typosquat_max_distance` stays at the detector's own threshold of 2 and genuine distance-2 attacks (`reqeusts`, `cryptografy`) are still caught.
+
+Weak matches are still reported by `scan-project` with the reduction explained in the signal reason — downgraded, not hidden.
+
+**Post-install enforcement.** A newly installed package scoring at or above `post_install_threshold` is handled per `on_post_install_risk`, which takes the same four actions as the pre-flight gate:
+
+| action | behaviour |
+|---|---|
+| `allow` | No-op — nothing reported, install kept |
+| `warn` (default) | Reports the packages and their signals; install kept |
+| `prompt` | Reports, then asks whether to keep the packages; declining rolls the install back |
+| `block` | Reports and rolls the install back |
+
+A rollback uses the same snapshot restore as a malicious-advisory hit — the packages are already extracted at this point, so keeping or reverting them is a real choice. As at pre-flight, `prompt` escalates to `non_interactive_escalation` when stdin is not a TTY, so CI runs and coding agents never silently keep a package that tripped the threshold.
+
+**The sandboxed shell is gated too.** `package-alert run <shell>` scores the project's lock file and applies the same policy as a direct install: the gate decision is the highest-ranked action across all scored packages, so one blocking dependency blocks the shell. False positives are handled by scoring rather than by declining to enforce — an ordinary lock file of legitimate libraries resolves to warnings and the shell starts. Use `scan-project` for the full breakdown.
+
+Setting `heuristics.enabled = false` disables risk scoring everywhere, including this gate.
 
 ### `version`
 
@@ -732,15 +789,45 @@ editable_roots = []
 # Packages published more recently than period_days trigger the cooldown policy.
 period_days = 7
 
-# Action when a package is within the cooldown period and matches a typosquat pattern.
-# One of: "prompt", "warn", "block", "allow"
+# Action when a package is within the cooldown period and has a non-zero
+# heuristic risk score. One of: "prompt", "warn", "block", "allow"
 on_new_medium_risk = "prompt"
 
-# Action when a package is within the cooldown period and has no typosquat match.
+# Action when a package is within the cooldown period and has no risk signals.
 on_new_low_risk = "warn"
 
 # In non-interactive contexts (no TTY — coding agents, CI), escalate "prompt" to this.
 non_interactive_escalation = "block"
+
+[sandbox.preflight_risk]
+enabled = true
+
+# Score at or above which on_high_risk fires (pre-flight, metadata-only).
+risk_threshold = 25
+
+# Action when the package name looks like a typosquat of a popular package.
+on_typosquat = "prompt"
+
+# Only matches at or below this edit distance trigger on_typosquat; more distant
+# matches are reported as warnings instead.
+typosquat_max_distance = 2
+
+# Minimum typosquat score required to trigger on_typosquat.
+typosquat_min_score = 15
+
+# Action when the pre-flight risk score reaches risk_threshold.
+on_high_risk = "warn"
+
+# In non-interactive contexts, escalate "prompt" to this.
+non_interactive_escalation = "block"
+
+# Score at or above which on_post_install_risk fires, after extraction.
+post_install_threshold = 30
+
+# Action when a newly installed package reaches post_install_threshold.
+# "block" always rolls the install back via the snapshot restore; "prompt" asks and
+# rolls back only if you decline.
+on_post_install_risk = "warn"
 
 [scheduler]
 enabled = true

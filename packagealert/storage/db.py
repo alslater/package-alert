@@ -73,10 +73,11 @@ CREATE INDEX IF NOT EXISTS idx_scan_results_type
     ON scan_results(project_path, scan_type, scanned_at DESC);
 
 CREATE TABLE IF NOT EXISTS top_packages_cache (
-    ecosystem     TEXT NOT NULL PRIMARY KEY,
-    fetched_at    REAL NOT NULL,
-    package_count INTEGER NOT NULL,
-    packages      TEXT NOT NULL
+    ecosystem      TEXT NOT NULL PRIMARY KEY,
+    fetched_at     REAL NOT NULL,
+    package_count  INTEGER NOT NULL,
+    packages       TEXT NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS publication_cache (
@@ -380,6 +381,18 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE alerts ADD COLUMN project_path TEXT")
         log.debug("Migrated alerts table: added project_path column")
 
+    async with conn.execute("PRAGMA table_info(top_packages_cache)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    if "schema_version" not in columns:
+        # Existing rows default to 0, below TopPackagesCache.CORPUS_SCHEMA_VERSION —
+        # they were written before per-language normalise_name fixes (e.g. npm/
+        # Packagist's PEP-503-folding bug) and must be treated as stale on next read
+        # rather than served as though still correctly normalised.
+        await conn.execute(
+            "ALTER TABLE top_packages_cache ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 0"
+        )
+        log.debug("Migrated top_packages_cache table: added schema_version column")
+
 
 async def store_alert(
     db: aiosqlite.Connection,
@@ -403,6 +416,26 @@ _PUBLICATION_CACHE_TTL = 30 * 24 * 3600  # 30 days
 _PUBLICATION_FETCH_FAILED_SENTINEL = -1.0
 
 
+def _row_key_ecosystem(ecosystem: str) -> str:
+    """Canonicalise an ecosystem for use as a publication_cache/cooldown_cleared key.
+
+    Applied inside these helpers rather than at each call site because the callers do
+    not agree — the same OsvCache lesson, one table over. RiskEngine keys with
+    PackageEvent.ecosystem, which canonicalises to a plugin's declared casing
+    ("NuGet"); the sandbox cooldown gate and cooldown-allow lowercase ("nuget"); the
+    central plugin stores clearances under whatever casing the server sent. That split
+    made a publication date cached by one surface a miss for the others (each fetched
+    and stored its own copy) and made an externally synced cooldown clearance
+    invisible to the gate it was meant to clear.
+
+    Delegates to models.events.cache_key_ecosystem — see that function's docstring
+    for why the canonical form is lowercased and why the fallback never raises.
+    """
+    from packagealert.models.events import cache_key_ecosystem
+
+    return cache_key_ecosystem(ecosystem)
+
+
 async def store_publication_date(
     db: aiosqlite.Connection,
     *,
@@ -411,6 +444,7 @@ async def store_publication_date(
     version: str,
     published_at: float | None,
 ) -> None:
+    ecosystem = _row_key_ecosystem(ecosystem)
     await db.execute(
         """
         INSERT INTO publication_cache (ecosystem, package, version, fetched_at, published_at)
@@ -432,6 +466,7 @@ async def store_age_failure_sentinel(
     version: str,
     ttl_minutes: int,
 ) -> None:
+    ecosystem = _row_key_ecosystem(ecosystem)
     ttl_seconds = min(ttl_minutes * 60, _PUBLICATION_CACHE_TTL)
     effective_fetched_at = time.time() - (_PUBLICATION_CACHE_TTL - ttl_seconds)
     await db.execute(
@@ -456,6 +491,7 @@ async def get_publication_date(
 ) -> float | str:
     """Return published_at timestamp, 'not_found' (cached 404), 'fetch_failed'
     (transient failure sentinel), or 'miss' (not in cache/expired)."""
+    ecosystem = _row_key_ecosystem(ecosystem)
     async with db.execute(
         "SELECT fetched_at, published_at FROM publication_cache WHERE ecosystem=? AND package=? AND version=?",
         (ecosystem, package, version),
@@ -481,6 +517,7 @@ async def store_cooldown_cleared(
     package: str,
     version: str,
 ) -> None:
+    ecosystem = _row_key_ecosystem(ecosystem)
     await db.execute(
         """
         INSERT INTO cooldown_cleared (ecosystem, package, version, cleared_at)
@@ -499,6 +536,7 @@ async def get_cooldown_cleared_at(
     package: str,
     version: str,
 ) -> float | None:
+    ecosystem = _row_key_ecosystem(ecosystem)
     async with db.execute(
         "SELECT cleared_at FROM cooldown_cleared WHERE ecosystem=? AND package=? AND version=?",
         (ecosystem, package, version),

@@ -1034,6 +1034,46 @@ def test_top_packages_fallback_contains_known_packages(lang: NodeLanguage) -> No
     assert "react" in fb
 
 
+class _FakeTopPackagesResponse:
+    def __init__(self, names: list[str]) -> None:
+        self._names = names
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        return {"objects": [{"package": {"name": n}} for n in self._names]}
+
+
+class _FakeTopPackagesClient:
+    def __init__(self, pages: list[list[str]]) -> None:
+        self._pages = pages
+        self.calls = 0
+
+    async def get(self, url: str) -> _FakeTopPackagesResponse:
+        names = self._pages[self.calls] if self.calls < len(self._pages) else []
+        self.calls += 1
+        return _FakeTopPackagesResponse(names)
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_preserves_dots_in_dotted_names(lang: NodeLanguage) -> None:
+    # npm's normalise_name is lowercase-only — it must not fold "socket.io" to
+    # "socket-io". Regression for TyposquatDetector's corpus/query mismatch: a
+    # corpus entry folded at fetch time can never be un-folded by the
+    # ecosystem-correct normalisation TyposquatDetector applies at query time.
+    client = _FakeTopPackagesClient([["socket.io", "lodash"]])
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result == ["socket.io", "lodash"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_lowercases_names(lang: NodeLanguage) -> None:
+    client = _FakeTopPackagesClient([["React"]])
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result == ["react"]
+
+
 # ---------------------------------------------------------------------------
 # resolve_package_dir
 # ---------------------------------------------------------------------------
@@ -1042,33 +1082,33 @@ def test_resolve_package_dir_plain_package(lang: NodeLanguage, tmp_path: Path) -
     pkg_dir = tmp_path / "node_modules" / "lodash"
     pkg_dir.mkdir(parents=True)
     result = lang.resolve_package_dir("lodash", tmp_path, None)
-    assert result == pkg_dir.resolve()
+    assert result == [pkg_dir.resolve()]
 
 
 def test_resolve_package_dir_scoped_package(lang: NodeLanguage, tmp_path: Path) -> None:
     pkg_dir = tmp_path / "node_modules" / "@babel" / "core"
     pkg_dir.mkdir(parents=True)
     result = lang.resolve_package_dir("@babel/core", tmp_path, None)
-    assert result == pkg_dir.resolve()
+    assert result == [pkg_dir.resolve()]
 
 
 def test_resolve_package_dir_rejects_traversal(lang: NodeLanguage, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("../../etc/passwd", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_traversal_in_scoped(lang: NodeLanguage, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("@scope/../../../etc", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_extra_slashes(lang: NodeLanguage, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("a/b/c", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_no_project_path(lang: NodeLanguage) -> None:
-    assert lang.resolve_package_dir("lodash", None, None) is None
+    assert lang.resolve_package_dir("lodash", None, None) == []
 
 
 def test_resolve_package_dir_dotdot_without_separator_accepted(lang: NodeLanguage, tmp_path: Path) -> None:
@@ -1076,7 +1116,13 @@ def test_resolve_package_dir_dotdot_without_separator_accepted(lang: NodeLanguag
     pkg_dir = tmp_path / "node_modules" / "some..pkg"
     pkg_dir.mkdir(parents=True)
     result = lang.resolve_package_dir("some..pkg", tmp_path, None)
-    assert result == pkg_dir.resolve()
+    assert result == [pkg_dir.resolve()]
+
+
+def test_resolve_package_dir_manifest_warning_always_none(lang: NodeLanguage, tmp_path: Path) -> None:
+    """node_modules/<name> is a direct path with no manifest file to distrust,
+    unlike PyPI's RECORD — this hook always returns None for npm."""
+    assert lang.resolve_package_dir_manifest_warning("lodash", tmp_path, None) is None
 
 
 # ---------------------------------------------------------------------------

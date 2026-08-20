@@ -89,15 +89,65 @@ critical_threshold = 70
 # Packages published more recently than period_days are subject to the cooldown policy.
 # period_days = 7
 
-# Action when a package is within the cooldown period and matches a typosquat pattern.
+# Action when a package is within the cooldown period and has a non-zero
+# heuristic risk score (typosquat match, low popularity, etc.).
 # One of: "prompt", "warn", "block", "allow"
 # on_new_medium_risk = "prompt"
 
-# Action when a package is within the cooldown period and has no typosquat match.
+# Action when a package is within the cooldown period and has no risk signals.
 # on_new_low_risk = "warn"
 
 # In non-interactive contexts (no TTY — coding agents, CI), escalate "prompt" to this action.
+# One of "allow", "warn" or "block": "prompt" is rejected, since escalating prompt to
+# prompt would leave the gate asking on a stdin nothing is attached to.
 # non_interactive_escalation = "block"
+
+# Risk-score gating for `package-alert run`, independent of the cooldown policy.
+# Thresholds are separate from [heuristics] on purpose: at pre-flight nothing is
+# installed yet, so only metadata signals (typosquat, low popularity) are
+# available and scores top out around 40.
+[sandbox.preflight_risk]
+# enabled = true
+
+# Score at or above which on_high_risk fires (pre-flight, metadata-only).
+# risk_threshold = 25
+
+# Action when the package name looks like a typosquat of a popular package.
+# on_typosquat = "prompt"
+
+# Only typosquat matches at or below this edit distance trigger on_typosquat.
+# More distant matches are reported as warnings instead. Defaults to the
+# detector's own threshold; lower to 1 to gate only on the closest matches.
+# typosquat_max_distance = 2
+
+# Minimum typosquat score required to trigger on_typosquat. The raw score is 20
+# (distance 1) or 15 (distance 2), reduced when the suspect package has
+# established adoption of its own (a trailing version suffix deepens that
+# reduction, but never applies on its own — a brand-new "requests2" keeps its
+# full score and is gated like any other squat). Gating on the score means those
+# reductions suppress false positives: httpx2 (18k dependents) is allowed, while
+# reqeusts and requests2 (absent from the registry) are gated.
+# typosquat_min_score = 15
+
+# Action when the pre-flight risk score reaches risk_threshold.
+# on_high_risk = "warn"
+
+# "prompt" is escalated to this when stdin is not a TTY (CI, coding agents).
+# One of "allow", "warn" or "block" — see the cooldown setting above.
+# non_interactive_escalation = "block"
+
+# Score at or above which on_post_install_risk fires. Applies after extraction,
+# where install-script / eval / embedded-binary signals are also available.
+# post_install_threshold = 30
+
+# Action when a newly installed package reaches post_install_threshold.
+# One of: "allow" (no-op), "warn" (report only), "prompt" (ask whether to keep the
+# packages), "block" (always roll back). Only "block" rolls back unconditionally:
+# "prompt" reports and asks, keeping the packages if you accept and rolling back
+# via the snapshot restore only if you decline. Declining is the default, so a bare
+# Enter rolls back. "prompt" escalates to non_interactive_escalation above when
+# stdin is not a TTY, since there is nobody to answer.
+# on_post_install_risk = "warn"
 
 [scheduler]
 enabled = true

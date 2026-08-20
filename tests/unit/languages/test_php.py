@@ -248,6 +248,50 @@ def test_top_packages_fallback_contains_known_packages(lang):
     assert "guzzlehttp/guzzle" in fb
 
 
+class _FakeTopPackagesResponse:
+    def __init__(self, names: list[str], next_url: str | None = None) -> None:
+        self._names = names
+        self._next_url = next_url
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        data: dict = {"packages": [{"name": n} for n in self._names]}
+        if self._next_url is not None:
+            data["next"] = self._next_url
+        return data
+
+
+class _FakeTopPackagesClient:
+    def __init__(self, pages: dict[str, list[str]]) -> None:
+        self._pages = pages
+        self.calls: list[str] = []
+
+    async def get(self, url: str) -> _FakeTopPackagesResponse:
+        self.calls.append(url)
+        names = self._pages.get(url, [])
+        return _FakeTopPackagesResponse(names)
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_preserves_dots_in_names(lang):
+    # Packagist's normalise_name is lowercase-only — it must not fold dotted
+    # vendor/package names. Regression for TyposquatDetector's corpus/query
+    # mismatch: a corpus entry folded at fetch time can never be un-folded by
+    # the ecosystem-correct normalisation TyposquatDetector applies at query time.
+    client = _FakeTopPackagesClient({"http://example/x": ["vendor/some.pkg"]})
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result == ["vendor/some.pkg"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_lowercases_names(lang):
+    client = _FakeTopPackagesClient({"http://example/x": ["Vendor/Package"]})
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result == ["vendor/package"]
+
+
 # ---------------------------------------------------------------------------
 # resolve_package_dir
 # ---------------------------------------------------------------------------
@@ -256,41 +300,47 @@ def test_resolve_package_dir_valid(lang, tmp_path: Path) -> None:
     pkg_dir = tmp_path / "vendor" / "guzzlehttp" / "guzzle"
     pkg_dir.mkdir(parents=True)
     result = lang.resolve_package_dir("guzzlehttp/guzzle", tmp_path, None)
-    assert result == pkg_dir.resolve()
+    assert result == [pkg_dir.resolve()]
 
 
 def test_resolve_package_dir_rejects_traversal(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("../../etc/passwd", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_dotdot_component(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("../evil/pkg", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_leading_dot(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir(".hidden/pkg", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_backslash_in_component(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("vendor\\evil/pkg", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_extra_slashes(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("a/b/c", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_rejects_no_slash(lang, tmp_path: Path) -> None:
     result = lang.resolve_package_dir("novendor", tmp_path, None)
-    assert result is None
+    assert result == []
 
 
 def test_resolve_package_dir_no_project_path(lang) -> None:
-    assert lang.resolve_package_dir("vendor/pkg", None, None) is None
+    assert lang.resolve_package_dir("vendor/pkg", None, None) == []
+
+
+def test_resolve_package_dir_manifest_warning_always_none(lang, tmp_path: Path) -> None:
+    """vendor/<vendor>/<package> is a direct path with no manifest file to
+    distrust, unlike PyPI's RECORD — this hook always returns None for Composer."""
+    assert lang.resolve_package_dir_manifest_warning("guzzlehttp/guzzle", tmp_path, None) is None
 
 
 # ---------------------------------------------------------------------------

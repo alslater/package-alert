@@ -45,6 +45,38 @@ async def test_negative_lookup_cached(cache):
 
 
 @pytest.mark.asyncio
+async def test_cache_hit_echoes_the_callers_requested_ecosystem_casing(cache):
+    """REGRESSION: the row is keyed by a lowercased/canonicalised ecosystem, but
+    a cache hit must still report the ecosystem casing the *caller* asked
+    about, not the DB key. Otherwise a live query for a plugin declaring
+    "NuGet" returns OsvResult.ecosystem == "NuGet" while a cache hit for the
+    exact same request returns "nuget" — a value CLI and scheduler findings
+    output emit directly."""
+    result = OsvResult(package_name="Newtonsoft.Json", ecosystem="NuGet", version="1.0", advisories=[])
+    await cache.set("NuGet", "Newtonsoft.Json", "1.0", result)
+
+    cached = await cache.get("NuGet", "Newtonsoft.Json", "1.0")
+
+    assert cached is not None
+    assert cached.ecosystem == "NuGet"
+    assert cached.package_name == "Newtonsoft.Json"
+
+
+@pytest.mark.asyncio
+async def test_cache_hit_still_matches_regardless_of_query_casing(cache):
+    """The lookup itself must still be case-insensitive on the ecosystem (a
+    plugin's casing can vary across call sites) — only the *returned* value
+    must reflect what this particular caller asked for."""
+    result = OsvResult(package_name="Newtonsoft.Json", ecosystem="NuGet", version="1.0", advisories=[])
+    await cache.set("NuGet", "Newtonsoft.Json", "1.0", result)
+
+    cached = await cache.get("nuget", "Newtonsoft.Json", "1.0")
+
+    assert cached is not None
+    assert cached.ecosystem == "nuget"
+
+
+@pytest.mark.asyncio
 async def test_expired_entry_returns_none(tmp_path):
     from packagealert.storage.db import open_db
     db = await open_db(tmp_path / "exp.db")
