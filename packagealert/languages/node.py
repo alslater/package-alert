@@ -21,6 +21,7 @@ from packagealert.languages.base import (
     SandboxTargets,
     ShellEnvironment,
     Snapshot,
+    parse_registry_timestamp,
 )
 from packagealert.models.risk import RiskSignal
 
@@ -188,6 +189,15 @@ class NodeLanguage:
             defer_to_lockfile=not result.global_install,
             lockfile_hint=_LOCKFILE_HINTS.get(result.manager),
             global_install=result.global_install,
+            # Only True for the subcommand shapes parse_npm_args/
+            # parse_yarn_args/parse_pnpm_args already classify as installing
+            # the existing lock file in full (bare `npm install`/`ci`,
+            # `npm update`/`audit fix`, bare `yarn`/`yarn install`/`dedupe`,
+            # `pnpm install`/`dedupe`/`fetch`/`import`) — not for a removal,
+            # even though a removal shares the same manager and empty
+            # `packages`.
+            is_lockfile_install=result.is_lockfile_install,
+            should_gate=result.should_gate,
         )
 
     # ------------------------------------------------------------------
@@ -828,7 +838,7 @@ class NodeLanguage:
         return "https://registry.npmjs.org/-/v1/search?text=keywords:javascript&popularity=1.0&size=250"
 
     async def fetch_top_packages(self, client: httpx.AsyncClient, url: str) -> list[str] | None:
-        from packagealert.languages.base import MAX_TOP_PACKAGES, normalise_package_name
+        from packagealert.languages.base import MAX_TOP_PACKAGES
         packages: list[str] = []
         offset = 0
         page_size = 250
@@ -839,7 +849,11 @@ class NodeLanguage:
             if not objects:
                 break
             for obj in objects:
-                packages.append(normalise_package_name(obj["package"]["name"]))
+                # normalise_name, not the PEP-503-folding normalise_package_name:
+                # npm does not collapse separators, so folding here would store
+                # "socket-io" for the registry's "socket.io" and TyposquatDetector's
+                # later per-ecosystem normalisation could never recover the dot.
+                packages.append(self.normalise_name(obj["package"]["name"]))
                 if len(packages) >= MAX_TOP_PACKAGES:
                     break
             if len(objects) < page_size:
@@ -882,44 +896,89 @@ class NodeLanguage:
         encoded = quote(name, safe="@")
         return f"https://registry.npmjs.org/{encoded}"
 
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        """Look up the version in the package document's `time` dict."""
+        if not isinstance(data, dict):
+            return None
+        version_time = data.get("time", {})
+        if version and version in version_time:
+            t = version_time[version]
+            try:
+                # npm emits Zulu ("...Z"), which is offset-aware: converting rather
+                # than replacing keeps this correct if that ever changes.
+                return parse_registry_timestamp(t).timestamp()
+            except ValueError:
+                pass
+        return None
+
+    def osv_ecosystem(self) -> str | None:
+        return "npm"
+
+    def normalise_name(self, name: str) -> str:
+        """Lowercase only — this registry does not collapse separators."""
+        return name.lower()
+
     def popularity_ecosystem(self) -> str | None:
         return "NPM"
 
-    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> list[Path]:
+        # *version* is accepted for signature compatibility but not used:
+        # node_modules holds exactly one version per package name at a given
+        # path, so the name alone identifies the tree unambiguously.
         if project_path is None:
-            return None
+            return []
         # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
         # unscoped packages have none. Reject anything else to prevent traversal.
         # Reject path separators and leading dots to prevent traversal.
         if package_name.startswith("@"):
             parts = package_name.split("/")
             if len(parts) != 2 or not parts[0] or not parts[1]:
-                return None
+                return []
             if any(p.startswith(".") for p in parts):
-                return None
+                return []
             if any(c in parts[1] for c in "/:+\\"):
-                return None
+                return []
         else:
             if not package_name or package_name[0] == ".":
-                return None
+                return []
             if any(c in package_name for c in "/:+\\"):
-                return None
+                return []
         node_modules = (project_path / "node_modules").resolve()
         try:
             candidate = (project_path / "node_modules" / package_name).resolve()
             if not candidate.is_relative_to(node_modules):
-                return None
+                return []
         except OSError:
-            return None
+            return []
         if not candidate.is_dir():
-            return None
-        return candidate
+            return []
+        return [candidate]
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        """node_modules/<name> is a direct, unambiguous path — resolve_package_dir
+        above parses no manifest file to distrust, unlike PyPI's RECORD. Nothing
+        here can be corrupted to force a shared-namespace-style misattribution."""
+        return None
 
     def latest_version_url(self, name: str) -> str | None:
         encoded = quote(name, safe="@")
         return f"https://registry.npmjs.org/{encoded}/latest"
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
+        if not isinstance(data, dict):
+            return None
         return data.get("version") or None
 
     # ------------------------------------------------------------------

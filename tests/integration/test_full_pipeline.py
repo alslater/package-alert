@@ -132,7 +132,7 @@ async def test_risk_engine_typosquat_pipeline():
         project_path=None,
         timestamp=datetime.now(UTC),
     )
-    report = await engine.analyze(event, None)
+    report = await engine.analyze(event, [])
     assert report.score > 0
     assert any(s.name == "typosquat" for s in report.signals)
 
@@ -151,5 +151,5 @@ async def test_risk_engine_clean_package():
         project_path=None,
         timestamp=datetime.now(UTC),
     )
-    report = await engine.analyze(event, None)
+    report = await engine.analyze(event, [])
     assert report.score == 0

@@ -52,6 +52,7 @@ from packagealert.sandbox.runner import (
     _snapshot_lock_files,
     _try_parse,
 )
+from tests.unit.dbmocks import make_mock_db
 
 
 @pytest.fixture(scope="session")
@@ -678,11 +679,14 @@ class TestTryParse:
         result = _try_parse(["uv", "sync"])
         assert result is not None
         assert result.manager == "uv-project"
+        assert result.is_lockfile_install is True
+        assert result.should_gate is True
 
     def test_recognises_npm_install(self):
         result = _try_parse(["npm", "install"])
         assert result is not None
         assert result.ecosystem == "npm"
+        assert result.is_lockfile_install is True
 
     def test_recognises_pip_install(self):
         result = _try_parse(["pip", "install", "requests"])
@@ -706,18 +710,356 @@ class TestTryParse:
         assert result is not None
         assert result.manager == "pipenv"
         assert result.packages == []
+        assert result.is_lockfile_install is True
 
     def test_recognises_pipenv_install(self):
         result = _try_parse(["pipenv", "install", "requests"])
         assert result is not None
         assert result.manager == "pipenv"
         assert result.packages == ["requests"]
+        assert result.is_lockfile_install is False
 
     def test_recognises_pipenv_create(self):
         result = _try_parse(["pipenv", "create"])
         assert result is not None
         assert result.manager == "pipenv"
         assert result.packages == []
+        assert result.is_lockfile_install is False
+
+
+# ---------------------------------------------------------------------------
+# is_lockfile_install — end-to-end through the real LanguageBase.parse_process_install
+# path (_try_parse), not just the process_args.py parser functions directly.
+#
+# REGRESSION (2nd pass): the risk/cooldown gates' lockfile-install detection
+# (is_lockfile_install) is correctly set by parse_npm_args/parse_pipenv_args/
+# etc., but _try_parse's ProcessInstall -> ParsedInstall adapter (and each
+# language module's own parse_process_install, which builds the intermediate
+# ProcessInstall) previously discarded it entirely — so every real `pa run`
+# invocation, including a bare `npm install`, saw is_lockfile_install=False
+# regardless of the parser's own classification. Both layers must carry the
+# field through for the gate fix to take effect where it actually matters.
+# ---------------------------------------------------------------------------
+
+
+class TestTryParseLockfileInstallIntent:
+    def test_npm_uninstall_is_not_a_lockfile_install(self):
+        """The exact reported scenario: npm uninstall must not be treated as
+        installing the current (pre-removal) lock file."""
+        result = _try_parse(["npm", "uninstall", "lodash"])
+        assert result is not None
+        assert result.packages == []
+        assert result.is_lockfile_install is False
+
+    def test_npm_ci_is_a_lockfile_install(self):
+        result = _try_parse(["npm", "ci"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_npm_install_dry_run_should_not_gate(self):
+        """REGRESSION: `--dry-run` reports what install would do without
+        installing anything (npm's own docs). It was ignored entirely, so a
+        package-less `npm install --dry-run` was indistinguishable from a
+        real bare install and would gate on the current lock file.
+        should_gate (not is_lockfile_install) is the field that must go
+        False here — is_lockfile_install still reflects what the equivalent
+        real `npm install` would do."""
+        result = _try_parse(["npm", "install", "--dry-run"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_npm_install_package_lock_only_should_not_gate(self):
+        """REGRESSION: `--package-lock-only` only rewrites package-lock.json
+        without touching node_modules (npm's own docs) — installs nothing."""
+        result = _try_parse(["npm", "install", "--package-lock-only"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_npm_install_lodash_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): the earlier dry-run fix only suppressed
+        the empty-packages lock-file scan, so `npm install lodash --dry-run`
+        (non-empty `packages`) was still unconditionally queried by
+        _resolve_query_packages/_preflight even though the command installs
+        nothing. should_gate must be False regardless of explicit packages."""
+        result = _try_parse(["npm", "install", "lodash", "--dry-run"])
+        assert result is not None
+        assert result.packages == ["lodash"]
+        assert result.should_gate is False
+
+    def test_npm_ci_dry_run_should_not_gate(self):
+        result = _try_parse(["npm", "ci", "--dry-run"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_npm_update_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `npm update --dry-run` was still
+        classified as a lockfile install with nothing suppressing the gate."""
+        result = _try_parse(["npm", "update", "--dry-run"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_npm_audit_fix_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `npm audit fix --dry-run` was still
+        classified as a lockfile install with nothing suppressing the gate."""
+        result = _try_parse(["npm", "audit", "fix", "--dry-run"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_npm_update_is_a_lockfile_install(self):
+        result = _try_parse(["npm", "update"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_yarn_remove_is_not_a_lockfile_install(self):
+        result = _try_parse(["yarn", "remove", "lodash"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_bare_yarn_is_a_lockfile_install(self):
+        result = _try_parse(["yarn"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_pnpm_remove_is_not_a_lockfile_install(self):
+        result = _try_parse(["pnpm", "remove", "lodash"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_pnpm_install_is_a_lockfile_install(self):
+        result = _try_parse(["pnpm", "install"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_pipenv_uninstall_is_not_a_lockfile_install(self):
+        result = _try_parse(["pipenv", "uninstall", "requests"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_pipenv_shell_is_not_a_lockfile_install(self):
+        result = _try_parse(["pipenv", "shell"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_uv_remove_is_not_a_lockfile_install(self):
+        result = _try_parse(["uv", "remove", "requests"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_uv_remove_does_not_populate_packages(self):
+        """REGRESSION: parse_uv_args used to extract the removed package
+        name(s) into `packages` for `remove` (same code path as `add`), so
+        `_resolve_query_packages`'s `if parsed.packages:` branch queried them
+        for risk/cooldown/OSV scoring as if they were about to be installed —
+        is_lockfile_install=False alone doesn't prevent that, since it only
+        guards the empty-packages branch. `packages` must be empty for a
+        removal, matching npm/yarn/pnpm's `remove`/`uninstall` branches."""
+        result = _try_parse(["uv", "remove", "requests"])
+        assert result is not None
+        assert result.packages == []
+
+    def test_uv_run_is_not_a_lockfile_install(self):
+        result = _try_parse(["uv", "run", "pytest"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_uv_cache_is_not_a_lockfile_install(self):
+        result = _try_parse(["uv", "cache", "clean"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_uv_sync_check_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `uv sync --check` only reports whether
+        the environment is synchronized with the project (uv's own docs) —
+        it was still classified as a lockfile install with nothing
+        suppressing the gate. should_gate (not is_lockfile_install) is the
+        field that must go False here."""
+        result = _try_parse(["uv", "sync", "--check"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_uv_sync_dry_run_should_not_gate(self):
+        """REGRESSION (P2): `uv sync --dry-run` performs a dry run "without
+        writing the lockfile or modifying the project environment" (uv's own
+        docs) — only `--check` was recognised as report-only."""
+        result = _try_parse(["uv", "sync", "--dry-run"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_uv_pip_sync_captures_requirements_file(self):
+        """REGRESSION (P1): `uv pip sync requirements.txt` used to fall
+        through the catch-all and return no req_files at all — risk,
+        cooldown, and OSV pre-flight all received zero queries for a real
+        install."""
+        result = _try_parse(["uv", "pip", "sync", "requirements.txt"])
+        assert result is not None
+        assert result.manager == "uv"
+        assert result.req_files == ["requirements.txt"]
+        assert result.should_gate is True
+
+    def test_uv_pip_sync_no_index_does_not_consume_requirements_file(self):
+        """REGRESSION (P1): `--no-index` is a boolean flag (uv's own docs)
+        that was wrongly treated as value-consuming, so `uv pip sync
+        --no-index requirements.txt` dropped the requirements filename
+        entirely."""
+        result = _try_parse(["uv", "pip", "sync", "--no-index", "requirements.txt"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+
+    def test_uv_pip_sync_dry_run_should_not_gate(self):
+        result = _try_parse(["uv", "pip", "sync", "requirements.txt", "--dry-run"])
+        assert result is not None
+        assert result.req_files == ["requirements.txt"]
+        assert result.should_gate is False
+
+    def test_pip_install_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `--dry-run` resolves dependencies and
+        reports what would happen without actually installing anything
+        (pip's own docs). It was ignored entirely, so `pip install requests
+        --dry-run` was indistinguishable from a real install."""
+        result = _try_parse(["pip", "install", "requests", "--dry-run"])
+        assert result is not None
+        assert result.packages == ["requests"]
+        assert result.should_gate is False
+
+    def test_pip_install_no_dry_run_should_gate(self):
+        result = _try_parse(["pip", "install", "requests"])
+        assert result is not None
+        assert result.should_gate is True
+
+    def test_uv_pip_install_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `uv pip install --dry-run` resolves
+        dependencies and prints the plan without installing anything (uv's
+        own docs)."""
+        result = _try_parse(["uv", "pip", "install", "requests", "--dry-run"])
+        assert result is not None
+        assert result.packages == ["requests"]
+        assert result.should_gate is False
+
+    def test_composer_require_dry_run_should_not_gate(self):
+        """REGRESSION (P2 follow-up): `--dry-run` outputs the operations but
+        executes nothing (Composer's own docs)."""
+        result = _try_parse(["composer", "require", "vendor/pkg", "--dry-run"])
+        assert result is not None
+        assert result.packages == ["vendor/pkg"]
+        assert result.should_gate is False
+
+    def test_composer_install_dry_run_should_not_gate(self):
+        result = _try_parse(["composer", "install", "--dry-run"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+        assert result.should_gate is False
+
+    def test_composer_update_dry_run_should_not_gate(self):
+        result = _try_parse(["composer", "update", "--dry-run"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_uv_lock_is_not_a_lockfile_install(self):
+        """REGRESSION: `uv lock` only regenerates uv.lock from
+        pyproject.toml (a fresh resolution) — it installs nothing and
+        doesn't even read the existing lock file as its surface. It was
+        grouped with `sync` (is_lockfile_install=True), so the pre-flight
+        gates scanned the current, about-to-be-replaced uv.lock as the
+        install surface."""
+        result = _try_parse(["uv", "lock"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_pipenv_lock_is_not_a_lockfile_install(self):
+        """REGRESSION: `pipenv lock` only regenerates Pipfile.lock from
+        Pipfile — it installs nothing into the environment. It was grouped
+        with `update`/`upgrade` (is_lockfile_install=True), so the
+        pre-flight gates scanned the current, about-to-be-replaced
+        Pipfile.lock as the install surface."""
+        result = _try_parse(["pipenv", "lock"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_pipenv_update_is_a_lockfile_install(self):
+        """`pipenv update` runs lock + sync — a real install, unlike bare
+        `pipenv lock`."""
+        result = _try_parse(["pipenv", "update"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_pipenv_update_dry_run_should_not_gate(self):
+        """REGRESSION: `--dry-run` sets outdated=True in pipenv's own
+        do_update(), routing entirely to do_outdated() — never locks or
+        syncs. `pipenv update --dry-run` was indistinguishable from a real
+        `pipenv update` and would gate on the current lock file.
+        should_gate (not is_lockfile_install) is the field that must go
+        False here."""
+        result = _try_parse(["pipenv", "update", "--dry-run"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_pipenv_update_outdated_should_not_gate(self):
+        """REGRESSION: `--outdated` routes do_update() entirely to
+        do_outdated() (pipenv's own source) — just lists updatable
+        packages, never locks or syncs."""
+        result = _try_parse(["pipenv", "update", "--outdated"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_pipenv_upgrade_is_not_a_lockfile_install(self):
+        """REGRESSION: unlike `update`, `pipenv upgrade` (pipenv's own
+        `routines.update.upgrade()`) only re-resolves the named/modified
+        packages and rewrites Pipfile.lock — it never calls pipenv's
+        sync/install routine (cmd_upgrade -> upgrade(), no do_sync call).
+        It was grouped with `update` (is_lockfile_install=True), so the
+        gates would scan the current lock file as if `upgrade` were
+        installing its contents."""
+        result = _try_parse(["pipenv", "upgrade"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_pnpm_dedupe_is_a_lockfile_install(self):
+        result = _try_parse(["pnpm", "dedupe"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_pnpm_dedupe_check_should_not_gate(self):
+        """REGRESSION: `--check` reports whether dedupe would make changes
+        "without installing packages or editing the lockfile" (pnpm's own
+        docs). It was ignored entirely, so `pnpm dedupe --check` was
+        indistinguishable from a real dedupe and would gate on the current
+        lock file. should_gate (not is_lockfile_install) is the field that
+        must go False here."""
+        result = _try_parse(["pnpm", "dedupe", "--check"])
+        assert result is not None
+        assert result.should_gate is False
+
+    def test_pnpm_fetch_is_a_lockfile_install(self):
+        result = _try_parse(["pnpm", "fetch"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_pnpm_import_is_not_a_lockfile_install(self):
+        """REGRESSION: `pnpm import` only generates pnpm-lock.yaml from a
+        *different* manager's lockfile (package-lock.json/yarn.lock) — it
+        never touches node_modules. It was grouped with `dedupe`/`fetch`
+        (is_lockfile_install=True), so the gates would scan pnpm's own
+        (unrelated) lock file as if `import` were installing its
+        contents."""
+        result = _try_parse(["pnpm", "import"])
+        assert result is not None
+        assert result.is_lockfile_install is False
+
+    def test_composer_install_is_a_lockfile_install(self):
+        result = _try_parse(["composer", "install"])
+        assert result is not None
+        assert result.is_lockfile_install is True
+
+    def test_composer_require_is_not_a_lockfile_install(self):
+        """Explicit packages named on the command line — not the ambiguous
+        empty-packages case at all."""
+        result = _try_parse(["composer", "require", "vendor/pkg"])
+        assert result is not None
+        assert result.is_lockfile_install is False
 
     def test_pip_install_r_collects_req_files(self):
         result = _try_parse(["pip", "install", "-r", "requirements.txt", "-r", "dev.txt"])
@@ -2001,6 +2343,26 @@ class TestCollectNewPackages:
         names = [r[1] for r in result]
         assert names.count("requests") == 1
 
+    def test_same_package_version_under_different_scan_roots_is_reported_for_each_root(self, tmp_path):
+        # Two distinct scan roots (e.g. a project venv and a nested tool's own
+        # venv) both installing the same name/version are two separate on-disk
+        # copies. _post_scan_risk scores each (ecosystem, name, version, scan_root)
+        # entry independently via its own scan_root, so collapsing them into one
+        # entry — keeping only the first scan_root — would let a compromised
+        # second copy go unscanned.
+        env1 = tmp_path / "env1" / "site-packages"
+        env2 = tmp_path / "env2" / "site-packages"
+        env1.mkdir(parents=True)
+        env2.mkdir(parents=True)
+        (env1 / "requests-2.31.0.dist-info").mkdir()
+        (env2 / "requests-2.31.0.dist-info").mkdir()
+
+        result = _collect_new_packages([env1, env2], {}, "pypi")
+
+        roots = {r[3] for r in result}
+        assert roots == {env1, env2}
+        assert len(result) == 2
+
     def test_only_scans_ecosystem_when_specified(self, tmp_path):
         nm = tmp_path / "node_modules"
         nm.mkdir()
@@ -2078,6 +2440,12 @@ class TestRunShell:
         # Patch bwrap_available so the runner doesn't bail early
         import packagealert.sandbox.runner as runner_mod
         monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        # Isolate cwd: without this the runner scans package-alert's own
+        # repo as the "project," and its uv.lock intentionally contains
+        # typosquat-shaped calibration fixtures (httpx2, httpcore2, respx)
+        # that trip the real preflight risk gate, failing this test for
+        # reasons unrelated to what it's actually testing.
+        monkeypatch.chdir(tmp_path)
 
         import asyncio
         runner = _make_runner()
@@ -3199,8 +3567,9 @@ class TestInstallTargetRestoreIntegration:
             return True
 
         async def _post_scan_spy(packages, *a, **kw):
-            # Record whether the evil package was visible when post_scan ran
-            post_scan_saw_evil.append(any(name == "evil" for _, name, _ in packages))
+            # Record whether the evil package was visible when post_scan ran.
+            # Entries are (ecosystem, name, version, scan_root).
+            post_scan_saw_evil.append(any(pkg[1] == "evil" for pkg in packages))
             return True
 
         monkeypatch.setattr(runner, "_scan_updated_lock_files", _scan_and_mutate)
@@ -3887,7 +4256,8 @@ class TestPreflightContainment:
         yarn_scan = _fake_scan_result([("npm", "lodash", "4.17.21")])
 
         parsed = runner_mod.ParsedInstall(
-            manager="yarn", packages=[], ecosystem="npm", lockfile_hint="yarn.lock"
+            manager="yarn", packages=[], ecosystem="npm", lockfile_hint="yarn.lock",
+            is_lockfile_install=True,
         )
         ctx = runner_mod._Context(argv=["yarn", "install"], parsed=parsed, cwd=tmp_path)
         runner = _make_runner()
@@ -3916,7 +4286,8 @@ class TestPreflightContainment:
         scan_result = _fake_scan_result([("npm", "lodash", "4.17.21")])
 
         parsed = runner_mod.ParsedInstall(
-            manager="npm", packages=[], ecosystem="npm", lockfile_hint=None
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint=None,
+            is_lockfile_install=True,
         )
         ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
         runner = _make_runner()
@@ -3947,7 +4318,8 @@ class TestPreflightContainment:
         scan_result = _fake_scan_result([("npm", "lodash", "4.17.21")])
 
         parsed = runner_mod.ParsedInstall(
-            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json"
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json",
+            is_lockfile_install=True,
         )
         ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
         runner = _make_runner()
@@ -3979,7 +4351,8 @@ class TestPreflightContainment:
         fallback_scan = _fake_scan_result([("npm", "lodash", "4.17.21")])
 
         parsed = runner_mod.ParsedInstall(
-            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json"
+            manager="npm", packages=[], ecosystem="npm", lockfile_hint="package-lock.json",
+            is_lockfile_install=True,
         )
         ctx = runner_mod._Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
         runner = _make_runner()
@@ -3996,6 +4369,41 @@ class TestPreflightContainment:
         assert result is True
         mock_scan_lockfiles.assert_called_once_with([tmp_path / "package-lock.json"])
         mock_scan_project.assert_called_once_with(tmp_path)
+
+
+class TestPreflightShouldGate:
+    """_preflight() must skip the OSV check entirely for a report-only/check-only command."""
+
+    def test_dry_run_with_explicit_malicious_looking_package_is_not_queried(self, tmp_path):
+        """REGRESSION (P2 follow-up, exact reported scenario): `npm install
+        lodash --dry-run` carries a non-empty `packages=["lodash"]` — before
+        should_gate, _preflight's `if parsed.packages:` branch queried OSV
+        for it unconditionally and could block the dry-run over a signal on
+        a package that will never actually be installed. should_gate=False
+        must short-circuit before OSV is ever queried."""
+        import asyncio
+
+        parsed = _try_parse(["npm", "install", "lodash", "--dry-run"])
+        assert parsed is not None
+        assert parsed.packages == ["lodash"]
+        assert parsed.should_gate is False
+        ctx = _Context(argv=["npm", "install", "lodash", "--dry-run"], parsed=parsed, cwd=tmp_path)
+
+        _fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"lodash"})
+        mock_open_db = unittest.mock.AsyncMock(side_effect=_fake_open_db)
+        runner = _make_runner()
+
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", mock_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            result = asyncio.run(runner._preflight(ctx))
+
+        assert result is True
+        # should_gate=False must short-circuit before the DB is even opened —
+        # confirms OSV was never queried for the dry-run's explicit package.
+        mock_open_db.assert_not_called()
 
 
 class TestScanUpdatedLockFiles:
@@ -4406,8 +4814,11 @@ def test_cooldown_blocks_non_interactive(tmp_path, monkeypatch):
         patch("sys.stdin") as mock_stdin,
     ):
         mock_stdin.isatty.return_value = False
-        mock_db = AsyncMock()
-        mock_db.close = AsyncMock()
+        # A real aiosqlite connection's execute() returns an awaitable async context
+        # manager; an AsyncMock returns a bare coroutine, so `async with
+        # db.execute(...)` raised TypeError inside the cache readers and was swallowed
+        # by their fail-open handlers.
+        mock_db = make_mock_db()
         mock_open_db.return_value = mock_db
 
         result = asyncio.run(runner.run(["pip", "install", "requests==2.31.0"]))
@@ -4451,8 +4862,11 @@ def test_cooldown_resolves_latest_version_for_unpinned(tmp_path, monkeypatch):
         patch("sys.stdin") as mock_stdin,
     ):
         mock_stdin.isatty.return_value = False
-        mock_db = AsyncMock()
-        mock_db.close = AsyncMock()
+        # A real aiosqlite connection's execute() returns an awaitable async context
+        # manager; an AsyncMock returns a bare coroutine, so `async with
+        # db.execute(...)` raised TypeError inside the cache readers and was swallowed
+        # by their fail-open handlers.
+        mock_db = make_mock_db()
         mock_open_db.return_value = mock_db
 
         # Unpinned — no version in the install spec
@@ -4492,8 +4906,11 @@ def test_cooldown_skips_when_latest_version_fetch_fails(tmp_path, monkeypatch):
         patch.dict("os.environ", {"VIRTUAL_ENV": "/fake/venv"}),
     ):
         mock_stdin.isatty.return_value = False
-        mock_db = AsyncMock()
-        mock_db.close = AsyncMock()
+        # A real aiosqlite connection's execute() returns an awaitable async context
+        # manager; an AsyncMock returns a bare coroutine, so `async with
+        # db.execute(...)` raised TypeError inside the cache readers and was swallowed
+        # by their fail-open handlers.
+        mock_db = make_mock_db()
         mock_open_db.return_value = mock_db
         mock_run.return_value.returncode = 0
 
@@ -5243,9 +5660,29 @@ class TestLanguageBaseDataclasses:
         assert e.path_prepends == []
         assert e.notes == []
 
-    def test_contract_version_is_4(self):
+    def test_contract_version_is_5(self):
         from packagealert.languages.base import CURRENT_CONTRACT_VERSION
-        assert CURRENT_CONTRACT_VERSION == 4
+        assert CURRENT_CONTRACT_VERSION == 5
+
+    def test_builtin_modules_declare_the_current_contract_version(self):
+        """Built-ins must not lag the contract, or they silently get the shims.
+
+        Scoped to the in-tree modules by name. Iterating all_languages() would fail on
+        any installed third-party plugin that legitimately declares an older version —
+        which the compatibility shims exist to support, so a v4 plugin is a supported
+        configuration, not a defect. Naming the three also catches a built-in silently
+        failing to register.
+        """
+        from packagealert.languages import registry as lang_registry
+        from packagealert.languages.base import CURRENT_CONTRACT_VERSION
+
+        lang_registry.load()
+        for name in ("python", "node", "php"):
+            lang = lang_registry.get(name)
+            assert lang is not None, f"built-in {name!r} is not registered"
+            assert lang.contract_version == CURRENT_CONTRACT_VERSION, (
+                f"{name} declares v{lang.contract_version}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -6011,3 +6448,67 @@ class TestCleanupWritableBinds:
         assert not good_src.exists(), "good src must still be cleaned up after bad entry raises"
         assert any("unexpected OSError" in r.message for r in caplog.records)
 
+
+    def test_changelog_documents_the_current_contract_version(self):
+        """LANGUAGES.md must document every contract version, including the newest.
+
+        The guide previously also restated the number in prose ("currently `4`"),
+        which went stale on the next bump. That claim is gone — the changelog is the
+        single place a version number is written — so this guards the remaining one.
+        """
+        import re
+        from pathlib import Path
+
+        from packagealert.languages.base import CURRENT_CONTRACT_VERSION
+
+        guide = Path(__file__).parent.parent.parent / "LANGUAGES.md"
+        text = guide.read_text()
+        rows = [int(m) for m in re.findall(r"^\| (\d+) \|", text, re.MULTILINE)]
+        assert rows, "no contract changelog rows found"
+        assert max(rows) == CURRENT_CONTRACT_VERSION, (
+            f"LANGUAGES.md changelog stops at v{max(rows)} but the contract is "
+            f"v{CURRENT_CONTRACT_VERSION} — add a changelog row"
+        )
+
+    def test_guide_does_not_hardcode_the_contract_version_in_prose(self):
+        """A restated literal goes stale silently; reference the constant instead."""
+        import re
+        from pathlib import Path
+
+        guide = Path(__file__).parent.parent.parent / "LANGUAGES.md"
+        prose = [
+            ln for ln in guide.read_text().splitlines()
+            if re.search(r"currently\s+`\d+`", ln)
+        ]
+        assert not prose, f"contract version hardcoded in prose: {prose}"
+
+    def test_guide_documents_every_v5_contract_method(self):
+        """The hooks added in contract v5 must appear in the guide's method list.
+
+        Scoped to v5 rather than the whole protocol: eight older methods are also
+        undocumented (tracked on the roadmap), so a blanket assertion would fail for
+        pre-existing reasons and obscure new drift.
+        """
+        from pathlib import Path
+
+        guide = (Path(__file__).parent.parent.parent / "LANGUAGES.md").read_text()
+        v5_hooks = ("publication_date_parse", "osv_ecosystem", "normalise_name")
+        missing = [h for h in v5_hooks if f"def {h}" not in guide]
+        assert not missing, f"LANGUAGES.md does not document: {missing}"
+
+    def test_guide_resolver_signature_matches_the_contract(self):
+        """The documented resolve_package_dir parameters must match the real ones."""
+        import inspect
+        from pathlib import Path
+
+        from packagealert.languages.base import LanguageBase
+
+        params = list(inspect.signature(LanguageBase.resolve_package_dir).parameters)
+        params.remove("self")
+        guide = (Path(__file__).parent.parent.parent / "LANGUAGES.md").read_text()
+        for block in guide.split("def resolve_package_dir(")[1:]:
+            body = block.split(") ->")[0]
+            for param in params:
+                assert f"{param}:" in body, (
+                    f"a documented resolve_package_dir omits `{param}`"
+                )

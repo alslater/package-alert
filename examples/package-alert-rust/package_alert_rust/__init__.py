@@ -10,7 +10,6 @@ import httpx
 
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
-    CURRENT_CONTRACT_VERSION,
     MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
@@ -55,7 +54,15 @@ class CargoLanguage:
     name = "rust"
     ecosystems: ClassVar[list[str]] = ["crates.io"]
     process_names: ClassVar[list[str]] = ["cargo"]
-    contract_version = CURRENT_CONTRACT_VERSION
+    # Pinned to the highest contract version this plugin actually implements —
+    # NOT CURRENT_CONTRACT_VERSION. This plugin predates v5 (resolve_package_dir
+    # here still returns Path | None, not list[Path], and it implements none of
+    # publication_date_parse/osv_ecosystem/normalise_name), so declaring v5 would
+    # falsely claim full compliance: the registry only shims/adapts a plugin
+    # declaring a version *below* the one that changed, so an equal-to-current
+    # declaration gets no protection at all. Bump this only after actually
+    # implementing whatever a future contract version adds.
+    contract_version = 4
     author = "package-alert contributors"
     repository = "https://github.com/package-alert/package-alert-rust"
 
@@ -223,8 +230,10 @@ class CargoLanguage:
     def latest_version_url(self, name: str) -> str | None:
         return f"https://crates.io/api/v1/crates/{name}"
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
         # crates.io returns the newest version in crate.newest_version
+        if not isinstance(data, dict):
+            return None
         return data.get("crate", {}).get("newest_version") or None
 
     def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:

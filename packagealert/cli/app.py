@@ -368,12 +368,20 @@ async def _run_scan_cache(cfg):
                         continue
                     if not metadata or not metadata.version:
                         continue
-                    result = await osv_cache.get(metadata.ecosystem.lower(), metadata.name, metadata.version)
+                    # Canonicalise exactly as the daemon does. Lowercasing here wrote
+                    # rows keyed "nuget" while the daemon wrote "NuGet" for the same
+                    # package, so the two paths could not read each other's cache
+                    # entries and clear-cache could only ever find one of them.
+                    try:
+                        cache_eco = normalise_ecosystem(metadata.ecosystem)
+                    except ValueError:
+                        cache_eco = metadata.ecosystem.lower()
+                    result = await osv_cache.get(cache_eco, metadata.name, metadata.version)
                     if result is None:
-                        results = await osv_client.batch_query([(metadata.ecosystem.lower(), metadata.name, metadata.version)])
+                        results = await osv_client.batch_query([(cache_eco, metadata.name, metadata.version)])
                         if results:
                             result = results[0]
-                            await osv_cache.set(metadata.ecosystem.lower(), metadata.name, metadata.version, result)
+                            await osv_cache.set(cache_eco, metadata.name, metadata.version, result)
                     if result and result.has_malicious:
                         try:
                             _eco = normalise_ecosystem(metadata.ecosystem)
@@ -508,6 +516,300 @@ def _severity_colour(adv) -> str:
     return "red" if adv.is_malicious else "yellow"
 
 
+_RISK_LEVEL_COLOUR = {"critical": "red", "warning": "yellow", "info": "cyan"}
+
+
+def _preflight_level(score: int, cfg, *, installed: bool = False) -> str:
+    """Classify a scan risk score for display.
+
+    Deliberately not `RiskReport.level`. That property's 40/70 boundaries are
+    calibrated for the daemon, which scores with source-code signals available.
+    Lock-file scanning is metadata-only (typosquat + low_popularity, ceiling ~40),
+    so copying it labelled everything below 40 as "info" — including scores of
+    25-39 that DO gate `pa run` via `sandbox.preflight_risk.risk_threshold`.
+    Showing "info" beside a package that would be blocked misleads the reader.
+
+    The `warning` boundary is mode-dependent. `--scan-installed` (*installed*)
+    reads real extracted packages, so source-code heuristics contribute and the
+    score range matches the post-install scan — `post_install_threshold` is the
+    calibrated boundary there, not `risk_threshold`. `critical` stays at the
+    daemon's boundary in both modes so the surfaces agree at the high end.
+    """
+    if score >= cfg.heuristics.critical_threshold:
+        return "critical"
+    pr = cfg.sandbox.preflight_risk
+    warn_at = pr.post_install_threshold if installed else pr.risk_threshold
+    if score >= warn_at:
+        return "warning"
+    return "info"
+
+
+def _is_low_signal_risk(row: dict) -> bool:
+    """True for rows whose only signal is a minimal low_popularity hit.
+
+    On a large lock file most small legitimate libraries trip low_popularity at
+    score 5. Such rows are hidden unless --details is passed. They can never have
+    reached the pre-flight risk threshold, so suppression is display-only.
+    """
+    signals = row.get("signals") or []
+    return (
+        len(signals) == 1
+        and signals[0]["name"] == "low_popularity"
+        and signals[0]["score"] <= 5
+    )
+
+
+def _visible_risks(risks: list[dict], *, show_details: bool) -> list[dict]:
+    """Filter risk rows for display. Shared by the text and HTML renderers.
+
+    Low-signal rows are hidden unless --details is passed. JSON deliberately does
+    not use this — it is a machine contract and always carries every row.
+    """
+    if show_details:
+        return list(risks)
+    return [r for r in risks if not _is_low_signal_risk(r)]
+
+
+# Display priority for the one-line summary reason. Score alone is the wrong
+# ordering: low_popularity ("not found on deps.dev", 20) outscores a distance-2
+# typosquat ("resembles 'requests'", 15), so picking by score hides *which*
+# package is being impersonated — the single most actionable fact in the row, and
+# the normal shape for distance-2 squats. Naming the target always wins.
+_REASON_PRIORITY = {"typosquat": 2, "low_popularity": 1}
+
+
+def _primary_reason(row: dict) -> str:
+    """Return the most actionable signal reason as an inline suffix.
+
+    One clause, not all of them: concatenating every reason pushed the line past
+    140 characters, and the two signals largely restate each other. Selection is
+    by display priority first (see _REASON_PRIORITY) and score second, so the
+    impersonated package name survives the truncation. `--details` adds the full
+    per-signal breakdown with names and individual scores.
+    """
+    signals = row.get("signals") or []
+    candidates = [s for s in signals if (s.get("reason") or "").strip()]
+    if not candidates:
+        return ""
+    best = max(
+        candidates,
+        key=lambda s: (_REASON_PRIORITY.get(s.get("name", ""), 0), s.get("score", 0)),
+    )
+    return f" — {best['reason'].strip()}"
+
+
+def _installed_dir_resolver(root: Path):
+    """Build (path_resolver, manifest_warning_resolver) for score_packages, for a scan root.
+
+    *path_resolver* is a (ecosystem, name, version) -> list[list[Path]] resolver.
+    Returns a list of candidate groups, not a flat list of paths: the same name
+    and version can be installed in more than one environment, and
+    `score_packages` scores every group independently and keeps the
+    highest-scoring report so a compromised copy cannot hide behind a clean
+    sibling. Within one environment, a distribution can own more than one
+    directory (e.g. `google/auth` and `google/oauth2` for a namespace-package
+    distribution) — those belong in the *same* group, scored together as one
+    candidate, rather than competing with each other for the max. An empty list
+    degrades that package to metadata-only scoring.
+
+    *manifest_warning_resolver* is a (ecosystem, name, version) -> str | None
+    resolver carrying each package's manifest-integrity warning (see
+    LanguageBase.resolve_package_dir_manifest_warning) — an aggregate across
+    every environment checked, not tied to whichever candidate group wins the
+    score competition, since a corrupt manifest in one environment must not be
+    concealed by a healthy copy scoring higher in another. Populated as a side
+    effect of *path_resolver* resolving the same package's environments, cached
+    per (ecosystem, name, version) so the manifest lookup is not repeated.
+
+    Both are built together, and only used by `--scan-installed`, where
+    packages are enumerated from a real venv/site-packages or node_modules and
+    the extracted source is readable. Delegate to the runner's
+    `_resolve_installed_dir`, which handles both ecosystems and enforces that
+    the resolved paths stay within the scanned tree.
+
+    The site-packages lookup is done once here rather than per package.
+    """
+    from packagealert.languages.python import all_installed_site_packages
+    from packagealert.sandbox.runner import _resolve_installed_dir
+
+    # Uses the language module's own discovery so the resolver searches exactly the
+    # environments detect_installed_packages found the packages in — a divergent
+    # list here silently dropped source-code signals for env/.env. All candidates
+    # are kept: detection aggregates across multiple venvs, so stopping at the
+    # first would miss a package shadowed by an earlier empty environment.
+    site_packages_dirs = all_installed_site_packages(root)
+
+    # `[None]` when no venv exists, so the loop still runs once for ecosystems that
+    # ignore site_packages_dir (Node derives node_modules from project_path).
+    candidates = site_packages_dirs or [None]
+
+    # Populated by resolve() and read back by resolve_manifest_warning() for the
+    # same (ecosystem, name, version) key — score_packages always resolves paths
+    # before the manifest warning for a given package (see its `one()`), so the
+    # entry is guaranteed present by the time it is read.
+    manifest_warnings: dict[tuple[str, str, str | None], str | None] = {}
+
+    def resolve(ecosystem: str, name: str, version: str | None) -> list[list[Path]]:
+        # Both hints are stated explicitly: *root* is the project root (Node reads
+        # project_path/node_modules) and each site-packages dir is where Python
+        # packages may live. Passing project_path avoids relying on
+        # scan_root.parent, which is only the project root for node_modules.
+        # No ecosystem branch is needed: each language module takes the hint it
+        # uses and ignores the other, so one loop serves both.
+        #
+        # Every environment's group is returned, not the first: the same name and
+        # version can be installed in several environments, and nothing in
+        # (ecosystem, name, version) distinguishes those copies. Returning only
+        # one would let a compromised copy in another environment be scored as
+        # clean. Each environment's own directories stay together as one group,
+        # since they are one distribution's own files, not competing candidates.
+        groups: list[list[Path]] = []
+        warning: str | None = None
+        for site_packages in candidates:
+            resolved, env_warning = _resolve_installed_dir(
+                ecosystem, name, root, site_packages,
+                project_path=root, version=version,
+            )
+            if resolved and resolved not in groups:
+                groups.append(resolved)
+            # First non-None warning across environments wins — a corrupt
+            # manifest anywhere is worth surfacing, and nothing distinguishes
+            # which environment's warning is "more important" than another's.
+            if warning is None and env_warning:
+                warning = env_warning
+        manifest_warnings[(ecosystem, name, version)] = warning
+        return groups
+
+    def resolve_manifest_warning(ecosystem: str, name: str, version: str | None) -> str | None:
+        return manifest_warnings.get((ecosystem, name, version))
+
+    return resolve, resolve_manifest_warning
+
+
+async def _risk_pass(
+    cfg,
+    db,
+    to_query: list,
+    *,
+    skip: bool = False,
+    root: Path | None = None,
+    installed: bool = False,
+) -> tuple[list[dict], int]:
+    """Score *to_query* with the heuristic risk engine.
+
+    Returns (risk rows sorted by descending score, failure count).
+
+    Never raises, and the guarantee covers the *whole* pass — imports, registry
+    loading (which executes third-party plugin entry points), client and engine
+    construction, scoring, teardown, and row building. Risk scoring is additive
+    information layered on top of the OSV results; a failure anywhere in it
+    degrades to "no scores" and must never prevent the findings from rendering.
+    On failure the affected packages are counted as unscored so the omission is
+    reported rather than silently swallowed.
+    """
+    if skip or not cfg.heuristics.enabled or not to_query:
+        return [], 0
+
+    # Every stage below — imports, registry loading (which runs third-party plugin
+    # entry points), client and engine construction, scoring, and teardown — is
+    # inside the boundary. The contract above is unconditional: a failure anywhere
+    # in the risk pass degrades to "no scores" and must never stop the OSV
+    # findings from rendering.
+    pop_client = None
+    try:
+        from rich.progress import BarColumn, Progress, TextColumn
+
+        from packagealert.analyzers.risk import RiskEngine
+        from packagealert.heuristics.top_packages import TopPackagesCache
+        from packagealert.languages import registry as lang_registry
+        from packagealert.osv.popularity import PopularityCache, PopularityClient
+        from packagealert.scoring import score_packages
+
+        lang_registry.load()
+        pop_client = PopularityClient(lang_registry.popularity_ecosystem_map())
+        engine = RiskEngine(
+            cfg.heuristics,
+            pop_client=pop_client,
+            pop_cache=PopularityCache(db),
+            top_packages_cache=TopPackagesCache(db=db, cfg=cfg.heuristics),
+            db=db,
+            cooldown_period_days=cfg.sandbox.cooldown.period_days,
+        )
+
+        keys = [(p.ecosystem.lower(), p.name, p.version) for p in to_query]
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.completed}/{task.total}"),
+            transient=True,
+            console=console,
+        ) as progress:
+            task = progress.add_task("Scoring packages", total=len(keys))
+            # --scan-installed reads real extracted packages, so supply a
+            # resolver and let the source-code heuristics contribute. Lock-file
+            # mode has nothing on disk, so both resolvers stay None.
+            resolver, manifest_warning_resolver = (
+                _installed_dir_resolver(root)
+                if installed and root is not None
+                else (None, None)
+            )
+            outcome = await score_packages(
+                engine,
+                keys,
+                progress_cb=lambda: progress.advance(task),
+                package_dir_resolver=resolver,
+                manifest_warning_resolver=manifest_warning_resolver,
+            )
+    except Exception:
+        log.warning("Risk scoring pass failed — continuing without scores", exc_info=True)
+        return [], len(to_query)
+    finally:
+        # Teardown is inside the boundary too: a close failure previously
+        # propagated from this finally block even when scoring had succeeded.
+        if pop_client is not None:
+            try:
+                await pop_client.aclose()
+            except Exception:
+                log.warning("Closing the popularity client failed", exc_info=True)
+
+    # Row building is fail-open *per report*, matching score_packages' own per-package
+    # guarantee. Wrapping the whole loop meant one malformed report — scoring.py stores
+    # whatever engine.analyze returned without validating its type, so a plugin-supplied
+    # engine can put an arbitrary object here — discarded every valid row already built
+    # and reported every package as unscored, including genuinely high-scoring ones.
+    rows: list[dict] = []
+    row_failures = 0
+    for (ecosystem, name, version), report in outcome.reports.items():
+        try:
+            if report.score <= 0:
+                continue
+            rows.append({
+                "package": name,
+                "ecosystem": ecosystem,
+                "version": version,
+                "score": report.score,
+                "level": _preflight_level(report.score, cfg, installed=installed),
+                "signals": [
+                    {"name": s.name, "score": s.score, "reason": s.reason}
+                    for s in report.signals
+                ],
+            })
+        except Exception:
+            log.warning(
+                "Building the risk row for %s/%s failed — skipping that package",
+                ecosystem, name, exc_info=True,
+            )
+            row_failures += 1
+
+    try:
+        rows.sort(key=lambda r: -r["score"])
+    except Exception:
+        # Only reachable if a row carries a non-comparable score, which the per-row
+        # handler above would not have caught. Report unsorted rather than losing them.
+        log.warning("Sorting risk rows failed — reporting them unsorted", exc_info=True)
+    return rows, outcome.failures + row_failures
+
+
 @app.command("scan-project")
 def scan_project(
     path: Path = typer.Argument(Path("."), help="Project directory to scan."),
@@ -516,6 +818,7 @@ def scan_project(
     prod_only: bool = typer.Option(False, "--prod-only", help="Exclude dev dependencies from the scan. Mutually exclusive with --scan-installed. With --requirements, dev/prod is undetectable so all packages are included with a warning."),
     requirements: Path | None = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
+    no_risk: bool = typer.Option(False, "--no-risk", help="Skip heuristic risk scoring (typosquat, popularity). Scoring is on by default."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html."),
     config: Path | None = _cfg_option,
 ):
@@ -541,13 +844,14 @@ def scan_project(
             console.print(f"[red]--requirements must be a file, not a directory: {requirements}[/red]")
             raise typer.Exit(1)
     cfg, _ = _load(config)
-    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only))
+    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only, no_risk=no_risk))
 
 
 async def _run_scan_project(
     cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str,
     requirements: Path | None = None,
     prod_only: bool = False,
+    no_risk: bool = False,
 ):
     import json as jsonlib
 
@@ -641,6 +945,11 @@ async def _run_scan_project(
                 })
 
     await osv_client.aclose()
+
+    risks, risk_failures = await _risk_pass(
+        cfg, db, to_query, skip=no_risk, root=root, installed=installed
+    )
+
     await db.close()
 
     from datetime import datetime
@@ -653,6 +962,8 @@ async def _run_scan_project(
         findings=findings,
         sources=result.sources,
         scanned_at=datetime.now(UTC),
+        risks=risks,
+        risk_failures=risk_failures,
     )
     await plugin_registry.fire_on_scan_complete(scan)
 
@@ -664,11 +975,25 @@ async def _run_scan_project(
             "sources": result.sources,
             "unpinned": unpinned_list,
             "findings": findings,
+            "risks": risks,
+            # How many packages could not be scored. Without it a fully failed risk
+            # pass emitted "risks": [] — indistinguishable from a clean scan, so a
+            # machine consumer read "scoring broke" as "nothing is risky". The text
+            # output has always warned about this; JSON callers could not see it.
+            "risk_failures": risk_failures,
         }, indent=2))
         return
 
     if fmt in ("html", "browser"):
-        html = _render_html(root, result.sources, unpinned_list, findings)
+        html = _render_html(
+            root,
+            result.sources,
+            unpinned_list,
+            findings,
+            risks=_visible_risks(risks, show_details=show_details),
+            risk_total=len(risks),
+            risk_failures=risk_failures,
+        )
         if fmt == "browser":
             open_html_in_browser(html)
         else:
@@ -712,8 +1037,46 @@ async def _run_scan_project(
         else:
             vulnerable += 1
 
+    if risks:
+        shown = _visible_risks(risks, show_details=show_details)
+        suppressed = len(risks) - len(shown)
+        if shown:
+            console.print(f"\n[bold]Risk signals ({len(shown)}):[/bold]")
+            for r in shown:
+                colour = _RISK_LEVEL_COLOUR.get(r["level"], "cyan")
+                version = r["version"] or "unpinned"
+                # Default is one line per package, carrying the highest-scoring
+                # signal's reason; --details expands the full breakdown below it.
+                console.print(
+                    f"[RISK {r['score']}] {r['level']:<8} {r['package']}@{version}"
+                    f"{_primary_reason(r)}",
+                    style=colour,
+                    markup=False,
+                    highlight=False,
+                )
+                # The breakdown adds each signal's name and score — the
+                # attribution behind the composite total — which the one-clause
+                # summary above does not carry, even for a single-signal row.
+                if show_details:
+                    for s in r["signals"]:
+                        console.print(
+                            f"    - {s['name']} ({s['score']}): {s['reason']}",
+                            style="dim",
+                            markup=False,
+                            highlight=False,
+                        )
+        if suppressed:
+            console.print(
+                f"[dim]  ({suppressed} low-signal row(s) hidden — use --details to show)[/dim]"
+            )
+
+    if risk_failures:
+        console.print(
+            f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
+        )
+
     console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow], "
-                  f"[yellow]{len(result.unpinned)} unpinned[/yellow] ({len(to_query)} packages checked)")
+                  f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] ({len(to_query)} packages checked)")
 
 
 def open_html_in_browser(html: str) -> None:
@@ -731,7 +1094,17 @@ def open_html_in_browser(html: str) -> None:
     Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, scanned_at: str = "") -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, scanned_at: str = "") -> str:
+    """Render a self-contained HTML report.
+
+    *risks* is the already-filtered set of rows to table (low-signal rows are
+    suppressed unless --details). *risk_total* is the unfiltered count for the
+    summary line, so the header agrees with the text footer even when rows are
+    hidden; it defaults to len(risks) when not supplied.
+
+    *risk_failures* is surfaced so an empty risk table cannot be misread as a clean
+    result when scoring actually failed — the same distinction the text output makes.
+    """
     from html import escape
     malicious = sum(1 for f in findings if f["is_malicious"])
     vulnerable = len(findings) - malicious
@@ -758,6 +1131,30 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, s
         </tr>"""
 
     unpinned_rows = "".join(f"<li>{escape(p['name'])} ({escape(p['ecosystem'])})</li>" for p in unpinned)
+
+    _LEVEL_BG = {"critical": "#7f1d1d", "warning": "#d97706", "info": "#0891b2"}
+    risk_rows = ""
+    for r in (risks or []):
+        bg = _LEVEL_BG.get(r["level"], "#0891b2")
+        sig = escape("; ".join(f"{s['name']} ({s['score']})" for s in r["signals"]))
+        risk_rows += f"""
+        <tr>
+          <td><span style="background:{bg};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;font-weight:bold">{escape(str(r['score']))}</span></td>
+          <td><strong>{escape(r['package'])}</strong></td>
+          <td>{escape(r['ecosystem'])}</td>
+          <td>{escape(r['version'] or 'unpinned')}</td>
+          <td>{escape(r['level'])}</td>
+          <td>{sig}</td>
+        </tr>"""
+
+    risk_section = ""
+    if risk_rows:
+        risk_section = f"""
+<h2>Risk signals</h2>
+<table>
+  <thead><tr><th>Score</th><th>Package</th><th>Ecosystem</th><th>Version</th><th>Level</th><th>Signals</th></tr></thead>
+  <tbody>{risk_rows}</tbody>
+</table>"""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -790,19 +1187,22 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, s
   <span class="malicious">{malicious} malicious</span>
   <span class="vulnerable">{vulnerable} vulnerable</span>
   <span>{len(unpinned)} unpinned</span>
+  <span>{risk_total if risk_total is not None else len(risks or [])} at risk</span>
+  {f'<span class="malicious">{risk_failures} unscored</span>' if risk_failures else ""}
 </div>
 {"<h2>Unpinned dependencies</h2><ul>" + unpinned_rows + "</ul>" if unpinned else ""}
 <table>
   <thead><tr><th></th><th>Package</th><th>Ecosystem</th><th>Version</th><th>Advisory</th><th>Summary</th><th>Fix</th></tr></thead>
   <tbody>{rows}</tbody>
 </table>
+{risk_section}
 </body>
 </html>"""
 
 
 @app.command("clear-cache")
 def clear_cache(
-    ecosystem: str | None = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear: pypi, npm, or packagist. Clears all if omitted."),
+    ecosystem: str | None = typer.Option(None, "--ecosystem", "-e", help="Ecosystem to clear, e.g. pypi (any registered ecosystem, including those from language plugins; case-insensitive). Clears all if omitted."),
     config: Path | None = _cfg_option,
 ):
     """Clear the OSV query cache, optionally filtered by ecosystem."""
@@ -813,13 +1213,52 @@ def clear_cache(
 async def _run_clear_cache(cfg, ecosystem: str | None):
     from packagealert.storage.db import open_db
 
-    if ecosystem and ecosystem not in ("pypi", "npm", "packagist"):
-        console.print(f"[red]Unknown ecosystem '{ecosystem}'. Use 'pypi', 'npm', or 'packagist'.[/red]")
-        raise typer.Exit(1)
+    # Validate against the registry so plugin ecosystems are accepted, and report
+    # what is actually registered rather than three hardcoded names.
+    cache_key = None
+    if ecosystem:
+        from packagealert.languages import registry as lang_registry
+
+        lang_registry.load()
+        if lang_registry.for_ecosystem(ecosystem) is None:
+            # Read each plugin's declared spelling defensively, matching what
+            # for_ecosystem() and known_ecosystems() do: a plugin whose `ecosystems`
+            # attribute raises must be skipped, not allowed to replace this validation
+            # message with a traceback.
+            #
+            # Declared spellings rather than known_ecosystems()'s canonical forms,
+            # because this list tells the user what to type and should match what
+            # `package-alert languages list` shows — the built-ins declare "PyPI" and
+            # "Packagist" while their canonical form is lowercase.
+            known_set: set[str] = set()
+            for lang in lang_registry.all_languages():
+                try:
+                    declared = getattr(lang, "ecosystems", None) or []
+                    known_set.update(e for e in declared if isinstance(e, str) and e)
+                except Exception:  # one bad plugin must not hide the rest
+                    log.warning(
+                        "Language module %r has an unusable `ecosystems` attribute — "
+                        "omitting it from the known list",
+                        getattr(lang, "name", "?"), exc_info=True,
+                    )
+            known = sorted(known_set)
+            console.print(
+                f"Unknown ecosystem '{ecosystem}'. Known: {', '.join(known) or 'none'}.",
+                style="red",
+                markup=False,
+            )
+            raise typer.Exit(1)
+        # Match OsvCache._cache_key_ecosystem exactly: the lowercased canonical form.
+        # osv_cache rows are keyed by canonicalising and then lowercasing, so a plugin
+        # declaring "NuGet" writes rows keyed "nuget" — the same key its rows always
+        # had, since every pre-canonicalisation writer lowercased.
+        from packagealert.models.events import cache_key_ecosystem
+
+        cache_key = cache_key_ecosystem(ecosystem)
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
-    if ecosystem:
-        await db.execute("DELETE FROM osv_cache WHERE ecosystem=?", (ecosystem,))
+    if cache_key:
+        await db.execute("DELETE FROM osv_cache WHERE ecosystem=?", (cache_key,))
     else:
         await db.execute("DELETE FROM osv_cache")
     await db.commit()

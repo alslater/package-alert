@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import httpx
 
+from packagealert.config import CooldownAction
 from packagealert.languages.base import PackageSpec
+from packagealert.sandbox.escalation import escalate_if_prompt
 
 if TYPE_CHECKING:
     from packagealert.config import CooldownConfig
@@ -16,7 +17,9 @@ if TYPE_CHECKING:
 
 @dataclass
 class CooldownDecision:
-    action: Literal["allow", "warn", "prompt", "block"]
+    # The shared literal, not an inline copy: every value assigned here comes from
+    # CooldownConfig, so an inline duplicate could silently fall out of step with it.
+    action: CooldownAction
     reason: str
     package: PackageSpec
     age_days: float | None
@@ -48,11 +51,12 @@ def decide(
 
     action = cfg.on_new_medium_risk if risk_score > 0 else cfg.on_new_low_risk
 
-    # Escalate prompt → block in non-interactive contexts
-    if action == "prompt" and not is_tty:
-        action = cfg.non_interactive_escalation
+    action = escalate_if_prompt(
+        action, is_tty=is_tty, non_interactive_escalation=cfg.non_interactive_escalation
+    )
 
-    risk_label = f", typosquat score: {risk_score}" if risk_score > 0 else ""
+    # Not typosquat-specific: callers may pass a full RiskEngine composite score.
+    risk_label = f", risk score: {risk_score}" if risk_score > 0 else ""
     return CooldownDecision(
         action=action,
         reason=f"Package published {age_days:.1f} days ago (cooldown: {cfg.period_days}d{risk_label})",
@@ -116,39 +120,32 @@ async def fetch_publication_date(url: str, *, ecosystem: str, version: str | Non
         return None
 
 
-def _parse_publication_date(data: dict, *, ecosystem: str, version: str | None = None) -> float | None:
-    eco = ecosystem.lower()
+def _parse_publication_date(data: object, *, ecosystem: str, version: str | None = None) -> float | None:
+    """Delegate publication-date parsing to the ecosystem's language module.
 
-    if eco == "pypi":
-        times = [u["upload_time"] for u in data.get("urls", []) if "upload_time" in u]
-        if not times:
+    Registry response shapes are the language module's business — it already owns
+    the URL via publication_date_url(), so it owns reading the reply too. This
+    function previously branched on ecosystem here, which meant any third-party
+    plugin got None back and, because decide() treats age_days=None as "warn",
+    its cooldown policy silently never enforced.
+    """
+    from packagealert.languages import registry as lang_registry
+
+    lang_registry.load()
+    lang = lang_registry.for_ecosystem(ecosystem)
+    if lang is None:
+        return None
+    try:
+        parse = getattr(lang, "publication_date_parse", None)
+        if not callable(parse):
             return None
-        earliest = min(
-            datetime.fromisoformat(t).replace(tzinfo=UTC) for t in times
+        return parse(data, version)
+    except Exception:
+        log.warning(
+            "publication_date_parse raised for lang=%s ecosystem=%s — treating the "
+            "date as unavailable", getattr(lang, "name", "?"), ecosystem, exc_info=True,
         )
-        return earliest.timestamp()
-
-    if eco == "npm":
-        version_time = data.get("time", {})
-        if version and version in version_time:
-            t = version_time[version]
-            try:
-                return datetime.fromisoformat(t).replace(tzinfo=UTC).timestamp()
-            except ValueError:
-                pass
         return None
-
-    if eco == "packagist":
-        for pkg_versions in data.get("packages", {}).values():
-            for entry in pkg_versions:
-                if entry.get("version") != version:
-                    continue
-                t = entry.get("time")
-                if t:
-                    return datetime.fromisoformat(t).replace(tzinfo=UTC).timestamp()
-        return None
-
-    return None
 
 
 async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
@@ -167,10 +164,10 @@ async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
         log.debug("Unexpected status %d from %s", resp.status_code, url)
         return None
 
-    parse_fn = getattr(lang, "latest_version_parse", None)
-    if not callable(parse_fn):
-        return None
     try:
+        parse_fn = getattr(lang, "latest_version_parse", None)
+        if not callable(parse_fn):
+            return None
         return parse_fn(resp.json(), name)
     except Exception as exc:  # noqa: BLE001 — malformed registry response or plugin failure, fail open
         log.debug("Failed to parse latest version from %s: %s", url, exc)

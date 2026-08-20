@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -13,12 +14,40 @@ def normalise_package_name(name: str) -> str:
     """Normalise a package name: lowercase and collapse runs of [-_.] to a single hyphen."""
     return _NORMALISE_RE.sub("-", name).lower()
 
+
+def parse_registry_timestamp(raw: str) -> datetime:
+    """Parse a registry ISO-8601 timestamp into an aware UTC datetime.
+
+    Registries differ in what they emit, and the two cases need opposite handling:
+
+    - **Offset-aware** (`...+05:30`, or `...Z`): the instant is already fully
+      specified, so it must be *converted* with `astimezone(UTC)`. Calling
+      `replace(tzinfo=UTC)` here discards the offset and silently reinterprets the
+      local wall-clock reading as UTC, shifting the instant by up to 14 hours.
+    - **Naive** (`2023-05-22T15:12:42`): no offset is given and every registry we
+      read documents these as UTC, so `replace(tzinfo=UTC)` is correct — it attaches
+      the timezone the value already implies.
+
+    Shared by every `publication_date_parse` implementation so the rule exists once.
+    Three separate copies previously used `replace` unconditionally, which was correct
+    only because npm emits `Z` and Packagist currently emits `+00:00`; a registry
+    serving a non-zero offset would have skewed package age and, through it, cooldown
+    decisions.
+
+    Raises `ValueError` on an unparseable value, matching `datetime.fromisoformat`, so
+    existing callers keep their current error handling.
+    """
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
 if TYPE_CHECKING:
     import httpx
 
     from packagealert.heuristics.base import AbstractHeuristic
 
-CURRENT_CONTRACT_VERSION = 4
+CURRENT_CONTRACT_VERSION = 5
 
 # Describes a package being requested or installed (from CLI args or lock files).
 @dataclass
@@ -140,6 +169,44 @@ class ProcessInstall:
     # packages[0] (e.g. pipx inject httpie httpx → target_env_name="httpie").
     # None means the environment name is derived from packages[0] as normal.
     target_env_name: str | None = None
+    # True only for a command that installs/syncs the manager's *existing* lock
+    # file in full with no explicit package names of its own (bare `pipenv
+    # install`/`sync`, `uv sync`/`lock`) — the one case where `package-alert
+    # run`'s pre-flight gates should scan that lock file for OSV advisories /
+    # typosquat / risk signals, since that is what is actually about to be
+    # installed.
+    #
+    # Distinct from `defer_to_lockfile`, which is about a different consumer
+    # (the daemon's process monitor) and a different question ("did this
+    # command change the lock file, so the monitor should read it back after
+    # the process exits?") — `defer_to_lockfile` is correctly True for a
+    # removal too, since removing a package also changes the lock file and the
+    # monitor still needs to notice. `is_lockfile_install` must NOT be True
+    # there: `pipenv uninstall`/`uv remove`/a read-only subcommand
+    # (`pipenv shell`, `uv cache`) produce the identical empty-`packages`
+    # ProcessInstall as a bare install, but scanning the lock file for them
+    # would gate packages the command is not installing — including, for a
+    # removal, the very package being removed — and could block it outright.
+    is_lockfile_install: bool = False
+    # False for a command that is guaranteed to install/change nothing no
+    # matter what packages/req_files/is_lockfile_install say — a report-only
+    # or check-only invocation (`pipenv update --dry-run`/`--outdated`, `uv
+    # sync --check`). Consulting `is_lockfile_install`/`packages` alone is
+    # not enough: an explicit-package dry-run still carries its real
+    # `packages`, which the gates would otherwise query despite the command
+    # installing nothing. Checked before any other field by the runner's
+    # pre-flight gates. Defaults to True (gate normally) so a third-party
+    # plugin predating this field keeps its current behaviour.
+    should_gate: bool = True
+    # True when the command targets the system Python rather than an active
+    # venv/conda environment — `uv pip sync`/`uv pip install --system`, or
+    # the equivalent UV_SYSTEM_PYTHON env var. Verified empirically that
+    # `--system` switches uv's interpreter discovery to ignore an active
+    # VIRTUAL_ENV/CONDA_PREFIX entirely (see ParsedInstall's twin field in
+    # parsers/process_args.py for the full explanation). Consumers must not
+    # apply VIRTUAL_ENV/CONDA_PREFIX-based version discovery when this is
+    # True.
+    is_system_python_target: bool = False
 
 
 @runtime_checkable
@@ -218,17 +285,60 @@ class LanguageBase(Protocol):
         """Fetch a ranked list of top packages from ``url`` using ``client``.
 
         Each registry has its own response shape and pagination strategy, so
-        this method must be implemented by each language module.  Return a list
-        of normalised names (lowercase, hyphens only — use ``normalise_package_name``),
-        capped at ``MAX_TOP_PACKAGES`` entries, or None on failure.
+        this method must be implemented by each language module.  Return names
+        normalised with this language's own ``normalise_name()`` — NOT
+        unconditionally folded with ``normalise_package_name`` (lowercase,
+        hyphens only), which is PyPI's PEP 503 rule and actively wrong for a
+        registry that does not fold separators: it would store "socket-io" for
+        npm's genuine "socket.io", a corruption `TyposquatDetector`'s later
+        per-ecosystem normalisation of the *query* name can never recover from
+        (see `_resolve_corpus`/`_normalise` in heuristics/typosquat.py). For
+        PyPI, ``normalise_name`` already delegates to ``normalise_package_name``,
+        so nothing changes there. Cap the result at ``MAX_TOP_PACKAGES`` entries,
+        or return None on failure.
         """
         ...
     def top_packages_fallback(self) -> list[str]:
         """Static baseline used when the cache is empty and fetch has failed.
-        Names must be pre-normalised: lowercase, hyphens only (no underscores or dots)."""
+        Names must be pre-normalised with this language's own ``normalise_name()``
+        rule — e.g. lowercase-only for npm/Packagist, not PEP 503 folding."""
         ...
     def publication_date_url(self, name: str, version: str) -> str | None:
         return None
+
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        """Extract a Unix publication timestamp from a registry API response.
+
+        Called with the parsed JSON body from publication_date_url() — typed
+        ``object``, not ``dict``, because a JSON document's root is not always
+        an object: RubyGems' versions.json, for one, returns a JSON array.
+        Narrow with ``isinstance`` before indexing/iterating; do not assume a
+        dict. Return None if the date cannot be determined from the response.
+
+        Implement this alongside publication_date_url: without it the cooldown
+        policy cannot determine a package's age and fails open, never blocking or
+        prompting regardless of how recently the package was published.
+        """
+        return None
+
+    def osv_ecosystem(self) -> str | None:
+        """The ecosystem name OSV.dev uses, e.g. "PyPI", "npm", "Packagist".
+
+        Used to match advisory entries when extracting fixed versions. Return None
+        if OSV does not cover this ecosystem; the raw ecosystem string is then used
+        as a best-effort fallback.
+        """
+        return None
+
+    def normalise_name(self, name: str) -> str:
+        """Normalise a package name for equality comparison.
+
+        Used when matching a queried package against advisory entries, where the
+        registry's own casing/separator rules decide whether two names are the same
+        package. PyPI collapses runs of ``[-_.]`` per PEP 503; most ecosystems only
+        lowercase, which is the default.
+        """
+        return name.lower()
 
     def popularity_ecosystem(self) -> str | None:
         return None
@@ -429,18 +539,74 @@ class LanguageBase(Protocol):
         """
         return []
 
-    def resolve_package_dir(self, package_name: str, project_path: Path | None, site_packages_dir: Path | None) -> Path | None:
-        """Return the on-disk directory for an installed package, or None if not resolvable.
+    def resolve_package_dir(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> list[Path]:
+        """Return every on-disk directory this distribution owns, or [] if none resolvable.
 
-        Called by the daemon after a process-monitor event to locate the extracted
-        package directory so file-content heuristics can be run against it.
+        Called by the daemon after a process-monitor event, and by --scan-installed, to
+        locate the extracted package directory so file-content heuristics can be run
+        against it.
+
+        Returns a *list* — plural — because a single directory is not always a
+        distribution's whole footprint. A PEP 420 implicit namespace package
+        distribution (`google-auth`) installs into more than one subdirectory
+        (`google/auth/`, `google/oauth2/`) of a top-level directory (`google/`) it does
+        not exclusively own — sibling distributions (`google-cloud-storage`) install
+        into other subdirectories of the same shared root, with no file at the shared
+        level to mark it as shared. Returning that shared root handed source-code
+        heuristics every sibling distribution's files too, misattributing one
+        distribution's signals to another. Every directory in the returned list must
+        therefore actually belong to *this* distribution and no other's.
 
         *project_path* is the cwd of the install process (e.g. the project root
         for npm/composer, or None if unknown). *site_packages_dir* is the active
         venv's site-packages directory (PyPI only, None for other ecosystems).
 
-        Default returns None — language modules that support file-content heuristics
+        *version*, when given, must be matched as well as the name. A caller may
+        search several environments — `scan-project --scan-installed` aggregates
+        packages across every venv it finds — and two of them can hold different
+        versions of the same package. Matching on name alone then returns whichever
+        environment is searched first, so heuristics inspect the wrong source tree
+        and a malicious version can be scored against a benign one. Return `[]`
+        rather than a name-only match when the requested version is not present.
+
+        Default returns `[]` — language modules that support file-content heuristics
         should override this.
+        """
+        return []
+
+    def resolve_package_dir_manifest_warning(
+        self,
+        package_name: str,
+        project_path: Path | None,
+        site_packages_dir: Path | None,
+        version: str | None = None,
+    ) -> str | None:
+        """Return a risk-signal warning if this distribution's install manifest
+        could not be fully trusted while resolving its package directory.
+
+        Called with the same arguments as ``resolve_package_dir`` (immediately
+        after it, on the matched distribution) so a language module can report
+        an integrity problem with the manifest it consulted — independent of
+        whether any directory was actually resolvable. A manifest a legitimate
+        build tool essentially never produces (e.g. a RECORD entry exceeding a
+        CSV parser's field-size limit) is itself a suspicious signal: without
+        this hook, `resolve_package_dir` correctly refuses to guess a directory
+        for a distribution whose manifest cannot be verified, but that safety
+        response is indistinguishable from an ordinary "no heuristics needed
+        here" — silently downgrading a probable evasion attempt (corrupting the
+        manifest specifically to escape source-code scanning) to a clean scan.
+
+        Return None when the manifest was absent, empty, or fully trusted —
+        including when it was simply never looked at (this hook is best-effort:
+        a plugin that overrides `resolve_package_dir` without also overriding
+        this method reports no warning, exactly like the base "no manifest
+        format" case). Default returns None.
         """
         return None
 
@@ -452,11 +618,14 @@ class LanguageBase(Protocol):
         """
         return None
 
-    def latest_version_parse(self, data: dict, name: str) -> str | None:
+    def latest_version_parse(self, data: object, name: str) -> str | None:
         """Extract the latest version string from a registry API response.
 
-        Called with the parsed JSON body from latest_version_url(). Return None
-        if the version cannot be determined from the response.
+        Called with the parsed JSON body from latest_version_url() — typed
+        ``object``, not ``dict``, since a JSON document's root is not always
+        an object (see publication_date_parse). Narrow with ``isinstance``
+        before indexing/iterating. Return None if the version cannot be
+        determined from the response.
         """
         return None
 

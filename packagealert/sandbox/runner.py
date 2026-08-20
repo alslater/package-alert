@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import contextlib
+import enum
 import logging
 import os
 import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -91,6 +94,49 @@ class _Context:
     scan_targets: list[Path] = field(default_factory=list)
     # Directories to snapshot+restore for rollback but not scanned for new packages
     snapshot_only_dirs: list[Path] = field(default_factory=list)
+
+
+class _GateResourcesUnavailable(enum.Enum):
+    """Sentinel: gate resources could not be opened, so both gates must skip.
+
+    Distinct from None, which on the gates' `res` parameter means "not supplied —
+    open your own". Conflating the two made a locked DB be retried by every gate
+    in turn: three connection attempts per run, each able to burn SQLite's lock
+    timeout, for a subsystem that is purely advisory.
+
+    A single-member Enum rather than a plain sentinel class so that
+    ``res is GATE_RESOURCES_UNAVAILABLE`` narrows the union for a type checker. With
+    an ordinary instance the guard is opaque, and every subsequent ``res.engine`` /
+    ``res.db`` access reported an attribute error on the sentinel type — noise that
+    hides real findings in the same file.
+    """
+
+    TOKEN = "GATE_RESOURCES_UNAVAILABLE"
+
+    def __repr__(self) -> str:  # pragma: no cover — debugging aid
+        return "GATE_RESOURCES_UNAVAILABLE"
+
+
+GATE_RESOURCES_UNAVAILABLE = _GateResourcesUnavailable.TOKEN
+
+
+@dataclass
+class _GateResources:
+    """State shared by the risk gate and the cooldown gate for one run.
+
+    Both gates iterate the same package list and need the same DB connection,
+    top-packages corpus, risk engine and typosquat detector. `detector` is the
+    engine's own instance, and it memoises internally, so the O(corpus) typosquat
+    scan runs once per distinct package name across both gates and the engine.
+    """
+
+    db: Any
+    # engine/detector/pop_client are None when risk scoring is disabled: the
+    # cooldown gate needs only `db`, so the engine and its httpx client are not
+    # constructed at all in that case.
+    engine: Any | None
+    detector: Any | None
+    pop_client: Any | None
 
 
 class SandboxRunner:
@@ -191,27 +237,27 @@ class SandboxRunner:
             (mirrors configure_sandbox behaviour for cross-namespace flags).
             Returns 1 if the check blocked, 0 to continue.
             """
-            pre_check_fn = getattr(lang, "pre_run_check", None)
-            if not callable(pre_check_fn):
-                return 0
             _lang_name = getattr(lang, "name", "?")
             try:
-                _sig = _inspect.signature(pre_check_fn)
-                _params = _sig.parameters
-                _has_flags_param = "flags" in _params or any(
-                    p.kind == _inspect.Parameter.VAR_KEYWORD
-                    for p in _params.values()
-                )
-                # expose_ssh_keys was in the old LanguageBase signature, so any
-                # plugin overriding pre_run_check before contract v3 will have it.
-                # Only Python ever acted on it — and the built-in Python plugin is
-                # already on v3, so this path is only hit by third-party legacy
-                # plugins that never used the value. Always pass False.
-                _has_legacy_expose = "expose_ssh_keys" in _params
-            except (ValueError, TypeError):
-                _has_flags_param = True
-                _has_legacy_expose = False
-            try:
+                pre_check_fn = getattr(lang, "pre_run_check", None)
+                if not callable(pre_check_fn):
+                    return 0
+                try:
+                    _sig = _inspect.signature(pre_check_fn)
+                    _params = _sig.parameters
+                    _has_flags_param = "flags" in _params or any(
+                        p.kind == _inspect.Parameter.VAR_KEYWORD
+                        for p in _params.values()
+                    )
+                    # expose_ssh_keys was in the old LanguageBase signature, so any
+                    # plugin overriding pre_run_check before contract v3 will have it.
+                    # Only Python ever acted on it — and the built-in Python plugin is
+                    # already on v3, so this path is only hit by third-party legacy
+                    # plugins that never used the value. Always pass False.
+                    _has_legacy_expose = "expose_ssh_keys" in _params
+                except (ValueError, TypeError):
+                    _has_flags_param = True
+                    _has_legacy_expose = False
                 if _has_legacy_expose:
                     # expose_ssh_keys is always False here. The parameter existed in the
                     # old LanguageBase signature so every pre-v3 plugin declared it, but
@@ -289,9 +335,44 @@ class SandboxRunner:
             if _run_pre_check(_lang, None, _ns_flags):
                 return 1
 
-        cooldown_result = await self._cooldown_check(ctx)
-        if cooldown_result is False:
-            return 1
+        # Both gates iterate the same package list and need the same DB, corpus,
+        # engine and detector, so construct that state once and share it — but only
+        # when a gate will actually use it. Constructing unconditionally would open
+        # a DB connection and an httpx client for runs that skip both gates
+        # entirely (no explicit packages, e.g. `pip install -r`), letting resource
+        # initialisation fail an install that risk scoring does not even apply to.
+        #
+        # Never pass None here: on a gate's `res` parameter that means "not
+        # supplied, open your own", so a failed or skipped open would be retried
+        # once per gate. GATE_RESOURCES_UNAVAILABLE says "skip" and stays skipped.
+        gate_res: _GateResources | _GateResourcesUnavailable = (
+            await self._open_gate_resources()
+            if self._gate_resources_needed(
+                ctx, allow_external_lockfiles=allow_external_lockfiles
+            )
+            else GATE_RESOURCES_UNAVAILABLE
+        )
+        try:
+            # Risk gate runs before cooldown: if a package is a typosquat, the user
+            # should not be asked to answer a cooldown prompt about a package they
+            # are then told is a typosquat.
+            risk_result = await self._risk_check(
+                ctx, res=gate_res, allow_external_lockfiles=allow_external_lockfiles
+            )
+            if risk_result is False:
+                return 1
+            risk_scores: dict[tuple[str, str], int] = risk_result  # type: ignore[assignment]
+
+            cooldown_result = await self._cooldown_check(
+                ctx,
+                risk_scores=risk_scores,
+                res=gate_res,
+                allow_external_lockfiles=allow_external_lockfiles,
+            )
+            if cooldown_result is False:
+                return 1
+        finally:
+            await self._close_gate_resources(gate_res)
         pending_clears: list[tuple[str, str, str]] = cooldown_result  # type: ignore[assignment]
 
         if not await self._preflight(ctx, allow_external_lockfiles=allow_external_lockfiles):
@@ -348,7 +429,12 @@ class SandboxRunner:
         if parsed is not None:
             lang = lang_registry.for_ecosystem(parsed.ecosystem)
             if lang is not None:
-                prepare_env_fn = getattr(lang, "prepare_sandbox_env", None)
+                try:
+                    prepare_env_fn = getattr(lang, "prepare_sandbox_env", None)
+                except Exception:
+                    log.warning("prepare_sandbox_env lookup raised for lang=%s — skipping",
+                                getattr(lang, "name", "?"), exc_info=True)
+                    prepare_env_fn = None
                 if callable(prepare_env_fn):
                     try:
                         extra_write = prepare_env_fn(parsed, cwd, sandbox_env)
@@ -395,15 +481,15 @@ class SandboxRunner:
         if ctx.parsed is not None:
             lang_for_cs = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
             if lang_for_cs is not None:
-                configure_fn = getattr(lang_for_cs, "configure_sandbox", None)
-                if callable(configure_fn):
-                    _primary_lang_name = getattr(lang_for_cs, "name", None)
-                    lang_flags_cs = flags.get(_primary_lang_name or "", frozenset())
-                    try:
+                _primary_lang_name = getattr(lang_for_cs, "name", None)
+                try:
+                    configure_fn = getattr(lang_for_cs, "configure_sandbox", None)
+                    if callable(configure_fn):
+                        lang_flags_cs = flags.get(_primary_lang_name or "", frozenset())
                         configure_fn(ctx.parsed, cwd, lang_flags_cs, _cs_targets, home_ro, sandbox_env)
-                    except Exception:
-                        log.warning("configure_sandbox raised for lang=%s — skipping",
-                                    _primary_lang_name, exc_info=True)
+                except Exception:
+                    log.warning("configure_sandbox raised for lang=%s — skipping",
+                                _primary_lang_name, exc_info=True)
 
         # Also invoke configure_sandbox for any other language namespace that has
         # active flags — so e.g. --flags python:ssh-keys mounts ~/.ssh even when
@@ -417,13 +503,13 @@ class SandboxRunner:
             _ns_name = getattr(_lang, "name", _ns)
             if _ns_name == _primary_lang_name:
                 continue  # already handled above
-            _configure_fn = getattr(_lang, "configure_sandbox", None)
-            if callable(_configure_fn):
-                try:
+            try:
+                _configure_fn = getattr(_lang, "configure_sandbox", None)
+                if callable(_configure_fn):
                     _configure_fn(None, cwd, _ns_flags, _cs_targets, home_ro, sandbox_env)
-                except Exception:
-                    log.warning("configure_sandbox raised for lang=%s — skipping",
-                                _ns_name, exc_info=True)
+            except Exception:
+                log.warning("configure_sandbox raised for lang=%s — skipping",
+                            _ns_name, exc_info=True)
 
         # Collect writable bind pairs from configure_sandbox_writable.
         _parsed_by_lang = {_primary_lang_name: ctx.parsed} if _primary_lang_name and ctx.parsed else {}
@@ -443,35 +529,35 @@ class SandboxRunner:
                 lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
                 if lang is not None:
                     lang_name = getattr(lang, "name", "?")
-                    prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
-                    if callable(prepare_fn):
-                        try:
+                    try:
+                        prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
+                        if callable(prepare_fn):
                             argv = prepare_fn(argv, cwd)
-                        except Exception:
-                            log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
+                    except Exception:
+                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
                     editable_roots = self._cfg.sandbox.editable_roots
-                    extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
-                    if callable(extra_ro_fn):
-                        try:
+                    try:
+                        extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
+                        if callable(extra_ro_fn):
                             for p in extra_ro_fn(argv, cwd):
                                 if _is_safe_sandbox_path(p, editable_roots):
                                     home_ro.append(p.resolve())
                                 else:
                                     log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
                                     self._print_editable_rejection(p, editable_roots)
-                        except Exception:
-                            log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
-                    extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
-                    if callable(extra_write_fn):
-                        try:
+                    except Exception:
+                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+                    try:
+                        extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
+                        if callable(extra_write_fn):
                             for p in extra_write_fn(argv, cwd):
                                 if _is_safe_sandbox_path(p, editable_roots):
                                     ctx.write_dirs.append(p.resolve())
                                 else:
                                     log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
                                     self._print_editable_rejection(p, editable_roots)
-                        except Exception:
-                            log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+                    except Exception:
+                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
             result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
                 argv, ctx.write_dirs,
                 allow_network=allow_network,
@@ -519,24 +605,23 @@ class SandboxRunner:
         if parsed and not ctx.scan_targets:
             lang = lang_registry.for_ecosystem(parsed.ecosystem)
             if lang is not None:
-                post_run_fn = getattr(lang, "post_run_scan_targets", None)
-                if callable(post_run_fn):
-                    try:
-                        targets = post_run_fn(parsed, cwd)
-                    except Exception:
-                        log.warning(
-                            "post_run_scan_targets raised for lang=%s — skipping",
-                            getattr(lang, "name", "?"), exc_info=True,
-                        )
-                        targets = []
-                    if targets:
-                        # First path is the rollback root (e.g. venv root),
-                        # last path is the scan target (e.g. site-packages).
-                        rollback_root = targets[0]
-                        scan_target = targets[-1]
-                        if scan_target.exists():
-                            ctx.scan_targets.append(scan_target)
-                            snapshots[rollback_root] = self._backend.absent_snapshot()
+                try:
+                    post_run_fn = getattr(lang, "post_run_scan_targets", None)
+                    targets = post_run_fn(parsed, cwd) if callable(post_run_fn) else []
+                except Exception:
+                    log.warning(
+                        "post_run_scan_targets raised for lang=%s — skipping",
+                        getattr(lang, "name", "?"), exc_info=True,
+                    )
+                    targets = []
+                if targets:
+                    # First path is the rollback root (e.g. venv root),
+                    # last path is the scan target (e.g. site-packages).
+                    rollback_root = targets[0]
+                    scan_target = targets[-1]
+                    if scan_target.exists():
+                        ctx.scan_targets.append(scan_target)
+                        snapshots[rollback_root] = self._backend.absent_snapshot()
 
         ecosystem = parsed.ecosystem if parsed else None
         try:
@@ -647,12 +732,489 @@ class SandboxRunner:
                 ok = False
         return ok
 
-    async def _cooldown_check(self, ctx: _Context) -> list[tuple[str, str, str]] | bool:
+    def _gate_resources_needed(
+        self, ctx: _Context, *, allow_external_lockfiles: bool = False
+    ) -> bool:
+        """True when either pre-flight gate will actually inspect a package.
+
+        Both gates need a non-empty package set, and the risk gate additionally
+        needs to be enabled. Checking this *before* _open_gate_resources() keeps a
+        disabled or inapplicable run free of a DB connection and an httpx client:
+        wasted work at best, and an installation that risk scoring does not even
+        apply to must never fail during resource initialisation.
+
+        The package set comes from `_resolve_query_packages`, not bare
+        `ctx.parsed.packages`: `pip install -r requirements.txt` and a bare
+        `npm install` both have `packages == []` but do have packages to
+        gate. `npm uninstall` has the identical empty shape but correctly
+        resolves to no packages — see `_resolve_query_packages`'s and
+        `ParsedInstall.is_lockfile_install`'s docstrings.
+
+        Note the cooldown gate has no `enabled` flag of its own, so resources are
+        still required when only risk scoring is disabled.
+        """
+        # The cooldown gate has no enable flag, so a non-empty package set is
+        # currently both necessary and sufficient. Should cooldown gain one, this
+        # becomes `risk_enabled or cooldown_enabled`.
+        if ctx.parsed is None:
+            return False
+        queries, _blocked_reason, _source = self._resolve_query_packages(
+            ctx, allow_external_lockfiles=allow_external_lockfiles
+        )
+        return bool(queries)
+
+    async def _open_gate_resources(self) -> _GateResources | _GateResourcesUnavailable:
+        """Open the DB, engine, detector and typosquat cache shared by both gates.
+
+        The risk gate and the cooldown gate run back-to-back over the same package
+        list and need overlapping state: one DB connection, one TopPackagesCache
+        (and therefore one top-packages fetch), one RiskEngine, and one
+        TyposquatDetector. Constructing them once here — rather than per gate —
+        also means the O(corpus) typosquat scan runs once per package instead of
+        three times, since the detector memoises across both gates and the engine.
+
+        Scaled to what is actually needed. The cooldown gate requires only the DB
+        (for publication dates and clearances) plus a TyposquatDetector for its
+        risk_score fallback — never the RiskEngine or its httpx PopularityClient.
+        Disabling `sandbox.preflight_risk.enabled` (the pre-flight *gate*) must not
+        also disable that fallback: it previously routed through the same flag as
+        engine construction, so turning off pre-flight scoring alone forced
+        `_typo_for` to return None, which zeroed cooldown's risk_score and could
+        silently downgrade `on_new_medium_risk` ("prompt") to `on_new_low_risk`
+        ("warn") for a real typosquat — weakening a gate the user never touched.
+        `heuristics.enabled` is still the one flag that disables everything,
+        including this fallback, since it is the global kill switch for
+        heuristic-derived signals.
+
+        Risk construction failures degrade rather than propagate: building the
+        engine touches third-party plugin entry points (the popularity ecosystem
+        map) and opens an httpx client, none of which should be able to abort an
+        install. On failure the returned resources carry the DB alone, so the
+        cooldown gate still runs and the risk gate reports no scores. Any client
+        created before the failure is carried out for _close_gate_resources() to
+        release, so a partial build cannot leak a socket.
+
+        Returns GATE_RESOURCES_UNAVAILABLE when even the DB cannot be opened
+        (read-only filesystem, SQLite lock timeout). Neither gate is load-bearing
+        for the install itself, so both are skipped in that case rather than
+        aborting the run — and the sentinel, rather than None, is what makes
+        "skipped" stick: None on a gate's `res` parameter means "not supplied",
+        which would have each gate retry the failing open in turn.
+
+        The caller owns the lifecycle and must call _close_gate_resources().
+        """
+        try:
+            db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
+        except Exception:
+            log.warning(
+                "Could not open the database — skipping risk and cooldown checks "
+                "for this run", exc_info=True,
+            )
+            return GATE_RESOURCES_UNAVAILABLE
+        if not self._cfg.heuristics.enabled:
+            return _GateResources(db=db, engine=None, detector=None, pop_client=None)
+        if not self._cfg.sandbox.preflight_risk.enabled:
+            # The pre-flight gate is off, but cooldown's risk_score fallback still
+            # needs a detector. Built directly rather than via _build_risk_engine, so
+            # disabling the gate does not also construct the RiskEngine or its httpx
+            # PopularityClient that only the gate needed.
+            detector = await self._build_typosquat_detector(db)
+            return _GateResources(db=db, engine=None, detector=detector, pop_client=None)
+        try:
+            engine, detector, pop_client = await self._build_risk_engine(db)
+        except Exception:
+            log.warning(
+                "Could not construct the risk engine — continuing without risk "
+                "scoring (cooldown checks still apply)", exc_info=True,
+            )
+            # _build_risk_engine closes its own PopularityClient before re-raising,
+            # so nothing is left to release here beyond the DB the caller owns. Still
+            # try for a bare detector so cooldown's fallback survives this failure too.
+            detector = await self._build_typosquat_detector(db)
+            return _GateResources(db=db, engine=None, detector=detector, pop_client=None)
+        return _GateResources(db=db, engine=engine, detector=detector, pop_client=pop_client)
+
+    async def _build_typosquat_detector(self, db: Any) -> Any | None:
+        """Build a bare TyposquatDetector, with no RiskEngine or httpx client.
+
+        Used when the pre-flight risk gate is off (or failed to construct) but
+        cooldown still needs its risk_score fallback. Returns None on failure —
+        cooldown's own fail-open in `_typo_for` already tolerates that.
+        """
+        try:
+            from packagealert.heuristics.top_packages import TopPackagesCache
+            from packagealert.heuristics.typosquat import TyposquatDetector
+
+            top_cache = TopPackagesCache(db=db, cfg=self._cfg.heuristics)
+            return TyposquatDetector(top_cache)
+        except Exception:
+            log.warning(
+                "Could not construct a typosquat detector for cooldown's fallback "
+                "score — cooldown will classify on age alone", exc_info=True,
+            )
+            return None
+
+    async def _close_gate_resources(
+        self, res: _GateResources | _GateResourcesUnavailable | None
+    ) -> None:
+        """Release shared gate resources. Safe to call once, in a finally block.
+
+        Tolerates None and GATE_RESOURCES_UNAVAILABLE (nothing was opened in
+        either case) and never raises: a teardown fault must not fail an install
+        that has otherwise succeeded.
+        """
+        if res is None or res is GATE_RESOURCES_UNAVAILABLE:
+            return
+        try:
+            if res.pop_client is not None:
+                await res.pop_client.aclose()
+        except Exception:
+            log.warning("Closing the popularity client failed", exc_info=True)
+        finally:
+            with contextlib.suppress(Exception):
+                await res.db.close()
+
+    async def _typo_for(self, res: _GateResources, name: str, ecosystem: str) -> Any | None:
+        """Typosquat-analyse *name* via the shared detector.
+
+        The detector memoises internally, so repeat calls across the risk gate,
+        the cooldown gate and RiskEngine.analyze() cost nothing. Returns None if
+        the analysis failed, or if risk scoring is disabled and no detector was
+        built — callers fail open rather than blocking an install because the
+        corpus was unavailable.
+        """
+        if res.detector is None:
+            return None
+        try:
+            return await res.detector.analyze(name, ecosystem)
+        except Exception:
+            log.warning("Typosquat check failed for %s — skipping", name, exc_info=True)
+            return None
+
+    async def _build_risk_engine(self, db: Any) -> tuple[Any, Any, Any]:
+        """Construct a fully-wired RiskEngine sharing *db*.
+
+        Mirrors the daemon's construction (daemon.py) so scores produced here are
+        comparable with daemon scores. Returns (engine, detector, pop_client);
+        the caller owns closing pop_client.
+
+        If construction fails after the httpx PopularityClient exists, that client
+        is closed here before re-raising — this function owns the ordering, so it
+        owns the cleanup rather than leaving callers to guess what was built.
+        """
+        from packagealert.analyzers.risk import RiskEngine
+        from packagealert.heuristics.top_packages import TopPackagesCache
+        from packagealert.heuristics.typosquat import TyposquatDetector
+        from packagealert.osv.popularity import PopularityCache, PopularityClient
+
+        pop_client = PopularityClient(lang_registry.popularity_ecosystem_map())
+        try:
+            top_cache = TopPackagesCache(db=db, cfg=self._cfg.heuristics)
+            engine = RiskEngine(
+                self._cfg.heuristics,
+                pop_client=pop_client,
+                pop_cache=PopularityCache(db),
+                top_packages_cache=top_cache,
+                db=db,
+                cooldown_period_days=self._cfg.sandbox.cooldown.period_days,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                await pop_client.aclose()
+            raise
+        # Reuse the engine's own detector rather than building a second one.
+        # RiskEngine constructs a TyposquatDetector internally and calls it during
+        # analyze(); a separate runner-level instance would run the O(corpus) scan
+        # a second time for every package, which no amount of caching here can
+        # deduplicate. getattr keeps this tolerant of the attribute being renamed.
+        detector = getattr(engine, "_typosquat", None) or TyposquatDetector(top_cache)
+        return engine, detector, pop_client
+
+    async def _risk_check(
+        self,
+        ctx: _Context,
+        *,
+        res: _GateResources | _GateResourcesUnavailable | None = None,
+        allow_external_lockfiles: bool = False,
+    ) -> dict[tuple[str, str], int] | bool:
+        """Evaluate typosquat + composite risk score for the packages about to be
+        installed. Return False to block, else a (ecosystem, name) -> score map
+        for _cooldown_check to reuse.
+
+        Deliberately independent of _cooldown_check's skip conditions: a typosquat
+        match is a function of the package name alone, so it must still be reported
+        when the ecosystem has no publication-date endpoint or when an unpinned
+        version cannot be resolved.
+
+        The package set comes from `_resolve_query_packages`, matching the OSV
+        pre-flight check's coverage: explicit CLI packages, `-r`/`--requirement`
+        files, and bare package-manager lock-file installs (e.g. `npm install`
+        with no explicit names) all contribute — not just `ctx.parsed.packages`,
+        which is empty for the latter two and previously skipped this gate
+        entirely despite the OSV pre-flight already covering the same install.
+
+        *res* carries state shared with the cooldown gate. When omitted the method
+        opens and closes its own, so it remains independently callable.
+        """
+        from packagealert.sandbox.preflight_risk import decide_risk
+        from packagealert.scoring import score_packages
+
+        cfg = self._cfg.sandbox.preflight_risk
+        if not cfg.enabled or not self._cfg.heuristics.enabled:
+            return {}
+        if ctx.parsed is None:
+            return {}
+        queries, blocked_reason, _source = self._resolve_query_packages(
+            ctx, allow_external_lockfiles=allow_external_lockfiles
+        )
+        if blocked_reason is not None:
+            self._console.print(
+                f"✗ Lock file {blocked_reason} resolves outside the project directory "
+                f"— refusing risk scan. Pass --allow-external-lockfiles to override.",
+                style="bold red",
+                markup=False,
+            )
+            return False
+        if not queries:
+            return {}
+
+        is_tty = sys.stdin.isatty()
+        if res is GATE_RESOURCES_UNAVAILABLE:
+            # Already known unavailable — do not retry the failing open.
+            return {}
+        owned = res is None
+        if res is None:
+            res = await self._open_gate_resources()
+        if res is GATE_RESOURCES_UNAVAILABLE:
+            # No DB: risk scoring is unavailable. Fail open.
+            return {}
+        engine = res.engine
+        if engine is None:
+            # Engine construction failed earlier; cooldown still runs, we do not.
+            # Release anything this call opened before bailing.
+            if owned:
+                await self._close_gate_resources(res)
+            return {}
+
+        scores: dict[tuple[str, str], int] = {}
+        blocked: list = []
+        warned: list = []
+
+        try:
+            # Scored concurrently (bounded by score_packages' own semaphore) rather
+            # than one engine.analyze() await per package in sequence: each call can
+            # hit deps.dev on a popularity-cache miss and read publication-date rows,
+            # entirely independent work across packages that a sequential loop would
+            # otherwise serialise. _risk_check_lockfiles already scores this way for
+            # the same reason; this mirrors it rather than looping _score_one.
+            keys = [(raw_ecosystem.lower(), name, version) for raw_ecosystem, name, version in queries]
+            outcome = await score_packages(engine, keys)
+
+            for (ecosystem, name, version), report in outcome.reports.items():
+                pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
+
+                # Fail open on any scoring failure: a risk check must never block
+                # an install because the network or the corpus was unavailable.
+                typo = await self._typo_for(res, name, ecosystem)
+                if typo is None:
+                    continue
+
+                scores[(ecosystem, name.lower())] = report.score
+
+                decision = decide_risk(
+                    pkg, report=report, typo=_reconcile_typo(typo, report), cfg=cfg, is_tty=is_tty
+                )
+
+                if decision.action == "block":
+                    blocked.append(decision)
+                elif decision.action == "warn":
+                    warned.append(decision)
+                elif decision.action == "prompt":
+                    from rich.prompt import Confirm
+                    self._console.print(
+                        f"  {_spec_label(pkg)}: {decision.reason}", style="yellow", markup=False
+                    )
+                    if not Confirm.ask("Install anyway?", default=False):
+                        blocked.append(decision)
+        finally:
+            if owned:
+                await self._close_gate_resources(res)
+
+        for d in warned:
+            self._console.print(
+                f"  ⚠ {_spec_label(d.package)}: {d.reason}", style="yellow", markup=False
+            )
+
+        if blocked:
+            for d in blocked:
+                self._console.print(
+                    f"✗ {_spec_label(d.package)}: {d.reason}", style="red", markup=False
+                )
+            # markup=False: the config path contains brackets Rich would eat.
+            self._console.print(
+                "  Risk gating is configured in [sandbox.preflight_risk].",
+                style="dim",
+                markup=False,
+            )
+            return False
+
+        return scores
+
+    async def _risk_check_lockfiles(
+        self, cwd: Path, *, allow_external_lockfiles: bool = False
+    ) -> bool:
+        """Risk-gate a project's lock-file package set. Return False to block.
+
+        Used by the shell path, which has no explicit package list. The gate
+        decision is the highest-ranked action across all scored packages, so a
+        sandboxed interactive shell gets the same protection as a direct install.
+
+        Lock file containment is enforced before anything is read. scan_project()
+        follows symlinks unconditionally, and this path additionally sends every
+        package name to deps.dev, so an unchecked external symlink would both read
+        and exfiltrate a file outside the project.
+
+        Reporting suppresses low-signal rows the same way scan-project does;
+        suppression never affects enforcement, because a suppressed row cannot
+        have reached risk_threshold in the first place.
+
+        False positives here are handled by scoring, not by declining to enforce:
+        RiskEngine reduces the typosquat score for packages with established
+        adoption of their own, so an ordinary lock file of legitimate libraries
+        resolves to warn (httpx2 scores 3, respx 14 — both below
+        typosquat_min_score) and the shell starts.
+        """
+        from packagealert.parsers import lockfiles
+        from packagealert.sandbox.preflight_risk import ACTION_RANK, decide_risk, worst
+        from packagealert.scoring import score_packages
+
+        cfg = self._cfg.sandbox.preflight_risk
+        if not cfg.enabled or not self._cfg.heuristics.enabled:
+            return True
+
+        # Containment first: scan_project() below follows symlinks unconditionally,
+        # and the scoring pass sends package names to deps.dev. Both must be gated
+        # on the lock files actually belonging to this project.
+        if not allow_external_lockfiles:
+            offender = _assert_scannable_lock_files_contained(cwd)
+            if offender is not None:
+                self._console.print(
+                    f"✗ Lock file {offender} resolves outside the project directory "
+                    f"— refusing risk scan. Pass --allow-external-lockfiles to override.",
+                    style="bold red",
+                    markup=False,
+                )
+                log.warning(
+                    "Lock file resolves outside project root, refusing risk scan: %s",
+                    cwd / offender,
+                )
+                return False
+
+        try:
+            result = lockfiles.scan_project(cwd)
+        except Exception:
+            log.warning("Lock-file scan failed for risk check — skipping", exc_info=True)
+            return True
+        if not result.pinned:
+            return True
+
+        is_tty = sys.stdin.isatty()
+        res = await self._open_gate_resources()
+        if res is GATE_RESOURCES_UNAVAILABLE or res.engine is None:
+            # No DB or no engine: nothing to score. Let the shell start.
+            await self._close_gate_resources(res)
+            return True
+
+        decisions: list = []
+        try:
+            keys = [(p.ecosystem.lower(), p.name, p.version) for p in result.pinned]
+            outcome = await score_packages(res.engine, keys)
+
+            for (ecosystem, name, version), report in outcome.reports.items():
+                typo = await self._typo_for(res, name, ecosystem)
+                if typo is None:
+                    continue
+                decisions.append(
+                    decide_risk(
+                        PackageSpec(name=name, version=version, ecosystem=ecosystem),
+                        report=report,
+                        # Judge the engine-reduced score, as _risk_check does —
+                        # the detector's raw score ignores adoption evidence.
+                        typo=_reconcile_typo(typo, report),
+                        cfg=cfg,
+                        is_tty=is_tty,
+                    )
+                )
+        finally:
+            await self._close_gate_resources(res)
+
+        flagged = [d for d in decisions if d.action != "allow"]
+        if not flagged:
+            return True
+
+        # Highest-severity findings first, and the worst of them governs the gate.
+        flagged.sort(key=lambda d: -ACTION_RANK[d.action])
+        top = worst(flagged)
+        assert top is not None  # flagged is non-empty
+
+        blocking = top.action == "block"
+        header_style = "bold red" if blocking else "yellow"
+        marker = "✗" if blocking else "⚠"
+        self._console.print(
+            f"{marker} Risk signals in {len(flagged)} lock file dependenc"
+            f"{'y' if len(flagged) == 1 else 'ies'}:",
+            style=header_style,
+            markup=False,
+        )
+        for d in flagged:
+            self._console.print(
+                f"  {_spec_label(d.package)}: {d.reason}",
+                style="red" if d.action == "block" else "yellow",
+                markup=False,
+            )
+        self._console.print(
+            "  Run 'package-alert scan-project' for the full breakdown.",
+            style="dim",
+            markup=False,
+        )
+
+        if blocking:
+            # markup=False: the config path contains brackets Rich would eat.
+            self._console.print(
+                "  Risk gating is configured in [sandbox.preflight_risk].",
+                style="dim",
+                markup=False,
+            )
+            return False
+        if top.action == "prompt":
+            from rich.prompt import Confirm
+            return bool(Confirm.ask("Enter sandbox anyway?", default=False))
+        return True
+
+    async def _cooldown_check(
+        self,
+        ctx: _Context,
+        *,
+        risk_scores: dict[tuple[str, str], int] | None = None,
+        res: _GateResources | _GateResourcesUnavailable | None = None,
+        allow_external_lockfiles: bool = False,
+    ) -> list[tuple[str, str, str]] | bool:
         """Check cooldown policy. Returns False if blocked, or a list of
         (ecosystem, name, version) tuples for packages the user confirmed at the
         prompt — to be written to cooldown_cleared after a successful install.
-        An empty list means allowed with no prompts."""
-        import sys
+        An empty list means allowed with no prompts.
+
+        *risk_scores* maps (ecosystem, lowercased name) to the composite
+        RiskEngine score computed by _risk_check. When absent, the typosquat
+        score is used instead, preserving the pre-risk-gate behaviour.
+
+        The package set comes from `_resolve_query_packages`, the same as
+        `_risk_check` — see that method's docstring for why bare
+        `ctx.parsed.packages` under-covers `-r`/lock-file installs.
+
+        *res* carries state shared with the risk gate — including memoised
+        typosquat results, so the corpus scan is not repeated. When omitted the
+        method opens and closes its own, so it remains independently callable."""
         import time as _time
 
         from packagealert.sandbox.cooldown import (
@@ -661,44 +1223,59 @@ class SandboxRunner:
             fetch_publication_date,
         )
 
-        if ctx.parsed is None or not ctx.parsed.packages:
+        if ctx.parsed is None:
+            return []
+        queries, blocked_reason, _source = self._resolve_query_packages(
+            ctx, allow_external_lockfiles=allow_external_lockfiles
+        )
+        if blocked_reason is not None:
+            self._console.print(
+                f"✗ Lock file {blocked_reason} resolves outside the project directory "
+                f"— refusing cooldown scan. Pass --allow-external-lockfiles to override.",
+                style="bold red",
+                markup=False,
+            )
+            return False
+        if not queries:
             return []
 
         cfg = self._cfg.sandbox.cooldown
         is_tty = sys.stdin.isatty()
-        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
+        if res is GATE_RESOURCES_UNAVAILABLE:
+            # Already known unavailable — do not retry the failing open.
+            return []
+        owned = res is None
+        if res is None:
+            res = await self._open_gate_resources()
+        if res is GATE_RESOURCES_UNAVAILABLE:
+            # No DB means no publication dates and no clearances to consult.
+            # Fail open rather than blocking on missing information.
+            log.warning("Cooldown checks skipped: no database available")
+            return []
+        db = res.db
 
-        from packagealert.heuristics.top_packages import TopPackagesCache
-        from packagealert.heuristics.typosquat import TyposquatDetector
         from packagealert.languages.base import PackageSpec
-        from packagealert.parsers.process_args import parse_package_spec
-        top_cache = TopPackagesCache(db, self._cfg.heuristics)
-        detector = TyposquatDetector(top_cache)
 
         blocked: list = []
         pending_clears: list[tuple[str, str, str]] = []
         warned: list = []
 
         try:
-            for pkg_str in ctx.parsed.packages:
-                ecosystem = ctx.parsed.ecosystem.lower()
-                name, version = parse_package_spec(pkg_str, ecosystem)
-                if not name:
-                    continue  # VCS URL, local path, editable install — not a registry package
+            for raw_ecosystem, name, version in queries:
+                ecosystem = raw_ecosystem.lower()
                 if not version:
                     lang_for_latest = lang_registry.for_ecosystem(ecosystem)
                     if lang_for_latest is not None:
-                        latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
-                        if callable(latest_url_fn):
-                            try:
-                                latest_url = latest_url_fn(name)
-                            except Exception:
-                                log.warning("latest_version_url raised for lang=%s pkg=%s — skipping", getattr(lang_for_latest, "name", "?"), name, exc_info=True)
-                                latest_url = None
-                            if latest_url is not None:
-                                version = await fetch_latest_version(latest_url, lang_for_latest, name)
-                                if version:
-                                    self._console.print(f"[dim]Resolving latest version: {lang_for_latest.serialise_package_spec(name, version)}[/dim]")
+                        try:
+                            latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
+                            latest_url = latest_url_fn(name) if callable(latest_url_fn) else None
+                        except Exception:
+                            log.warning("latest_version_url raised for lang=%s pkg=%s — skipping", getattr(lang_for_latest, "name", "?"), name, exc_info=True)
+                            latest_url = None
+                        if latest_url is not None:
+                            version = await fetch_latest_version(latest_url, lang_for_latest, name)
+                            if version:
+                                self._console.print(f"[dim]Resolving latest version: {lang_for_latest.serialise_package_spec(name, version)}[/dim]")
                     if not version:
                         self._console.print(
                             f"[dim]Cooldown skipped for {name} (unpinned — version unknown until install)[/dim]"
@@ -734,8 +1311,18 @@ class SandboxRunner:
                 age_days = (_time.time() - pub_ts) / 86400 if isinstance(pub_ts, float) else None
                 cleared_at = await get_cooldown_cleared_at(db, ecosystem=ecosystem, package=name, version=version)
 
-                typo = await detector.analyze(name, ecosystem)
-                risk_score = typo.score
+                # Reuses the risk gate's memoised result when the caller shared
+                # resources, so the O(corpus) scan runs once per package. None when
+                # risk scoring is disabled or the corpus was unavailable — cooldown
+                # is an age policy and must still run without it, so this only
+                # costs the typosquat detail in the reason string.
+                typo = await self._typo_for(res, name, ecosystem)
+                # Prefer the composite RiskEngine score computed by _risk_check;
+                # fall back to the typosquat score, or 0 when neither is available.
+                fallback = typo.score if typo is not None else 0
+                risk_score = fallback
+                if risk_scores is not None:
+                    risk_score = risk_scores.get((ecosystem, name.lower()), fallback)
 
                 decision = decide_with_cleared(
                     pkg,
@@ -746,10 +1333,17 @@ class SandboxRunner:
                     cleared_at=cleared_at,
                 )
 
-                if typo.is_typosquat and typo.closest_match:
+                if typo is not None and typo.is_typosquat and typo.closest_match:
+                    # Omit the distance when unknown rather than showing "None".
+                    _dist = (
+                        f" (distance {typo.distance})" if typo.distance is not None else ""
+                    )
                     decision = dataclass_replace(
                         decision,
-                        reason=f"{decision.reason}; possible typosquat of '{typo.closest_match}' (distance {typo.distance})",
+                        reason=(
+                            f"{decision.reason}; possible typosquat of "
+                            f"'{typo.closest_match}'{_dist}"
+                        ),
                     )
 
                 if decision.action == "block":
@@ -764,7 +1358,8 @@ class SandboxRunner:
                     else:
                         pending_clears.append((ecosystem, name, version))
         finally:
-            await db.close()
+            if owned:
+                await self._close_gate_resources(res)
 
         for d in warned:
             self._console.print(f"[yellow]  {d.package.name}=={d.package.version}: {d.reason}[/yellow]")
@@ -836,28 +1431,33 @@ class SandboxRunner:
         notes: list[str] = []
 
         for lang in lang_registry.all_languages():
-            shell_env_fn = getattr(lang, "shell_environment", None)
-            if callable(shell_env_fn):
-                try:
-                    lang_shell = shell_env_fn(cwd)
-                except Exception:
-                    log.warning("shell_environment raised for lang=%s — skipping",
-                                getattr(lang, "name", "?"), exc_info=True)
+            try:
+                shell_env_fn = getattr(lang, "shell_environment", None)
+                if not callable(shell_env_fn):
                     continue
-                write_dirs.extend(lang_shell.write_dirs)
-                scan_targets.extend(lang_shell.scan_targets)
-                for k, v in lang_shell.env_updates.items():
-                    sandbox_env[k] = v
-                for p in lang_shell.path_prepends:
-                    sandbox_env["PATH"] = f"{p}:{sandbox_env.get('PATH', '')}"
-                notes.extend(lang_shell.notes)
-                for w in lang_shell.warnings:
-                    self._console.print(w, style="bold yellow", markup=False)
+                lang_shell = shell_env_fn(cwd)
+            except Exception:
+                log.warning("shell_environment raised for lang=%s — skipping",
+                            getattr(lang, "name", "?"), exc_info=True)
+                continue
+            write_dirs.extend(lang_shell.write_dirs)
+            scan_targets.extend(lang_shell.scan_targets)
+            for k, v in lang_shell.env_updates.items():
+                sandbox_env[k] = v
+            for p in lang_shell.path_prepends:
+                sandbox_env["PATH"] = f"{p}:{sandbox_env.get('PATH', '')}"
+            notes.extend(lang_shell.notes)
+            for w in lang_shell.warnings:
+                self._console.print(w, style="bold yellow", markup=False)
 
         if notes:
             self._console.print(f"[dim]Environment: {', '.join(notes)}[/dim]")
 
         # Pre-flight: scan all project lock files for known-malicious packages
+        if not await self._risk_check_lockfiles(
+            cwd, allow_external_lockfiles=allow_external_lockfiles
+        ):
+            return 1
         if not await self._preflight_shell(cwd, allow_external_lockfiles=allow_external_lockfiles):
             return 1
 
@@ -911,17 +1511,17 @@ class SandboxRunner:
             lang_flags_sh = shell_flags.get(lang_name_sh, frozenset())
             if not lang_flags_sh:
                 continue
-            configure_fn = getattr(lang, "configure_sandbox", None)
-            if callable(configure_fn):
-                _sh_targets = SandboxTargets(
-                    scan_targets=list(scan_targets),
-                    write_dirs=list(write_dirs),
-                )
-                try:
+            try:
+                configure_fn = getattr(lang, "configure_sandbox", None)
+                if callable(configure_fn):
+                    _sh_targets = SandboxTargets(
+                        scan_targets=list(scan_targets),
+                        write_dirs=list(write_dirs),
+                    )
                     configure_fn(None, cwd, lang_flags_sh, _sh_targets, home_ro, sandbox_env)
-                except Exception:
-                    log.warning("configure_sandbox raised for lang=%s in shell mode — skipping",
-                                lang_name_sh, exc_info=True)
+            except Exception:
+                log.warning("configure_sandbox raised for lang=%s in shell mode — skipping",
+                            lang_name_sh, exc_info=True)
 
         # Collect writable bind pairs from configure_sandbox_writable (shell mode).
         _wb_sh_targets = SandboxTargets(
@@ -1066,21 +1666,45 @@ class SandboxRunner:
         self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
-    async def _preflight(self, ctx: _Context, *, allow_external_lockfiles: bool = False) -> bool:
-        """Query OSV for what's about to be installed. Return False to block."""
-        from packagealert.osv.cache import OsvCache
-        from packagealert.osv.client import OsvClient
+    def _resolve_query_packages(
+        self, ctx: _Context, *, allow_external_lockfiles: bool = False
+    ) -> tuple[list[tuple[str, str, str | None]], str | None, str]:
+        """Build the (ecosystem, name, version) package set for *ctx*'s install.
+
+        Shared by the OSV pre-flight check and the risk/cooldown gates so all
+        three see the same install surface. Explicit CLI packages alone
+        under-covers real `pa run` usage — `pip install -r requirements.txt`
+        and a bare `npm install` (installing everything from an existing
+        lock file) both have `parsed.packages == []`, and previously the risk
+        and cooldown gates returned early there, running no typosquat or
+        high-risk scoring at all for either surface despite the OSV
+        pre-flight already expanding them.
+
+        Returns `(queries, blocked_reason, source)`. *blocked_reason*, when not
+        None, means an external (symlinked-outside-the-project) lock file was
+        found and the caller must block the run rather than use *queries* —
+        mirrors `_preflight`'s own containment check, required because
+        `scan_project` follows symlinks unconditionally. *source* is a
+        human-readable description of where *queries* came from, for status
+        messages; it is `""` when *queries* is empty or the run was blocked.
+        """
         from packagealert.parsers.lockfiles import scan_project
-        from packagealert.storage.db import open_db
 
         parsed = ctx.parsed
-
         if parsed is None:
-            self._console.print("[dim]Pre-flight: unrecognised command, skipping OSV check[/dim]")
-            return True
+            return [], None, ""
+
+        if not parsed.should_gate:
+            # A report-only/check-only invocation (`npm install lodash
+            # --dry-run`, `uv sync --check`, ...) installs nothing no matter
+            # what packages/req_files/is_lockfile_install say — see
+            # ParsedInstall.should_gate's own docstring. Must be checked
+            # before packages/req_files below: an explicit-package dry-run
+            # still has a non-empty `packages`, which would otherwise be
+            # queried and could block a command that changes nothing.
+            return [], None, ""
 
         queries: list[tuple[str, str, str | None]] = []
-
         source_parts: list[str] = []
 
         if parsed.packages:
@@ -1100,7 +1724,10 @@ class SandboxRunner:
             for rf in parsed.req_files:
                 req_path = ctx.cwd / rf
                 if req_path.exists():
-                    pinned, unpinned = collect_requirements_packages(req_path, visited, ctx.cwd)
+                    pinned, unpinned = collect_requirements_packages(
+                        req_path, visited, ctx.cwd,
+                        is_system_python_target=parsed.is_system_python_target,
+                    )
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
                     queries.extend((p.ecosystem, p.name, None) for p in unpinned)
                     file_sources.append(rf)
@@ -1109,17 +1736,23 @@ class SandboxRunner:
                 f"{added} packages ({', '.join(file_sources) or 'no packages found'})"
             )
 
-        if not parsed.packages and not parsed.req_files:
-            # Lock-file install — read lockfile for exact versions.
+        if not parsed.packages and not parsed.req_files and parsed.is_lockfile_install:
+            # Lock-file install — read the lock file for exact versions.
+            # `is_lockfile_install` is required here, not inferred from empty
+            # packages/req_files: a removal (`npm uninstall`, `yarn/pnpm
+            # remove`) or an unrelated non-install subcommand (`pipenv
+            # shell`/`check`, `uv run`/`cache`) produces the identical empty
+            # ParsedInstall shape but must NOT trigger a scan of the current
+            # lock file — that would gate packages the command is not
+            # installing at all, and could block a legitimate removal over a
+            # risk signal on the very dependency being removed. See
+            # ParsedInstall.is_lockfile_install's own docstring.
+            #
             # Enforce containment before scan_project() follows any symlinks.
             if not allow_external_lockfiles:
                 bad = _assert_scannable_lock_files_contained(ctx.cwd)
                 if bad is not None:
-                    self._console.print(
-                        f"[bold red]✗ Blocked — lock file '{bad}' resolves outside the project "
-                        f"directory. Use --allow-external-lockfiles to override.[/bold red]"
-                    )
-                    return False
+                    return [], bad, ""
             if parsed.lockfile_hint:
                 # Use the hinted lockfile directly so we scan the right file in
                 # repos with multiple lockfiles for the same ecosystem (e.g. a
@@ -1145,7 +1778,40 @@ class SandboxRunner:
             lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
             source_parts.append(f"{len(queries)} packages ({lock_sources})")
 
-        source = "; ".join(source_parts)
+        return queries, None, "; ".join(source_parts)
+
+    async def _preflight(self, ctx: _Context, *, allow_external_lockfiles: bool = False) -> bool:
+        """Query OSV for what's about to be installed. Return False to block."""
+        from packagealert.osv.cache import OsvCache
+        from packagealert.osv.client import OsvClient
+        from packagealert.storage.db import open_db
+
+        parsed = ctx.parsed
+
+        if parsed is None:
+            self._console.print("[dim]Pre-flight: unrecognised command, skipping OSV check[/dim]")
+            return True
+
+        if not parsed.should_gate:
+            # A report-only/check-only invocation (`npm install lodash
+            # --dry-run`, `uv sync --check`, ...) installs nothing no matter
+            # what packages/req_files/is_lockfile_install say — see
+            # ParsedInstall.should_gate's own docstring. Must be checked
+            # before packages/req_files below: an explicit-package dry-run
+            # still has a non-empty `packages`, which would otherwise be
+            # queried and could block a command that changes nothing.
+            self._console.print("[dim]Pre-flight: no-op/report-only command, skipping OSV check[/dim]")
+            return True
+
+        queries, blocked_reason, source = self._resolve_query_packages(
+            ctx, allow_external_lockfiles=allow_external_lockfiles
+        )
+        if blocked_reason is not None:
+            self._console.print(
+                f"[bold red]✗ Blocked — lock file '{blocked_reason}' resolves outside the project "
+                f"directory. Use --allow-external-lockfiles to override.[/bold red]"
+            )
+            return False
 
         if not queries:
             self._console.print("[dim]Pre-flight: nothing to check[/dim]")
@@ -1329,8 +1995,12 @@ class SandboxRunner:
         self._console.print("[green]✓ Lock file scan: clean[/green]")
         return True
 
-    async def _post_scan(self, packages: list[tuple[str, str, str | None]]) -> bool:
-        """OSV-check newly installed packages. Return False if anything is malicious."""
+    async def _post_scan(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:
+        """OSV-check newly installed packages, then risk-score them.
+
+        *packages* carries a fourth element — the scan root the package was
+        detected under — which OSV does not need but the risk pass does.
+        """
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
         from packagealert.storage.db import open_db
@@ -1340,9 +2010,12 @@ class SandboxRunner:
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
 
+        # OSV queries are (ecosystem, name, version) only.
+        osv_queries = [(eco, name, ver) for eco, name, ver, _root in packages]
+
         try:
-            for i in range(0, len(packages), 50):
-                batch = packages[i : i + 50]
+            for i in range(0, len(osv_queries), 50):
+                batch = osv_queries[i : i + 50]
                 results = await client.batch_query(batch)
                 for q, r in zip(batch, results):
                     if r:
@@ -1360,13 +2033,376 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        self._console.print("[green]✓ Post-install: clean[/green]")
+        self._console.print("[green]✓ Post-install: no known advisories[/green]")
+        return await self._post_scan_risk(packages)
+
+    async def _post_scan_risk(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:
+        """Score newly installed packages with full source-code signals.
+
+        This is the only point in the run flow where an extracted package tree
+        exists, so install-script / eval / embedded-binary signals can fire here
+        but not at pre-flight. Returning False triggers the caller's rollback.
+        """
+        from packagealert.analyzers.risk import UNVERIFIABLE_MANIFEST_SIGNAL
+        from packagealert.models.events import normalise_ecosystem
+        from packagealert.sandbox.escalation import escalate_if_prompt
+        from packagealert.scoring import score_packages
+
+        cfg = self._cfg.sandbox.preflight_risk
+        if not cfg.enabled or not self._cfg.heuristics.enabled:
+            return True
+
+        # Own resources: this runs after the install, long after the pre-flight
+        # gates have released theirs.
+        res = await self._open_gate_resources()
+        if res is GATE_RESOURCES_UNAVAILABLE or res.engine is None:
+            # Risk scoring is unavailable. The OSV post-install check has already
+            # passed, so keep the install rather than rolling back a good one over
+            # a scoring-setup failure.
+            log.warning("Post-install risk scoring skipped: risk engine unavailable")
+            await self._close_gate_resources(res)
+            return True
+        engine = res.engine
+
+        flagged: list[tuple[str, str | None, int, list[str]]] = []
+        try:
+            # Scored concurrently via score_packages (bounded by its own semaphore)
+            # rather than one engine.analyze() await per package in sequence — each
+            # call can hit deps.dev on a popularity-cache miss and read
+            # publication-date rows, entirely independent work across packages that
+            # a sequential loop would otherwise serialise. Mirrors _risk_check and
+            # _risk_check_lockfiles, which already score this way for the same
+            # reason.
+            #
+            # *packages* can carry the same (ecosystem, name, version) more than
+            # once with different scan_roots — a monorepo install can place the
+            # same dependency under more than one node_modules/site-packages tree
+            # in a single run — so score_packages' plain (ecosystem, name,
+            # version) dedup cannot see the distinct copies on its own. The
+            # resolver below groups every scan_root for a given key into its own
+            # candidate group, exactly like _installed_dir_resolver in cli/app.py,
+            # so score_packages scores each copy independently and keeps the
+            # highest-scoring report — a compromised copy under a second scan_root
+            # cannot hide behind a clean copy under the first.
+            #
+            # Keyed by the *canonical* ecosystem, not the raw string _try_parse
+            # produced (which always lowercases — see _try_parse's own comment):
+            # score_packages.one() normalises each key's ecosystem before calling
+            # resolve_dirs/resolve_manifest_warning, so a plugin declaring
+            # "NuGet" would otherwise be looked up here as "NuGet" against a
+            # dict built with "nuget". That mismatch does not raise all the way
+            # out — score_packages' own resolver wrapper catches it and quietly
+            # degrades to metadata-only scoring — so every source-code signal
+            # (install-script, eval, embedded-binary, unverifiable-manifest) for
+            # a mixed-case plugin ecosystem went silently missing. Normalising
+            # here, once, keeps this dict's keys identical to what score_packages
+            # will actually look up with.
+            roots_by_key: dict[tuple[str, str, str | None], list[Path]] = {}
+            for raw_ecosystem, name, version, scan_root in packages:
+                try:
+                    ecosystem = normalise_ecosystem(raw_ecosystem)
+                except ValueError:
+                    ecosystem = raw_ecosystem.lower()
+                roots_by_key.setdefault((ecosystem, name, version), []).append(scan_root)
+
+            manifest_warnings: dict[tuple[str, str, str | None], str | None] = {}
+
+            def resolve_dirs(
+                ecosystem: str, name: str, version: str | None
+            ) -> list[list[Path]]:
+                groups: list[list[Path]] = []
+                warning: str | None = None
+                for scan_root in roots_by_key[(ecosystem, name, version)]:
+                    # project_path is deliberately left to the scan_root.parent
+                    # fallback: a post-install scan target may be a venv elsewhere
+                    # or a monorepo subdirectory, so there is no single project
+                    # root to pass. The fallback is correct for the Node targets
+                    # that need it.
+                    resolved, env_warning = _resolve_installed_dir(
+                        ecosystem, name, Path.cwd(), scan_root, version=version
+                    )
+                    if not resolved:
+                        log.debug(
+                            "No package directory resolved for %s/%s under %s — "
+                            "source-code signals unavailable",
+                            ecosystem, name, scan_root,
+                        )
+                    if resolved:
+                        groups.append(resolved)
+                    # First non-None warning across scan_roots wins — a corrupt
+                    # manifest anywhere is worth surfacing, and nothing
+                    # distinguishes which scan_root's warning matters more.
+                    if warning is None and env_warning:
+                        warning = env_warning
+                manifest_warnings[(ecosystem, name, version)] = warning
+                return groups
+
+            def resolve_manifest_warning(
+                ecosystem: str, name: str, version: str | None
+            ) -> str | None:
+                return manifest_warnings.get((ecosystem, name, version))
+
+            keys = list(roots_by_key.keys())
+            outcome = await score_packages(
+                engine, keys,
+                package_dir_resolver=resolve_dirs,
+                manifest_warning_resolver=resolve_manifest_warning,
+            )
+
+            for (ecosystem, name, version), report in outcome.reports.items():
+                # unverifiable_manifest fires independently of the aggregate
+                # threshold: it typically arrives alone at score 20 (a corrupt
+                # manifest means no directories were resolved, so no other
+                # source-code heuristic ran), which never reaches
+                # post_install_threshold's default of 30 on its own — silently
+                # keeping an install whose own manifest could not be verified,
+                # despite it being exactly the kind of signal that should never
+                # go unreported. Mirrors preflight_risk.decide_risk's
+                # independent typosquat/high-risk gating rather than folding
+                # every signal into one combined score.
+                has_manifest_warning = any(
+                    s.name == UNVERIFIABLE_MANIFEST_SIGNAL for s in report.signals
+                )
+                if report.score >= cfg.post_install_threshold or has_manifest_warning:
+                    flagged.append(
+                        (name, version, report.score, [s.name for s in report.signals])
+                    )
+        finally:
+            await self._close_gate_resources(res)
+
+        if not flagged:
+            return True
+
+        # Resolve the configured action. on_post_install_risk accepts the full
+        # CooldownAction literal, so all four values must be honoured — treating
+        # anything that is not "block" as "warn" would silently downgrade a
+        # configured "prompt" and never escalate it in CI.
+        action = cfg.on_post_install_risk
+        if action == "allow":
+            # A genuine no-op: report nothing and keep the install.
+            return True
+        # Nobody can answer in CI or under a coding agent, so fall back to the
+        # configured escalation rather than hanging or silently keeping a
+        # package that tripped the threshold — shared with the pre-flight
+        # gate and cooldown, which apply the identical substep.
+        action = escalate_if_prompt(
+            action, is_tty=sys.stdin.isatty(), non_interactive_escalation=cfg.non_interactive_escalation
+        )
+        if action == "allow":
+            return True
+
+        blocking = action == "block"
+        style = "bold red" if blocking else "bold yellow"
+        marker = "✗" if blocking else "⚠"
+        self._console.print(
+            f"{marker} Post-install: {len(flagged)} package(s) flagged "
+            f"(risk threshold {cfg.post_install_threshold}, or an unverifiable manifest):",
+            style=style,
+            markup=False,
+        )
+        for name, version, score, signals in flagged:
+            label = f"{name}=={version}" if version else name
+            self._console.print(
+                f"  • {label}  score {score}  [{', '.join(signals)}]",
+                style="red" if blocking else "yellow",
+                markup=False,
+            )
+
+        if blocking:
+            return False
+        if action == "prompt":
+            from rich.prompt import Confirm
+            # The packages are already extracted; declining rolls the install back
+            # through the caller's snapshot restore.
+            return bool(Confirm.ask("Keep these packages installed?", default=False))
         return True
 
 
 # ---------------------------------------------------------------------------
 # Module-level helpers (kept outside the class for testability)
 # ---------------------------------------------------------------------------
+
+
+def _reconcile_typo(typo: Any, report: Any) -> Any:
+    """Return *typo* with its score replaced by the engine's reduced value.
+
+    TyposquatDetector reports the raw name-similarity score. RiskEngine then
+    reduces it for packages with established adoption of their own and for
+    version-suffix variants, and that reduced value is what the gate must judge —
+    otherwise the reductions never reach the decision. Reading it back off the
+    report keeps the reduction logic in one place (the engine) rather than
+    duplicating it here.
+    """
+    if not getattr(typo, "is_typosquat", False):
+        return typo
+    signal = next((s for s in getattr(report, "signals", []) if s.name == "typosquat"), None)
+    if signal is None or signal.score == typo.score:
+        return typo
+    return dataclass_replace(typo, score=signal.score)
+
+
+def _version_passing_style(method: Any) -> str:
+    """How to pass `version` to *method*: "keyword", "positional", or "none".
+
+    resolve_package_dir gained `version` in contract v5; plugins written against an
+    earlier version take three arguments. Inspecting the signature keeps a genuine
+    TypeError from inside a plugin distinguishable from an arity mismatch.
+
+    The distinction between "keyword" and "positional" matters: a hook declared
+    `(..., *, version=None)` or `(..., **kwargs)` accepts the argument only by
+    name, and passing it positionally raises TypeError — which the caller's broad
+    except would swallow, silently disabling every source-code heuristic for a
+    perfectly valid plugin. Only positional-only parameters and bare `*args`
+    require positional passing.
+    """
+    import inspect
+
+    try:
+        sig = inspect.signature(method)
+    except (TypeError, ValueError):
+        return "none"
+
+    accepts_var_positional = False
+    for param in sig.parameters.values():
+        if param.kind is param.VAR_KEYWORD:
+            # **kwargs — name it explicitly.
+            return "keyword"
+        if param.kind is param.VAR_POSITIONAL:
+            # *args cannot be addressed by name; remember and keep looking, in case
+            # a keyword-only `version` follows (def f(*args, version=None)).
+            accepts_var_positional = True
+            continue
+        if param.name != "version":
+            continue
+        if param.kind is param.POSITIONAL_ONLY:
+            return "positional"
+        # POSITIONAL_OR_KEYWORD and KEYWORD_ONLY both accept the name.
+        return "keyword"
+    return "positional" if accepts_var_positional else "none"
+
+
+def call_resolve_package_dir(
+    method: Any,
+    name: str,
+    project_path: Path | None,
+    site_packages_dir: Path | None,
+    *,
+    version: str | None = None,
+) -> list[Path]:
+    """Invoke a language module's resolve_package_dir, adapting to its signature.
+
+    Shared by the sandbox runner and the daemon so the argument-passing rules are
+    defined once. Exceptions propagate — each caller logs and degrades in its own
+    way. See _version_passing_style for why the style must be inspected.
+
+    Returns every directory the distribution owns (see LanguageBase.resolve_package_dir
+    for why this is a list rather than a single Path — a namespace-package
+    distribution can own more than one non-adjacent subdirectory of a shared root).
+    The registry's contract-v5 adapter guarantees *method* itself already returns
+    list[Path] regardless of the plugin's declared contract version, so no
+    adaptation happens here.
+    """
+    args: tuple = (name, project_path, site_packages_dir)
+    kwargs: dict[str, Any] = {}
+    if version is not None:
+        style = _version_passing_style(method)
+        if style == "keyword":
+            kwargs["version"] = version
+        elif style == "positional":
+            args = (name, project_path, site_packages_dir, version)
+    return method(*args, **kwargs)
+
+
+def _resolve_installed_dir(
+    ecosystem: str,
+    name: str,
+    cwd: Path,
+    scan_root: Path | None = None,
+    *,
+    project_path: Path | None = None,
+    version: str | None = None,
+) -> tuple[list[Path], str | None]:
+    """Resolve an installed package's directories via its language module,
+    alongside any manifest-integrity warning for it (see
+    LanguageBase.resolve_package_dir_manifest_warning).
+
+    Mirrors daemon._resolve_package_dir, including the defensive hook guard: a
+    third-party plugin raising here must not fail the post-install scan.
+
+    Both location hints are passed because ecosystems need different ones and the
+    runner should not encode that mapping: PythonLanguage requires
+    site_packages_dir (and returns [] without it, which previously disabled all
+    Python source heuristics post-install), while NodeLanguage requires
+    project_path and ignores site_packages_dir.
+
+    *scan_root* is the directory whose walk detected the package — site-packages
+    for Python, node_modules for Node — and is forwarded as site_packages_dir.
+
+    *project_path* should be passed explicitly whenever the caller knows it. When
+    omitted it falls back to `scan_root.parent`, then to *cwd*. That inference is
+    only correct when the scan root IS node_modules (parent = project root), which
+    holds for the post-install scan's Node targets but **not** for a venv
+    site-packages, whose parent is `lib/pythonX.Y`. The fallback is retained
+    because it is right for that original caller and harmless elsewhere —
+    PythonLanguage.resolve_package_dir ignores project_path entirely — but callers
+    that know the real project root should say so rather than rely on the shape of
+    the scan root matching their ecosystem.
+
+    Returns every directory this one environment's resolution owns — e.g. both
+    `google/auth` and `google/oauth2` for a namespace-package distribution — never
+    the shared namespace root, which sibling distributions also install into.
+    """
+    if project_path is None:
+        project_path = scan_root.parent if scan_root is not None else cwd
+    # for_ecosystem() returns None on an unloaded registry, which would silently
+    # disable every source-code signal. SandboxRunner.__init__ already loads it,
+    # but this is a module-level helper and must not depend on that. Idempotent.
+    lang_registry.load()
+    lang = lang_registry.for_ecosystem(ecosystem)
+    if lang is None:
+        return [], None
+    dirs: list[Path] = []
+    # Pass the version so a caller searching several environments cannot be handed
+    # a different version's source tree. Older plugins predate the parameter, so
+    # check the signature rather than catching TypeError — that would also swallow
+    # a genuine TypeError raised from inside the plugin's own body. Pass by keyword
+    # unless the signature can only take it positionally: `(..., *, version=None)`
+    # and `(..., **kwargs)` both reject a 4th positional argument.
+    try:
+        method = getattr(lang, "resolve_package_dir", None)
+        if callable(method):
+            dirs = call_resolve_package_dir(
+                method, name, project_path, scan_root, version=version
+            )
+    except Exception:
+        log.warning(
+            "resolve_package_dir raised for lang=%s pkg=%s — skipping",
+            getattr(lang, "name", "?"), name, exc_info=True,
+        )
+
+    warning: str | None = None
+    try:
+        warning_fn = getattr(lang, "resolve_package_dir_manifest_warning", None)
+        if callable(warning_fn):
+            warning = warning_fn(name, project_path, scan_root, version=version)
+    except Exception:
+        log.warning(
+            "resolve_package_dir_manifest_warning raised for lang=%s pkg=%s — skipping",
+            getattr(lang, "name", "?"), name, exc_info=True,
+        )
+
+    return dirs, warning
+
+
+def _spec_label(pkg: object) -> str:
+    """Render a PackageSpec as name==version for display.
+
+    Markup-unsafe by design: package names are registry-supplied and may contain
+    brackets, so callers must pass this to Console.print with markup=False.
+    """
+    version = getattr(pkg, "version", None)
+    name = getattr(pkg, "name", "?")
+    return f"{name}=={version}" if version else f"{name} (unpinned)"
 
 
 def _home_ro_dirs() -> list[Path]:
@@ -1398,13 +2434,13 @@ def _home_ro_dirs() -> list[Path]:
     result = [p for p in candidates if p.exists()]
     # Merge language-module config paths
     for lang in lang_registry.all_languages():
-        home_ro_fn = getattr(lang, "home_ro_paths", None)
-        if callable(home_ro_fn):
-            try:
+        try:
+            home_ro_fn = getattr(lang, "home_ro_paths", None)
+            if callable(home_ro_fn):
                 result.extend(p for p in home_ro_fn() if p.exists() and p not in result)
-            except Exception:
-                log.warning("home_ro_paths raised for lang=%s — skipping",
-                            getattr(lang, "name", "?"), exc_info=True)
+        except Exception:
+            log.warning("home_ro_paths raised for lang=%s — skipping",
+                        getattr(lang, "name", "?"), exc_info=True)
     return result
 
 
@@ -1559,6 +2595,19 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         suggested_env=pi.suggested_env,
         extra_write_home_dirs=list(getattr(pi, "extra_write_home_dirs", [])),
         target_env_name=getattr(pi, "target_env_name", None),
+        # getattr default False (not True): a third-party plugin predating
+        # this field must not have every empty-packages command
+        # (uninstalls included) silently start scanning its lock file just
+        # because the attribute happens to be absent.
+        is_lockfile_install=getattr(pi, "is_lockfile_install", False),
+        # getattr default True (gate normally): a third-party plugin
+        # predating this field has no way to signal "report-only, nothing
+        # to gate" and should keep today's behaviour of being gated as usual.
+        should_gate=getattr(pi, "should_gate", True),
+        # getattr default False: a third-party plugin predating this field
+        # has no way to signal system-Python targeting, so assume the
+        # ordinary venv-discovery path still applies.
+        is_system_python_target=getattr(pi, "is_system_python_target", False),
     )
 
 
@@ -1615,17 +2664,20 @@ def _collect_writable_binds(
         name = getattr(lang, "name", "?")
         lang_flags = flags_by_lang.get(name, frozenset())
         parsed = parsed_by_lang.get(name)
-        fn = getattr(lang, "configure_sandbox_writable", None)
-        if callable(fn):
-            try:
+        _not_called = object()
+        pairs: object = _not_called
+        try:
+            fn = getattr(lang, "configure_sandbox_writable", None)
+            if callable(fn):
                 pairs = fn(parsed, cwd, lang_flags, targets)
-            except Exception:
-                log.warning(
-                    "configure_sandbox_writable raised for lang=%s — skipping",
-                    name,
-                    exc_info=True,
-                )
-                continue
+        except Exception:
+            log.warning(
+                "configure_sandbox_writable raised for lang=%s — skipping",
+                name,
+                exc_info=True,
+            )
+            pairs = _not_called
+        if pairs is not _not_called:
             if not isinstance(pairs, list):
                 log.warning(
                     "configure_sandbox_writable lang=%s returned %s, expected list — skipping",
@@ -1683,18 +2735,18 @@ def _collect_writable_binds(
                     )
             if valid_pairs:
                 result.extend(valid_pairs)
-                warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
-                if callable(warn_fn):
-                    try:
+                try:
+                    warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
+                    if callable(warn_fn):
                         msg = warn_fn(parsed, cwd, lang_flags, targets)
                         if msg:
                             warnings.append(msg)
-                    except Exception:
-                        log.warning(
-                            "configure_sandbox_writable_warning raised for lang=%s — skipping",
-                            name,
-                            exc_info=True,
-                        )
+                except Exception:
+                    log.warning(
+                        "configure_sandbox_writable_warning raised for lang=%s — skipping",
+                        name,
+                        exc_info=True,
+                    )
     return result, warnings
 
 
@@ -1906,9 +2958,9 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
     if lang is None:
         return
-    resolve_fn = getattr(lang, "resolve_sandbox_targets", None)
-    if callable(resolve_fn):
-        try:
+    try:
+        resolve_fn = getattr(lang, "resolve_sandbox_targets", None)
+        if callable(resolve_fn):
             result = resolve_fn(ctx.parsed, ctx.cwd)
             # Validate ALL paths returned by the language plugin before accepting
             # them — a malicious or buggy plugin could otherwise cause the runner
@@ -1958,9 +3010,9 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
             if console is not None:
                 for w in result.warnings:
                     console.print(w, style="bold yellow", markup=False)
-        except Exception:
-            log.warning("resolve_sandbox_targets raised for lang=%s — skipping",
-                        getattr(lang, "name", "?"), exc_info=True)
+    except Exception:
+        log.warning("resolve_sandbox_targets raised for lang=%s — skipping",
+                    getattr(lang, "name", "?"), exc_info=True)
 
 
 class _LockUnreadable:
@@ -2194,9 +3246,17 @@ def _collect_new_packages(
     scan_targets: list[Path],
     snapshots: dict[Path, InstallSnapshot],
     ecosystem: str | None,
-) -> list[tuple[str, str, str | None]]:
-    """Return (ecosystem, name, version) tuples for packages that appeared since the snapshot."""
-    new: list[tuple[str, str, str | None]] = []
+) -> list[tuple[str, str, str | None, Path]]:
+    """Return (ecosystem, name, version, scan_root) for packages that appeared
+    since the snapshot.
+
+    *scan_root* is the directory whose walk detected the package — site-packages
+    for Python, node_modules for Node. It is retained because post-install source
+    heuristics need it to locate the extracted package on disk
+    (_resolve_installed_dir); without it, PythonLanguage.resolve_package_dir
+    returns None and every source-code signal is unreachable.
+    """
+    new: list[tuple[str, str, str | None, Path]] = []
     for target in scan_targets:
         snap = snapshots.get(target)
         before: set[Path] = snap.path_set() if snap is not None else set()
@@ -2261,17 +3321,26 @@ def _collect_new_packages(
         for lang in langs:
             if lang is None:
                 continue
-            detect_fn = getattr(lang, "detect_new_packages", None)
-            if callable(detect_fn):
-                try:
+            try:
+                detect_fn = getattr(lang, "detect_new_packages", None)
+                if callable(detect_fn):
                     pkg_specs = detect_fn(new_paths, walk_root)
                     for ps in pkg_specs:
-                        new.append((ps.ecosystem, ps.name, ps.version))
-                except Exception:
-                    log.warning("detect_new_packages raised for lang=%s — skipping",
-                                getattr(lang, "name", "?"), exc_info=True)
-    # Deduplicate preserving order
-    seen: set[tuple[str, str, str | None]] = set()
+                        new.append((ps.ecosystem, ps.name, ps.version, walk_root))
+            except Exception:
+                log.warning("detect_new_packages raised for lang=%s — skipping",
+                            getattr(lang, "name", "?"), exc_info=True)
+    # Deduplicate preserving order, keyed on the full tuple including scan_root.
+    # The same (ecosystem, name, version) installed under two distinct scan
+    # roots is two separate on-disk copies — e.g. a project venv and a nested
+    # tool's own venv both pulling in the same version — and each is scored
+    # independently by _post_scan_risk via _resolve_installed_dir(..., scan_root,
+    # ...). Keying on identity alone (dropping scan_root) collapsed those into
+    # one entry, silently skipping every copy after the first: a compromised
+    # second copy would never be inspected. Keying on the full tuple still
+    # collapses true duplicates — the same package detected twice under the
+    # same scan_root, e.g. by more than one language plugin's detect_new_packages.
+    seen: set[tuple[str, str, str | None, Path]] = set()
     result = []
     for pkg in new:
         if pkg not in seen:
