@@ -19,6 +19,8 @@ class ScanPayload(TypedDict):
     status: str
     finding_count: int
     findings: list[dict]
+    risks: list[dict]
+    risk_failures: int
     sources: list[str]
     scanned_at: str
 
@@ -159,6 +161,8 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         "status": "findings" if scan.finding_count > 0 else "clean",
         "finding_count": scan.finding_count,
         "findings": scan.findings,
+        "risks": scan.risks,
+        "risk_failures": scan.risk_failures,
         "sources": scan.sources,
         "scanned_at": scan.scanned_at.isoformat(),
     }

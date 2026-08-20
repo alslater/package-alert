@@ -149,6 +149,8 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     project_path = str(record.get("project_path") or "")
     scan_type = str(record.get("scan_type") or "")
     findings = record.get("findings") or []
+    risks = record.get("risks") or []
+    risk_failures = record.get("risk_failures") or 0
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
@@ -168,12 +170,23 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "finding_count": record.get("finding_count", len(findings)),
             "sources": sources,
             "findings": findings,
+            "risks": risks,
+            "risk_failures": risk_failures,
         }, indent=2))
         return
 
     if fmt in ("html", "browser"):
-        from packagealert.cli.app import _render_html, open_html_in_browser
-        html = _render_html(Path(project_path), sources, [], findings, scanned_at=date_str)
+        from packagealert.cli.app import (
+            _render_html,
+            _visible_risks,
+            open_html_in_browser,
+        )
+        html = _render_html(
+            Path(project_path), sources, [], findings,
+            risks=_visible_risks(risks, show_details=show_details),
+            risk_total=len(risks), risk_failures=risk_failures,
+            scanned_at=date_str,
+        )
         if fmt == "browser":
             open_html_in_browser(html)
         else:
@@ -183,7 +196,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     console.print(f"\nScan [bold]#{escape(str(scan_id))}[/bold] — {escape(project_path)}")
     console.print(f"Run at: {date_str}  |  Type: {escape(scan_type)}\n")
 
-    if not findings:
+    if not findings and not risks and not risk_failures:
         console.print("[green]No findings — all clear.[/green]")
         return
 
@@ -206,6 +219,44 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
                 console.print(f"  {escape((f.get('details') or '').strip())}", highlight=False)
             if f.get("url"):
                 console.print(f"  {escape(f.get('url') or '')}")
+
+    if risks:
+        from packagealert.cli.app import (
+            _RISK_LEVEL_COLOUR,
+            _primary_reason,
+            _visible_risks,
+        )
+        shown = _visible_risks(risks, show_details=show_details)
+        suppressed = len(risks) - len(shown)
+        if shown:
+            console.print(f"\n[bold]Risk signals ({len(shown)}):[/bold]")
+            for r in shown:
+                colour = _RISK_LEVEL_COLOUR.get(r.get("level"), "cyan")
+                version = r.get("version") or "unpinned"
+                console.print(
+                    f"[RISK {r.get('score')}] {r.get('level', ''):<8} {r.get('package', '')}@{version}"
+                    f"{_primary_reason(r)}",
+                    style=colour,
+                    markup=False,
+                    highlight=False,
+                )
+                if show_details:
+                    for s in r.get("signals") or []:
+                        console.print(
+                            f"    - {s.get('name')} ({s.get('score')}): {s.get('reason')}",
+                            style="dim",
+                            markup=False,
+                            highlight=False,
+                        )
+        if suppressed:
+            console.print(
+                f"[dim]  ({suppressed} low-signal row(s) hidden — use --details to show)[/dim]"
+            )
+
+    if risk_failures:
+        console.print(
+            f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
+        )
 
 
 def apply_overlay_to_config(toml_str: str, cfg: AppConfig) -> None:

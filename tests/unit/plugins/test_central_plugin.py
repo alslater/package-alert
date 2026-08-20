@@ -652,3 +652,91 @@ async def test_scans_listall_prints_no_table_when_all_pending_entries_unparseabl
     out = capsys.readouterr().out
     assert "Pending sync" not in out
     assert caplog.text.count("BUG: central_outbox entry") == 2
+
+
+def _scan_record_with_risk() -> dict:
+    return {
+        "id": 42, "project_path": "/proj", "scan_type": "project",
+        "status": "clean", "finding_count": 0, "findings": [],
+        "sources": ["pypi"], "scanned_at": "2026-01-01T00:00:00+00:00",
+        "risks": [{
+            "package": "reqeusts", "ecosystem": "pypi", "version": "1.0.0",
+            "score": 46, "level": "warning",
+            "signals": [{"name": "typosquat", "score": 15, "reason": "resembles 'requests'"}],
+        }],
+        "risk_failures": 2,
+    }
+
+
+def test_render_scan_detail_json_includes_risks(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_risk(), "json", show_details=False)
+    out = json.loads(capsys.readouterr().out)
+    assert out["risks"] == _scan_record_with_risk()["risks"]
+    assert out["risk_failures"] == 2
+
+
+def test_render_scan_detail_text_shows_risks_when_no_findings(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_risk(), "text", show_details=False)
+    out = capsys.readouterr().out
+    assert "No findings — all clear." not in out
+    assert "reqeusts" in out
+    assert "warning" in out
+
+
+def test_render_scan_detail_text_shows_risk_failures(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_risk(), "text", show_details=False)
+    out = capsys.readouterr().out
+    assert "2" in out and "unavailable" in out
+
+
+def test_render_scan_detail_html_includes_risks(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_risk(), "html", show_details=False)
+    out = capsys.readouterr().out
+    assert "reqeusts" in out
+
+
+def _scan_record_with_low_signal_risk() -> dict:
+    return {
+        "id": 42, "project_path": "/proj", "scan_type": "project",
+        "status": "clean", "finding_count": 0, "findings": [],
+        "sources": ["pypi"], "scanned_at": "2026-01-01T00:00:00+00:00",
+        "risks": [{
+            "package": "obscure-lib", "ecosystem": "pypi", "version": "1.0.0",
+            "score": 5, "level": "info",
+            "signals": [{"name": "low_popularity", "score": 5, "reason": "not found on deps.dev"}],
+        }],
+        "risk_failures": 0,
+    }
+
+
+def test_render_scan_detail_html_hides_low_signal_risks_by_default(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_low_signal_risk(), "html", show_details=False)
+    out = capsys.readouterr().out
+    assert "obscure-lib" not in out
+
+
+def test_render_scan_detail_html_shows_low_signal_risks_with_details(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_low_signal_risk(), "html", show_details=True)
+    out = capsys.readouterr().out
+    assert "obscure-lib" in out
+
+
+def test_render_scan_detail_text_hides_low_signal_risks_by_default(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_low_signal_risk(), "text", show_details=False)
+    out = capsys.readouterr().out
+    assert "obscure-lib" not in out
+
+
+def test_render_scan_detail_text_reports_suppressed_low_signal_count(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+    _render_scan_detail(_scan_record_with_low_signal_risk(), "text", show_details=False)
+    out = capsys.readouterr().out
+    assert "1 low-signal row" in out
+    assert "--details" in out
