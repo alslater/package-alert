@@ -1035,25 +1035,24 @@ def test_top_packages_fallback_contains_known_packages(lang: NodeLanguage) -> No
 
 
 class _FakeTopPackagesResponse:
-    def __init__(self, names: list[str]) -> None:
+    def __init__(self, names: object) -> None:
         self._names = names
 
     def raise_for_status(self) -> None:
         pass
 
-    def json(self) -> dict:
-        return {"objects": [{"package": {"name": n}} for n in self._names]}
+    def json(self) -> object:
+        return self._names
 
 
 class _FakeTopPackagesClient:
-    def __init__(self, pages: list[list[str]]) -> None:
-        self._pages = pages
+    def __init__(self, names: object) -> None:
+        self._names = names
         self.calls = 0
 
     async def get(self, url: str) -> _FakeTopPackagesResponse:
-        names = self._pages[self.calls] if self.calls < len(self._pages) else []
         self.calls += 1
-        return _FakeTopPackagesResponse(names)
+        return _FakeTopPackagesResponse(self._names)
 
 
 @pytest.mark.asyncio
@@ -1062,16 +1061,63 @@ async def test_fetch_top_packages_preserves_dots_in_dotted_names(lang: NodeLangu
     # "socket-io". Regression for TyposquatDetector's corpus/query mismatch: a
     # corpus entry folded at fetch time can never be un-folded by the
     # ecosystem-correct normalisation TyposquatDetector applies at query time.
-    client = _FakeTopPackagesClient([["socket.io", "lodash"]])
+    client = _FakeTopPackagesClient(["socket.io", "lodash"])
     result = await lang.fetch_top_packages(client, "http://example/x")
     assert result == ["socket.io", "lodash"]
 
 
 @pytest.mark.asyncio
 async def test_fetch_top_packages_lowercases_names(lang: NodeLanguage) -> None:
-    client = _FakeTopPackagesClient([["React"]])
+    client = _FakeTopPackagesClient(["React"])
     result = await lang.fetch_top_packages(client, "http://example/x")
     assert result == ["react"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_single_request_no_pagination(lang: NodeLanguage) -> None:
+    """ecosyste.ms returns the full page in one response — no follow-up call."""
+    client = _FakeTopPackagesClient(["a", "b", "c"])
+    await lang.fetch_top_packages(client, "http://example/x")
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_returns_none_on_unexpected_shape(lang: NodeLanguage) -> None:
+    """A non-list JSON body (e.g. an error object) must not be treated as names."""
+    client = _FakeTopPackagesClient({"error": "not found"})
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_skips_non_string_entries(lang: NodeLanguage) -> None:
+    client = _FakeTopPackagesClient(["lodash", None, 42, "express"])
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result == ["lodash", "express"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_caps_at_max_top_packages(lang: NodeLanguage) -> None:
+    """REGRESSION: the contract (LanguageBase.fetch_top_packages) requires every
+    implementation to cap the result at MAX_TOP_PACKAGES itself — the URL's
+    per_page is a request to the server, not a guarantee. An oversized or
+    nonconforming response must still be capped locally rather than stored in
+    full."""
+    from packagealert.languages.base import MAX_TOP_PACKAGES
+
+    oversized = [f"pkg-{i}" for i in range(MAX_TOP_PACKAGES + 50)]
+    client = _FakeTopPackagesClient(oversized)
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result is not None
+    assert len(result) == MAX_TOP_PACKAGES
+    assert result == [f"pkg-{i}" for i in range(MAX_TOP_PACKAGES)]
+
+
+@pytest.mark.asyncio
+async def test_fetch_top_packages_returns_none_for_empty_list(lang: NodeLanguage) -> None:
+    client = _FakeTopPackagesClient([])
+    result = await lang.fetch_top_packages(client, "http://example/x")
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

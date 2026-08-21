@@ -14,6 +14,7 @@ import httpx
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
+    MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
     ProcessInstall,
@@ -835,30 +836,37 @@ class NodeLanguage:
         return [p for p in candidates if p.exists()]
 
     def top_packages_url(self) -> str | None:
-        return "https://registry.npmjs.org/-/v1/search?text=keywords:javascript&popularity=1.0&size=250"
+        # ecosyste.ms ranks by actual download count with no keyword/text
+        # filter. The npm registry's own search API (`-/v1/search`) was tried
+        # first, but every query there is a text-relevance search with a
+        # popularity *boost* — there is no way to ask it for "everything,
+        # sorted by popularity" independent of a text match. Filtering on
+        # `keywords:javascript` excluded any popular package that doesn't
+        # self-tag that exact keyword: jsdom (29k+ dependents, actual download
+        # rank ~442) tags itself dom/html/whatwg/w3c and never appeared in that
+        # corpus at any page depth, so it could never be recognised as a
+        # legitimate exact match nor serve as a typosquat target.
+        return (
+            "https://packages.ecosyste.ms/api/v1/registries/npmjs.org/package_names"
+            f"?per_page={MAX_TOP_PACKAGES}&sort=downloads&page=1"
+        )
 
     async def fetch_top_packages(self, client: httpx.AsyncClient, url: str) -> list[str] | None:
-        from packagealert.languages.base import MAX_TOP_PACKAGES
-        packages: list[str] = []
-        offset = 0
-        page_size = 250
-        while len(packages) < MAX_TOP_PACKAGES:
-            resp = await client.get(f"{url}&from={offset}")
-            resp.raise_for_status()
-            objects = resp.json().get("objects", [])
-            if not objects:
-                break
-            for obj in objects:
-                # normalise_name, not the PEP-503-folding normalise_package_name:
-                # npm does not collapse separators, so folding here would store
-                # "socket-io" for the registry's "socket.io" and TyposquatDetector's
-                # later per-ecosystem normalisation could never recover the dot.
-                packages.append(self.normalise_name(obj["package"]["name"]))
-                if len(packages) >= MAX_TOP_PACKAGES:
-                    break
-            if len(objects) < page_size:
-                break
-            offset += page_size
+        resp = await client.get(url)
+        resp.raise_for_status()
+        names = resp.json()
+        if not isinstance(names, list):
+            return None
+        # normalise_name, not the PEP-503-folding normalise_package_name: npm
+        # does not collapse separators, so folding here would store
+        # "socket-io" for the registry's "socket.io" and TyposquatDetector's
+        # later per-ecosystem normalisation could never recover the dot.
+        #
+        # Sliced locally rather than trusting per_page in the URL: the contract
+        # (LanguageBase.fetch_top_packages) requires every implementation to
+        # cap the result itself, so an oversized or nonconforming response from
+        # ecosyste.ms is never stored in full regardless of what the query asked for.
+        packages = [self.normalise_name(n) for n in names if isinstance(n, str)][:MAX_TOP_PACKAGES]
         return packages if packages else None
 
     def top_packages_fallback(self) -> list[str]:

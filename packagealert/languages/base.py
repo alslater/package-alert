@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 _NORMALISE_RE = re.compile(r"[-_.]+")
-MAX_TOP_PACKAGES = 500
+MAX_TOP_PACKAGES = 1000
 
 
 def normalise_package_name(name: str) -> str:

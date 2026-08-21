@@ -53,6 +53,92 @@ async def test_score_is_higher_for_distance_1(detector):
     assert result.score == 20
 
 
+# ---------------------------------------------------------------------------
+# Distance-2 matches on very short names are too weak to flag.
+#
+# At 3-4 characters, distance 2 means over half the string differs — that's
+# no more indicative of a corruption than of two unrelated short names
+# coinciding (zod vs eol: distance 2, no real visual/typing resemblance).
+# Distance-1 stays meaningful at any length, since a single-character edit is
+# a real typo shape regardless of how short the name is.
+# ---------------------------------------------------------------------------
+
+
+def test_short_name_distance_2_is_not_flagged():
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    result = TyposquatDetector()._analyze_uncached("zod", frozenset({"eol"}))
+    assert result.is_typosquat is False
+    assert result.closest_match is None
+    assert result.score == 0
+
+
+def test_short_name_distance_1_is_still_flagged():
+    """The length gate must not swallow genuine short-name typos."""
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    # "cwd" -> "cw" is distance 1 (a trailing-character deletion).
+    result = TyposquatDetector()._analyze_uncached("cwd", frozenset({"cw"}))
+    assert result.is_typosquat is True
+    assert result.distance == 1
+    assert result.closest_match == "cw"
+
+
+def test_distance_2_below_length_floor_is_not_flagged_even_asymmetrically():
+    """The shorter of the two names governs, even if the other is longer."""
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    result = TyposquatDetector()._analyze_uncached("zx", frozenset({"zoo"}))
+    assert result.is_typosquat is False
+
+
+def test_eligible_candidate_wins_over_an_equal_distance_ineligible_one():
+    """REGRESSION: the length gate applied only to the already-selected best
+    match, so an ineligible short candidate could win the distance-2 tie-break
+    by sort order and suppress the whole result even when another candidate at
+    the identical distance was long enough to be a genuine signal.
+
+    "abcde" is distance 2 from both "abcf" (length 4, below the length floor)
+    and "abcxy" (length 5, at the floor) — eligibility must be part of
+    selecting the best match, not just a filter applied to whichever
+    candidate happened to be picked first.
+    """
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    result = TyposquatDetector()._analyze_uncached("abcde", frozenset({"abcf", "abcxy"}))
+    assert result.is_typosquat is True
+    assert result.closest_match == "abcxy"
+    assert result.distance == 2
+    assert result.score == 15
+
+
+def test_ineligible_candidate_still_suppresses_when_no_eligible_match_exists():
+    """The fix must not turn eligibility into an automatic pass — with no
+    eligible candidate at all (both "eol" and "zap" are distance 2 from "zod"
+    and below the length floor), suppression is still correct."""
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    result = TyposquatDetector()._analyze_uncached("zod", frozenset({"eol", "zap"}))
+    assert result.is_typosquat is False
+    assert result.closest_match is None
+
+
+def test_a_closer_short_match_still_beats_a_farther_eligible_one():
+    """A strictly closer distance always wins the slot, regardless of
+    eligibility — eligibility only breaks a TIE at equal distance, it must
+    not override a real distance advantage. Distance-1 is never gated by
+    length at all, so a short distance-1 match must win over a longer,
+    length-eligible distance-2 match."""
+    from packagealert.heuristics.typosquat import TyposquatDetector
+
+    # "zod" is distance 1 from "zodx" and distance 2 from "zodey" (eligible,
+    # length 5, but farther).
+    result = TyposquatDetector()._analyze_uncached("zod", frozenset({"zodx", "zodey"}))
+    assert result.is_typosquat is True
+    assert result.closest_match == "zodx"
+    assert result.distance == 1
+
+
 @pytest.mark.asyncio
 async def test_normalized_name_handled(detector):
     # Underscores should be normalized before comparison

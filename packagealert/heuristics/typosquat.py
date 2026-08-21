@@ -112,6 +112,14 @@ _TYPO_THRESHOLD = 2  # max Levenshtein distance to flag
 _SCORE_DISTANCE_1 = 20
 _SCORE_DISTANCE_2 = 15
 
+# A distance-2 match on a very short name is a weak signal: at 3-4 characters,
+# distance 2 means over half the string differs, which is just as consistent
+# with two unrelated names as with a corruption of one into the other (zod vs
+# eol). A distance-1 match stays meaningful at any length — a single-character
+# edit is a real typo shape regardless of how short the name is — so only the
+# distance-2 case is gated.
+_MIN_LEN_FOR_DISTANCE_2 = 5
+
 # A trailing major-version marker: httpx2, urllib3, psycopg2, jinja2.
 # Version-suffixed release lines are extremely common and produce distance-1
 # neighbours of the unsuffixed name as a matter of course.
@@ -152,6 +160,13 @@ class TyposquatResult:
     # RiskEngine._typosquat_adoption_factor. Acting on this flag here made
     # appending a digit a one-character bypass of the gate.
     affix_variant: bool = False
+
+
+def _len_eligible(name: str, match: str, distance: int) -> bool:
+    """True unless *distance* is 2 and the shorter of the two names is too
+    short for that distance to be a meaningful signal (see
+    _MIN_LEN_FOR_DISTANCE_2). Distance-1 is always eligible."""
+    return distance != 2 or min(len(name), len(match)) >= _MIN_LEN_FOR_DISTANCE_2
 
 
 def _is_affix_variant(name: str, match: str) -> bool:
@@ -288,21 +303,40 @@ class TyposquatDetector:
         best_match: str | None = None
         best_dist = _TYPO_THRESHOLD + 1
         best_is_affix = True
+        best_eligible = False
 
         # Iterate in a fixed order — candidates is a frozenset, whose iteration
         # order depends on string hash randomization (PYTHONHASHSEED), so two
         # equal-distance matches could otherwise be picked inconsistently
-        # across processes. On a tie, prefer a non-affix match: affix_variant
-        # drives a score reduction downstream, so letting a tie land on the
-        # affix candidate would nondeterministically move the same package
-        # across typosquat_min_score between runs.
+        # across processes. Tie-break preference, in order: a strictly closer
+        # distance always wins; at equal distance, a length-eligible candidate
+        # (see _len_eligible) beats an ineligible one, since letting a short
+        # ineligible candidate win the slot would suppress the whole result
+        # even when another equally-close, eligible candidate exists (e.g.
+        # "abcde" against {"abcf", "abcxy"}: both are distance 2, but "abcf"
+        # winning the tie-break by sort order alone would incorrectly
+        # suppress the genuine "abcxy" match); and only then, prefer a
+        # non-affix match — affix_variant drives a score reduction downstream,
+        # so letting a tie land on the affix candidate would nondeterministically
+        # move the same package across typosquat_min_score between runs.
         for candidate in sorted(candidates):
             d = levenshtein_distance(normalized, candidate)
             is_affix = _is_affix_variant(normalized, candidate)
-            if d < best_dist or (d == best_dist and best_is_affix and not is_affix):
+            eligible = _len_eligible(normalized, candidate, d)
+            if d < best_dist or (
+                d == best_dist
+                and (
+                    (eligible and not best_eligible)
+                    or (eligible == best_eligible and best_is_affix and not is_affix)
+                )
+            ):
                 best_dist = d
                 best_match = candidate
                 best_is_affix = is_affix
+                best_eligible = eligible
+
+        if best_dist <= _TYPO_THRESHOLD and best_match and not best_eligible:
+            return TyposquatResult(is_typosquat=False, closest_match=None, distance=None, score=0)
 
         if best_dist <= _TYPO_THRESHOLD and best_match:
             # Score purely on edit distance. The affix flag is reported for the

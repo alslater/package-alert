@@ -111,7 +111,7 @@ async def test_fetch_and_store_pypi(db):
 async def test_fetch_and_store_npm(db):
     cache = TopPackagesCache(db=db, cfg=_cfg())
     lang = _make_lang(
-        url="https://registry.npmjs.org/-/v1/search?text=keywords:javascript&popularity=1.0&size=250",
+        url="https://packages.ecosyste.ms/api/v1/registries/npmjs.org/package_names?per_page=500&sort=downloads&page=1",
         fetch_result=["lodash", "express"],
     )
     result = await cache.fetch_and_store(lang, "npm")
@@ -446,6 +446,51 @@ async def test_resolve_falls_back_when_only_older_schema_version_row_exists_and_
         result = await cache.resolve(lang, "npm")
 
     assert result == ["fallback-pkg"]
+
+
+@pytest.mark.asyncio
+async def test_npm_corpus_source_switch_invalidates_the_old_keyword_filtered_row(db):
+    """REGRESSION: switching npm's fetch source (keyword-filtered registry
+    search -> ecosyste.ms download-ranked endpoint, see node.py's
+    top_packages_url) changed corpus membership outright, not just
+    normalisation — but the schema version was not bumped when that source
+    change first shipped. A pre-existing npm row within its TTL was served
+    as fresh, so an upgraded installation could keep the old, narrower
+    corpus (and its false positives, e.g. jsdom absent) for up to
+    top_packages_refresh_days after upgrading. resolve() must treat any row
+    from an older schema version as a miss and fetch fresh via the new
+    source, exactly as it does for a normalise_name fix."""
+    # Schema version 1 is a literal, not CORPUS_SCHEMA_VERSION - 1: that row was
+    # actually written under version 1 (the keyword-filtered npm search source),
+    # and the whole point of this test is to pin that the *current* constant has
+    # moved past it. A relative offset would stay trivially satisfied even if a
+    # future change forgot to bump the constant again — exactly the failure mode
+    # this test exists to catch.
+    assert CORPUS_SCHEMA_VERSION > 1, (
+        "CORPUS_SCHEMA_VERSION must be bumped past 1 for the npm ecosyste.ms "
+        "source switch to invalidate pre-switch rows — see node.py top_packages_url"
+    )
+    cache = TopPackagesCache(db=db, cfg=_cfg(days=7))
+    await db.execute(
+        "INSERT INTO top_packages_cache(ecosystem, fetched_at, package_count, packages, schema_version) "
+        "VALUES (?,?,?,?,?)",
+        (
+            "npm", time.time(), 2,
+            json.dumps(["lodash", "express"]),  # the old, keyword-filtered corpus
+            1,
+        ),
+    )
+    await db.commit()
+
+    lang = _make_lang(fetch_result=["jsdom", "lodash", "express"])
+    result = await cache.resolve(lang, "npm")
+
+    assert result == ["jsdom", "lodash", "express"], (
+        "the stale pre-switch row was served instead of refetching from the new source"
+    )
+    lang.fetch_top_packages.assert_called_once()
+    stored = await cache.get("npm")
+    assert stored == ["jsdom", "lodash", "express"]
 
 
 @pytest.mark.asyncio
