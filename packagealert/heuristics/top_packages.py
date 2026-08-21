@@ -18,12 +18,23 @@ log = logging.getLogger(__name__)
 
 # Bump whenever a language's normalise_name changes what a corpus fetch stores
 # (e.g. the PEP-503-folding bug fixed for npm/Packagist, which persisted
-# "socket.io" as "socket-io"). A row written by an older version was
-# normalised under different rules and must never be served again — as
-# fresh OR as a stale fallback — once this constant moves past it; get()
+# "socket.io" as "socket-io"), OR whenever a language's top_packages_url/
+# fetch_top_packages changes *source* rather than just normalisation (e.g.
+# npm's switch from a keyword-filtered registry search to ecosyste.ms's
+# download-ranked endpoint, which changed corpus membership outright — jsdom
+# went from absent to present). Either way, a row written by an older version
+# reflects logic this version no longer runs and must never be served again —
+# as fresh OR as a stale fallback — once this constant moves past it; get()
 # and get_or_stale() both evict on a version mismatch rather than relying on
-# TTL, which a still-fresh corrupted row would otherwise pass right through.
-CORPUS_SCHEMA_VERSION = 1
+# TTL, which a still-fresh (by wall clock) but stale (by source) row would
+# otherwise pass right through for up to top_packages_refresh_days.
+#
+# Global rather than per-ecosystem: a bump forces every ecosystem's cache to
+# refetch once, even when only one language's fetch logic actually changed.
+# That is the accepted cost of the existing mechanism, not something this
+# fix changes — the PEP-503 bump above was npm/Packagist-specific and still
+# forced an unrelated PyPI refetch.
+CORPUS_SCHEMA_VERSION = 2
 
 
 class TopPackagesCache:

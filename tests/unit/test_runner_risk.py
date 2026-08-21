@@ -285,6 +285,116 @@ async def test_prompt_escalates_to_block_when_not_tty():
     ask.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_prompt_skipped_once_another_package_already_blocked():
+    """REGRESSION: once one package in the same run is blocked, nothing a later
+    "prompt" decision's answer could say changes the outcome — _risk_check
+    returned False either way. Confirm.ask must not fire in that case, and the
+    later package must not itself force a separate accepted/allowed path."""
+    r = _runner(on_typosquat="block", on_high_risk="prompt", risk_threshold=25)
+
+    def analyze(ev, d, w=None):
+        # "reqeusts" is the typosquat (blocked); "obscure" only trips the
+        # high-risk threshold (would otherwise prompt).
+        return _report(40) if ev.package_name == "obscure" else _report(0)
+
+    def typo_analyze(name, ecosystem):
+        return _typo(True, "requests", 1, 20) if name == "reqeusts" else _typo()
+
+    engine_double = AsyncMock()
+    engine_double.analyze.side_effect = analyze
+    detector_double = AsyncMock()
+    detector_double.analyze.side_effect = typo_analyze
+    pop_client_double = AsyncMock()
+
+    with (
+        _db_patch(),
+        patch.object(
+            SandboxRunner, "_build_risk_engine",
+            return_value=(engine_double, detector_double, pop_client_double),
+        ),
+        patch("packagealert.sandbox.runner.sys.stdin.isatty", return_value=True),
+        patch("rich.prompt.Confirm.ask", return_value=True) as ask,
+    ):
+        out = await r._risk_check(_ctx(["reqeusts==1.0.0", "obscure==1.0.0"]))
+
+    assert out is False
+    ask.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_prompt_skipped_even_when_the_blocked_package_finishes_scoring_last():
+    """REGRESSION: score_packages scores concurrently and inserts each report
+    into outcome.reports as its own task completes (scoring.py's `one()`), so
+    dict order is task-completion order, not query order. Iterating
+    outcome.reports.items() directly made the already_blocked short-circuit a
+    timing accident: if the prompted package's task happened to finish before
+    the blocked package's task, this branch saw already_blocked == False and
+    still called Confirm.ask, even though "reqeusts" (listed first) is the one
+    that ultimately forces the block. This test makes "reqeusts" the SLOWEST
+    task on purpose, so a naive dict-order iteration would see "obscure"
+    (fast, prompts) complete and get processed before "reqeusts" (slow,
+    blocks) — the exact inversion the fix must be immune to."""
+    import asyncio
+
+    r = _runner(on_typosquat="block", on_high_risk="prompt", risk_threshold=25)
+
+    async def analyze(ev, d, w=None):
+        if ev.package_name == "reqeusts":
+            await asyncio.sleep(0.02)  # finishes LAST despite being listed first
+            return _report(0)
+        await asyncio.sleep(0)  # "obscure" finishes first
+        return _report(40)
+
+    def typo_analyze(name, ecosystem):
+        return _typo(True, "requests", 1, 20) if name == "reqeusts" else _typo()
+
+    engine_double = AsyncMock()
+    engine_double.analyze.side_effect = analyze
+    detector_double = AsyncMock()
+    detector_double.analyze.side_effect = typo_analyze
+    pop_client_double = AsyncMock()
+
+    with (
+        _db_patch(),
+        patch.object(
+            SandboxRunner, "_build_risk_engine",
+            return_value=(engine_double, detector_double, pop_client_double),
+        ),
+        patch("packagealert.sandbox.runner.sys.stdin.isatty", return_value=True),
+        patch("rich.prompt.Confirm.ask", return_value=True) as ask,
+    ):
+        out = await r._risk_check(_ctx(["reqeusts==1.0.0", "obscure==1.0.0"]))
+
+    assert out is False
+    # If this fails: outcome.reports' completion order put "obscure" (prompt)
+    # ahead of "reqeusts" (block) — iteration must follow query order, not
+    # completion order.
+    ask.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_package_prompts_only_once():
+    """REGRESSION: score_packages() dedupes its input internally (its own
+    _dedupe_keys), so outcome.reports has exactly one entry per distinct
+    package regardless of how many times it was requested. Iterating the raw,
+    non-deduped `keys` list (to fix the ordering bug above) reintroduced the
+    duplicate: a package repeated on the CLI or across requirement files was
+    processed once per repetition, so a "prompt" decision interactively asked
+    "Install anyway?" more than once for the SAME package in one run."""
+    r = _runner(on_typosquat="prompt")
+    with (
+        _db_patch(),
+        _engine_patch(typo=_typo(True, "requests", 1, 20), report=_report(20)),
+        patch("packagealert.sandbox.runner.sys.stdin.isatty", return_value=True),
+        patch("rich.prompt.Confirm.ask", return_value=True) as ask,
+    ):
+        out = await r._risk_check(_ctx(["reqeusts==1.0.0", "reqeusts==1.0.0"]))
+
+    assert out is not False
+    ask.assert_called_once()
+
+
 # --- fail open ---------------------------------------------------------------
 
 
@@ -2220,6 +2330,55 @@ async def test_cooldown_still_enforces_when_risk_scoring_disabled():
         out = await r._cooldown_check(_ctx(["brandnew==1.0.0"]))
 
     assert out is False, "cooldown must still block a brand-new package"
+
+
+@pytest.mark.asyncio
+async def test_cooldown_prompt_skipped_once_another_package_already_blocked():
+    """REGRESSION: mirrors test_prompt_skipped_once_another_package_already_blocked
+    for _cooldown_check. Once "blocked" already forces the whole check to
+    return False, a later package's "prompt" decision cannot change that
+    outcome and must not fire Confirm.ask."""
+    import time as _time
+
+    cfg = AppConfig()
+    cfg.sandbox.cooldown.on_new_low_risk = "block"
+    cfg.sandbox.cooldown.on_new_medium_risk = "prompt"
+    with patch("packagealert.sandbox.runner.build_backend"):
+        r = SandboxRunner(cfg)
+
+    lang = MagicMock()
+    lang.publication_date_url.side_effect = (
+        lambda name, version: f"https://pypi.org/pypi/{name}/{version}/json"
+    )
+    fresh = _time.time()  # published just now -> inside the cooldown window
+
+    async def fake_get_publication_date(db, *, ecosystem, package, version):
+        return fresh
+
+    with (
+        _db_patch(),
+        patch("packagealert.sandbox.runner.lang_registry.for_ecosystem", return_value=lang),
+        patch(
+            "packagealert.sandbox.runner.get_publication_date",
+            side_effect=fake_get_publication_date,
+        ),
+        patch(
+            "packagealert.sandbox.runner.get_cooldown_cleared_at",
+            new_callable=AsyncMock, return_value=None,
+        ),
+        _engine_patch(typo=_typo()),
+        patch("packagealert.sandbox.runner.sys.stdin.isatty", return_value=True),
+        patch("rich.prompt.Confirm.ask", return_value=True) as ask,
+    ):
+        # "lowrisk" has no risk score -> on_new_low_risk="block".
+        # "medrisk" is pre-scored (via risk_scores) -> on_new_medium_risk="prompt".
+        out = await r._cooldown_check(
+            _ctx(["lowrisk==1.0.0", "medrisk==1.0.0"]),
+            risk_scores={("pypi", "lowrisk"): 0, ("pypi", "medrisk"): 10},
+        )
+
+    assert out is False
+    ask.assert_not_called()
 
 
 @pytest.mark.asyncio

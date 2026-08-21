@@ -999,6 +999,10 @@ class SandboxRunner:
         scores: dict[tuple[str, str], int] = {}
         blocked: list = []
         warned: list = []
+        # Once any package is blocked, the whole check returns False regardless
+        # of a later "prompt" decision's answer — skip the pointless Confirm.ask
+        # once that outcome is already fixed, matching _cooldown_check.
+        already_blocked = False
 
         try:
             # Scored concurrently (bounded by score_packages' own semaphore) rather
@@ -1010,7 +1014,28 @@ class SandboxRunner:
             keys = [(raw_ecosystem.lower(), name, version) for raw_ecosystem, name, version in queries]
             outcome = await score_packages(engine, keys)
 
-            for (ecosystem, name, version), report in outcome.reports.items():
+            # Iterate in first-seen query order, not outcome.reports' dict
+            # order: score_packages scores concurrently and inserts each
+            # report as its own task completes (see scoring.py's `one()`),
+            # so dict order is task-completion order — unrelated to, and
+            # nondeterministic relative to, the order packages were listed
+            # in. The already_blocked short-circuit below depends on a
+            # stable, meaningful order: iterating completion order could see
+            # a "prompt" decision before an earlier-listed package's "block"
+            # simply because its network call happened to finish first,
+            # making the short-circuit's effect a timing accident rather
+            # than a property of the package list.
+            #
+            # dict.fromkeys(keys), not the raw keys list: score_packages
+            # dedupes internally (its own _dedupe_keys), so a package repeated
+            # on the CLI or across requirement files has exactly one entry in
+            # outcome.reports. Iterating the raw (non-deduped) keys list would
+            # process — and for a "prompt" decision, interactively re-ask
+            # about — the same package once per repetition.
+            for ecosystem, name, version in dict.fromkeys(keys):
+                report = outcome.reports.get((ecosystem, name, version))
+                if report is None:
+                    continue
                 pkg = PackageSpec(name=name, version=version, ecosystem=ecosystem)
 
                 # Fail open on any scoring failure: a risk check must never block
@@ -1027,15 +1052,22 @@ class SandboxRunner:
 
                 if decision.action == "block":
                     blocked.append(decision)
+                    already_blocked = True
                 elif decision.action == "warn":
                     warned.append(decision)
                 elif decision.action == "prompt":
+                    if already_blocked:
+                        # Nothing this prompt could answer would change the
+                        # outcome — an earlier package already forces a block.
+                        blocked.append(decision)
+                        continue
                     from rich.prompt import Confirm
                     self._console.print(
                         f"  {_spec_label(pkg)}: {decision.reason}", style="yellow", markup=False
                     )
                     if not Confirm.ask("Install anyway?", default=False):
                         blocked.append(decision)
+                        already_blocked = True
         finally:
             if owned:
                 await self._close_gate_resources(res)
@@ -1259,6 +1291,12 @@ class SandboxRunner:
         blocked: list = []
         pending_clears: list[tuple[str, str, str]] = []
         warned: list = []
+        # Once any package is blocked, the whole check returns False regardless
+        # of what happens to any later "prompt" decision — its answer can never
+        # change the outcome. Publication-date/typosquat lookups still run for
+        # every remaining package, so the user sees every blocking reason in one
+        # pass, but the interactive Confirm.ask is skipped as pointless.
+        already_blocked = False
 
         try:
             for raw_ecosystem, name, version in queries:
@@ -1348,13 +1386,20 @@ class SandboxRunner:
 
                 if decision.action == "block":
                     blocked.append(decision)
+                    already_blocked = True
                 elif decision.action == "warn":
                     warned.append(decision)
                 elif decision.action == "prompt":
+                    if already_blocked:
+                        # Nothing this prompt could answer would change the
+                        # outcome — an earlier package already forces a block.
+                        blocked.append(decision)
+                        continue
                     from rich.prompt import Confirm
                     self._console.print(f"[yellow]  {pkg.name}=={pkg.version}: {decision.reason}[/yellow]")
                     if not Confirm.ask("Install anyway?", default=False):
                         blocked.append(decision)
+                        already_blocked = True
                     else:
                         pending_clears.append((ecosystem, name, version))
         finally:
