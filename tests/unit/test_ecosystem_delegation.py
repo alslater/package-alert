@@ -7,12 +7,173 @@ so a new language needs no edits to core modules.
 See docs/superpowers/specs/2026-08-12-ecosystem-conditional-removal-design.md
 """
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from packagealert.languages.base import CURRENT_CONTRACT_VERSION
+from packagealert.languages.base import (
+    CURRENT_CONTRACT_VERSION,
+    PreRunResult,
+    SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
+    Snapshot,
+)
+
+if TYPE_CHECKING:
+    import httpx
+
+
+class _MinimalLanguageMixin:
+    """Fills in every LanguageBase Protocol member with a trivial stub body.
+
+    Structural Protocol conformance is not inherited from LanguageBase's own
+    default method bodies, so a test double that only sets the identity
+    fields (name/ecosystems/process_names/...) is otherwise missing every
+    other member as far as pyright is concerned. Mix this in for any local
+    test-double language class that is meant to behave like an ordinary,
+    fully-working plugin (as opposed to one deliberately broken to test
+    tolerance of a misbehaving plugin).
+    """
+
+    def parse_process_install(self, args: list[str]) -> None:
+        return None
+
+    def parse_package_spec(self, raw: str) -> tuple[str, str | None]:
+        return raw, None
+
+    def serialise_package_spec(self, name: str, version: str | None) -> str:
+        return f"{name}=={version}" if version else name
+
+    def parse_lockfile(self, path) -> list:
+        return []
+
+    def inspect_package(self, path) -> None:
+        return None
+
+    def cache_paths(self) -> list:
+        return []
+
+    def classify_cache_file(self, path) -> None:
+        return None
+
+    def cache_file_globs(self) -> list[str]:
+        return []
+
+    def heuristics(self) -> list:
+        return []
+
+    def lockfile_patterns(self) -> list[str]:
+        return []
+
+    def detect_installed_packages(self, root) -> list:
+        return []
+
+    def sandbox_paths(self) -> SandboxPaths:
+        return SandboxPaths()
+
+    def sandbox_env(self) -> list[str]:
+        return []
+
+    def available_flags(self) -> list[tuple[str, str]]:
+        return []
+
+    def top_packages_url(self) -> str | None:
+        return None
+
+    async def fetch_top_packages(self, client: "httpx.AsyncClient", url: str) -> list[str] | None:
+        return None
+
+    def top_packages_fallback(self) -> list[str]:
+        return []
+
+    def publication_date_url(self, name: str, version: str) -> str | None:
+        return None
+
+    def publication_date_parse(self, data: object, version: str | None) -> float | None:
+        return None
+
+    def osv_ecosystem(self) -> str | None:
+        return None
+
+    def normalise_name(self, name: str) -> str:
+        return name.lower()
+
+    def popularity_ecosystem(self) -> str | None:
+        return None
+
+    def prepare_sandbox_argv(self, argv: list[str], cwd) -> list[str]:
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd) -> list:
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd) -> list:
+        return []
+
+    def post_run_scan_targets(self, parsed, cwd) -> list:
+        return []
+
+    def pre_run_check(self, parsed, cwd, flags=frozenset()) -> PreRunResult:
+        return PreRunResult(ok=True)
+
+    def configure_sandbox(self, parsed, cwd, flags, targets, home_ro, sandbox_env) -> None:
+        return None
+
+    def configure_sandbox_writable(self, parsed, cwd, flags, targets) -> list:
+        return []
+
+    def configure_sandbox_writable_warning(self, parsed, cwd, flags, targets) -> str | None:
+        return None
+
+    def resolve_sandbox_targets(self, parsed, cwd) -> SandboxTargets:
+        return SandboxTargets()
+
+    def prepare_sandbox_env(self, parsed, cwd, env) -> list:
+        return []
+
+    def shell_environment(self, cwd) -> ShellEnvironment:
+        return ShellEnvironment()
+
+    def detect_new_packages(self, new_paths, walk_root) -> list:
+        return []
+
+    def home_ro_paths(self) -> list:
+        return []
+
+    def resolve_package_dir(self, package_name, project_path, site_packages_dir, version=None) -> list:
+        return []
+
+    def resolve_package_dir_manifest_warning(self, package_name, project_path, site_packages_dir, version=None) -> str | None:
+        return None
+
+    def latest_version_url(self, name: str) -> str | None:
+        return None
+
+    def latest_version_parse(self, data: object, name: str) -> str | None:
+        return None
+
+    def package_manager_names(self) -> list[str]:
+        return []
+
+    def project_shim_names(self) -> list[str]:
+        return self.package_manager_names()
+
+    def interpreter_names(self) -> list[str]:
+        return []
+
+    def interpreter_shim_script(self, real, pa) -> str | None:
+        return None
+
+    def project_bin_dirs(self, root) -> list:
+        return []
+
+    def snapshot(self, install_root) -> Snapshot:
+        return Snapshot({})
+
+    def detect_post_install(self, before, after) -> list:
+        return []
 
 # --- publication_date_parse ---------------------------------------------------
 #
@@ -612,7 +773,9 @@ async def test_clear_cache_lowercase_input_still_works(tmp_path):
 
     check = await open_db(dbp)
     cur = await check.execute("SELECT COUNT(*) FROM osv_cache")
-    assert (await cur.fetchone())[0] == 0
+    row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 0
     await check.close()
 
 
@@ -631,15 +794,14 @@ async def test_clear_cache_lowercase_input_still_works(tmp_path):
 def nuget_plugin():
     """A plugin whose declared ecosystem spelling is not lowercase."""
     import copy
-    from typing import ClassVar
 
     from packagealert.languages import registry as lang_registry
     from packagealert.languages.base import CURRENT_CONTRACT_VERSION
 
-    class NuGetLang:
+    class NuGetLang(_MinimalLanguageMixin):
         name = "dotnet"
-        ecosystems: ClassVar[list[str]] = ["NuGet"]
-        process_names: ClassVar[list[str]] = ["dotnet"]
+        ecosystems = ["NuGet"]  # noqa: RUF012
+        process_names = ["dotnet"]  # noqa: RUF012
         contract_version = CURRENT_CONTRACT_VERSION
         author = "third-party"
         repository = "example"
@@ -833,10 +995,10 @@ def nuget_lang():
 
     from packagealert.languages import registry as lang_registry
 
-    class NuGetLang:
+    class NuGetLang(_MinimalLanguageMixin):
         name = "dotnet"
-        ecosystems: ClassVar[list[str]] = ["NuGet"]
-        process_names: ClassVar[list[str]] = []
+        ecosystems = ["NuGet"]  # noqa: RUF012
+        process_names: list[str] = []  # noqa: RUF012
         contract_version = CURRENT_CONTRACT_VERSION
         author = "third-party"
         repository = "example"
@@ -1113,7 +1275,10 @@ def broken_plugin():
 
     lang_registry.load()
     saved = copy.copy(lang_registry._registry)
-    lang_registry.register(_BrokenEcosystemsPlugin())
+    # _BrokenEcosystemsPlugin is deliberately incomplete (it exists to prove a
+    # broken plugin can't crash validation) so it doesn't structurally satisfy
+    # LanguageBase.
+    lang_registry.register(_BrokenEcosystemsPlugin())  # type: ignore[arg-type]
     yield
     lang_registry._registry.clear()
     lang_registry._registry.update(saved)
@@ -1162,10 +1327,10 @@ async def test_a_working_plugins_ecosystem_is_listed_alongside_the_builtins(caps
     from packagealert.cli.app import _run_clear_cache
     from packagealert.languages import registry as lang_registry
 
-    class Working:
+    class Working(_MinimalLanguageMixin):
         name = "dotnet"
-        ecosystems: ClassVar[list[str]] = ["NuGet"]
-        process_names: ClassVar[list[str]] = []
+        ecosystems = ["NuGet"]  # noqa: RUF012
+        process_names: list[str] = []  # noqa: RUF012
         contract_version = CURRENT_CONTRACT_VERSION
         author = "third-party"
         repository = "example"
@@ -1173,7 +1338,8 @@ async def test_a_working_plugins_ecosystem_is_listed_alongside_the_builtins(caps
     lang_registry.load()
     saved = copy.copy(lang_registry._registry)
     try:
-        lang_registry.register(_BrokenEcosystemsPlugin())
+        # _BrokenEcosystemsPlugin is deliberately incomplete — see broken_plugin fixture.
+        lang_registry.register(_BrokenEcosystemsPlugin())  # type: ignore[arg-type]
         lang_registry.register(Working())
         cfg = MagicMock()
         cfg.plugins.enabled = []

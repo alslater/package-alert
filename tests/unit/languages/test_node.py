@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from packagealert.languages.base import CURRENT_CONTRACT_VERSION, SandboxPaths, Snapshot
@@ -1062,14 +1064,14 @@ async def test_fetch_top_packages_preserves_dots_in_dotted_names(lang: NodeLangu
     # corpus entry folded at fetch time can never be un-folded by the
     # ecosystem-correct normalisation TyposquatDetector applies at query time.
     client = _FakeTopPackagesClient(["socket.io", "lodash"])
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result == ["socket.io", "lodash"]
 
 
 @pytest.mark.asyncio
 async def test_fetch_top_packages_lowercases_names(lang: NodeLanguage) -> None:
     client = _FakeTopPackagesClient(["React"])
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result == ["react"]
 
 
@@ -1077,7 +1079,7 @@ async def test_fetch_top_packages_lowercases_names(lang: NodeLanguage) -> None:
 async def test_fetch_top_packages_single_request_no_pagination(lang: NodeLanguage) -> None:
     """ecosyste.ms returns the full page in one response — no follow-up call."""
     client = _FakeTopPackagesClient(["a", "b", "c"])
-    await lang.fetch_top_packages(client, "http://example/x")
+    await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert client.calls == 1
 
 
@@ -1085,14 +1087,14 @@ async def test_fetch_top_packages_single_request_no_pagination(lang: NodeLanguag
 async def test_fetch_top_packages_returns_none_on_unexpected_shape(lang: NodeLanguage) -> None:
     """A non-list JSON body (e.g. an error object) must not be treated as names."""
     client = _FakeTopPackagesClient({"error": "not found"})
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result is None
 
 
 @pytest.mark.asyncio
 async def test_fetch_top_packages_skips_non_string_entries(lang: NodeLanguage) -> None:
     client = _FakeTopPackagesClient(["lodash", None, 42, "express"])
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result == ["lodash", "express"]
 
 
@@ -1107,7 +1109,7 @@ async def test_fetch_top_packages_caps_at_max_top_packages(lang: NodeLanguage) -
 
     oversized = [f"pkg-{i}" for i in range(MAX_TOP_PACKAGES + 50)]
     client = _FakeTopPackagesClient(oversized)
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result is not None
     assert len(result) == MAX_TOP_PACKAGES
     assert result == [f"pkg-{i}" for i in range(MAX_TOP_PACKAGES)]
@@ -1116,7 +1118,7 @@ async def test_fetch_top_packages_caps_at_max_top_packages(lang: NodeLanguage) -
 @pytest.mark.asyncio
 async def test_fetch_top_packages_returns_none_for_empty_list(lang: NodeLanguage) -> None:
     client = _FakeTopPackagesClient([])
-    result = await lang.fetch_top_packages(client, "http://example/x")
+    result = await lang.fetch_top_packages(cast(httpx.AsyncClient, client), "http://example/x")
     assert result is None
 
 

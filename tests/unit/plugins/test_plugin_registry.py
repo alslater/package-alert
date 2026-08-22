@@ -77,7 +77,7 @@ async def test_agent_plugin_extra_schema_defaults_to_none():
 async def test_agent_plugin_extra_migrate_defaults_to_noop():
     # Must not raise, and must accept any object positionally where a real
     # aiosqlite.Connection would go — the default never touches it.
-    result = await AgentPlugin.extra_migrate(object())
+    result = await AgentPlugin.extra_migrate(object())  # type: ignore[arg-type]
     assert result is None
 
 

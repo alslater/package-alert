@@ -45,7 +45,7 @@ async def test_dequeue_all_filters_by_kind(db):
 
 async def test_enqueue_rejects_invalid_kind(db):
     with pytest.raises(ValueError, match="kind must be one of"):
-        await enqueue(db, kind="bogus", payload_json=json.dumps({"a": 1}))
+        await enqueue(db, kind="bogus", payload_json=json.dumps({"a": 1}))  # type: ignore[arg-type]
 
 
 async def test_dequeue_all_rejects_invalid_kind(db):
@@ -56,7 +56,7 @@ async def test_dequeue_all_rejects_invalid_kind(db):
     # never matches any row rather than erroring.
     await enqueue(db, kind="scan", payload_json=json.dumps({"a": 1}))
     with pytest.raises(ValueError, match="kind must be one of"):
-        await dequeue_all(db, kind="bogus")
+        await dequeue_all(db, kind="bogus")  # type: ignore[arg-type]
 
 
 async def test_dequeue_all_orders_oldest_first(db):

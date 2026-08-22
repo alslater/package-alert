@@ -72,6 +72,7 @@ async def test_alert_reported_to_fleet(tmp_path):
     plugin = _make_plugin(tmp_path, _cfg(tmp_path))
 
     await plugin.on_alert(_event(), _malicious_osv())
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
 
     assert route.called
@@ -92,6 +93,7 @@ async def test_scan_with_findings_reported(tmp_path):
         sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await plugin.on_scan_complete(scan)
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
 
     assert route.called
@@ -109,6 +111,7 @@ async def test_scan_without_findings_is_reported(tmp_path):
         sources=["pypi"], scanned_at=datetime.now(UTC),
     )
     await plugin.on_scan_complete(scan)
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
 
     assert route.called
@@ -127,6 +130,7 @@ async def test_config_overlay_applied_in_memory(tmp_path):
     plugin = _make_plugin(tmp_path, _cfg(tmp_path))
 
     await plugin._fetch_and_apply()
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
 
     assert plugin._overlay is not None
@@ -145,6 +149,7 @@ async def test_config_overlay_strips_credentials(tmp_path):
     plugin = _make_plugin(tmp_path, cfg)
 
     await plugin._fetch_and_apply()
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
 
     assert cfg.plugins.pa_central.api_key == "sk-test"
@@ -174,6 +179,7 @@ async def test_cooldown_sync_stores_locally(tmp_path):
          patch("packagealert.storage.db.open_db", AsyncMock(return_value=AsyncMock())):
         await plugin._fetch_and_apply()
 
+    assert plugin._client is not None, "setup() must have created a client"
     await plugin._client.aclose()
     assert ("pypi", "requests", "2.31.0") in stored
 

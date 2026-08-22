@@ -13,7 +13,10 @@ from packagealert.languages import registry as reg
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     LanguageBase,
+    PreRunResult,
     SandboxPaths,
+    SandboxTargets,
+    ShellEnvironment,
     Snapshot,
 )
 
@@ -24,18 +27,57 @@ class MockLanguage:
     ecosystems: list[str] = field(default_factory=lambda: ["Mock"])
     process_names: list[str] = field(default_factory=lambda: ["mocktool"])
     contract_version: int = CURRENT_CONTRACT_VERSION
+    author: str = "mock"
+    repository: str = "mock"
 
     def parse_process_install(self, args): return None
+    def parse_package_spec(self, raw): return raw, None
+    def serialise_package_spec(self, name, version): return f"{name}=={version}" if version else name
     def parse_lockfile(self, path): return []
     def inspect_package(self, path): return None
     def cache_paths(self): return []
     def classify_cache_file(self, path): return None
+    def cache_file_globs(self): return []
     def heuristics(self): return []
     def lockfile_patterns(self): return []
     def detect_installed_packages(self, root): return []
     def sandbox_paths(self): return SandboxPaths()
+    def sandbox_env(self): return []
+    def available_flags(self): return []
+    def top_packages_url(self): return None
+    async def fetch_top_packages(self, client, url): return None
+    def top_packages_fallback(self): return []
+    def publication_date_url(self, name, version): return None
+    def publication_date_parse(self, data, version): return None
+    def osv_ecosystem(self): return None
+    def normalise_name(self, name): return name.lower()
+    def popularity_ecosystem(self): return None
+    def prepare_sandbox_argv(self, argv, cwd): return argv
+    def sandbox_extra_ro_paths(self, argv, cwd): return []
+    def sandbox_extra_write_paths(self, argv, cwd): return []
+    def post_run_scan_targets(self, parsed, cwd): return []
+    def pre_run_check(self, parsed, cwd, flags=frozenset()): return PreRunResult(ok=True)
+    def configure_sandbox(self, parsed, cwd, flags, targets, home_ro, sandbox_env): return None
+    def configure_sandbox_writable(self, parsed, cwd, flags, targets): return []
+    def configure_sandbox_writable_warning(self, parsed, cwd, flags, targets): return None
+    def resolve_sandbox_targets(self, parsed, cwd): return SandboxTargets()
+    def prepare_sandbox_env(self, parsed, cwd, env): return []
+    def shell_environment(self, cwd): return ShellEnvironment()
+    def detect_new_packages(self, new_paths, walk_root): return []
+    def home_ro_paths(self): return []
+    def resolve_package_dir(self, package_name, project_path, site_packages_dir, version=None): return []
+    def resolve_package_dir_manifest_warning(self, package_name, project_path, site_packages_dir, version=None): return None
+    def latest_version_url(self, name): return None
+    def latest_version_parse(self, data, name): return None
+    def package_manager_names(self): return []
+    def project_shim_names(self): return self.package_manager_names()
+    def interpreter_names(self): return []
+    def interpreter_shim_script(self, real, pa): return None
+    def project_bin_dirs(self, root): return []
     def snapshot(self, install_root): return Snapshot({})
     def detect_post_install(self, before, after): return []
+
+
 
 
 @pytest.fixture(autouse=True)
@@ -169,7 +211,9 @@ def test_missing_contract_version_treated_as_one(caplog):
     lang = NoVersionLanguage()
     assert not hasattr(lang, "contract_version"), "test setup: attribute should be absent"
     with caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"):
-        reg.register(lang)
+        # Deliberately missing contract_version and other newer LanguageBase
+        # members to exercise the "predates contract_version" registration path.
+        reg.register(lang)  # type: ignore[reportArgumentType]
     assert "contract_version" in caplog.text
 
 
@@ -258,7 +302,9 @@ def test_for_process_buggy_plugin_skipped(caplog):
         def snapshot(self, r): return Snapshot({})
         def detect_post_install(self, b, a): return []
 
-    reg.register(BrokenProcessNames())
+    # Deliberately missing several LanguageBase members to exercise the
+    # "buggy plugin is skipped" path — must stay incomplete.
+    reg.register(BrokenProcessNames())  # type: ignore[reportArgumentType]
     reg.register(good)
 
     with caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"):
@@ -293,7 +339,9 @@ def test_for_ecosystem_buggy_plugin_skipped(caplog):
         def snapshot(self, r): return Snapshot({})
         def detect_post_install(self, b, a): return []
 
-    reg.register(BrokenEcosystems())
+    # Deliberately missing several LanguageBase members to exercise the
+    # "buggy plugin is skipped" path — must stay incomplete.
+    reg.register(BrokenEcosystems())  # type: ignore[reportArgumentType]
     reg.register(good)
 
     with caplog.at_level(logging.WARNING, logger="packagealert.languages.registry"):
@@ -458,13 +506,16 @@ class _V4Plugin:
     repository = "example.com"
 
 
-def _register_v4(monkeypatch):
+def _register_v4(monkeypatch) -> LanguageBase:
     from packagealert.languages import registry as reg
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
     plugin = _V4Plugin()
-    reg.register(plugin)
-    return reg.for_ecosystem("shimtest-eco")
+    # Deliberately predates every v5 hook to exercise the shim machinery below.
+    reg.register(plugin)  # type: ignore[reportArgumentType]
+    lang = reg.for_ecosystem("shimtest-eco")
+    assert lang is not None
+    return lang
 
 
 def test_shimmed_methods_are_callable_with_the_real_signatures(monkeypatch):
@@ -525,8 +576,11 @@ def test_a_plugin_implementing_a_hook_is_not_shimmed(monkeypatch):
             return "MyRegistry"
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
-    reg.register(_V4WithHook())
-    assert reg.for_ecosystem("shimtest-impl").osv_ecosystem() == "MyRegistry"
+    # _V4Plugin (and thus _V4WithHook) deliberately predates every v5 hook.
+    reg.register(_V4WithHook())  # type: ignore[reportArgumentType]
+    lang = reg.for_ecosystem("shimtest-impl")
+    assert lang is not None
+    assert lang.osv_ecosystem() == "MyRegistry"
 
 
 def test_raising_descriptor_does_not_abort_registration(monkeypatch):
@@ -546,8 +600,11 @@ def test_raising_descriptor_does_not_abort_registration(monkeypatch):
             raise RuntimeError("plugin exploded on attribute access")
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
-    reg.register(_RaisesOnLookup())  # must not raise
+    # _V4Plugin (and thus _RaisesOnLookup) deliberately predates every v5 hook;
+    # the raising `osv_ecosystem` property on top must not abort registration.
+    reg.register(_RaisesOnLookup())  # type: ignore[reportArgumentType]  # must not raise
     lang = reg.for_ecosystem("shimtest-raises")
+    assert lang is not None
     # The shim default was installed despite the raising descriptor, and the
     # other two v5-only hooks were still shimmed normally alongside it.
     assert lang.osv_ecosystem() is None
@@ -668,8 +725,10 @@ def test_pre_v5_plugin_returning_a_bad_shape_end_to_end_is_not_crash(monkeypatch
             return "/sp/pkg"
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
-    reg.register(_V4ReturningStr())
+    # _V4Plugin deliberately predates every v5 hook.
+    reg.register(_V4ReturningStr())  # type: ignore[reportArgumentType]
     lang = reg.for_ecosystem("shimtest-strreturn")
+    assert lang is not None
 
     result = lang.resolve_package_dir("foo", None, None)
     assert result == []
@@ -688,8 +747,10 @@ def test_pre_v5_plugin_returning_a_list_early_is_not_double_wrapped(monkeypatch)
             return [Path("/venv/foo"), Path("/venv/bar")]
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
-    reg.register(_V4ReturningList())
+    # _V4Plugin deliberately predates every v5 hook.
+    reg.register(_V4ReturningList())  # type: ignore[reportArgumentType]
     lang = reg.for_ecosystem("shimtest-listreturn")
+    assert lang is not None
 
     result = lang.resolve_package_dir("foo", None, None)
     assert result == [Path("/venv/foo"), Path("/venv/bar")]
@@ -748,8 +809,10 @@ def test_pre_v5_plugin_without_version_param_resolves_through_adapter_end_to_end
             return Path("/sp") / package_name
 
     monkeypatch.setattr(reg, "_registry", dict(reg._registry))
-    reg.register(_V4NoVersionParam())
+    # _V4Plugin deliberately predates every v5 hook.
+    reg.register(_V4NoVersionParam())  # type: ignore[reportArgumentType]
     lang = reg.for_ecosystem("shimtest-noversion")
+    assert lang is not None
 
     result = call_resolve_package_dir(
         lang.resolve_package_dir, "foo", None, None, version="1.2.3"
@@ -804,8 +867,10 @@ def test_immutable_v4_plugins_get_the_shim_defaults(cls, monkeypatch):
     monkeypatch.setattr(reg, "_registry", {})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(cls())
+        # _SlotsV4/_FrozenV4 deliberately predate every v5 hook.
+        reg.register(cls())  # type: ignore[reportArgumentType]
     lang = reg.get(cls.name)
+    assert lang is not None
     assert lang.publication_date_parse({}, "1.0") is None
     assert lang.osv_ecosystem() is None
     assert lang.normalise_name("Foo.Bar") == "foo.bar"
@@ -826,7 +891,8 @@ def test_shimming_does_not_mutate_the_plugin_instance(monkeypatch):
     plugin = Plain()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(plugin)
+        # Plain deliberately predates every v5 hook.
+        reg.register(plugin)  # type: ignore[reportArgumentType]
 
     for name in ("publication_date_parse", "osv_ecosystem", "normalise_name"):
         assert name not in plugin.__dict__, f"{name} was written onto the plugin"
@@ -837,8 +903,10 @@ def test_shim_proxy_forwards_real_attributes(monkeypatch):
     monkeypatch.setattr(reg, "_registry", {})
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(_SlotsV4())
+        # _SlotsV4 deliberately predates every v5 hook.
+        reg.register(_SlotsV4())  # type: ignore[reportArgumentType]
     lang = reg.get("slotsv4")
+    assert lang is not None
     assert lang.name == "slotsv4"
     assert lang.ecosystems == ["slotsv4eco"]
     assert lang.top_packages_fallback() == ["alpha"]
@@ -864,8 +932,10 @@ def test_a_plugins_own_implementation_is_never_replaced(monkeypatch):
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(OwnImpl())
+        # OwnImpl deliberately predates the other v5 hooks it doesn't implement.
+        reg.register(OwnImpl())  # type: ignore[reportArgumentType]
     lang = reg.get("ownimpl")
+    assert lang is not None
     assert lang.osv_ecosystem() == "MyEco"
     assert lang.normalise_name("abc") == "ABC"
     # Only the genuinely missing one is defaulted.
@@ -899,7 +969,9 @@ def test_a_fully_implementing_plugin_is_not_wrapped(monkeypatch):
     plugin = Complete()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(plugin)
+        # Complete implements every v4-and-earlier hook (the point of this test)
+        # but, like any v4 plugin, deliberately lacks v5-only members.
+        reg.register(plugin)  # type: ignore[reportArgumentType]
     assert reg.get("completev4") is plugin
 
 
@@ -935,7 +1007,9 @@ def test_all_languages_includes_third_party_plugins(monkeypatch):
     builtins = {lang.name for lang in reg.all_languages()}
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(_LegacyV4Plugin())
+        # _LegacyV4Plugin deliberately stays on v4 to represent a legitimately
+        # supported (not broken) older third-party plugin.
+        reg.register(_LegacyV4Plugin())  # type: ignore[reportArgumentType]
     assert {lang.name for lang in reg.all_languages()} == builtins | {"legacyv4"}
 
 
@@ -945,7 +1019,9 @@ def test_builtins_are_reachable_by_name_regardless_of_plugins(monkeypatch):
     reg.load()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(_LegacyV4Plugin())
+        # _LegacyV4Plugin deliberately stays on v4 to represent a legitimately
+        # supported (not broken) older third-party plugin.
+        reg.register(_LegacyV4Plugin())  # type: ignore[reportArgumentType]
 
     for name in ("python", "node", "php"):
         lang = reg.get(name)
@@ -959,7 +1035,9 @@ def test_a_v4_plugin_is_a_supported_configuration(monkeypatch):
     reg.load()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
-        reg.register(_LegacyV4Plugin())
+        # _LegacyV4Plugin deliberately stays on v4 to represent a legitimately
+        # supported (not broken) older third-party plugin.
+        reg.register(_LegacyV4Plugin())  # type: ignore[reportArgumentType]
 
     lang = reg.get("legacyv4")
     assert lang is not None

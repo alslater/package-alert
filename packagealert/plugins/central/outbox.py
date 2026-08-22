@@ -28,6 +28,7 @@ class OutboxEntry:
 async def count(db: aiosqlite.Connection) -> int:
     async with db.execute("SELECT COUNT(*) AS n FROM central_outbox") as cur:
         row = await cur.fetchone()
+    assert row is not None, "COUNT(*) always returns exactly one row"
     return int(row["n"])
 
 

@@ -231,7 +231,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
         if shown:
             console.print(f"\n[bold]Risk signals ({len(shown)}):[/bold]")
             for r in shown:
-                colour = _RISK_LEVEL_COLOUR.get(r.get("level"), "cyan")
+                colour = _RISK_LEVEL_COLOUR.get(r.get("level") or "", "cyan")
                 version = r.get("version") or "unpinned"
                 console.print(
                     f"[RISK {r.get('score')}] {r.get('level', ''):<8} {r.get('package', '')}@{version}"
@@ -446,7 +446,7 @@ class CentralPlugin(AgentPlugin):
 
     async def on_daemon_start(self, uptime_start: datetime) -> None:
         self._start_time = uptime_start
-        if not self._client.configured:
+        if self._client is None or not self._client.configured:
             return
         ok, err = await self._client.heartbeat(
             hostname=self._hostname(),

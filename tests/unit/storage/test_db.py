@@ -218,6 +218,7 @@ async def test_open_db_creates_enabled_plugins_own_table(tmp_path):
         await conn.commit()
         async with conn.execute("SELECT value FROM plugin_owned") as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert row["value"] == "x"
     finally:
         await conn.close()
@@ -343,6 +344,7 @@ async def test_plugin_extra_migrate_cannot_use_writable_schema_to_rewrite_core_t
             "SELECT sql FROM sqlite_master WHERE type='table' AND name = 'alerts'"
         ) as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert "project_path" in row["sql"]
         # Connection still fully usable afterward.
         await conn.execute(
@@ -362,6 +364,7 @@ async def test_plugin_extra_migrate_cannot_use_mixed_case_writable_schema_pragma
             "SELECT sql FROM sqlite_master WHERE type='table' AND name = 'alerts'"
         ) as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert "project_path" in row["sql"]
         await conn.execute(
             "INSERT INTO alerts(package_name, ecosystem, alerted_at) VALUES (?, ?, ?)",
@@ -387,6 +390,7 @@ async def test_plugin_extra_migrate_cannot_escape_rollback_via_commit(tmp_path):
         assert "commit_escape_table" in tables  # created by extra_schema()
         async with conn.execute("SELECT COUNT(*) as n FROM commit_escape_table") as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert row["n"] == 0, "the plugin's INSERT must be rolled back, not committed via its own commit() call"
         # Connection still fully usable afterward.
         await conn.execute(
@@ -413,6 +417,7 @@ async def test_plugin_extra_migrate_cannot_escape_rollback_via_executescript(tmp
         assert "executescript_escape_table" in tables
         async with conn.execute("SELECT COUNT(*) as n FROM executescript_escape_table") as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert row["n"] == 0
         await conn.execute(
             "INSERT INTO alerts(package_name, ecosystem, alerted_at) VALUES (?, ?, ?)",
@@ -491,6 +496,7 @@ async def test_plugin_extra_migrate_cannot_drop_core_table(tmp_path):
         # Connection still fully usable afterward.
         async with conn.execute("SELECT COUNT(*) as n FROM scan_results") as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert row["n"] == 0
     finally:
         await conn.close()
@@ -558,6 +564,7 @@ async def test_open_db_migrates_legacy_top_packages_cache_missing_schema_version
             "SELECT schema_version FROM top_packages_cache WHERE ecosystem='npm'"
         ) as cur:
             row = await cur.fetchone()
+        assert row is not None
         assert row["schema_version"] == 0
     finally:
         await conn.close()

@@ -113,19 +113,21 @@ def test_scheduler_config_rejects_invalid_values():
 
 
 def test_sandbox_extra_tmpfs_accepts_absolute_paths():
-    cfg = SandboxConfig(extra_tmpfs=["/tmp/custom", "/run/secrets"])
+    # Plain strings are valid at runtime: ExpandedPath coerces str -> Path via
+    # a BeforeValidator, which pyright cannot see through.
+    cfg = SandboxConfig(extra_tmpfs=["/tmp/custom", "/run/secrets"])  # type: ignore[arg-type]
     assert cfg.extra_tmpfs[0] == Path("/tmp/custom")
     assert cfg.extra_tmpfs[1] == Path("/run/secrets")
 
 
 def test_sandbox_extra_tmpfs_rejects_relative_path():
     with pytest.raises(ValidationError, match="must be absolute"):
-        SandboxConfig(extra_tmpfs=["relative/path"])
+        SandboxConfig(extra_tmpfs=["relative/path"])  # type: ignore[arg-type]
 
 
 def test_sandbox_extra_tmpfs_rejects_bare_name():
     with pytest.raises(ValidationError, match="must be absolute"):
-        SandboxConfig(extra_tmpfs=["secrets"])
+        SandboxConfig(extra_tmpfs=["secrets"])  # type: ignore[arg-type]
 
 
 def test_sandbox_extra_tmpfs_rejects_relative_via_toml(tmp_path):
@@ -308,7 +310,7 @@ def test_preflight_risk_defaults():
 def test_preflight_risk_rejects_unknown_action():
     from packagealert.config import PreflightRiskConfig
     with pytest.raises(ValidationError):
-        PreflightRiskConfig(on_typosquat="explode")
+        PreflightRiskConfig(on_typosquat="explode")  # type: ignore[arg-type]
 
 
 def test_preflight_risk_threshold_must_be_non_negative():

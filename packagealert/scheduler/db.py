@@ -35,7 +35,7 @@ class ScanRecord:
 
 
 def _max_severity(findings: list[dict]) -> str | None:
-    severities = [f.get("severity") for f in findings if f.get("severity")]
+    severities = [s for f in findings if isinstance(s := f.get("severity"), str)]
     if not severities:
         return None
     return max(severities, key=lambda s: _SEVERITY_ORDER.get(s, 0))
@@ -154,6 +154,7 @@ async def save_scan_result(
     ) as cur:
         row_id = cur.lastrowid
     await db.commit()
+    assert row_id is not None, "lastrowid is always set after a successful INSERT"
     return row_id
 
 

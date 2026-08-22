@@ -6,7 +6,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 from urllib.parse import quote, unquote
 
 import httpx
@@ -17,6 +17,7 @@ from packagealert.languages.base import (
     MAX_TOP_PACKAGES,
     PackageMetadata,
     PackageSpec,
+    PreRunResult,
     ProcessInstall,
     SandboxPaths,
     SandboxTargets,
@@ -146,8 +147,14 @@ class NodeLanguage:
     """Language module for Node.js / npm / yarn / pnpm."""
 
     name: str = "node"
-    ecosystems: ClassVar[list[str]] = ["npm"]
-    process_names: ClassVar[list[str]] = ["npm", "yarn", "pnpm", "node", "nodejs"]
+    # Not annotated ClassVar: LanguageBase declares these as read-only
+    # properties (to admit both class-level and per-instance implementers -
+    # see base.py), and pyright only accepts a plain class attribute against
+    # a property, not one explicitly typed ClassVar. Safe to share across
+    # calls regardless — there is exactly one NodeLanguage instance per
+    # process and nothing ever mutates the list in place.
+    ecosystems = ["npm"]  # noqa: RUF012
+    process_names = ["npm", "yarn", "pnpm", "node", "nodejs"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -418,7 +425,7 @@ class NodeLanguage:
                 dev_seeds = {}
                 in_root_importer = False
                 continue
-            if prod_seeds is None:
+            if prod_seeds is None or dev_seeds is None:
                 continue
             if _IMPORTER_RE.match(line):
                 in_root_importer = True
@@ -482,7 +489,7 @@ class NodeLanguage:
                 if m:
                     packages.append((m.group(1), m.group(2)))
 
-        if dev_seeds is None:
+        if dev_seeds is None or prod_seeds is None:
             # No importers: section — cannot classify anything.
             return [PackageSpec(name=n, version=v, ecosystem="npm", is_dev=None) for n, v in packages]
 
@@ -784,6 +791,73 @@ class NodeLanguage:
             "NODE_PATH", "NODE_ENV",
             "NVM_DIR", "NVM_BIN",
         ]
+
+    # ------------------------------------------------------------------
+    # Optional sandbox/flag extension points (no npm-specific behaviour yet)
+    # ------------------------------------------------------------------
+
+    def available_flags(self) -> list[tuple[str, str]]:
+        return []
+
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
+        return []
+
+    def pre_run_check(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str] = frozenset(),
+    ) -> PreRunResult:
+        return PreRunResult(ok=True)
+
+    def configure_sandbox(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+        home_ro: list[Path],
+        sandbox_env: dict[str, str],
+    ) -> None:
+        pass
+
+    def configure_sandbox_writable(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> list[tuple[Path, Path]]:
+        return []
+
+    def configure_sandbox_writable_warning(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> str | None:
+        return None
+
+    def prepare_sandbox_env(
+        self,
+        parsed: Any,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> list[Path]:
+        return []
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        return None
 
     # ------------------------------------------------------------------
     # shell_environment

@@ -212,11 +212,24 @@ class ProcessInstall:
 @runtime_checkable
 class LanguageBase(Protocol):
     name: str
-    ecosystems: list[str]
-    process_names: list[str]
     contract_version: int
     author: str
     repository: str
+
+    # Declared as read-only properties rather than a plain attribute so that
+    # both styles of implementer satisfy this Protocol: package-alert's
+    # built-in modules share one list per language via a plain class
+    # attribute (no explicit ClassVar — pyright only accepts that against a
+    # plain, non-property Protocol member, not this one), while
+    # dataclass-based test doubles and third-party plugins may reasonably
+    # declare per-instance fields instead. A plain (non-property) attribute
+    # declaration here forced pyright to require the exact same kind
+    # (ClassVar vs. instance) on every implementer, which rejected one style
+    # or the other.
+    @property
+    def ecosystems(self) -> list[str]: ...
+    @property
+    def process_names(self) -> list[str]: ...
 
     def parse_process_install(self, args: list[str]) -> ProcessInstall | None:
         """Parse a process invocation.  Return None if the args are not recognised."""

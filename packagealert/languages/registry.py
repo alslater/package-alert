@@ -373,7 +373,7 @@ def popularity_ecosystem_map() -> dict[str, str]:
                 getattr(lang, "name", "?"), exc_info=True,
             )
             continue
-        if system is not None:
+        if isinstance(system, str):
             try:
                 ecosystems = lang.ecosystems
             except Exception:

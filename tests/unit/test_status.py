@@ -394,9 +394,10 @@ def test_render_status_json_daemon_stopped(capsys):
 
 def test_render_status_rich_running():
     data = _make_status_data()
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "running" in output
     assert "99999" in output  # PID
     assert "2h 2m" in output  # uptime
@@ -405,18 +406,20 @@ def test_render_status_rich_running():
 def test_render_status_rich_shows_systemd():
     data = _make_status_data()
     data.daemon_managed_by_systemd = True
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "via systemd" in output
 
 
 def test_render_status_rich_no_systemd_label_when_user_started():
     data = _make_status_data()
     data.daemon_managed_by_systemd = False
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "systemd" not in output
 
 
@@ -431,9 +434,10 @@ def test_render_status_json_managed_by_systemd(capsys):
 
 def test_render_status_rich_stopped():
     data = _make_status_data(running=False)
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "stopped" in output
 
 
@@ -450,9 +454,10 @@ def test_render_status_rich_shows_alerts_section(capsys):
         )
     ]
     data = _make_status_data(alerts=alerts)
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "Alerts" in output
     assert "evil-pkg" in output
     assert "CRITICAL" in output
@@ -460,17 +465,19 @@ def test_render_status_rich_shows_alerts_section(capsys):
 
 def test_render_status_rich_no_alerts_message():
     data = _make_status_data(alerts=[])
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "No alerts" in output
 
 
 def test_render_status_rich_scheduled_projects():
     data = _make_status_data()
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "Scheduled Projects" in output
     assert "3 projects registered" in output
 
@@ -478,17 +485,19 @@ def test_render_status_rich_scheduled_projects():
 def test_render_status_rich_no_scheduled_projects():
     data = _make_status_data()
     data.scheduled_projects_count = 0
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "No projects scheduled" in output
 
 
 def test_render_status_rich_shows_log_paths():
     data = _make_status_data()
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "Logs" in output
     assert "daemon.log" in output
     assert "cli.log" in output
@@ -498,9 +507,10 @@ def test_render_status_rich_log_not_yet_created():
     data = _make_status_data()
     data.log_exists = False
     data.cli_log_exists = False
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "not yet created" in output
 
 
@@ -508,9 +518,10 @@ def test_render_status_rich_log_disabled():
     data = _make_status_data()
     data.log_path = ""
     data.cli_log_path = ""
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "disabled" in output
 
 
@@ -532,9 +543,10 @@ def test_render_status_rich_shows_central_outbox_and_last_seen():
         outbox_scan_count=2,
         outbox_alert_count=1,
     )
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "Last seen" in output
     assert "2026-07-15" in output  # last_seen_at timestamp rendered
     assert "Outbox" in output
@@ -560,9 +572,10 @@ def test_render_status_rich_shows_never_seen_when_no_successful_heartbeat():
         outbox_scan_count=0,
         outbox_alert_count=0,
     )
-    console = Console(file=io.StringIO(), highlight=False)
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
     render_status(data, as_json=False, console=console)
-    output = console.file.getvalue()
+    output = buf.getvalue()
     assert "Last seen" in output
     assert "never" in output
     assert "Outbox" in output

@@ -56,7 +56,8 @@ async def _outbox_counts(enabled_plugins: set[str]) -> dict[str, int]:
         return {"scan": 0, "alert": 0}
     db = await open_db(_DB_PATH, enabled_plugins=enabled_plugins)
     try:
-        return await _outbox.count_by_kind(db)
+        counts = await _outbox.count_by_kind(db)
+        return {str(kind): n for kind, n in counts.items()}
     finally:
         await db.close()
 

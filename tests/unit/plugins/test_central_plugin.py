@@ -4,6 +4,7 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +16,7 @@ from packagealert.models.risk import RiskReport, RiskSignal
 from packagealert.models.scans import ScanResult
 from packagealert.plugins.central import outbox
 from packagealert.plugins.central.client import ReportResult, build_scan_payload
+from packagealert.plugins.central.outbox import OutboxKind
 from packagealert.storage.db import open_db
 
 
@@ -110,10 +112,11 @@ async def plugin(tmp_path):
     p = _setup_plugin(tmp_path)
     with patch("packagealert.plugins.central.plugin.DEFAULT_DB_PATH", tmp_path / "pa.db"):
         yield p
+    assert p._client is not None
     await p._client.aclose()
 
 
-async def _seed_outbox(tmp_path: Path, *, kind: str, payload) -> None:
+async def _seed_outbox(tmp_path: Path, *, kind: OutboxKind, payload) -> None:
     """Enqueue one entry with the given kind and payload (dict, JSON-encoded)."""
     db = await open_db(tmp_path / "pa.db", enabled_plugins={"pa-central"})
     try:
@@ -122,7 +125,7 @@ async def _seed_outbox(tmp_path: Path, *, kind: str, payload) -> None:
         await db.close()
 
 
-async def _seed_outbox_raw(tmp_path: Path, *, kind: str, payload_json: str) -> None:
+async def _seed_outbox_raw(tmp_path: Path, *, kind: OutboxKind, payload_json: str) -> None:
     """Enqueue one entry with a raw (possibly malformed) payload_json string."""
     db = await open_db(tmp_path / "pa.db", enabled_plugins={"pa-central"})
     try:
@@ -131,7 +134,7 @@ async def _seed_outbox_raw(tmp_path: Path, *, kind: str, payload_json: str) -> N
         await db.close()
 
 
-async def _read_outbox(tmp_path: Path, *, kind: str | None = None) -> list[outbox.OutboxEntry]:
+async def _read_outbox(tmp_path: Path, *, kind: OutboxKind | None = None) -> list[outbox.OutboxEntry]:
     db = await open_db(tmp_path / "pa.db", enabled_plugins={"pa-central"})
     try:
         return await outbox.dequeue_all(db, kind=kind)
@@ -144,37 +147,42 @@ async def test_setup_creates_client(plugin):
 
 
 async def test_on_alert_osv_calls_report_alert(plugin):
+    assert plugin._client is not None
     plugin._client.report_alert = AsyncMock(return_value=ReportResult(ok=True, payload=None))
     await plugin.on_alert(_event(), _osv())
     plugin._client.report_alert.assert_awaited_once()
 
 
 async def test_on_alert_risk_calls_report_alert(plugin):
+    assert plugin._client is not None
     plugin._client.report_alert = AsyncMock(return_value=ReportResult(ok=True, payload=None))
     await plugin.on_alert(_event(), _risk())
     plugin._client.report_alert.assert_awaited_once()
 
 
 async def test_on_scan_complete_with_findings(plugin):
+    assert plugin._client is not None
     plugin._client.report_scan = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"root": "/proj"})
+        return_value=ReportResult(ok=True, payload=cast(Any, {"root": "/proj"}))
     )
     await plugin.on_scan_complete(_scan(finding_count=2, findings=[{}]))
     plugin._client.report_scan.assert_awaited_once()
 
 
 async def test_on_scan_complete_no_findings_reports(plugin):
+    assert plugin._client is not None
     plugin._client.report_scan = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"root": "/proj"})
+        return_value=ReportResult(ok=True, payload=cast(Any, {"root": "/proj"}))
     )
     await plugin.on_scan_complete(_scan())
     plugin._client.report_scan.assert_awaited_once()
 
 
 async def test_on_scan_complete_enqueues_on_failure(plugin, tmp_path):
+    assert plugin._client is not None
     failed_payload = {"root": "/proj", "finding_count": 1}
     plugin._client.report_scan = AsyncMock(
-        return_value=ReportResult(ok=False, payload=failed_payload, error="send failed")
+        return_value=ReportResult(ok=False, payload=cast(Any, failed_payload), error="send failed")
     )
     await plugin.on_scan_complete(_scan(finding_count=1, findings=[{}]))
 
@@ -186,8 +194,9 @@ async def test_on_scan_complete_enqueues_on_failure(plugin, tmp_path):
 
 
 async def test_on_scan_complete_does_not_enqueue_on_success(plugin, tmp_path):
+    assert plugin._client is not None
     plugin._client.report_scan = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"root": "/proj"}, error=None)
+        return_value=ReportResult(ok=True, payload=cast(Any, {"root": "/proj"}), error=None)
     )
     await plugin.on_scan_complete(_scan())
 
@@ -199,6 +208,7 @@ async def test_on_scan_complete_does_not_enqueue_when_payload_is_none(plugin, tm
     # on_scan_complete never rebuilds it, so a build failure there (which
     # report_scan() surfaces as ok=False, payload=None) must not attempt to
     # enqueue anything, and must not raise.
+    assert plugin._client is not None
     plugin._client.report_scan = AsyncMock(
         return_value=ReportResult(ok=False, payload=None, error="payload build error")
     )
@@ -208,9 +218,10 @@ async def test_on_scan_complete_does_not_enqueue_when_payload_is_none(plugin, tm
 
 
 async def test_on_alert_enqueues_on_failure(plugin, tmp_path):
+    assert plugin._client is not None
     failed_payload = {"package_name": "evil", "kind": "osv"}
     plugin._client.report_alert = AsyncMock(
-        return_value=ReportResult(ok=False, payload=failed_payload, error="send failed")
+        return_value=ReportResult(ok=False, payload=cast(Any, failed_payload), error="send failed")
     )
     await plugin.on_alert(_event(), _osv())
 
@@ -220,8 +231,9 @@ async def test_on_alert_enqueues_on_failure(plugin, tmp_path):
 
 
 async def test_on_alert_does_not_enqueue_on_success(plugin, tmp_path):
+    assert plugin._client is not None
     plugin._client.report_alert = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"package_name": "evil"}, error=None)
+        return_value=ReportResult(ok=True, payload=cast(Any, {"package_name": "evil"}), error=None)
     )
     await plugin.on_alert(_event(), _osv())
 
@@ -233,6 +245,7 @@ async def test_on_alert_does_not_enqueue_when_payload_is_none(plugin, tmp_path):
     # on_alert never rebuilds it, so a build failure there (which
     # report_alert() surfaces as ok=False, payload=None) must not attempt to
     # enqueue anything, and must not raise.
+    assert plugin._client is not None
     plugin._client.report_alert = AsyncMock(
         return_value=ReportResult(ok=False, payload=None, error="payload build error")
     )
@@ -251,6 +264,7 @@ async def test_config_overlay_strips_credentials(tmp_path):
     assert cfg.plugins.pa_central.server_url == "https://fleet.example.com"
     # overlay applied
     assert plugin._overlay is not None
+    assert plugin._client is not None
     await plugin._client.aclose()
 
 
@@ -263,10 +277,12 @@ async def test_config_overlay_strips_plugins_enabled(tmp_path):
     assert "evil-plugin" not in cfg.plugins.enabled
     assert plugin._overlay is not None
     assert plugin._overlay.get("plugins", {}).get("enabled") is None
+    assert plugin._client is not None
     await plugin._client.aclose()
 
 
 async def test_on_daemon_stop_sends_stopped_heartbeat(plugin):
+    assert plugin._client is not None
     plugin._client.heartbeat = AsyncMock(return_value=(True, None))
     plugin._task = None
     await plugin.on_daemon_stop()
@@ -278,6 +294,7 @@ async def test_on_daemon_stop_sends_stopped_heartbeat(plugin):
 async def test_last_seen_at_set_on_successful_heartbeat(plugin, tmp_path):
     from packagealert.plugins.central.state import read_state
 
+    assert plugin._client is not None
     plugin._client.heartbeat = AsyncMock(return_value=(True, None))
     plugin._task = None
     await plugin.on_daemon_stop()
@@ -293,6 +310,7 @@ async def test_last_seen_at_survives_a_subsequent_failed_heartbeat(plugin, tmp_p
     # not erase the record of when we last actually heard back.
     from packagealert.plugins.central.state import read_state
 
+    assert plugin._client is not None
     plugin._client.heartbeat = AsyncMock(return_value=(True, None))
     plugin._client.fetch_config = AsyncMock(return_value=(None, None))
     plugin._client.fetch_cooldowns = AsyncMock(return_value=None)
@@ -319,11 +337,12 @@ async def test_last_seen_at_survives_a_subsequent_failed_heartbeat(plugin, tmp_p
 
 
 async def test_drain_outbox_deletes_on_success(plugin, tmp_path):
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"a": 1})
+        return_value=ReportResult(ok=True, payload=cast(Any, {"a": 1}))
     )
     plugin._client.send_alert_payload = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"b": 2})
+        return_value=ReportResult(ok=True, payload=cast(Any, {"b": 2}))
     )
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
     await _seed_outbox(tmp_path, kind="alert", payload={"b": 2})
@@ -336,8 +355,11 @@ async def test_drain_outbox_deletes_on_success(plugin, tmp_path):
 
 
 async def test_drain_outbox_marks_failed_and_keeps_entry(plugin, tmp_path):
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
-        return_value=ReportResult(ok=False, payload={"a": 1}, error="HTTP 503 — server unavailable")
+        return_value=ReportResult(
+            ok=False, payload=cast(Any, {"a": 1}), error="HTTP 503 — server unavailable"
+        )
     )
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
 
@@ -358,9 +380,10 @@ async def test_drain_outbox_stops_early_on_retryable_connection_error(plugin, tm
     # attempting further entries rather than burning a connection attempt
     # per row. The failed entry is still marked failed and stays queued;
     # entries never attempted are left completely untouched.
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
         return_value=ReportResult(
-            ok=False, payload={"a": 1}, error="connection refused", error_kind="retryable"
+            ok=False, payload=cast(Any, {"a": 1}), error="connection refused", error_kind="retryable"
         )
     )
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
@@ -393,9 +416,10 @@ async def test_drain_outbox_stops_early_on_retryable_http_status(plugin, tmp_pat
     # server-wide/retryable, not specific to this one payload — the drain
     # must stop rather than sending the rest of a possibly-large queue
     # against a server that's down, overloaded, or rejecting all auth.
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
         return_value=ReportResult(
-            ok=False, payload={"a": 1}, error=error, error_kind="retryable"
+            ok=False, payload=cast(Any, {"a": 1}), error=error, error_kind="retryable"
         )
     )
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
@@ -414,9 +438,10 @@ async def test_drain_outbox_does_not_stop_early_on_payload_specific_http_error(p
     # server was reached and is otherwise healthy — it just rejected this
     # one payload. Other queued entries may still succeed, so draining must
     # continue trying them rather than stopping.
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
         return_value=ReportResult(
-            ok=False, payload={"a": 1}, error="HTTP 422", error_kind="payload_specific"
+            ok=False, payload=cast(Any, {"a": 1}), error="HTTP 422", error_kind="payload_specific"
         )
     )
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
@@ -435,8 +460,9 @@ async def test_drain_outbox_discards_unparseable_entry_but_continues(plugin, tmp
     # can never resolve on a future retry, so it is permanently discarded
     # (not mark_failed'd) rather than looping forever. The rest of the batch
     # must still be processed.
+    assert plugin._client is not None
     plugin._client.send_scan_payload = AsyncMock(
-        return_value=ReportResult(ok=True, payload={"a": 1})
+        return_value=ReportResult(ok=True, payload=cast(Any, {"a": 1}))
     )
     await _seed_outbox_raw(tmp_path, kind="scan", payload_json="{not valid json")
     await _seed_outbox(tmp_path, kind="scan", payload={"a": 1})
@@ -455,11 +481,16 @@ async def test_on_daemon_start_opens_long_lived_db_connection(tmp_path):
     # schema/migration pass on every call — real cost given _drain_outbox
     # fires every background-loop tick for the daemon's whole lifetime.
     plugin = _setup_plugin(tmp_path)
+    assert plugin._client is not None
     plugin._client.heartbeat = AsyncMock(return_value=(True, None))
     plugin._client.fetch_config = AsyncMock(return_value=(None, None))
     plugin._client.fetch_cooldowns = AsyncMock(return_value=None)
-    plugin._client.send_scan_payload = AsyncMock(return_value=ReportResult(ok=True, payload={"a": 1}))
-    plugin._client.send_alert_payload = AsyncMock(return_value=ReportResult(ok=True, payload={"b": 2}))
+    plugin._client.send_scan_payload = AsyncMock(
+        return_value=ReportResult(ok=True, payload=cast(Any, {"a": 1}))
+    )
+    plugin._client.send_alert_payload = AsyncMock(
+        return_value=ReportResult(ok=True, payload=cast(Any, {"b": 2}))
+    )
 
     with patch("packagealert.plugins.central.plugin.DEFAULT_DB_PATH", tmp_path / "pa.db"), \
          patch("packagealert.plugins.central.plugin.open_db", wraps=open_db) as wrapped_open_db:
@@ -468,8 +499,8 @@ async def test_on_daemon_start_opens_long_lived_db_connection(tmp_path):
             assert plugin._db is not None
             wrapped_open_db.assert_called_once()
 
-            await plugin._enqueue_outbox("scan", {"a": 1})
-            await plugin._enqueue_outbox("alert", {"b": 2})
+            await plugin._enqueue_outbox("scan", cast(Any, {"a": 1}))
+            await plugin._enqueue_outbox("alert", cast(Any, {"b": 2}))
             await plugin._drain_outbox()
             await plugin._drain_outbox()
 
@@ -477,6 +508,7 @@ async def test_on_daemon_start_opens_long_lived_db_connection(tmp_path):
             # reused the connection opened once in on_daemon_start().
             wrapped_open_db.assert_called_once()
         finally:
+            assert plugin._task is not None
             plugin._task.cancel()
             await plugin.on_daemon_stop()
 
@@ -498,8 +530,8 @@ async def test_concurrent_enqueue_outbox_does_not_lose_reports(plugin, tmp_path)
     plugin._db = await open_db(tmp_path / "shared.db", enabled_plugins={"pa-central"})
     try:
         await asyncio.gather(
-            plugin._enqueue_outbox("alert", {"a": 1}),
-            plugin._enqueue_outbox("alert", {"a": 2}),
+            plugin._enqueue_outbox("alert", cast(Any, {"a": 1})),
+            plugin._enqueue_outbox("alert", cast(Any, {"a": 2})),
         )
         entries = await outbox.dequeue_all(plugin._db)
         assert len(entries) == 2, "both concurrent reports must be persisted, not just one"
@@ -520,14 +552,19 @@ async def test_concurrent_enqueue_and_drain_do_not_lose_reports(plugin, tmp_path
     # single-threaded scheduling, but this guards the same self._db_lock
     # path drain uses regardless.
     plugin._db = await open_db(tmp_path / "shared.db", enabled_plugins={"pa-central"})
-    plugin._client.send_scan_payload = AsyncMock(return_value=ReportResult(ok=True, payload={"a": 1}))
-    plugin._client.send_alert_payload = AsyncMock(return_value=ReportResult(ok=True, payload={"b": 2}))
+    assert plugin._client is not None
+    plugin._client.send_scan_payload = AsyncMock(
+        return_value=ReportResult(ok=True, payload=cast(Any, {"a": 1}))
+    )
+    plugin._client.send_alert_payload = AsyncMock(
+        return_value=ReportResult(ok=True, payload=cast(Any, {"b": 2}))
+    )
     try:
         await outbox.enqueue(plugin._db, kind="scan", payload_json=json.dumps({"a": 0}))
         await asyncio.gather(
             plugin._drain_outbox(),
-            plugin._enqueue_outbox("alert", {"a": 1}),
-            plugin._enqueue_outbox("alert", {"a": 2}),
+            plugin._enqueue_outbox("alert", cast(Any, {"a": 1})),
+            plugin._enqueue_outbox("alert", cast(Any, {"a": 2})),
         )
         assert not any(
             "Failed to enqueue" in r.message or "drain failed" in r.message
@@ -550,6 +587,7 @@ async def test_concurrent_enqueue_and_drain_do_not_lose_reports(plugin, tmp_path
 
 
 async def test_scans_list_shows_pending_outbox_entries(plugin, tmp_path, capsys):
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=[])
     payload = build_scan_payload("host", _scan(finding_count=1, findings=[{}]))
     await _seed_outbox(tmp_path, kind="scan", payload=payload)
@@ -563,6 +601,7 @@ async def test_scans_list_shows_pending_outbox_entries(plugin, tmp_path, capsys)
 
 
 async def test_scans_listall_shows_pending_outbox_entries(plugin, tmp_path, capsys):
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=[])
     payload = build_scan_payload("host", _scan(finding_count=1, findings=[{}]))
     await _seed_outbox(tmp_path, kind="scan", payload=payload)
@@ -575,6 +614,7 @@ async def test_scans_listall_shows_pending_outbox_entries(plugin, tmp_path, caps
 
 
 async def test_scans_list_shows_pending_when_central_unreachable(plugin, tmp_path, capsys):
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=None)
     payload = build_scan_payload("host", _scan(finding_count=1, findings=[{}]))
     await _seed_outbox(tmp_path, kind="scan", payload=payload)
@@ -589,6 +629,7 @@ async def test_scans_list_shows_pending_when_central_unreachable(plugin, tmp_pat
 
 
 async def test_scans_listall_shows_pending_when_central_unreachable(plugin, tmp_path, capsys):
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=None)
     payload = build_scan_payload("host", _scan(finding_count=1, findings=[{}]))
     await _seed_outbox(tmp_path, kind="scan", payload=payload)
@@ -608,6 +649,7 @@ async def test_render_pending_scans_swallows_dequeue_error(plugin):
 
 
 async def test_scans_list_does_not_crash_on_outbox_read_failure(plugin):
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=[])
     with patch.object(outbox, "dequeue_all", AsyncMock(side_effect=RuntimeError("boom"))):
         handled = await plugin.scans_list("/proj", "host", 20)
@@ -624,6 +666,7 @@ async def test_scans_list_prints_no_table_when_all_pending_entries_unparseable(p
     # scans_list passes a concrete project_path, so entries are dropped by
     # _render_pending_scans's project-path filter before _render_pending_outbox
     # ever sees them — that filter needs its own logging for the same bug.
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=[])
     await _seed_outbox_raw(tmp_path, kind="scan", payload_json="{not valid json")
     await _seed_outbox_raw(tmp_path, kind="scan", payload_json="also not json")
@@ -641,6 +684,7 @@ async def test_scans_listall_prints_no_table_when_all_pending_entries_unparseabl
     # scans_listall passes project_path=None, so entries reach
     # _render_pending_outbox directly (bypassing _render_pending_scans's
     # filter) — this exercises that function's own unparseable-entry guard.
+    assert plugin._client is not None
     plugin._client.list_scans = AsyncMock(return_value=[])
     await _seed_outbox_raw(tmp_path, kind="scan", payload_json="{not valid json")
     await _seed_outbox_raw(tmp_path, kind="scan", payload_json="also not json")
