@@ -126,6 +126,7 @@ async def test_fetch_and_store_packagist_pagination(db):
         fetch_result=["symfony/console", "monolog/monolog", "guzzlehttp/guzzle"],
     )
     result = await cache.fetch_and_store(lang, "packagist")
+    assert result is not None
     assert "symfony/console" in result
     assert "monolog/monolog" in result
     assert "guzzlehttp/guzzle" in result
@@ -140,6 +141,7 @@ async def test_fetch_and_store_packagist_stops_at_500(db):
         fetch_result=pkgs,
     )
     result = await cache.fetch_and_store(lang, "packagist")
+    assert result is not None
     assert len(result) == 500
 
 
@@ -151,6 +153,7 @@ async def test_fetch_and_store_normalises_names(db):
         fetch_result=["my-package-js", "some-thing"],
     )
     result = await cache.fetch_and_store(lang, "pypi")
+    assert result is not None
     assert "my-package-js" in result
     assert "some-thing" in result
 

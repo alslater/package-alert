@@ -226,6 +226,7 @@ async def test_cache_monitor_start_skips_buggy_cache_paths_plugin(tmp_path):
 
     with patch("packagealert.languages.registry.all_languages", return_value=[bad_lang, good_lang]):
         await monitor.start()  # must not raise
+        assert monitor._observer is not None, "start() must have created an observer"
         monitor._observer.stop()
         monitor._observer.join()
 

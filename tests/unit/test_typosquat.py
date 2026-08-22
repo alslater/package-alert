@@ -548,7 +548,7 @@ def test_normalise_falls_back_when_the_hook_is_missing():
     class Old:
         pass
 
-    assert _normalise(Old(), "Foo.Bar") == "foo-bar"
+    assert _normalise(Old(), "Foo.Bar") == "foo-bar"  # type: ignore[arg-type]
     assert _normalise(None, "Foo.Bar") == "foo-bar"
 
 

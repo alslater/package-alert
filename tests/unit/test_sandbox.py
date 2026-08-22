@@ -43,6 +43,7 @@ from packagealert.sandbox.runner import (
     _home_ro_dirs,
     _is_safe_writable_bind_dest,
     _is_safe_writable_bind_src,
+    _LockUnreadable,
     _post_ro_tmpfs_dirs,
     _resolve_targets,
     _restorable_lock_files,
@@ -335,7 +336,7 @@ class TestBuildCmd:
                 build_cmd(["uv", "sync"], [relative])
         else:
             with pytest.raises(ValueError, match=pattern):
-                build_cmd(["uv", "sync"], [], **{kwarg: [relative]})
+                build_cmd(["uv", "sync"], [], **{kwarg: [relative]})  # type: ignore[arg-type]  # kwarg name is dynamic; pyright can't match it to a specific parameter
 
     def test_post_ro_tmpfs_nonexistent_skipped(self, tmp_path):
         nonexistent = tmp_path / "nope" / "logs"
@@ -421,15 +422,15 @@ class TestBuildCmd:
 
     def test_writable_binds_non_tuple_entry_raises(self, tmp_path):
         with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
-            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=["not-a-tuple"])
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=["not-a-tuple"])  # type: ignore[list-item]  # deliberately malformed to test validation
 
     def test_writable_binds_wrong_length_tuple_raises(self, tmp_path):
         with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
-            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(tmp_path,)])
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[(tmp_path,)])  # type: ignore[list-item]  # deliberately malformed to test validation
 
     def test_writable_binds_non_path_elements_raise(self, tmp_path):
         with pytest.raises(ValueError, match=r"writable_binds\[0\] must be a \(Path, Path\) tuple"):
-            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[("/src", "/dest")])
+            build_cmd(["echo"], write_dirs=[tmp_path], writable_binds=[("/src", "/dest")])  # type: ignore[list-item]  # deliberately malformed to test validation
 
     def test_writable_binds_skips_nonexistent_dest(self, tmp_path, caplog):
         src = tmp_path / "src"
@@ -3876,7 +3877,7 @@ class TestRestoreLockFiles:
                 raise OSError("disk full")
             return original_rename(self, target)
         monkeypatch.setattr(Path, "rename", patched)
-        snapshots = {lock: b"original content"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
         _restore_lock_files(snapshots, tmp_path, _make_runner()._console)  # no exception
         # Original file unchanged because rename failed; temp file was cleaned up.
         assert lock.read_bytes() == b"current content"
@@ -3905,7 +3906,7 @@ class TestRestoreInstallTargets:
         snap_a = FileSystemSnapshot(existed=True)
         snap_b = FileSystemSnapshot(existed=True)
 
-        result = _restore_install_targets(FakeBackend(), {target_a: snap_a, target_b: snap_b}, Console(quiet=True))
+        result = _restore_install_targets(FakeBackend(), {target_a: snap_a, target_b: snap_b}, Console(quiet=True))  # type: ignore[arg-type]  # fake only implements the method this test exercises
         assert result is True
         assert target_a in restored
         assert target_b in restored
@@ -3917,7 +3918,7 @@ class TestRestoreInstallTargets:
             def restore_install_target(self, path, token, console):
                 raise AssertionError("should not be called")
 
-        _restore_install_targets(FakeBackend(), {}, Console(quiet=True))  # no error
+        _restore_install_targets(FakeBackend(), {}, Console(quiet=True))  # type: ignore[arg-type]  # no error; fake only implements the method this test exercises
 
 
 # ---------------------------------------------------------------------------
@@ -4411,7 +4412,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"original")
-        snapshots = {lock: b"original"}  # unchanged
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original"}  # unchanged
         runner = _make_runner()
         result = asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
         assert result is True
@@ -4426,7 +4427,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"updated content")
-        snapshots = {lock: b"original content"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
         scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
@@ -4446,7 +4447,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"updated content")
-        snapshots = {lock: b"original content"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"evilpkg"})
         scan_result = _fake_scan_result([("pypi", "requests", "2.31.0"), ("pypi", "evilpkg", "1.0.0")])
@@ -4467,7 +4468,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         # Snapshot taken when Pipfile.lock did not exist — recorded as None sentinel
         lock = tmp_path / "Pipfile.lock"
-        snapshots = {lock: None}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: None}
         # Sandbox creates it
         lock.write_bytes(b"freshly generated")
 
@@ -4488,7 +4489,7 @@ class TestScanUpdatedLockFiles:
     def test_newly_created_lock_file_with_malicious_package_returns_false(self, tmp_path):
         import asyncio
         lock = tmp_path / "Pipfile.lock"
-        snapshots = {lock: None}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: None}
         lock.write_bytes(b"freshly generated with bad dep")
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
@@ -4514,7 +4515,7 @@ class TestScanUpdatedLockFiles:
         """
         import asyncio
         lock = tmp_path / "Pipfile.lock"
-        snapshots = {lock: None}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: None}
         # Sandbox creates a broken symlink pointing to a nonexistent external path
         lock.symlink_to(tmp_path.parent / "nonexistent_external_target")
         assert not lock.exists()   # confirm exists() misses it
@@ -4534,7 +4535,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"corrupt or empty content")
-        snapshots = {lock: b"original content"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
 
         empty_scan = _fake_scan_result([])  # parser returns nothing
 
@@ -4552,7 +4553,7 @@ class TestScanUpdatedLockFiles:
         from types import SimpleNamespace
         lock = tmp_path / "requirements.txt"
         lock.write_bytes(b"flask\nrequests\n")
-        snapshots = {lock: b"original"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original"}
 
         unpinned_pkg = SimpleNamespace(ecosystem="pypi", name="flask", version=None)
         unpinned_scan = SimpleNamespace(
@@ -4590,7 +4591,7 @@ class TestScanUpdatedLockFiles:
         link = tmp_path / "Pipfile.lock"
         link.symlink_to(target)
         # File changed (was absent, now present)
-        snapshots = {link: None}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {link: None}
 
         runner = _make_runner()
         with unittest.mock.patch(
@@ -4608,7 +4609,7 @@ class TestScanUpdatedLockFiles:
         target.write_bytes(b"contents")
         link = tmp_path / "Pipfile.lock"
         link.symlink_to(target)
-        snapshots = {link: None}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {link: None}
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
         scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
@@ -4632,7 +4633,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         # Snapshot: Pipfile.lock was a regular file
         lock = tmp_path / "Pipfile.lock"
-        snapshots = {lock: b"original content"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
         # Sandbox replaced it with a symlink pointing outside the project
         target = tmp_path.parent / "sensitive_external"
         target.write_bytes(b"secret data")
@@ -4661,7 +4662,7 @@ class TestScanUpdatedLockFiles:
         import asyncio
         lock = tmp_path / "Pipfile.lock"
         lock.write_bytes(b"original")
-        snapshots = {lock: b"original"}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original"}
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
         scan_result = _fake_scan_result([("pypi", "requests", "2.31.0")])
@@ -4691,7 +4692,7 @@ class TestScanUpdatedLockFiles:
         lock = tmp_path / "Pipfile.lock"
         original_content = b"original Pipfile.lock"
         lock.write_bytes(b"updated with malicious dep")
-        snapshots = {lock: original_content}
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: original_content}
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})
         scan_result = _fake_scan_result([("pypi", "fastapi", "0.1.0")])
@@ -4714,7 +4715,7 @@ class TestScanUpdatedLockFiles:
         """Integration: newly created lock file is deleted when malicious deps found."""
         import asyncio
         lock = tmp_path / "Pipfile.lock"
-        snapshots = {lock: None}  # absent before the run
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: None}  # absent before the run
         lock.write_bytes(b"freshly generated with bad dep")
 
         fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"fastapi"})

@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import tomllib
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import httpx
 
@@ -1095,8 +1095,14 @@ class PythonLanguage:
     """Language module for Python / pip / uv / pipenv."""
 
     name: str = "python"
-    ecosystems: ClassVar[list[str]] = ["PyPI"]
-    process_names: ClassVar[list[str]] = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]
+    # Not annotated ClassVar: LanguageBase declares these as read-only
+    # properties (to admit both class-level and per-instance implementers -
+    # see base.py), and pyright only accepts a plain class attribute against
+    # a property, not one explicitly typed ClassVar. Safe to share across
+    # calls regardless — there is exactly one PythonLanguage instance per
+    # process and nothing ever mutates the list in place.
+    ecosystems = ["PyPI"]  # noqa: RUF012
+    process_names = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -1474,6 +1480,9 @@ class PythonLanguage:
                 result[i] = f"--editable={self._abs_editable(val, cwd)}"
             i += 1
         return result
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Editable install source dirs need to be writable for egg-info generation."""

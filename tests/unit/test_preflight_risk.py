@@ -498,9 +498,17 @@ def test_worst_picks_highest_ranked():
         cfg=_cfg(risk_threshold=25, on_high_risk="warn"),
         is_tty=True,
     )
-    assert worst([allow, warn, block]).action == "block"
-    assert worst([allow, warn]).action == "warn"
-    assert worst([allow]).action == "allow"
+    worst_of_all = worst([allow, warn, block])
+    assert worst_of_all is not None
+    assert worst_of_all.action == "block"
+
+    worst_of_two = worst([allow, warn])
+    assert worst_of_two is not None
+    assert worst_of_two.action == "warn"
+
+    worst_of_one = worst([allow])
+    assert worst_of_one is not None
+    assert worst_of_one.action == "allow"
 
 
 def test_unknown_distance_is_not_rendered_as_none():

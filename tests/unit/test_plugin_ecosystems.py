@@ -50,7 +50,9 @@ def cargo_plugin():
     import copy
 
     saved = copy.copy(registry._registry)
-    registry.register(_CargoLang())
+    # _CargoLang is a deliberately minimal double: only the ecosystem-vocabulary
+    # surface is under test here, not the full LanguageBase contract.
+    registry.register(_CargoLang())  # type: ignore[arg-type]
     yield
     registry._registry.clear()
     registry._registry.update(saved)
@@ -121,7 +123,7 @@ def test_a_plugin_cannot_redefine_a_builtin_ecosystem():
 
     saved = copy.copy(registry._registry)
     try:
-        registry.register(Hijack())
+        registry.register(Hijack())  # type: ignore[arg-type]
         assert normalise_ecosystem("pypi") == "pypi"
         assert normalise_ecosystem("PyPI") == "pypi"
     finally:
@@ -148,7 +150,7 @@ def test_a_broken_plugin_does_not_break_the_vocabulary():
 
     saved = copy.copy(registry._registry)
     try:
-        registry.register(Broken())
+        registry.register(Broken())  # type: ignore[arg-type]
         # Built-ins must still resolve.
         assert normalise_ecosystem("pypi") == "pypi"
     finally:
@@ -247,7 +249,7 @@ def rust_example_plugin():
         pytest.skip("the Rust example plugin is not present")
     sys.path.insert(0, str(example))
     try:
-        from package_alert_rust import CargoLanguage
+        from package_alert_rust import CargoLanguage  # type: ignore[import-not-found]
     except ImportError:  # pragma: no cover - defensive
         sys.path.remove(str(example))
         pytest.skip("the Rust example plugin could not be imported")

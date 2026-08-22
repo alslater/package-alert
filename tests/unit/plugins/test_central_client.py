@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -10,6 +11,7 @@ import respx
 from packagealert.models.advisories import OsvAdvisory, OsvResult
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport, RiskSignal
+from packagealert.plugins.central.client import AlertPayload, ScanPayload
 
 
 def _event(name: str = "evil-pkg") -> PackageEvent:
@@ -309,7 +311,7 @@ async def test_send_scan_payload_posts_given_payload():
         return_value=httpx.Response(201, json={"id": 6})
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is True
     assert bool(result) is True
@@ -325,7 +327,7 @@ async def test_send_scan_payload_returns_error_string_on_failure():
         return_value=httpx.Response(500, text="server exploded")
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is False
     assert bool(result) is False
@@ -348,7 +350,7 @@ async def test_send_scan_payload_marks_connection_error_as_retryable():
         side_effect=httpx.ConnectError("connection refused")
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is False
     assert result.error_kind == "retryable"
@@ -361,7 +363,7 @@ async def test_send_scan_payload_marks_timeout_as_retryable():
         side_effect=httpx.ConnectTimeout("timed out")
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is False
     # ConnectTimeout is an httpx.TransportError subclass, same as ConnectError
@@ -377,7 +379,7 @@ async def test_send_scan_payload_classifies_payload_specific_statuses(status):
         return_value=httpx.Response(status)
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is False
     assert result.error_kind == "payload_specific"
@@ -391,7 +393,7 @@ async def test_send_scan_payload_classifies_retryable_statuses(status):
         return_value=httpx.Response(status)
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_scan_payload({"hostname": "host", "root": "/proj"})
+    result = await client.send_scan_payload(cast(ScanPayload, {"hostname": "host", "root": "/proj"}))
     await client.aclose()
     assert result.ok is False
     assert result.error_kind == "retryable"
@@ -404,7 +406,7 @@ async def test_send_alert_payload_posts_given_payload():
         return_value=httpx.Response(201, json={"id": 7})
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    result = await client.send_alert_payload(cast(AlertPayload, {"hostname": "host", "package_name": "evil"}))
     await client.aclose()
     assert result.ok is True
     assert bool(result) is True
@@ -420,7 +422,7 @@ async def test_send_alert_payload_returns_error_string_on_failure():
         return_value=httpx.Response(422)
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    result = await client.send_alert_payload(cast(AlertPayload, {"hostname": "host", "package_name": "evil"}))
     await client.aclose()
     assert result.ok is False
     assert bool(result) is False
@@ -440,7 +442,7 @@ async def test_send_alert_payload_marks_auth_failure_as_retryable():
         return_value=httpx.Response(401)
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    result = await client.send_alert_payload(cast(AlertPayload, {"hostname": "host", "package_name": "evil"}))
     await client.aclose()
     assert result.ok is False
     # 401 means authentication itself is broken — every subsequent request
@@ -455,7 +457,7 @@ async def test_send_alert_payload_marks_connection_error_as_retryable():
         side_effect=httpx.ConnectError("connection refused")
     )
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.send_alert_payload({"hostname": "host", "package_name": "evil"})
+    result = await client.send_alert_payload(cast(AlertPayload, {"hostname": "host", "package_name": "evil"}))
     await client.aclose()
     assert result.ok is False
     assert result.error_kind == "retryable"
@@ -630,7 +632,7 @@ async def test_report_scan_returns_false_on_payload_build_error():
         # scan_type, finding_count, findings, sources, scanned_at intentionally absent
 
     client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
-    result = await client.report_scan("host", _BrokenScan())
+    result = await client.report_scan("host", _BrokenScan())  # type: ignore[arg-type]
     await client.aclose()
     assert result.ok is False
     assert result.payload is None
@@ -643,11 +645,11 @@ def test_report_result_truthiness_mirrors_ok():
     # directly (no HTTP involved) to pin down the contract at the type level.
     from packagealert.plugins.central.client import ReportResult
 
-    ok_result = ReportResult(ok=True, payload={"a": 1}, error=None)
+    ok_result = ReportResult(ok=True, payload=cast(Any, {"a": 1}), error=None)
     assert bool(ok_result) is True
     assert ok_result  # truthy in a plain `if result:` context
 
-    failed_result = ReportResult(ok=False, payload={"a": 1}, error="send failed")
+    failed_result = ReportResult(ok=False, payload=cast(Any, {"a": 1}), error="send failed")
     assert bool(failed_result) is False
     assert not failed_result  # falsy even though payload/error are non-empty
 

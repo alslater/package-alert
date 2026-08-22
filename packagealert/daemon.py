@@ -93,12 +93,13 @@ def _resolve_package_dir(event: PackageEvent) -> tuple[list[Path], str | None]:
     try:
         warning_fn = getattr(lang, "resolve_package_dir_manifest_warning", None)
         if callable(warning_fn):
-            warning = warning_fn(
+            result = warning_fn(
                 event.package_name,
                 event.project_path,
                 event.site_packages_dir,
                 version=event.version,
             )
+            warning = result if isinstance(result, str) else None
     except Exception:
         log.warning(
             "resolve_package_dir_manifest_warning raised for lang=%s — skipping",
@@ -263,7 +264,8 @@ class Daemon:
         results = await osv_client.batch_query(uncached)
         for q, r in zip(uncached, results):
             if r:
-                await osv_cache.set(*q, r)
+                ecosystem, package_name, version = q
+                await osv_cache.set(ecosystem, package_name, version, r)
 
     async def _process_event(
         self,

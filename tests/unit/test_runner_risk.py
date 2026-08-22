@@ -15,7 +15,11 @@ import pytest
 from packagealert.config import AppConfig, PreflightRiskConfig
 from packagealert.heuristics.typosquat import TyposquatResult
 from packagealert.models.risk import RiskReport
-from packagealert.sandbox.runner import SandboxRunner, _Context
+from packagealert.sandbox.runner import (
+    GATE_RESOURCES_UNAVAILABLE,
+    SandboxRunner,
+    _Context,
+)
 from tests.unit.dbmocks import make_mock_db
 
 
@@ -91,7 +95,7 @@ async def test_clean_package_allows_and_returns_score_map():
     r = _runner()
     with _db_patch(), _engine_patch(typo=_typo(), report=_report(0)):
         out = await r._risk_check(_ctx(["requests==2.31.0"]))
-    assert out is not False
+    assert isinstance(out, dict)
     assert out[("pypi", "requests")] == 0
 
 
@@ -116,7 +120,7 @@ async def test_warn_does_not_block():
     r = _runner(on_high_risk="warn", risk_threshold=25)
     with _db_patch(), _engine_patch(typo=_typo(), report=_report(40)):
         out = await r._risk_check(_ctx(["obscure==1.0.0"]))
-    assert out is not False
+    assert isinstance(out, dict)
     assert out[("pypi", "obscure")] == 40
 
 
@@ -199,6 +203,7 @@ async def test_risk_check_scores_packages_concurrently():
         out = await r._risk_check(_ctx(packages))
 
     assert peak > 1, "packages were scored one at a time instead of concurrently"
+    assert isinstance(out, dict)
     assert len(out) == 5
 
 
@@ -746,7 +751,9 @@ async def test_post_scan_risk_scores_packages_concurrently():
     lang = MagicMock()
     lang.resolve_package_dir.return_value = []
 
-    packages = [("pypi", f"pkg{i}", "1.0.0", Path("/sp")) for i in range(5)]
+    packages: list[tuple[str, str, str | None, Path]] = [
+        ("pypi", f"pkg{i}", "1.0.0", Path("/sp")) for i in range(5)
+    ]
     with (
         _db_patch(),
         patch.object(
@@ -993,7 +1000,7 @@ async def test_post_scan_risk_scores_each_scan_root_of_a_duplicate_key_independe
     lang = MagicMock()
     lang.resolve_package_dir.side_effect = resolve_package_dir
 
-    packages = [
+    packages: list[tuple[str, str, str | None, Path]] = [
         ("pypi", "dup", "1.0.0", clean_root),
         ("pypi", "dup", "1.0.0", evil_root),
     ]
@@ -1033,7 +1040,7 @@ def nuget_plugin():
 
     lang_registry.load()
     saved = copy.copy(lang_registry._registry)
-    lang_registry.register(NuGetLang())
+    lang_registry.register(NuGetLang())  # type: ignore[arg-type]  # fake only implements resolve_package_dir, exercised via dynamic dispatch
     yield
     lang_registry._registry.clear()
     lang_registry._registry.update(saved)
@@ -1179,8 +1186,8 @@ async def test_lockfile_gate_refuses_external_symlinked_lockfile(tmp_path):
         ok = await r._risk_check_lockfiles(project)
 
     assert ok is False, "must refuse rather than scan an external lock file"
-    scan.assert_not_called(), "the lock file must never be read"
-    build.assert_not_called(), "no engine, so nothing reaches deps.dev"
+    scan.assert_not_called()  # the lock file must never be read
+    build.assert_not_called()  # no engine, so nothing reaches deps.dev
 
 
 @pytest.mark.asyncio
@@ -1306,6 +1313,7 @@ async def test_typosquat_corpus_scanned_once_per_package_across_both_gates():
 
     def counting(self, *args, **kwargs):
         normalized = kwargs.get("normalized", args[0] if args else None)
+        assert isinstance(normalized, str), "always called with a name in this test's flow"
         scans.append(normalized)
         return orig(self, *args, **kwargs)
 
@@ -1340,6 +1348,8 @@ async def test_close_gate_resources_closes_db_and_client():
     with _db_patch(), _engine_patch(typo=_typo(), report=_report(0)):
         gates = await r._open_gate_resources()
         await r._close_gate_resources(gates)
+    assert gates is not GATE_RESOURCES_UNAVAILABLE
+    assert gates.pop_client is not None
     gates.db.close.assert_awaited_once()
     gates.pop_client.aclose.assert_awaited_once()
 
@@ -2401,6 +2411,7 @@ async def test_disabled_risk_scoring_builds_no_engine_or_http_client():
         res = await r._open_gate_resources()
         await r._close_gate_resources(res)
     build.assert_not_called()
+    assert res is not GATE_RESOURCES_UNAVAILABLE
     assert res.engine is None
     assert res.detector is not None
     assert res.pop_client is None
@@ -2567,6 +2578,7 @@ async def test_engine_construction_failure_degrades_to_cooldown_only():
         ),
     ):
         res = await r._open_gate_resources()
+    assert res is not GATE_RESOURCES_UNAVAILABLE
     # The DB is still available, so the cooldown gate can run.
     assert res.db is not None
     # ...but risk scoring is unavailable rather than fatal.
@@ -2590,6 +2602,7 @@ async def test_engine_construction_failure_does_not_leak_the_db():
     ):
         res = await r._open_gate_resources()
         await r._close_gate_resources(res)
+    assert res is not GATE_RESOURCES_UNAVAILABLE
     assert open_db.await_count == 1
     res.db.close.assert_awaited_once()
 
@@ -2628,6 +2641,7 @@ async def test_real_engine_failure_degrades_and_leaks_nothing():
     ):
         res = await r._open_gate_resources()
         await r._close_gate_resources(res)
+    assert res is not GATE_RESOURCES_UNAVAILABLE
     assert res.engine is None
     assert res.db is not None
     client.aclose.assert_awaited_once()
@@ -2826,7 +2840,7 @@ async def test_gates_skip_without_retrying_when_given_the_sentinel():
         cool = await r._cooldown_check(ctx, res=GATE_RESOURCES_UNAVAILABLE)
     assert out == {}
     assert cool == []
-    open_db.assert_not_awaited(), "the sentinel means skip, not retry"
+    open_db.assert_not_awaited()  # the sentinel means skip, not retry
 
 
 @pytest.mark.asyncio
@@ -3011,6 +3025,7 @@ async def test_open_gate_resources_does_not_build_httpx_client_when_preflight_di
         res = await r._open_gate_resources()
         await r._close_gate_resources(res)
     pop_client_cls.assert_not_called()
+    assert res is not GATE_RESOURCES_UNAVAILABLE
     assert res.pop_client is None
     assert res.engine is None
     assert res.detector is not None

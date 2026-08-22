@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
 
 from watchdog.events import FileCreatedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
-from watchdog.observers.api import ObservedWatch
+from watchdog.observers.api import BaseObserver, ObservedWatch
 
 from packagealert.config import WatchConfig
 from packagealert.models.events import PackageEvent
@@ -45,7 +46,7 @@ class _Handler(FileSystemEventHandler):
 
     def on_created(self, event: FileCreatedEvent) -> None:
         from packagealert.languages import registry as lang_registry
-        path = Path(event.src_path)
+        path = Path(os.fsdecode(event.src_path))
         for lang in lang_registry.all_languages():
             try:
                 metadata = lang.classify_cache_file(path)
@@ -72,7 +73,7 @@ class _Handler(FileSystemEventHandler):
 class CacheMonitor(AbstractMonitor):
     def __init__(self, cfg: WatchConfig) -> None:
         self._cfg = cfg
-        self._observer: Observer | None = None
+        self._observer: BaseObserver | None = None
         self._handler: _Handler | None = None
         self._queue: asyncio.Queue[PackageEvent] = asyncio.Queue()
         self._running = False
@@ -120,7 +121,7 @@ class CacheMonitor(AbstractMonitor):
 
     def add_site_packages_watch(self, path: Path) -> None:
         """Dynamically register a site-packages directory to watch. Idempotent."""
-        if not self._observer or not path.exists():
+        if not self._observer or not self._handler or not path.exists():
             return
         self._cleanup_dead_watches()
         if path in self._site_package_watches:
@@ -134,7 +135,8 @@ class CacheMonitor(AbstractMonitor):
         for path in dead:
             watch = self._site_package_watches.pop(path)
             try:
-                self._observer.unschedule(watch)
+                if self._observer:
+                    self._observer.unschedule(watch)
             except Exception:
                 log.debug("Failed to unschedule watch for %s", path, exc_info=True)
             log.info("Removed stale site-packages watch: %s", path)

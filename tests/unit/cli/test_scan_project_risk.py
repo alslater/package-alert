@@ -665,6 +665,7 @@ def test_lockfile_mode_passes_no_resolver(tmp_path, env):
     ) as sp:
         sp.return_value = _outcome(_report(20, [("typosquat", 20, "typo")]))
         runner.invoke(app, ["scan-project", str(tmp_path)])
+    assert sp.await_args is not None
     assert sp.await_args.kwargs.get("package_dir_resolver") is None
 
 
@@ -677,6 +678,7 @@ def test_scan_installed_passes_a_resolver(tmp_path, env):
         sp.return_value = _outcome(_report(60, [("subprocess_in_setup", 30, "subprocess")]))
         res = runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
     assert res.exit_code == 0
+    assert sp.await_args is not None
     assert callable(sp.await_args.kwargs.get("package_dir_resolver"))
 
 
@@ -695,6 +697,7 @@ def test_scan_installed_resolver_resolves_a_real_package(tmp_path, env):
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     resolved = captured["resolver"]("pypi", "evil-pkg", "1.0.0")
@@ -710,6 +713,7 @@ def test_scan_installed_resolver_returns_none_for_unknown_package(tmp_path, env)
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     assert captured["resolver"]("pypi", "nonexistent-xyz", "1.0.0") == []
@@ -769,6 +773,7 @@ def test_resolver_finds_packages_in_every_supported_venv_dir(tmp_path, env, venv
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     resolved = captured["resolver"]("pypi", "evil-pkg", "1.0.0")
@@ -797,6 +802,7 @@ def test_resolver_searches_a_second_venv(tmp_path, env):
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     assert captured["resolver"]("pypi", "evil-pkg", "1.0.0") == [[sp_dir / "evil_pkg"]]
@@ -822,6 +828,7 @@ def test_resolver_handles_node_without_an_ecosystem_branch(tmp_path, env):
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     assert captured["resolver"]("npm", "evil-npm", "1.0.0") == [
@@ -845,6 +852,7 @@ def test_resolver_handles_node_with_no_venv_present(tmp_path, env):
     ):
         sp.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp.await_args is not None
         captured["resolver"] = sp.await_args.kwargs["package_dir_resolver"]
 
     assert captured["resolver"]("npm", "evil-npm", "1.0.0") == [
@@ -878,6 +886,7 @@ def test_resolver_picks_the_venv_holding_the_requested_version(tmp_path, env):
     ):
         sp_mock.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp_mock.await_args is not None
         captured["resolver"] = sp_mock.await_args.kwargs["package_dir_resolver"]
 
     resolve = captured["resolver"]
@@ -911,6 +920,7 @@ def test_resolver_returns_every_copy_of_a_duplicated_package(tmp_path, env):
     ):
         sp_mock.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp_mock.await_args is not None
         captured["resolver"] = sp_mock.await_args.kwargs["package_dir_resolver"]
 
     assert captured["resolver"]("pypi", "foo", "1.0.0") == [[d] for d in dirs]
@@ -954,6 +964,7 @@ def test_resolver_groups_a_namespace_packages_owned_directories_together(tmp_pat
     ):
         sp_mock.return_value = _outcome(None)
         runner.invoke(app, ["scan-project", str(tmp_path), "--scan-installed"])
+        assert sp_mock.await_args is not None
         captured["resolver"] = sp_mock.await_args.kwargs["package_dir_resolver"]
 
     resolved = captured["resolver"]("pypi", "google-auth", "2.56.3")
@@ -1007,16 +1018,18 @@ def test_a_clean_scan_and_a_failed_pass_differ_in_json(tmp_path, env):
 
 def test_scan_result_carries_the_failure_count():
     """Plugin on_scan_complete consumers need the same distinction."""
+    from datetime import UTC, datetime
+
     from packagealert.models.scans import ScanResult
 
     assert ScanResult(
         project_path="/p", scan_type="project", finding_count=0,
-        findings=[], sources=[], scanned_at=None,
+        findings=[], sources=[], scanned_at=datetime.now(UTC),
     ).risk_failures == 0
 
     scan = ScanResult(
         project_path="/p", scan_type="project", finding_count=0,
-        findings=[], sources=[], scanned_at=None, risk_failures=4,
+        findings=[], sources=[], scanned_at=datetime.now(UTC), risk_failures=4,
     )
     assert scan.risks == []
     assert scan.risk_failures == 4

@@ -335,6 +335,7 @@ def test_damping_context_in_report():
         damping=ctx,
     )
     assert report.damping is ctx
+    assert report.damping is not None
     assert report.damping.combined_factor == 0.4
     assert report.damping.notes == ["test note"]
 
@@ -481,6 +482,7 @@ async def test_unpopular_package_no_dampening():
         mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
         report = await engine.analyze(_event(), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.popularity_factor > 0.99
     assert report.score >= 19  # barely dampened: floor(20 * ~0.998) = 19
 
@@ -505,6 +507,7 @@ async def test_old_version_heuristic_signals_dampened():
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(0.25)
 
 
@@ -528,6 +531,7 @@ async def test_new_version_within_cooldown_no_age_dampening():
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(1.0)
 
 
@@ -550,6 +554,7 @@ async def test_combined_floor_applied():
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.combined_factor == pytest.approx(0.1)
     assert report.score == math.floor(20 * 0.1)
 
@@ -675,6 +680,7 @@ async def test_popularity_unavailable_warning_logged(caplog):
         with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
             report = await engine.analyze(_event(), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert any("popularity" in r.message.lower() for r in caplog.records)
     pop_cache.store_failure_sentinel.assert_awaited()
@@ -699,6 +705,7 @@ async def test_popularity_genuine_404_during_damping_neutral_no_sentinel(caplog)
         with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
             report = await engine.analyze(_event(), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert any("not found" in n for n in report.damping.notes)
     assert not any("popularity" in r.message.lower() for r in caplog.records)
@@ -749,6 +756,7 @@ async def test_popularity_unsupported_ecosystem_no_warning(caplog):
         with caplog.at_level(logging.WARNING, logger="packagealert.analyzers.risk"):
             report = await engine.analyze(_event(ecosystem="packagist"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.popularity_factor == pytest.approx(1.0)
     assert "unsupported ecosystem" in " ".join(report.damping.notes)
     assert not any("popularity" in r.message.lower() for r in caplog.records)
@@ -778,6 +786,7 @@ async def test_age_fetch_failure_factor_neutral_noted():
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("age data unavailable" in n for n in report.damping.notes)
     mock_sentinel.assert_awaited_once()
@@ -802,6 +811,7 @@ async def test_age_not_found_factor_neutral_noted():
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("not found" in n for n in report.damping.notes)
 
@@ -822,6 +832,7 @@ async def test_no_db_age_factor_neutral_noted():
         mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
         report = await engine.analyze(_event(), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("age data unavailable" in n for n in report.damping.notes)
 
@@ -843,6 +854,7 @@ async def test_version_count_fallback_when_dependent_count_zero():
         mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
         report = await engine.analyze(_event(), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.popularity_factor == pytest.approx(0.25)
 
 
@@ -871,6 +883,7 @@ async def test_misconfigured_max_damping_age_logs_warning(caplog):
             mock_typo.analyze = AsyncMock(return_value=MagicMock(is_typosquat=False, closest_match=None, score=0))
             report = await engine.analyze(_event(ecosystem="npm"), package_dirs=[])
 
+    assert report.damping is not None
     assert report.damping.age_factor == pytest.approx(1.0)
     assert any("max_damping_age_days" in r.message for r in caplog.records)
 
@@ -902,6 +915,7 @@ async def test_multi_signal_floor_applied_once():
         report = await engine.analyze(_event(), package_dirs=[])
 
     # factor = 0.5 (ratio=1.0 at threshold); floor(9*0.5 + 9*0.5) = floor(9.0) = 9
+    assert report.damping is not None
     assert report.damping.combined_factor == pytest.approx(0.5)
     assert report.score == 9
     assert sum(s.score for s in report.signals) == report.score
@@ -1024,7 +1038,7 @@ async def test_popularity_transient_failure_stores_sentinel_suppresses_signal():
 # ---------------------------------------------------------------------------
 
 
-def _typo_result(score=20, distance=1, match="httpx", affix=False):
+def _typo_result(score=20, distance: int | None = 1, match="httpx", affix=False):
     from packagealert.heuristics.typosquat import TyposquatResult
     return TyposquatResult(
         is_typosquat=True, closest_match=match, distance=distance,
@@ -1035,6 +1049,8 @@ def _typo_result(score=20, distance=1, match="httpx", affix=False):
 def _engine_with_pop(cfg, popularity):
     """Engine whose popularity lookup returns *popularity* (a PackagePopularity)."""
     engine = RiskEngine(cfg, pop_client=MagicMock(), pop_cache=MagicMock())
+    assert engine._pop_client is not None
+    assert engine._pop_cache is not None
     engine._pop_client.supports_ecosystem = MagicMock(return_value=True)
     engine._pop_cache.get = AsyncMock(return_value=popularity)
     return engine
@@ -1131,7 +1147,8 @@ async def test_popularity_fetched_once_for_both_signals(event, cfg):
                      return_value=_typo_result(score=20)),
     ):
         await engine.analyze(event, package_dirs=[])
-    assert engine._pop_cache.get.await_count == 1
+    assert engine._pop_cache is not None
+    assert engine._pop_cache.get.await_count == 1  # type: ignore[attr-defined]  # AsyncMock swapped in by _engine_with_pop
 
 
 @pytest.mark.asyncio

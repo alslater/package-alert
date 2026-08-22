@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -489,7 +490,7 @@ def _collect_pylock_packages(
         return pinned, unpinned
 
     default_groups = data.get("default-groups")
-    marker_environment: dict[str, object] = (
+    marker_environment: dict[str, str | AbstractSet[str]] = (
         {"dependency_groups": frozenset(default_groups)}
         if isinstance(default_groups, list) and all(isinstance(g, str) for g in default_groups)
         else {}

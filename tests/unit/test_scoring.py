@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from packagealert.models.risk import RiskReport
+from packagealert.scoring import PackageKey
 
 
 def _report(name, score):
@@ -18,7 +19,7 @@ async def test_scores_all_packages():
     engine = AsyncMock()
     engine.analyze.side_effect = lambda ev, d, w=None: _report(ev.package_name, 30)
 
-    pkgs = [("pypi", "a", "1.0"), ("pypi", "b", "2.0")]
+    pkgs: list[PackageKey] = [("pypi", "a", "1.0"), ("pypi", "b", "2.0")]
     out = await score_packages(engine, pkgs)
 
     assert out.failures == 0
@@ -95,7 +96,7 @@ async def test_concurrency_is_bounded():
     engine = AsyncMock()
     engine.analyze.side_effect = analyze
 
-    pkgs = [("pypi", f"p{i}", "1.0") for i in range(25)]
+    pkgs: list[PackageKey] = [("pypi", f"p{i}", "1.0") for i in range(25)]
     out = await score_packages(engine, pkgs, concurrency=4)
 
     assert peak <= 4
@@ -705,7 +706,9 @@ async def test_str_resolver_return_is_rejected_not_iterated():
     engine.analyze.side_effect = analyze
 
     out = await score_packages(
-        engine, [("pypi", "a", "1.0")], package_dir_resolver=lambda e, n, v: "/sp/a"
+        engine,
+        [("pypi", "a", "1.0")],
+        package_dir_resolver=lambda e, n, v: "/sp/a",  # type: ignore[arg-type]  # deliberately invalid: str must be rejected, not iterated
     )
     # Exactly one metadata-only call, not one per character.
     assert seen == [[]], f"str was iterated into {seen}"
@@ -721,7 +724,9 @@ async def test_bytes_resolver_return_is_rejected():
     engine.analyze.side_effect = lambda ev, d, w=None: _report(ev.package_name, 20)
 
     await score_packages(
-        engine, [("pypi", "a", "1.0")], package_dir_resolver=lambda e, n, v: b"/sp/a"
+        engine,
+        [("pypi", "a", "1.0")],
+        package_dir_resolver=lambda e, n, v: b"/sp/a",  # type: ignore[arg-type]  # deliberately invalid: bytes must be rejected
     )
     assert engine.analyze.await_args.args[1] == []
 
@@ -759,7 +764,8 @@ async def test_list_containing_non_paths_drops_the_bad_entries():
     await score_packages(
         engine,
         [("pypi", "a", "1.0")],
-        package_dir_resolver=lambda e, n, v: ["/sp/bad", good, None, 7],
+        # deliberately invalid: only the real Path must survive filtering.
+        package_dir_resolver=lambda e, n, v: ["/sp/bad", good, None, 7],  # type: ignore[arg-type]
     )
     assert seen == [[good]], f"expected only the real Path, got {seen}"
 
@@ -772,7 +778,9 @@ async def test_list_of_only_bad_entries_degrades_to_metadata_only():
     engine.analyze.side_effect = lambda ev, d, w=None: _report(ev.package_name, 10)
 
     out = await score_packages(
-        engine, [("pypi", "a", "1.0")], package_dir_resolver=lambda e, n, v: ["/a", "/b"]
+        engine,
+        [("pypi", "a", "1.0")],
+        package_dir_resolver=lambda e, n, v: ["/a", "/b"],  # type: ignore[arg-type]  # deliberately invalid: no real Path entries
     )
     assert out.failures == 0
     assert engine.analyze.await_args.args[1] == []
@@ -859,7 +867,8 @@ async def test_non_path_entries_in_a_nested_group_are_logged_with_package_contex
         await score_packages(
             engine,
             [("pypi", "google-auth", "2.56.3")],
-            package_dir_resolver=lambda e, n, v: [[good, "/sp/bad", None]],
+            # deliberately invalid: non-Path entries in a nested group must be logged.
+            package_dir_resolver=lambda e, n, v: [[good, "/sp/bad", None]],  # type: ignore[arg-type]
         )
 
     assert "pypi/google-auth" in caplog.text, (
@@ -1130,7 +1139,8 @@ async def test_custom_sequence_resolver_return_degrades_to_metadata_only():
     outcome = await score_packages(
         engine,
         [("pypi", "a", "1.0")],
-        package_dir_resolver=lambda e, n, v: CustomSeq([Path("/sp/a")]),
+        # deliberately invalid: a custom Sequence is not list/tuple and must degrade.
+        package_dir_resolver=lambda e, n, v: CustomSeq([Path("/sp/a")]),  # type: ignore[arg-type]
     )
     # Scored metadata-only rather than failed.
     assert outcome.failures == 0
@@ -1167,7 +1177,7 @@ async def test_every_package_is_scored_across_batch_boundaries():
     from packagealert.scoring import _SCHEDULE_BATCH, score_packages
 
     n = _SCHEDULE_BATCH * 2 + 7  # spans three batches, last one partial
-    keys = [("pypi", f"p{i}", "1.0") for i in range(n)]
+    keys: list[PackageKey] = [("pypi", f"p{i}", "1.0") for i in range(n)]
 
     scored: list[str] = []
 
@@ -1222,7 +1232,7 @@ async def test_a_failure_in_one_batch_does_not_stop_later_batches():
     from packagealert.scoring import _SCHEDULE_BATCH, score_packages
 
     n = _SCHEDULE_BATCH + 10
-    keys = [("pypi", f"p{i}", "1.0") for i in range(n)]
+    keys: list[PackageKey] = [("pypi", f"p{i}", "1.0") for i in range(n)]
 
     async def analyze(ev, d, w=None):
         if ev.package_name == "p0":

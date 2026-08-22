@@ -139,7 +139,10 @@ def _parse_publication_date(data: object, *, ecosystem: str, version: str | None
         parse = getattr(lang, "publication_date_parse", None)
         if not callable(parse):
             return None
-        return parse(data, version)
+        result = parse(data, version)
+        if isinstance(result, bool):
+            return None
+        return float(result) if isinstance(result, (int, float)) else None
     except Exception:
         log.warning(
             "publication_date_parse raised for lang=%s ecosystem=%s — treating the "
@@ -168,7 +171,8 @@ async def fetch_latest_version(url: str, lang: object, name: str) -> str | None:
         parse_fn = getattr(lang, "latest_version_parse", None)
         if not callable(parse_fn):
             return None
-        return parse_fn(resp.json(), name)
+        result = parse_fn(resp.json(), name)
+        return result if isinstance(result, str) else None
     except Exception as exc:  # noqa: BLE001 — malformed registry response or plugin failure, fail open
         log.debug("Failed to parse latest version from %s: %s", url, exc)
         return None

@@ -139,7 +139,8 @@ class ScheduledScanner:
                     fresh = await osv_client.batch_query(uncached_queries)
                     for q, r in zip(uncached_queries, fresh):
                         if r:
-                            await osv_cache.set(*q, r)
+                            ecosystem, package_name, version = q
+                            await osv_cache.set(ecosystem, package_name, version, r)
                 for osv_result in cached + fresh:
                     if not osv_result or not osv_result.advisories:
                         continue
@@ -168,7 +169,7 @@ class ScheduledScanner:
         result = detect_project(project_path)
         if not result.sources:
             return [], []
-        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned]
+        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
         findings = await self._run_osv_queries(queries)
         return findings, result.sources
 

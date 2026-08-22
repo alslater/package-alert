@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -23,6 +24,7 @@ from packagealert.languages.base import (
     SandboxEnvError,
     SandboxScanError,
     SandboxTargets,
+    ShellEnvironment,
 )
 from packagealert.parsers.process_args import (
     ParsedInstall,
@@ -437,15 +439,20 @@ class SandboxRunner:
                     prepare_env_fn = None
                 if callable(prepare_env_fn):
                     try:
-                        extra_write = prepare_env_fn(parsed, cwd, sandbox_env)
+                        raw_extra_write = prepare_env_fn(parsed, cwd, sandbox_env)
                     except SandboxEnvError as exc:
                         self._console.print(str(exc), style="bold red", markup=False)
                         return 1
                     except Exception:
                         log.warning("prepare_sandbox_env raised for lang=%s — skipping",
                                     getattr(lang, "name", "?"), exc_info=True)
-                        extra_write = []
+                        raw_extra_write = []
                     else:
+                        extra_write: list[Path] = (
+                            [p for p in raw_extra_write if isinstance(p, Path)]
+                            if isinstance(raw_extra_write, list)
+                            else []
+                        )
                         for p in extra_write:
                             if p not in ctx.write_dirs:
                                 ctx.write_dirs.append(p)
@@ -532,14 +539,21 @@ class SandboxRunner:
                     try:
                         prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
                         if callable(prepare_fn):
-                            argv = prepare_fn(argv, cwd)
+                            raw_argv = prepare_fn(argv, cwd)
+                            if isinstance(raw_argv, list) and all(isinstance(a, str) for a in raw_argv):
+                                argv = raw_argv
                     except Exception:
                         log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
                     editable_roots = self._cfg.sandbox.editable_roots
                     try:
                         extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
                         if callable(extra_ro_fn):
-                            for p in extra_ro_fn(argv, cwd):
+                            extra_ro_paths = extra_ro_fn(argv, cwd)
+                            for p in (
+                                [q for q in extra_ro_paths if isinstance(q, Path)]
+                                if isinstance(extra_ro_paths, list)
+                                else []
+                            ):
                                 if _is_safe_sandbox_path(p, editable_roots):
                                     home_ro.append(p.resolve())
                                 else:
@@ -550,7 +564,12 @@ class SandboxRunner:
                     try:
                         extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
                         if callable(extra_write_fn):
-                            for p in extra_write_fn(argv, cwd):
+                            extra_write_paths = extra_write_fn(argv, cwd)
+                            for p in (
+                                [q for q in extra_write_paths if isinstance(q, Path)]
+                                if isinstance(extra_write_paths, list)
+                                else []
+                            ):
                                 if _is_safe_sandbox_path(p, editable_roots):
                                     ctx.write_dirs.append(p.resolve())
                                 else:
@@ -607,7 +626,12 @@ class SandboxRunner:
             if lang is not None:
                 try:
                     post_run_fn = getattr(lang, "post_run_scan_targets", None)
-                    targets = post_run_fn(parsed, cwd) if callable(post_run_fn) else []
+                    raw_targets = post_run_fn(parsed, cwd) if callable(post_run_fn) else []
+                    targets = (
+                        raw_targets
+                        if isinstance(raw_targets, list) and all(isinstance(t, Path) for t in raw_targets)
+                        else []
+                    )
                 except Exception:
                     log.warning(
                         "post_run_scan_targets raised for lang=%s — skipping",
@@ -704,7 +728,7 @@ class SandboxRunner:
         flags_by_lang: dict[str, frozenset[str]],
         cwd: Path,
         targets: SandboxTargets,
-        parsed_by_lang: dict[str, ParsedInstall | None],
+        parsed_by_lang: Mapping[str, ParsedInstall | None],
     ) -> list[tuple[Path, Path]]:
         """Collect writable-bind pairs and print any security warnings via the runner console.
 
@@ -1306,7 +1330,8 @@ class SandboxRunner:
                     if lang_for_latest is not None:
                         try:
                             latest_url_fn = getattr(lang_for_latest, "latest_version_url", None)
-                            latest_url = latest_url_fn(name) if callable(latest_url_fn) else None
+                            raw_latest_url = latest_url_fn(name) if callable(latest_url_fn) else None
+                            latest_url = raw_latest_url if isinstance(raw_latest_url, str) else None
                         except Exception:
                             log.warning("latest_version_url raised for lang=%s pkg=%s — skipping", getattr(lang_for_latest, "name", "?"), name, exc_info=True)
                             latest_url = None
@@ -1325,7 +1350,7 @@ class SandboxRunner:
                 lang = lang_registry.for_ecosystem(ecosystem)
                 if lang is None:
                     continue
-                url = lang.publication_date_url(pkg.name, pkg.version)
+                url = lang.publication_date_url(pkg.name, version)
                 if url is None:
                     # Ecosystem has not opted into cooldown — skip entirely.
                     # The typosquat check is also skipped: without a publication
@@ -1480,7 +1505,10 @@ class SandboxRunner:
                 shell_env_fn = getattr(lang, "shell_environment", None)
                 if not callable(shell_env_fn):
                     continue
-                lang_shell = shell_env_fn(cwd)
+                raw_lang_shell = shell_env_fn(cwd)
+                if not isinstance(raw_lang_shell, ShellEnvironment):
+                    continue
+                lang_shell = raw_lang_shell
             except Exception:
                 log.warning("shell_environment raised for lang=%s — skipping",
                             getattr(lang, "name", "?"), exc_info=True)
@@ -1692,7 +1720,8 @@ class SandboxRunner:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
                         if r:
-                            await cache.set(*q, r)
+                            ecosystem, package_name, version = q
+                            await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
@@ -1884,7 +1913,8 @@ class SandboxRunner:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
                         if r:
-                            await cache.set(*q, r)
+                            ecosystem, package_name, version = q
+                            await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
@@ -2020,7 +2050,8 @@ class SandboxRunner:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
                         if r:
-                            await cache.set(*q, r)
+                            ecosystem, package_name, version = q
+                            await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
@@ -2064,7 +2095,8 @@ class SandboxRunner:
                 results = await client.batch_query(batch)
                 for q, r in zip(batch, results):
                     if r:
-                        await cache.set(*q, r)
+                        ecosystem, package_name, version = q
+                        await cache.set(ecosystem, package_name, version, r)
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
@@ -2429,7 +2461,8 @@ def _resolve_installed_dir(
     try:
         warning_fn = getattr(lang, "resolve_package_dir_manifest_warning", None)
         if callable(warning_fn):
-            warning = warning_fn(name, project_path, scan_root, version=version)
+            raw_warning = warning_fn(name, project_path, scan_root, version=version)
+            warning = raw_warning if isinstance(raw_warning, str) else None
     except Exception:
         log.warning(
             "resolve_package_dir_manifest_warning raised for lang=%s pkg=%s — skipping",
@@ -2482,7 +2515,12 @@ def _home_ro_dirs() -> list[Path]:
         try:
             home_ro_fn = getattr(lang, "home_ro_paths", None)
             if callable(home_ro_fn):
-                result.extend(p for p in home_ro_fn() if p.exists() and p not in result)
+                lang_home_ro = home_ro_fn()
+                if isinstance(lang_home_ro, list):
+                    result.extend(
+                        p for p in lang_home_ro
+                        if isinstance(p, Path) and p.exists() and p not in result
+                    )
         except Exception:
             log.warning("home_ro_paths raised for lang=%s — skipping",
                         getattr(lang, "name", "?"), exc_info=True)
@@ -2692,7 +2730,7 @@ def _collect_writable_binds(
     flags_by_lang: dict[str, frozenset[str]],
     cwd: Path,
     targets: SandboxTargets,
-    parsed_by_lang: dict[str, ParsedInstall | None],
+    parsed_by_lang: Mapping[str, ParsedInstall | None],
 ) -> tuple[list[tuple[Path, Path]], list[str]]:
     """Collect (src, dest) writable-bind pairs and security warnings from all language modules.
 
@@ -2784,7 +2822,7 @@ def _collect_writable_binds(
                     warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
                     if callable(warn_fn):
                         msg = warn_fn(parsed, cwd, lang_flags, targets)
-                        if msg:
+                        if isinstance(msg, str) and msg:
                             warnings.append(msg)
                 except Exception:
                     log.warning(
@@ -3006,7 +3044,10 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     try:
         resolve_fn = getattr(lang, "resolve_sandbox_targets", None)
         if callable(resolve_fn):
-            result = resolve_fn(ctx.parsed, ctx.cwd)
+            raw_result = resolve_fn(ctx.parsed, ctx.cwd)
+            if not isinstance(raw_result, SandboxTargets):
+                return
+            result = raw_result
             # Validate ALL paths returned by the language plugin before accepting
             # them — a malicious or buggy plugin could otherwise cause the runner
             # to expose credential dirs, snapshot sensitive data, or bind-mount
@@ -3370,7 +3411,11 @@ def _collect_new_packages(
                 detect_fn = getattr(lang, "detect_new_packages", None)
                 if callable(detect_fn):
                     pkg_specs = detect_fn(new_paths, walk_root)
-                    for ps in pkg_specs:
+                    for ps in (
+                        [s for s in pkg_specs if isinstance(s, PackageSpec)]
+                        if isinstance(pkg_specs, list)
+                        else []
+                    ):
                         new.append((ps.ecosystem, ps.name, ps.version, walk_root))
             except Exception:
                 log.warning("detect_new_packages raised for lang=%s — skipping",

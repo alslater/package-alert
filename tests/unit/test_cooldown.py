@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from packagealert.config import CooldownAction, NonInteractiveAction
 from packagealert.languages.base import PackageSpec
 from packagealert.storage.db import open_db
 
@@ -37,7 +38,12 @@ def test_cooldown_cleared_table_exists(tmp_path):
     assert row is not None
 
 
-def _make_cfg(period_days=7, on_new_medium_risk="prompt", on_new_low_risk="warn", non_interactive_escalation="block"):
+def _make_cfg(
+    period_days=7,
+    on_new_medium_risk: CooldownAction = "prompt",
+    on_new_low_risk: CooldownAction = "warn",
+    non_interactive_escalation: NonInteractiveAction = "block",
+):
     from packagealert.config import CooldownConfig
     return CooldownConfig(
         period_days=period_days,

@@ -99,6 +99,8 @@ async def test_add_both_scan_types_for_same_project(db):
     await add_project(db, path="/home/user/myapp", schedule="weekly", scan_type="installed")
     p1 = await get_project(db, "/home/user/myapp", "project")
     p2 = await get_project(db, "/home/user/myapp", "installed")
+    assert p1 is not None
+    assert p2 is not None
     assert p1.schedule == "daily"
     assert p2.schedule == "weekly"
     # Both coexist independently
@@ -111,6 +113,7 @@ async def test_add_project_duplicate_updates_schedule(db):
     await add_project(db, path="/home/user/myapp", schedule="daily", scan_type="project")
     await add_project(db, path="/home/user/myapp", schedule="weekly", scan_type="project")
     p = await get_project(db, "/home/user/myapp", "project")
+    assert p is not None
     assert p.schedule == "weekly"
     assert p.scan_type == "project"
 
@@ -160,6 +163,8 @@ async def test_update_last_scanned(db):
     await update_last_scanned(db, "/home/user/myapp", "project", t)
     p_project = await get_project(db, "/home/user/myapp", "project")
     p_installed = await get_project(db, "/home/user/myapp", "installed")
+    assert p_project is not None
+    assert p_installed is not None
     assert p_project.last_scanned_at == pytest.approx(t)
     assert p_installed.last_scanned_at is None  # unaffected
 
@@ -225,6 +230,7 @@ async def test_max_severity_none_when_no_findings(db):
     rec_id = await save_scan_result(db, project_path="/p", schedule="daily",
                                     scan_type="project", findings=[], sources=["uv.lock"])
     rec = await get_scan_result(db, rec_id)
+    assert rec is not None
     assert rec.max_severity is None
     assert rec.finding_count == 0
 

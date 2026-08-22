@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any
 
 import httpx
 
@@ -15,6 +15,7 @@ from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
     PackageMetadata,
     PackageSpec,
+    PreRunResult,
     ProcessInstall,
     SandboxPaths,
     SandboxTargets,
@@ -53,8 +54,14 @@ def _normalise_version(version: str | None) -> str | None:
 
 class PhpLanguage:
     name = "php"
-    ecosystems: ClassVar[list[str]] = ["Packagist"]
-    process_names: ClassVar[list[str]] = ["composer", "php", "php8", "php7"]
+    # Not annotated ClassVar: LanguageBase declares these as read-only
+    # properties (to admit both class-level and per-instance implementers -
+    # see base.py), and pyright only accepts a plain class attribute against
+    # a property, not one explicitly typed ClassVar. Safe to share across
+    # calls regardless — there is exactly one PhpLanguage instance per
+    # process and nothing ever mutates the list in place.
+    ecosystems = ["Packagist"]  # noqa: RUF012
+    process_names = ["composer", "php", "php8", "php7"]  # noqa: RUF012
     contract_version = CURRENT_CONTRACT_VERSION
     author = "builtin"
     repository = "builtin"
@@ -195,6 +202,76 @@ class PhpLanguage:
         return [
             "COMPOSER_HOME", "COMPOSER_CACHE_DIR", "COMPOSER_MIRROR",
         ]
+
+    # ------------------------------------------------------------------
+    # Optional sandbox/flag extension points (no composer-specific behaviour yet)
+    # ------------------------------------------------------------------
+
+    def available_flags(self) -> list[tuple[str, str]]:
+        return []
+
+    def popularity_ecosystem(self) -> str | None:
+        return None
+
+    def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
+        return argv
+
+    def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
+        return []
+
+    def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
+        return []
+
+    def pre_run_check(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str] = frozenset(),
+    ) -> PreRunResult:
+        return PreRunResult(ok=True)
+
+    def configure_sandbox(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+        home_ro: list[Path],
+        sandbox_env: dict[str, str],
+    ) -> None:
+        pass
+
+    def configure_sandbox_writable(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> list[tuple[Path, Path]]:
+        return []
+
+    def configure_sandbox_writable_warning(
+        self,
+        parsed: Any | None,
+        cwd: Path,
+        flags: frozenset[str],
+        targets: SandboxTargets,
+    ) -> str | None:
+        return None
+
+    def prepare_sandbox_env(
+        self,
+        parsed: Any,
+        cwd: Path,
+        env: dict[str, str],
+    ) -> list[Path]:
+        return []
+
+    def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
+        return None
 
     # ------------------------------------------------------------------
     # shell_environment

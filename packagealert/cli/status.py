@@ -375,6 +375,7 @@ async def gather_status(
                 "SELECT COUNT(*) as cnt FROM alerts WHERE alerted_at >= ?", (cutoff,)
             ) as cur:
                 row = await cur.fetchone()
+                assert row is not None, "COUNT(*) always returns exactly one row"
                 alerts_count = row["cnt"]
 
             async with db.execute(
@@ -401,6 +402,7 @@ async def gather_status(
 
             async with db.execute("SELECT COUNT(*) as cnt FROM scheduled_projects") as cur:
                 row = await cur.fetchone()
+                assert row is not None, "COUNT(*) always returns exactly one row"
                 scheduled_count = row["cnt"]
 
             if "pa-central" in cfg.plugins.enabled:

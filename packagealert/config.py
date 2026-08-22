@@ -65,18 +65,18 @@ class HeuristicsConfig(BaseModel):
     enabled: bool = True
     warning_threshold: int = 40
     critical_threshold: int = 70
-    top_packages_refresh_days: int = Field(7, ge=1)
+    top_packages_refresh_days: int = Field(default=7, ge=1)
     # Popularity damper
-    high_dependent_count: int = Field(1000, ge=1)
-    high_version_count: int = Field(50, ge=1)
-    popularity_floor: float = Field(0.25, ge=0.0, le=1.0)
-    popularity_failure_ttl_minutes: int = Field(60, ge=1)
+    high_dependent_count: int = Field(default=1000, ge=1)
+    high_version_count: int = Field(default=50, ge=1)
+    popularity_floor: float = Field(default=0.25, ge=0.0, le=1.0)
+    popularity_failure_ttl_minutes: int = Field(default=60, ge=1)
     # Age damper
-    age_failure_ttl_minutes: int = Field(60, ge=1)
-    max_damping_age_days: int = Field(90, ge=1)
-    age_floor: float = Field(0.25, ge=0.0, le=1.0)
+    age_failure_ttl_minutes: int = Field(default=60, ge=1)
+    max_damping_age_days: int = Field(default=90, ge=1)
+    age_floor: float = Field(default=0.25, ge=0.0, le=1.0)
     # Combined
-    combined_damping_floor: float = Field(0.1, ge=0.0, le=1.0)
+    combined_damping_floor: float = Field(default=0.1, ge=0.0, le=1.0)
 
 
 # The single definition of a gate action, shared by the cooldown gate, the pre-flight
@@ -101,7 +101,7 @@ NonInteractiveAction = Literal["allow", "warn", "block"]
 
 
 class CooldownConfig(BaseModel):
-    period_days: int = Field(7, ge=1)
+    period_days: int = Field(default=7, ge=1)
     on_new_medium_risk: CooldownAction = "prompt"
     on_new_low_risk: CooldownAction = "warn"
     non_interactive_escalation: NonInteractiveAction = "block"
@@ -120,13 +120,13 @@ class PreflightRiskConfig(BaseModel):
     """
 
     enabled: bool = True
-    risk_threshold: int = Field(25, ge=0)
+    risk_threshold: int = Field(default=25, ge=0)
     on_typosquat: CooldownAction = "prompt"
     # Only typosquat matches at or below this edit distance trigger on_typosquat;
     # more distant matches are reported as warnings. Defaults to the detector's
     # own threshold (2) because false positives are now handled by scoring rather
     # than by distance: see typosquat_min_score.
-    typosquat_max_distance: int = Field(2, ge=1)
+    typosquat_max_distance: int = Field(default=2, ge=1)
     # Minimum typosquat signal score required to trigger on_typosquat. The raw
     # score is 20 (distance 1) or 15 (distance 2); the risk engine reduces it in
     # proportion to the suspect's own adoption, and a version-suffix variant
@@ -140,7 +140,7 @@ class PreflightRiskConfig(BaseModel):
     # registry, gates); urlib3 -> 20 (gates). These figures are pinned by
     # tests/unit/test_risk_engine.py::test_documented_httpx2_calibration_is_exact
     # — update them together with the adoption constants in analyzers/risk.py.
-    typosquat_min_score: int = Field(15, ge=0)
+    typosquat_min_score: int = Field(default=15, ge=0)
     on_high_risk: CooldownAction = "warn"
     # See NonInteractiveAction: "prompt" is excluded because escalating prompt to
     # prompt leaves Confirm.ask() to run against a non-TTY stdin.
@@ -153,12 +153,12 @@ class PreflightRiskConfig(BaseModel):
     # Damping reduces these further for packages with real publication history —
     # an observed four-signal npm package landed at 46 — so a higher threshold
     # silently misses genuine attacks.
-    post_install_threshold: int = Field(30, ge=0)
+    post_install_threshold: int = Field(default=30, ge=0)
     on_post_install_risk: CooldownAction = "warn"
 
 
 class FileSystemBackendConfig(BaseModel):
-    snapshot_file_size_limit: int = Field(10 * 1024 * 1024, ge=0)  # 10 MB in bytes
+    snapshot_file_size_limit: int = Field(default=10 * 1024 * 1024, ge=0)  # 10 MB in bytes
 
 
 _KNOWN_BACKENDS: frozenset[str] = frozenset({"filesystem"})
@@ -198,17 +198,17 @@ class SandboxConfig(BaseModel):
 
 class SchedulerConfig(BaseModel):
     enabled: bool = True
-    daily_hour: int = Field(2, ge=0, le=23)   # 0-23: hour of day to run daily scans
-    weekly_day: int = Field(6, ge=0, le=6)    # 0=Monday … 6=Sunday
-    weekly_hour: int = Field(2, ge=0, le=23)  # 0-23: hour of day to run weekly scans
-    max_scan_history: int = Field(5, ge=1)
+    daily_hour: int = Field(default=2, ge=0, le=23)   # 0-23: hour of day to run daily scans
+    weekly_day: int = Field(default=6, ge=0, le=6)    # 0=Monday … 6=Sunday
+    weekly_hour: int = Field(default=2, ge=0, le=23)  # 0-23: hour of day to run weekly scans
+    max_scan_history: int = Field(default=5, ge=1)
 
 
 class CentralPluginConfig(BaseModel):
     api_key: str = ""
     server_url: str = ""
-    heartbeat_interval_seconds: int = Field(300, ge=60)
-    config_fetch_interval_seconds: int = Field(3600, ge=60)
+    heartbeat_interval_seconds: int = Field(default=300, ge=60)
+    config_fetch_interval_seconds: int = Field(default=3600, ge=60)
     allow_http: bool = False
 
 
