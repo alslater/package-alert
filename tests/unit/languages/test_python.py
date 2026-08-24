@@ -1415,6 +1415,226 @@ def test_uv_lock_shared_transitive_dep_is_prod(lang: PythonLanguage, tmp_path: P
     assert by_name["urllib3"].is_dev is False  # in both trees — conservative prod
 
 
+def test_uv_lock_excludes_dep_gated_by_inapplicable_marker(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A dependency edge marked for a platform this interpreter isn't running on
+    (e.g. httpx2's real sys_platform == 'emscripten' dependency on httpx2-jsfetch)
+    must not be treated as reachable from the root project — it will never
+    actually be installed here.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "httpx2" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "httpx2"\n'
+        'version = "2.12.0"\n'
+        'dependencies = [\n'
+        '    { name = "httpx2-jsfetch", marker = "sys_platform == \'emscripten\'" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "httpx2-jsfetch"\n'
+        'version = "1.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    names = {p.name for p in result}
+    assert "httpx2-jsfetch" not in names
+    assert "httpx2" in names
+
+
+def test_uv_lock_python_version_marker_fails_open(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A dependency edge gated on python_version/python_full_version must not be
+    excluded, even if it evaluates False against package-alert's own interpreter.
+
+    parse_lockfile() has no target-venv context (unlike the pylock.toml parser
+    in parsers/lockfiles.py, which resolves one) — evaluating such a marker
+    against the wrong interpreter risks a false negative (silently dropping a
+    dependency the target project's real Python actually installs), which is
+    worse than the false positive of over-including a platform-inapplicable
+    one. Only markers insensitive to this ambiguity (sys_platform, os_name,
+    etc.) are evaluated for exclusion; python_version markers fail open.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "futurepkg" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "futurepkg"\n'
+        'version = "1.0.0"\n'
+        'dependencies = [\n'
+        '    { name = "futuredep", marker = "python_version >= \'4.0\'" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "futuredep"\n'
+        'version = "1.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    names = {p.name for p in result}
+    assert "futuredep" in names
+
+
+def test_uv_lock_extra_marker_fails_open(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A dependency edge gated on `extra == '...'` must not be excluded.
+
+    packaging.markers.Marker.evaluate() defaults `extra` to '' when no
+    environment dict is supplied (unlike dependency_groups, which raises
+    UndefinedEnvironmentName and is already caught by the exception-based
+    fail-open path below) — so `extra == 'foo'` silently evaluates False
+    regardless of what extras a real `uv sync --extra foo` selected.
+    parse_lockfile() has no selected-extras context, so this must fail open
+    the same way python_version/implementation_name do, rather than
+    excluding a dependency that a real install with that extra would pull in.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "extrapkg" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "extrapkg"\n'
+        'version = "1.0.0"\n'
+        'dependencies = [\n'
+        '    { name = "extradep", marker = "extra == \'foo\'" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "extradep"\n'
+        'version = "1.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    names = {p.name for p in result}
+    assert "extradep" in names
+
+
+def test_uv_lock_implementation_name_marker_fails_open(lang: PythonLanguage, tmp_path: Path) -> None:
+    """A dependency edge gated on implementation_name/implementation_version/
+    platform_python_implementation must not be excluded, even if it evaluates
+    False against package-alert's own (CPython) interpreter.
+
+    Same false-negative risk as python_version: scanning a PyPy target's
+    uv.lock from package-alert's CPython would otherwise falsely evaluate
+    `implementation_name == 'PyPy'` as False and silently drop a real
+    dependency.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "pypypkg" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pypypkg"\n'
+        'version = "1.0.0"\n'
+        'dependencies = [\n'
+        '    { name = "pypydep", marker = "implementation_name == \'pypy\'" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "pypydep"\n'
+        'version = "1.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    names = {p.name for p in result}
+    assert "pypydep" in names
+
+
+def test_uv_lock_excludes_package_record_gated_by_inapplicable_resolution_markers(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """When resolution forks by platform, uv.lock emits multiple [[package]]
+    records for the same name, each scoped by a package-level
+    resolution-markers list (distinct from the per-dependency `marker` field).
+    A record whose resolution-markers don't apply to this platform must not be
+    reported as installed, even when reached via an unconditional dependency
+    edge.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "winonly" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "winonly"\n'
+        'version = "1.0.0"\n'
+        'resolution-markers = [\n'
+        '    "sys_platform == \'win32\'",\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "winonly"\n'
+        'version = "0.9.0"\n'
+        'resolution-markers = [\n'
+        '    "sys_platform != \'win32\'",\n'
+        ']\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    versions = {p.version for p in result if p.name == "winonly"}
+    assert versions == {"0.9.0"}
+
+
+def test_uv_lock_resolution_markers_all_malformed_fails_open() -> None:
+    """A resolution-markers list where every entry is filtered out (non-string,
+    or empty string) must still be treated as applying.
+
+    `any(_uv_lock_marker_applies(m) for m in markers if isinstance(m, str) and
+    m)` returns False on an empty generator just as readily as on one whose
+    markers all evaluated False — indistinguishable from "genuinely
+    inapplicable" without special-casing the empty-after-filtering case. That
+    would silently drop a package from a lock file with malformed
+    resolution-markers instead of failing open like every other
+    unresolvable-marker case in this module.
+    """
+    from packagealert.languages.python import _uv_lock_resolution_markers_apply
+
+    assert _uv_lock_resolution_markers_apply({"resolution-markers": [123]}) is True
+    assert _uv_lock_resolution_markers_apply({"resolution-markers": [""]}) is True
+
+
+def test_uv_lock_workspace_member_unreachable_from_root_still_included(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """A package with no path from root at all (e.g. a workspace member) is
+    unreachable for reasons unrelated to markers and must still be reported
+    with is_dev=None — only marker-excluded packages get dropped entirely.
+    """
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\n'
+        'name = "my-app"\n'
+        'version = "1.0.0"\n'
+        'source = { editable = "." }\n'
+        'dependencies = [\n'
+        '    { name = "requests" },\n'
+        ']\n\n'
+        '[[package]]\n'
+        'name = "requests"\n'
+        'version = "2.31.0"\n\n'
+        '[[package]]\n'
+        'name = "sibling-workspace-member"\n'
+        'version = "1.0.0"\n'
+    )
+    result = lang.parse_lockfile(uv_lock)
+    by_name = {p.name: p for p in result}
+    assert by_name["sibling-workspace-member"].is_dev is None
+
+
 # ---------------------------------------------------------------------------
 # configure_sandbox_writable
 # ---------------------------------------------------------------------------

@@ -32,7 +32,11 @@ from packagealert.languages.base import (
     parse_registry_timestamp,
 )
 from packagealert.models.risk import RiskSignal
-from packagealert.parsers.lockfiles import _find_project_root
+from packagealert.parsers.lockfiles import (
+    _QUOTED_RE,
+    _find_project_root,
+    _marker_references_python_version,
+)
 from packagealert.parsers.wheel import parse_wheel_filename
 
 log = logging.getLogger(__name__)
@@ -227,28 +231,167 @@ def _parse_requirements_txt(
     return results
 
 
+# Marker grammar identifiers for PEP 508 variables that describe *which
+# interpreter* is running rather than the OS/platform it runs on —
+# implementation_name/platform_python_implementation (CPython vs PyPy vs
+# GraalPy, etc.) and implementation_version, same false-negative risk as
+# python_version/python_full_version (see _uv_lock_marker_applies). Checked
+# with quoted segments stripped first, same rationale as
+# parsers.lockfiles._VERSION_MARKER_VAR_RE.
+_UV_LOCK_INTERPRETER_IDENTITY_MARKER_VAR_RE = re.compile(
+    r"\bimplementation_name\b|\bimplementation_version\b|\bplatform_python_implementation\b"
+)
+
+
+def _marker_references_interpreter_identity(marker: str) -> bool:
+    return bool(_UV_LOCK_INTERPRETER_IDENTITY_MARKER_VAR_RE.search(_QUOTED_RE.sub("", marker)))
+
+
+# `extra` is PEP 508's selection variable for optional dependency groups
+# (`package[foo]`). Marker.evaluate() defaults it to '' when no environment
+# dict is supplied — unlike `dependency_groups` (PEP 751's analogous
+# selection variable), which has no default and raises
+# UndefinedEnvironmentName, already caught by the exception-based fail-open
+# path below. That means `extra == 'foo'` silently evaluates False here
+# regardless of what extras a real install selected, rather than failing
+# loudly. parse_lockfile() receives no selected-extras context, so this must
+# be checked explicitly and failed open too.
+_EXTRA_MARKER_VAR_RE = re.compile(r"\bextra\b")
+
+
+def _marker_references_extra(marker: str) -> bool:
+    return bool(_EXTRA_MARKER_VAR_RE.search(_QUOTED_RE.sub("", marker)))
+
+
+def _uv_lock_marker_applies(marker: str) -> bool:
+    """Whether a single uv.lock marker string applies to this interpreter.
+
+    Evaluated against package-alert's own running interpreter, not a
+    possibly-different target venv — parse_lockfile() takes no cwd/target
+    context today (unlike the pylock.toml marker evaluation in
+    parsers/lockfiles.py, which resolves a target venv for
+    python_version-sensitive markers). A python_version/python_full_version
+    marker therefore fails open unconditionally (kept, not excluded): scanning
+    a project whose target Python differs from package-alert's own could
+    otherwise evaluate the marker against the wrong interpreter and silently
+    drop a dependency the target actually installs — a false negative, worse
+    than the false positive this function otherwise fixes. The same applies
+    to implementation_name/implementation_version/
+    platform_python_implementation (CPython vs PyPy, etc.) — package-alert's
+    own interpreter's identity is no more likely to match the target's than
+    its version is, so these fail open too. `extra` (optional-dependency-group
+    selection, e.g. `package[foo]`) fails open for the same reason:
+    parse_lockfile() doesn't know which extras a real install would select,
+    and Marker.evaluate() silently defaults `extra` to '' rather than raising
+    — evaluating it here would treat `extra == 'foo'`-gated dependencies as
+    never selected, when `uv sync --extra foo` may install them. Markers
+    insensitive to that ambiguity (sys_platform, os_name, platform_machine,
+    etc.) are still evaluated normally. A malformed or unresolvable marker
+    also fails open so a lock file we can't fully evaluate still gets its
+    packages scanned rather than silently dropped.
+    """
+    if (
+        _marker_references_python_version(marker)
+        or _marker_references_interpreter_identity(marker)
+        or _marker_references_extra(marker)
+    ):
+        return True
+    try:
+        from packaging.markers import (
+            InvalidMarker,
+            Marker,
+            UndefinedComparison,
+            UndefinedEnvironmentName,
+        )
+
+        return Marker(marker).evaluate()
+    except (InvalidMarker, UndefinedEnvironmentName, UndefinedComparison):
+        return True
+
+
+def _uv_lock_dep_applies(dep: dict) -> bool:
+    """Whether a uv.lock dependency edge's marker applies to this interpreter.
+
+    uv.lock records environment markers (``sys_platform``, ``os_name``, etc.)
+    on individual dependency edges to express platform-conditional deps —
+    e.g. httpx2's real dependency on httpx2-jsfetch is gated behind
+    ``sys_platform == 'emscripten'``. Evaluating unconditionally would treat
+    such deps as reachable even though uv would never actually install them
+    here, over-reporting them as installed dependencies.
+    """
+    marker = dep.get("marker")
+    if not isinstance(marker, str) or not marker:
+        return True
+    return _uv_lock_marker_applies(marker)
+
+
+def _uv_lock_resolution_markers_apply(pkg: dict) -> bool:
+    """Whether a uv.lock [[package]] record's resolution-markers apply here.
+
+    When resolution forks by environment, uv emits multiple [[package]]
+    records for the same name, each scoped by a package-level
+    ``resolution-markers`` list — distinct from the per-dependency ``marker``
+    field ``_uv_lock_dep_applies`` handles. The list entries are disjoint
+    conditions covering one fork branch, so the record applies if *any* of
+    them evaluates true. A record with no resolution-markers (unforked
+    resolution, the common case) always applies.
+    """
+    markers = pkg.get("resolution-markers")
+    if not isinstance(markers, list) or not markers:
+        return True
+    valid_markers = [m for m in markers if isinstance(m, str) and m]
+    if not valid_markers:
+        # Every entry was malformed (non-string, or empty) — indistinguishable
+        # from "genuinely inapplicable" via any() alone, so this must be
+        # checked explicitly to fail open rather than silently dropping the
+        # package.
+        return True
+    return any(_uv_lock_marker_applies(m) for m in valid_markers)
+
+
 def _parse_uv_lock(path: Path) -> list[PackageSpec]:
     """Parse a uv.lock TOML file into PackageSpec objects."""
     try:
         data = tomllib.loads(path.read_text())
         packages = data.get("package", [])
 
-        # Build a name -> dep-names adjacency map from the lock (all packages).
+        # Build a name -> dep-names adjacency map from the lock (all packages),
+        # both with marker-inapplicable edges dropped and with all edges kept.
+        # The unfiltered map distinguishes a package that's excluded because
+        # its only path from root requires a marker that doesn't apply here
+        # (e.g. httpx2-jsfetch, gated behind sys_platform == 'emscripten') from
+        # one that's unreachable from root for unrelated reasons (a workspace
+        # member, an unresolvable marker) — only the former should be dropped
+        # from the results entirely; the latter keeps today's is_dev=None.
+        # A forked resolution emits multiple [[package]] records for the same
+        # name (one per resolution-markers branch), each with its own
+        # dependency list — union rather than overwrite so edges from every
+        # record are captured. A record whose own resolution-markers don't
+        # apply here contributes no edges at all: uv would never install that
+        # record, so its listed dependencies aren't real either.
         deps_of: dict[str, set[str]] = {}
+        deps_of_unfiltered: dict[str, set[str]] = {}
         for pkg in packages:
             norm = _normalize_name(pkg.get("name", "") or "")
             if not norm:
                 continue
-            deps_of[norm] = {
+            record_applies = _uv_lock_resolution_markers_apply(pkg)
+            raw_deps = pkg.get("dependencies", [])
+            deps_of.setdefault(norm, set()).update(
                 _normalize_name(d["name"])
-                for d in pkg.get("dependencies", [])
-                if d.get("name")
-            }
+                for d in raw_deps
+                if d.get("name") and record_applies and _uv_lock_dep_applies(d)
+            )
+            deps_of_unfiltered.setdefault(norm, set()).update(
+                _normalize_name(d["name"]) for d in raw_deps if d.get("name")
+            )
 
         # Find the root project entry (source.editable = ".") and collect its
         # direct prod and dev dep seeds.
         prod_seeds: set[str] = set()
         dev_seeds: set[str] = set()
+        prod_seeds_unfiltered: set[str] = set()
+        dev_seeds_unfiltered: set[str] = set()
         found_root = False
         for pkg in packages:
             src = pkg.get("source", {})
@@ -256,15 +399,19 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
                 found_root = True
                 for dep in pkg.get("dependencies", []):
                     if dep_name := dep.get("name"):
-                        prod_seeds.add(_normalize_name(dep_name))
+                        prod_seeds_unfiltered.add(_normalize_name(dep_name))
+                        if _uv_lock_dep_applies(dep):
+                            prod_seeds.add(_normalize_name(dep_name))
                 for group_deps in pkg.get("dev-dependencies", {}).values():
                     for dep in group_deps:
                         if dep_name := dep.get("name"):
-                            dev_seeds.add(_normalize_name(dep_name))
+                            dev_seeds_unfiltered.add(_normalize_name(dep_name))
+                            if _uv_lock_dep_applies(dep):
+                                dev_seeds.add(_normalize_name(dep_name))
                 break
 
         # BFS/DFS reachability from each seed set.
-        def _reachable(seeds: set[str]) -> set[str]:
+        def _reachable(seeds: set[str], graph: dict[str, set[str]]) -> set[str]:
             visited: set[str] = set()
             queue = list(seeds)
             while queue:
@@ -272,15 +419,21 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
                 if name in visited:
                     continue
                 visited.add(name)
-                queue.extend(deps_of.get(name, set()) - visited)
+                queue.extend(graph.get(name, set()) - visited)
             return visited
 
         if found_root:
-            prod_reachable = _reachable(prod_seeds)
-            dev_reachable = _reachable(dev_seeds)
+            prod_reachable = _reachable(prod_seeds, deps_of)
+            dev_reachable = _reachable(dev_seeds, deps_of)
+            # Reachable at all, ignoring markers — used only to detect
+            # marker-excluded packages below, never for is_dev classification.
+            reachable_unfiltered = _reachable(
+                prod_seeds_unfiltered | dev_seeds_unfiltered, deps_of_unfiltered
+            )
         else:
             prod_reachable = set()
             dev_reachable = set()
+            reachable_unfiltered = set()
 
         results = []
         for pkg in packages:
@@ -291,10 +444,22 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
             src = pkg.get("source", {})
             if isinstance(src, dict) and src.get("editable") == ".":
                 continue
-            version = pkg.get("version")
+            if not _uv_lock_resolution_markers_apply(pkg):
+                # This record is one fork-specific variant (e.g. a Windows-only
+                # resolution of a package that also has a non-Windows record)
+                # and doesn't apply on this platform — uv would never install
+                # it here.
+                continue
             norm = _normalize_name(name)
             in_prod = norm in prod_reachable
             in_dev = norm in dev_reachable
+            if found_root and norm in reachable_unfiltered and not in_prod and not in_dev:
+                # Only reachable from root through edges whose marker doesn't
+                # apply to this platform (e.g. httpx2-jsfetch, gated behind
+                # sys_platform == 'emscripten') — uv would never install this
+                # here, so it isn't a real dependency of this project.
+                continue
+            version = pkg.get("version")
             if in_prod:
                 is_dev: bool | None = False  # reachable from prod — treat as prod
             elif in_dev:
