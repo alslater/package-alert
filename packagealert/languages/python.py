@@ -45,6 +45,36 @@ log = logging.getLogger(__name__)
 # Internal regex constants
 # ---------------------------------------------------------------------------
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+# uv wheel-cache index leaf, name prefix already stripped. Two shapes:
+# "<version>-<python>-<abi>-<platform>" for prebuilt wheels (only the
+# trailing platform tag may itself contain dots, e.g.
+# "manylinux_2_17_x86_64.manylinux2014_x86_64", so python/abi are matched as
+# single hyphen-free tags and platform absorbs the rest); or
+# "<version>-<build-hash>" (a 16-char lowercase hex build cache key) for
+# wheels built locally from an sdist. Version char class matches _WHEEL_RE.
+# Audited against: uv 0.12.5 — see "Auditing the uv cache-layout
+# assumptions" in .claude/CLAUDE.md for how/when to re-check this.
+_UV_WHEEL_INDEX_TAGS_RE = re.compile(r"^(?P<version>[A-Za-z0-9_.!+]+?)-[^-]+-[^-]+-.+$")
+_UV_WHEEL_INDEX_BUILD_HASH_RE = re.compile(r"^(?P<version>[A-Za-z0-9_.!+]+?)-[0-9a-f]{16}$")
+# Matches both the alternative-index digest ("index/<hash>/...") and the
+# direct-URL digest ("url/<hash>/...", wheels-v* only — see
+# _uv_index_name_dir()) — both are uv's cache_digest(), a fixed 16-hex-char
+# hash (uv-cache-key/src/digest.rs), though this pattern is intentionally
+# looser (>=8 hex chars) since shape validation elsewhere already pins the
+# surrounding directory structure exactly.
+# Audited against: uv 0.12.5 — see "Auditing the uv cache-layout
+# assumptions" in .claude/CLAUDE.md for how/when to re-check this.
+_UV_CACHE_HASH_RE = re.compile(r"^[0-9a-f]{8,}$")
+# uv cache-schema root directory names: "wheels-v6", "sdists-v9", etc. — the
+# version suffix is always digits-only. A bare Path.glob("wheels-v*") also
+# matches "wheels-v6.backup", "wheels-vNext", or a non-directory like
+# "wheels-v6.txt"; recursively watching any such lookalike (e.g. a manual
+# backup of the whole cache) could reopen the inotify watch exhaustion this
+# scoping was meant to prevent, so glob matches are filtered through this
+# pattern before being watched.
+# Audited against: uv 0.12.5 — see "Auditing the uv cache-layout
+# assumptions" in .claude/CLAUDE.md for how/when to re-check this.
+_UV_CACHE_SCHEMA_DIR_RE = re.compile(r"^(?:wheels|sdists)-v\d+$")
 # Dist-info normalisation: collapse runs of [-_.] to a single underscore for
 # comparison. PEP 503 uses hyphens, but dist-info stems use underscores, so
 # we normalise to underscores to match the filesystem representation.
@@ -902,6 +932,284 @@ def _distinfo_to_metadata(path: Path) -> PackageMetadata | None:
     return PackageMetadata(name=name, version=m.group(2), ecosystem="PyPI")
 
 
+def _uv_index_name_dir(path: Path, root_prefix: str) -> Path | None:
+    """Return the "<name>" directory of a uv wheels-v*/sdists-v* index entry,
+    or None unless `path` sits exactly at "<root_prefix*>/pypi/<name>/<leaf>",
+    "<root_prefix*>/index/<hash>/<name>/<leaf>", or — "wheels-v" only, see
+    below — "<root_prefix*>/url/<hash>/<name>/<leaf>", relative to its
+    nearest ancestor matching `root_prefix` (e.g. "wheels-v", "sdists-v").
+
+    Other subtrees under the same root — sdists-v*/git/<hash>,
+    sdists-v*/path/<hash>, sdists-v*/editable/<hash>, or an intermediate
+    "<name>" directory before any leaf has been created under it — must not
+    reach the caller's name/version extraction, since path.parent.name there
+    is a hash or a literal "pypi"/"index"/"url", not a package name.
+
+    An ancestor further up the path (e.g. a home directory or mount point
+    literally named "wheels-volume") can also start with `root_prefix`
+    without being the real cache root. Trying only the first such match from
+    the filesystem root would reject a valid entry in that case, so every
+    matching component is tried, nearest to `path` first, until one yields
+    a valid relative shape.
+
+    A bare startswith(root_prefix) is not enough on its own, though: it
+    would also accept "wheels-volume" or "wheels-vNext" as if they were a
+    real cache root, since nothing constrains what follows the prefix. Each
+    candidate is additionally checked against _UV_CACHE_SCHEMA_DIR_RE (the
+    same "wheels-v<digits>"/"sdists-v<digits>" pattern cache_paths() uses to
+    filter its own glob matches), so a lookalike directory that happens to
+    contain a pypi/<name>/<leaf>-shaped subtree can't produce a false
+    PackageEvent.
+
+    The "url" bucket (a direct-URL dependency, e.g. `pip install
+    https://.../pkg-1.0-py3-none-any.whl`) is real and distinct from "pypi"/
+    "index"/"git"/"path"/"editable" — uv's WheelCache::Url (uv-cache/src/
+    wheel.rs) roots it at "url/<16-hex digest of the canonical URL>", and
+    for a WHEEL fetched this way that's followed by `.wheel_dir(name)`
+    (uv-distribution/src/distribution_database.rs), giving exactly
+    "url/<hash>/<name>/<leaf>" — the same shape as "index/<hash>/<name>/
+    <leaf>", just keyed by URL digest instead of index-URL digest. archive-
+    v0 being unwatched means this class of install produced no cache event
+    at all before this shape was recognised here.
+
+    This does NOT extend to sdists-v*, though: a direct-URL SOURCE
+    distribution shards by revision hash directly under "url/<hash>/"
+    (uv-distribution/src/source/mod.rs, BuildableSource::Dist(SourceDist::
+    DirectUrl(..))) — there is no "<name>" directory in that path at all,
+    unlike the wheel case, so it has the same "no name/version encoded in
+    the index path" shape as git/path/editable and must be left
+    unclassified here for the same reason (confirmed empirically: a real
+    `uv pip install <direct-url-sdist>` produces "sdists-v9/url/<hash>/
+    <revision-hash>/...", not "sdists-v9/url/<hash>/<name>/<version>"). Its
+    built wheel is still correctly picked up by the .whl-under-sdists-v*
+    handling in classify_cache_file() regardless, exactly as for git/path/
+    editable sdists.
+    """
+    parts = path.parts
+    root_indices = [
+        i for i, part in enumerate(parts)
+        if part.startswith(root_prefix) and _UV_CACHE_SCHEMA_DIR_RE.match(part)
+    ]
+    for root_idx in reversed(root_indices):
+        rel = parts[root_idx + 1:]
+        if len(rel) == 3 and rel[0] == "pypi":
+            return path.parent
+        if len(rel) == 4 and rel[0] == "index" and _UV_CACHE_HASH_RE.match(rel[1]):
+            return path.parent
+        if (
+            root_prefix == "wheels-v"
+            and len(rel) == 4
+            and rel[0] == "url"
+            and _UV_CACHE_HASH_RE.match(rel[1])
+        ):
+            return path.parent
+    return None
+
+
+def _uv_wheel_index_entry_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv wheels-v*/pypi/<name>/<leaf> index entry to PackageMetadata.
+
+    `path` is the entry watchdog reports on creation — a symlink into
+    archive-v0 on current uv (wheels-v6+), whose target holds the extracted
+    wheel including its .dist-info. archive-v0 itself is unwatched (content-
+    addressed, hundreds of thousands of dirs — see cache_paths()), so this
+    classifies from the index path alone rather than the target's contents,
+    EXCEPT for the build-hash leaf shape below, which must resolve into
+    archive-v0 to get a trustworthy version.
+
+    The parent directory is always the normalised package name. The leaf is
+    "<version>-<python>-<abi>-<platform>" for a prebuilt wheel, or
+    "<version>-<build-hash>" (current schema) — or either prefixed with
+    "<name>-" (legacy, e.g. wheels-v4) — strip a matching name prefix first,
+    then extract the version. See _UV_WHEEL_INDEX_TAGS_RE /
+    _UV_WHEEL_INDEX_BUILD_HASH_RE.
+
+    The build-hash form is NOT reliably "<version>-<16-hex build cache
+    key>": uv's WheelFilename::cache_key() also produces this exact shape
+    when the normal "<version>-<tags>" key exceeds 64 characters, and in
+    that case it truncates the *version itself* (to 64 - 1 - 16 = 47 chars,
+    trimming trailing "." / "+") before appending the digest — see uv's
+    crates/uv-distribution-filename/src/wheel.rs. So the "version" the
+    build-hash regex extracts can be a truncated prefix of the real
+    version, not the real version, whenever the true version is longer than
+    that width (uv's own cache_key() test covers exactly this with a
+    69-character version). Reporting that prefix as the install's version
+    would query OSV and risk-score a version that was never installed.
+    Since only the build-hash form is ambiguous like this — the tags form's
+    version is always the literal, complete version, uv never truncates
+    that shape — this resolves the symlink and re-derives the version from
+    the linked archive-v0 entry's own "<name>-<version>.dist-info" (whose
+    version is never truncated, and is what's actually authoritative for
+    what was really installed) rather than trusting the leaf name's
+    (possibly-truncated) version group. If that can't be recovered — the
+    symlink is broken, or no .dist-info is found alongside it — the entry
+    is not classified at all rather than risking a wrong version.
+
+    Each entry has companion metadata files alongside it, all named
+    "<leaf>.<ext>" (e.g. "1.0.0-py3-none-any.http") — reject those
+    explicitly rather than relying on the tags regex, whose greedy platform
+    group would otherwise swallow the extension and double-classify (or, for
+    ".lock", prematurely classify before the real entry even exists — see
+    below) the same install:
+      - ".http": the pointer uv's RegistryWheelIndex reads for a wheel
+        downloaded from a remote registry (PyPI or a URL index).
+      - ".msgpack": companion metadata cached alongside a ".http" pointer.
+      - ".rev": the equivalent pointer for a wheel resolved from a local/
+        `--find-links` (path) index — same role as ".http", different index
+        kind (uv-distribution/src/distribution_database.rs, load_wheel()).
+      - ".lock": an advisory cross-process lock file uv creates at the very
+        start of loading a wheel (uv-distribution/src/distribution_database.rs,
+        lock_wheel()) — i.e. before extraction, so watchdog can observe it
+        created well before the real archive-v0 symlink exists. It is never
+        deleted after use (only unlocked — see uv-fs/src/locked_file.rs,
+        Drop for LockedFile), so it also persists on disk exactly like the
+        other companions once the install finishes.
+
+    Only paths sitting exactly at "pypi/<name>/<leaf>" or
+    "index/<hash>/<name>/<leaf>" are classified — see _uv_index_name_dir().
+    Any other path under wheels-v* (an index hash dir, the bare "pypi"/
+    "index" dir, an intermediate "<name>" dir with no leaf yet) is rejected
+    rather than risking a shape-shaped-like-a-leaf coincidence.
+    """
+    if path.suffix in (".http", ".msgpack", ".rev", ".lock"):
+        return None
+    name_dir = _uv_index_name_dir(path, "wheels-v")
+    if name_dir is None:
+        return _uv_git_wheel_leaf_to_metadata(path)
+    name = _normalize_name(name_dir.name)
+    if not _VALID_PKG_NAME_RE.match(name):
+        return None
+    leaf = path.name
+    for prefix in (name_dir.name + "-", name_dir.name.replace("-", "_") + "-"):
+        if leaf.startswith(prefix):
+            leaf = leaf[len(prefix):]
+            break
+    tags_match = _UV_WHEEL_INDEX_TAGS_RE.match(leaf)
+    if tags_match:
+        return PackageMetadata(name=name, version=tags_match.group("version"), ecosystem="PyPI")
+    if not _UV_WHEEL_INDEX_BUILD_HASH_RE.match(leaf):
+        return None
+    version = _version_from_archive_dist_info(path, name)
+    if version is None:
+        return None
+    return PackageMetadata(name=name, version=version, ecosystem="PyPI")
+
+
+def _version_from_archive_dist_info(path: Path, expected_name: str) -> str | None:
+    """Resolve `path` (a uv wheels-v* index entry symlinked into archive-v0)
+    and return the untruncated version from its "<name>-<version>.dist-info"
+    entry, or None if the symlink is broken, doesn't resolve to a directory,
+    or no matching .dist-info is found — see
+    _uv_wheel_index_entry_to_metadata()'s docstring for why the build-hash
+    leaf name alone can't be trusted for the version.
+
+    `expected_name` guards against a .dist-info for some other package
+    sitting alongside — shouldn't happen for a single-wheel archive-v0
+    entry, but classification must still decline rather than guess if it
+    ever does.
+    """
+    try:
+        target = path.resolve(strict=True)
+    except OSError:
+        return None
+    if not target.is_dir():
+        return None
+    try:
+        entries = list(target.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        m = _DISTINFO_RE.match(entry.name)
+        if not m:
+            continue
+        if _normalize_name(m.group(1)) != expected_name:
+            continue
+        return m.group(2)
+    return None
+
+
+def _uv_git_wheel_leaf_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv wheels-v*/git/<url-digest>/<git-sha>/<wheel-filename-stem>
+    index entry to PackageMetadata, or None if `path` doesn't sit at that
+    exact shape.
+
+    A wheel file committed directly to a Git repository (`pip install
+    "pkg @ git+https://...#egg=pkg&path=dist/pkg-1.0-py3-none-any.whl"`,
+    uv's BuiltDist::GitPath) is cached differently from every other index
+    shape _uv_index_name_dir() recognises: uv-cache/src/wheel.rs's
+    WheelCacheKind::Git enum-doc comment claims "wheels can't be delivered
+    through Git", but that's stale — uv-distribution/src/
+    distribution_database.rs's `BuiltDist::GitPath(wheel) =>` arm
+    contradicts it directly, persisting the entry at exactly this shape:
+    `cache.entry(CacheBucket::Wheels, WheelCache::Git(&wheel.url,
+    git_sha).root(), wheel.filename.stem())` — the third argument, the
+    leaf, is the WHEEL'S OWN FILENAME STEM, not a leaf under a "<name>"
+    directory the way pypi/index/url are. Confirmed empirically against a
+    real isolated `uv pip install` of a wheel committed to a local git
+    repo: wheels-v6/git/<16-hex URL digest>/<16-hex short git SHA>/
+    <name>-<version>-<python>-<abi>-<platform> (a bare symlink into
+    archive-v0, same as every other index shape), with a companion
+    "<version>-<tags>.rev" pointer file (excluded by suffix in the caller,
+    same as the other companion kinds — note its base name differs from
+    the leaf's, since it's keyed by WheelFilename::cache_key() rather than
+    the full stem, but the suffix check doesn't care).
+
+    Since there's no name-bearing parent directory here — the name is only
+    ever present in the leaf itself — this parses the leaf the same way a
+    real *.whl file is parsed elsewhere in classify_cache_file(): append
+    ".whl" back onto the stem and hand it to the shared PEP 427 filename
+    parser, rather than duplicating that regex. If it doesn't parse as a
+    valid wheel filename, declines rather than guessing.
+    """
+    parts = path.parts
+    root_indices = [
+        i for i, part in enumerate(parts)
+        if part.startswith("wheels-v") and _UV_CACHE_SCHEMA_DIR_RE.match(part)
+    ]
+    matches_shape = False
+    for root_idx in reversed(root_indices):
+        rel = parts[root_idx + 1:]
+        if (
+            len(rel) == 4
+            and rel[0] == "git"
+            and _UV_CACHE_HASH_RE.match(rel[1])
+            and _UV_CACHE_HASH_RE.match(rel[2])
+        ):
+            matches_shape = True
+            break
+    if not matches_shape:
+        return None
+    info = parse_wheel_filename(path.with_name(path.name + ".whl"))
+    if info is None or not _VALID_PKG_NAME_RE.match(info.name):
+        return None
+    return PackageMetadata(name=info.name, version=info.version, ecosystem="PyPI")
+
+
+def _uv_sdist_index_entry_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv sdists-v*/{pypi,index/<hash>}/<name>/<version> index entry
+    to PackageMetadata. Unlike the wheel index, the leaf is a bare version —
+    no tags to strip.
+
+    Only paths sitting exactly at "pypi/<name>/<version>" or
+    "index/<hash>/<name>/<version>" are classified — see
+    _uv_index_name_dir(). sdists-v* also holds git/<hash>, path/<hash>, and
+    editable/<hash> subtrees (locally-sourced sdists, not registry
+    packages); without shape validation, a path.parent.name of "git" or a
+    hex hash starting with a digit could otherwise be misread as a package
+    name/version.
+    """
+    name_dir = _uv_index_name_dir(path, "sdists-v")
+    if name_dir is None:
+        return None
+    name = _normalize_name(name_dir.name)
+    if not _VALID_PKG_NAME_RE.match(name):
+        return None
+    version = path.name
+    if not version or not version[0].isdigit():
+        return None
+    return PackageMetadata(name=name, version=version, ecosystem="PyPI")
+
+
 def _fingerprint_distinfo(path: Path) -> str:
     """Return a fingerprint string for a dist-info directory."""
     m = _DISTINFO_RE.match(path.name)
@@ -1381,11 +1689,66 @@ class PythonLanguage:
     # ------------------------------------------------------------------
     # cache_paths
     # ------------------------------------------------------------------
+    #
+    # cache_paths(), cache_file_globs(), classify_cache_file(), and the
+    # _uv_wheel_index_entry_to_metadata() / _uv_sdist_index_entry_to_metadata()
+    # / _uv_index_name_dir() helpers below all hardcode assumptions about
+    # uv's ~/.cache/uv on-disk layout, which uv does not document as a
+    # stable interface and has changed before (wheels-v4 -> wheels-v6,
+    # sdists-v9). See "Auditing the uv cache-layout assumptions" in
+    # .claude/CLAUDE.md for how and when to re-verify all of this against a
+    # real cache and uv's actual source — last done against uv 0.12.5.
 
     def cache_paths(self) -> list[Path]:
+        # Watch only the structured wheel index, not uv's archive-v0
+        # (extracted package contents, no classifiable filenames), git-v0
+        # (git checkouts), sdists-v* (see poll_only_cache_paths() — its
+        # index entries are shallow like wheels-v*'s, but each source-build
+        # shard also unpacks a full sdist into a `src/` subdirectory right
+        # alongside the built wheel, which a recursive watch here can't
+        # avoid descending into), or pip's http/http-v2 (opaque HTTP
+        # response cache). Those content-addressed/unpacked stores add
+        # unboundedly many dirs of zero classification value and exhaust
+        # inotify watch limits — see NodeLanguage.cache_paths() for the same
+        # fix applied to npm's _cacache.
+        uv_cache = Path.home() / ".cache" / "uv"
+        pip_cache = Path.home() / ".cache" / "pip"
+        candidates = sorted(uv_cache.glob("wheels-v*"))
+        # glob("wheels-v*") also matches lookalikes like "wheels-v6.backup"
+        # or "wheels-vNext", and glob doesn't filter by type — a stray
+        # non-directory ("wheels-v6.txt") would match too. Recursively
+        # watching an unintended directory here (e.g. a manual backup of the
+        # whole cache) could reopen the watch exhaustion this scoping exists
+        # to prevent, so only exact "wheels-v<digits>" directories are kept.
+        paths = [
+            p for p in candidates
+            if _UV_CACHE_SCHEMA_DIR_RE.match(p.name) and p.is_dir()
+        ]
+        paths.append(pip_cache / "wheels")
+        return paths
+
+    def poll_only_cache_paths(self) -> list[Path]:
+        # sdists-v*'s index entries (pypi/<name>/<version>, index/<hash>/
+        # <name>/<version>) are as shallow as wheels-v*'s, but uv unpacks
+        # each source-build shard into a real `src/` directory containing
+        # the sdist's full extracted contents (its own subpackages,
+        # build/, egg-info/, etc.) sitting right alongside the built
+        # .whl — confirmed against a real ~/.cache/uv (a single package
+        # revision can easily add tens of directories under src/ alone).
+        # There is no way to recursively watch deep enough to catch the
+        # .whl via inotify (it's a sibling of src/ in the same directory)
+        # without also recursing into src/ itself: watchdog's/inotify's
+        # recursive watch has no path-exclusion or depth limit. See
+        # CacheMonitor._poll_cache_dirs(), which classifies this root's
+        # cache_file_globs() matches via a periodic glob() walk instead of
+        # a permanent recursive watch — bounding the cost to one traversal
+        # per maintenance interval rather than a permanently-held kernel
+        # resource that scales with the number of packages ever built from
+        # source, the same failure mode this file exists to prevent.
+        uv_cache = Path.home() / ".cache" / "uv"
         return [
-            Path.home() / ".cache" / "pip",
-            Path.home() / ".cache" / "uv",
+            p for p in sorted(uv_cache.glob("sdists-v*"))
+            if _UV_CACHE_SCHEMA_DIR_RE.match(p.name) and p.is_dir()
         ]
 
     # ------------------------------------------------------------------
@@ -1393,12 +1756,60 @@ class PythonLanguage:
     # ------------------------------------------------------------------
 
     def cache_file_globs(self) -> list[str]:
-        return ["**/*.whl", "**/*.dist-info", "**/*.tar.gz"]
+        return [
+            "**/*.whl", "**/*.dist-info", "**/*.tar.gz",
+            # uv index entries: wheels-v*/pypi/<name>/<leaf>,
+            # sdists-v*/pypi/<name>/<version>, sdists-v*/index/<hash>/<name>/<version>,
+            # wheels-v*/url/<hash>/<name>/<leaf> (a direct-URL wheel dependency —
+            # see _uv_index_name_dir() for why this doesn't extend to sdists-v*),
+            # wheels-v*/git/<url-digest>/<git-sha>/<wheel-filename-stem> (a wheel
+            # committed directly to a Git repo — see
+            # _uv_git_wheel_leaf_to_metadata()). This glob list is shared across
+            # BOTH cache_paths() (wheels-v*, watched with a live inotify watch)
+            # AND poll_only_cache_paths() (sdists-v*, periodically glob-scanned
+            # instead — see CacheMonitor._poll_cache_dirs()); classify_cache_file()
+            # itself is what rejects a git/*/*/* match under an sdists-v* root
+            # (confirmed against a real sdists-v*/git/<hash>/<revision>/... tree:
+            # its own .whl already classifies through the dedicated .whl branch,
+            # and the bare revision-hash-dir entries correctly stay unclassified
+            # since _uv_git_wheel_leaf_to_metadata() only matches under a
+            # wheels-v* ancestor), not this glob.
+            "pypi/*/*", "index/*/*/*", "url/*/*/*", "git/*/*/*",
+        ]
 
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
         """Classify a path in the cache or site-packages as a known package artifact."""
         # .whl files
         if path.suffix == ".whl":
+            # uv builds a wheel from a cached sdist several levels beneath
+            # that sdist's own pypi/<name>/<version> (or index/<hash>/
+            # <name>/<version>) index entry — sdists-v9/pypi/<name>/
+            # <version>/<revision-hash>/<name>-<version>-*.whl — the current
+            # uv cache layout explicitly stores the built wheel there. This
+            # is always classified as its own event: a version directory
+            # can exist (and still classify as a valid index entry, purely
+            # by its shape on disk) without this daemon session ever having
+            # actually emitted an event for it — the directory persists
+            # across installs/builds (it's uv's own cache, not deleted
+            # after use), and a daemon started after the directory already
+            # existed, or a second build under an already-cached version
+            # (e.g. a hash mismatch, or a different platform tag, forcing a
+            # rebuild), both leave the wheel as the ONLY signal for that
+            # specific install. Suppressing it based on "does a
+            # classifiable ancestor exist right now" — rather than "did
+            # this session actually emit an event for it" — can silently
+            # drop the install with zero events at all, confirmed
+            # empirically for both scenarios above. A wheel is always the
+            # last, definitive signal a build produced *something*, so it
+            # is never worth risking that over avoiding an occasional
+            # duplicate: if the version-directory event for the same build
+            # also happens to have been observed in this same session,
+            # daemon.py's own per-batch dedup (same ecosystem/name/version/
+            # project_path) already collapses the two when they land in
+            # the same batch; when they don't (the original motivation for
+            # trying to suppress this — see git history), a duplicate
+            # alert is a UX annoyance, not a missed one, which is the
+            # asymmetry that matters here.
             info = parse_wheel_filename(path)
             if info and _VALID_PKG_NAME_RE.match(info.name):
                 return PackageMetadata(name=info.name, version=info.version, ecosystem="PyPI")
@@ -1417,6 +1828,33 @@ class PythonLanguage:
                 name = _normalize_name(m.group(1))
                 if _VALID_PKG_NAME_RE.match(name):
                     return PackageMetadata(name=name, version=m.group(2), ecosystem="PyPI")
+            return None
+
+        # uv wheels-v*/sdists-v* index entries — see cache_paths() for why
+        # archive-v0 (where the actual .dist-info lives) is unwatched, and
+        # poll_only_cache_paths() for why sdists-v* is polled rather than
+        # watched; either way, these index paths are classified directly
+        # from the path shape rather than the target's contents.
+        #
+        # A path can have a "wheels-v"-prefixed ancestor without that being
+        # the real cache root — e.g. a mount point or directory literally
+        # named "wheels-volume" that happens to contain a genuine sdists-v9
+        # entry further down (/mnt/wheels-volume/.../sdists-v9/pypi/foo/1.0).
+        # Returning unconditionally the moment any ancestor merely starts
+        # with "wheels-v" would report None for that entry without ever
+        # trying the sdist classifier, even though
+        # _uv_wheel_index_entry_to_metadata() itself correctly rejects the
+        # lookalike (via _uv_index_name_dir()'s _UV_CACHE_SCHEMA_DIR_RE
+        # check) — so only a genuine wheel match short-circuits here; a
+        # rejection falls through to the sdist check below instead of
+        # ending classification outright.
+        parts = path.parts
+        if any(part.startswith("wheels-v") for part in parts):
+            wheel_result = _uv_wheel_index_entry_to_metadata(path)
+            if wheel_result is not None:
+                return wheel_result
+        if any(part.startswith("sdists-v") for part in parts):
+            return _uv_sdist_index_entry_to_metadata(path)
 
         return None
 

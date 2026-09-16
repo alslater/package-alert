@@ -219,7 +219,14 @@ async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
     whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
     whl.touch()
 
-    lang = MagicMock()
+    # spec= constrains which attributes this mock has at all: without it, a
+    # bare MagicMock() auto-creates poll_only_cache_paths() too (matching
+    # callable(getattr(lang, "poll_only_cache_paths", None))'s guard), whose
+    # return value is itself a MagicMock rather than a list — cache_paths()
+    # + poll_only_cache_paths() then raises inside _run_scan_cache()'s own
+    # try/except, silently skipping this plugin entirely rather than
+    # exercising the classify_cache_file() failure this test is for.
+    lang = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
     lang.name = "python"
     lang.cache_file_globs.return_value = ["*.whl"]
     lang.cache_paths.return_value = [tmp_path]

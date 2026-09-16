@@ -75,10 +75,38 @@ class ProcessMonitor(AbstractMonitor):
     async def _scan_processes(self) -> None:
         current_pids: set[int] = set()
         pm_names = self._pm_names
-        for proc in psutil.process_iter(["pid", "ppid", "cmdline", "cwd"]):
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline", "cwd", "create_time"]):
             try:
                 info = proc.info
                 pid = info["pid"]
+                # Sampled from the same process_iter() snapshot as `pid` itself, so it's
+                # guaranteed to correspond to the exact process instance identified below
+                # — not a separate psutil.Process(pid).create_time() call, which could
+                # observe a different (PID-reused) process if made any later than this.
+                # Carried on the emitted PackageEvent so a consumer arbitrarily far in the
+                # future (behind OSV lookups, batching, etc.) can still verify `pid` refers
+                # to the same process, rather than trusting whatever now holds that PID —
+                # see CacheMonitor._resolve_owning_pid().
+                #
+                # process_iter()'s per-attribute error handling (psutil.Process.as_dict(),
+                # ad_value=None by default) can populate `pid` successfully while
+                # `create_time` specifically comes back None — an AccessDenied or
+                # ZombieProcess race hitting just that one attribute within the same
+                # oneshot() collection, not the whole process lookup. If that's carried
+                # through as event_pid=pid, event_pid_create_time=None,
+                # _resolve_owning_pid(pid, None) can't tell "no process was ever really
+                # observed" (its own no-pid-known caller — add_site_packages_watch() with
+                # no process at all) apart from "a process WAS observed here but its
+                # create_time couldn't be read" — it treats None as licence to sample
+                # create_time() itself, fresh, at whatever later moment it actually runs.
+                # That reopens exactly the PID-reuse race pid_create_time exists to close:
+                # if this pid has since been reused, _resolve_owning_pid would silently
+                # bind the watch to the new, unrelated process's create_time. So a pid
+                # observed without its create_time is not carried at all — event_pid stays
+                # None, which _resolve_owning_pid already treats as "no process to track"
+                # without ever reaching that unsafe fallback.
+                create_time = info.get("create_time")
+                event_pid = pid if create_time is not None else None
                 cmdline: list[str] = info.get("cmdline") or []
                 current_pids.add(pid)
 
@@ -152,6 +180,8 @@ class ProcessMonitor(AbstractMonitor):
                         project_path=project_path,
                         timestamp=datetime.now(UTC),
                         site_packages_dir=site_pkgs,
+                        pid=event_pid,
+                        pid_create_time=create_time,
                     )
                     log.info(
                         "Detected install: %s %s@%s via %s",
