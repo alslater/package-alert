@@ -280,12 +280,139 @@ def test_inspect_package_non_whl_returns_none(lang: PythonLanguage, tmp_path: Pa
 # cache_paths / cache_file_globs
 # ---------------------------------------------------------------------------
 
-def test_cache_paths_returns_paths(lang: PythonLanguage) -> None:
+def _make_uv_pip_cache(home: Path) -> None:
+    (home / ".cache" / "uv" / "wheels-v6" / "pypi").mkdir(parents=True)
+    (home / ".cache" / "uv" / "sdists-v9").mkdir(parents=True)
+    # Content-addressed stores that must NOT be watched (see cache_paths()).
+    archive = home / ".cache" / "uv" / "archive-v0" / "abc123"
+    archive.mkdir(parents=True)
+    (home / ".cache" / "uv" / "git-v0").mkdir(parents=True)
+    (home / ".cache" / "pip" / "wheels").mkdir(parents=True)
+    (home / ".cache" / "pip" / "http-v2").mkdir(parents=True)
+    (home / ".cache" / "pip" / "http").mkdir(parents=True)
+
+
+def test_cache_paths_returns_paths(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # cache_paths() globs for uv's wheels-v* dir, so it returns no uv path at
+    # all unless one exists on disk — must not depend on the developer's
+    # real ~/.cache/uv being populated (or on tmp_path's random name not
+    # coincidentally containing "uv").
+    _make_uv_pip_cache(tmp_path)
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
     paths = lang.cache_paths()
-    assert len(paths) >= 2
     str_paths = [str(p) for p in paths]
     assert any("pip" in s for s in str_paths)
     assert any("uv" in s for s in str_paths)
+
+
+def test_cache_paths_watches_wheel_index(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_uv_pip_cache(tmp_path)
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+    paths = lang.cache_paths()
+    str_paths = {str(p) for p in paths}
+    assert str(tmp_path / ".cache" / "uv" / "wheels-v6") in str_paths
+    assert str(tmp_path / ".cache" / "pip" / "wheels") in str_paths
+
+
+def test_cache_paths_does_not_watch_sdist_index(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: sdists-v* must NOT be in cache_paths() (recursively
+    inotify-watched) — see poll_only_cache_paths() for why. Each source-build
+    shard under sdists-v* unpacks a full sdist into a `src/` directory right
+    alongside the built wheel, and there is no depth-limited or
+    path-excluding recursive watch available (watchdog/inotify's `recursive`
+    is a flat boolean per root); watching sdists-v* recursively would
+    therefore reopen the same inotify-watch-exhaustion problem cache_paths()
+    exists to prevent, just one level deeper in the tree.
+    """
+    _make_uv_pip_cache(tmp_path)
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+    paths = lang.cache_paths()
+    str_paths = {str(p) for p in paths}
+    assert str(tmp_path / ".cache" / "uv" / "sdists-v9") not in str_paths
+
+
+def test_poll_only_cache_paths_watches_sdist_index(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sdists-v* is picked up by poll_only_cache_paths() instead of
+    cache_paths() — see test_cache_paths_does_not_watch_sdist_index."""
+    _make_uv_pip_cache(tmp_path)
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+    paths = lang.poll_only_cache_paths()
+    str_paths = {str(p) for p in paths}
+    assert str(tmp_path / ".cache" / "uv" / "sdists-v9") in str_paths
+    # cache_paths() and poll_only_cache_paths() must be disjoint — a root
+    # returned by both would end up both recursively watched AND polled,
+    # reintroducing the exact recursive-watch cost poll_only_cache_paths()
+    # exists to avoid for this root.
+    assert not (set(str_paths) & {str(p) for p in lang.cache_paths()})
+
+
+def test_cache_paths_does_not_watch_content_addressed_stores(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """archive-v0/git-v0/http(-v2) hold hundreds of thousands of dirs with
+    zero classification value and previously exhausted inotify watch limits."""
+    _make_uv_pip_cache(tmp_path)
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+    paths = lang.cache_paths()
+    str_paths = [str(p) for p in paths]
+    assert not any("archive-v0" in s for s in str_paths)
+    assert not any("git-v0" in s for s in str_paths)
+    assert not any(s.endswith(("http-v2", "http")) for s in str_paths)
+
+
+def test_cache_paths_excludes_wheels_v_lookalikes(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Path.glob("wheels-v*") also matches non-schema lookalikes like
+    "wheels-v6.backup" or "wheels-vNext", and glob doesn't filter by type
+    (a stray non-directory "wheels-v6.txt" would match too). Recursively
+    watching an unintended directory here could reopen the inotify watch
+    exhaustion cache_paths() exists to prevent, so only exact
+    "wheels-v<digits>" directories must be returned.
+    """
+    _make_uv_pip_cache(tmp_path)
+    uv_cache = tmp_path / ".cache" / "uv"
+    (uv_cache / "wheels-v6.backup").mkdir()
+    (uv_cache / "wheels-vNext").mkdir()
+    (uv_cache / "wheels-v6.txt").touch()
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+
+    paths = lang.cache_paths()
+    str_paths = {str(p) for p in paths}
+
+    assert str(uv_cache / "wheels-v6") in str_paths
+    assert str(uv_cache / "wheels-v6.backup") not in str_paths
+    assert str(uv_cache / "wheels-vNext") not in str_paths
+    assert str(uv_cache / "wheels-v6.txt") not in str_paths
+
+
+def test_poll_only_cache_paths_excludes_sdists_v_lookalikes(
+    lang: PythonLanguage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same lookalike exclusion as test_cache_paths_excludes_wheels_v_lookalikes,
+    for poll_only_cache_paths()'s sdists-v* glob."""
+    _make_uv_pip_cache(tmp_path)
+    uv_cache = tmp_path / ".cache" / "uv"
+    (uv_cache / "sdists-volume").mkdir()
+    (uv_cache / "sdists-v").mkdir()  # missing the digit suffix entirely
+    monkeypatch.setattr("packagealert.languages.python.Path.home", lambda: tmp_path)
+
+    paths = lang.poll_only_cache_paths()
+    str_paths = {str(p) for p in paths}
+
+    assert str(uv_cache / "sdists-v9") in str_paths
+    assert str(uv_cache / "sdists-volume") not in str_paths
+    assert str(uv_cache / "sdists-v") not in str_paths
+    assert str(uv_cache / "sdists-volume") not in str_paths
+    assert str(uv_cache / "sdists-v") not in str_paths
 
 
 def test_cache_file_globs_covers_recognised_suffixes(lang: PythonLanguage) -> None:
@@ -293,6 +420,12 @@ def test_cache_file_globs_covers_recognised_suffixes(lang: PythonLanguage) -> No
     assert any(".whl" in g for g in globs)
     assert any(".dist-info" in g for g in globs)
     assert any(".tar.gz" in g for g in globs)
+
+
+def test_cache_file_globs_covers_uv_index_entries(lang: PythonLanguage) -> None:
+    globs = lang.cache_file_globs()
+    assert any(g == "pypi/*/*" for g in globs)
+    assert any(g == "index/*/*/*" for g in globs)
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +487,789 @@ def test_classify_distinfo_file_not_dir_returns_none(lang: PythonLanguage, tmp_p
     f = tmp_path / "requests-2.31.0.dist-info"
     f.touch()
     assert lang.classify_cache_file(f) is None
+
+
+# ---------------------------------------------------------------------------
+# classify_cache_file — uv wheels-v*/sdists-v* index entries
+#
+# These paths cover the P1 gap: wheels-v*/pypi/<name>/<leaf> entries are
+# symlinks into archive-v0, which is intentionally unwatched (see
+# cache_paths()), so classification happens from the index path itself.
+# ---------------------------------------------------------------------------
+
+def test_classify_uv_wheel_index_current_schema(lang: PythonLanguage, tmp_path: Path) -> None:
+    # wheels-v6+: leaf is "<version>-<python>-<abi>-<platform>", name from parent dir.
+    entry = tmp_path / "wheels-v6" / "pypi" / "msal" / "1.37.0-py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.symlink_to(tmp_path / "archive-v0" / "somehash")  # target need not exist
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "msal"
+    assert result.version == "1.37.0"
+    assert result.ecosystem == "PyPI"
+
+
+def test_classify_uv_wheel_index_compound_platform_tag(lang: PythonLanguage, tmp_path: Path) -> None:
+    # The platform tag may itself contain dots (two manylinux variants).
+    entry = (
+        tmp_path / "wheels-v6" / "pypi" / "pandas"
+        / "2.2.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "pandas"
+    assert result.version == "2.2.3"
+
+
+def test_classify_uv_wheel_index_legacy_schema_name_prefixed(lang: PythonLanguage, tmp_path: Path) -> None:
+    # wheels-v4: leaf is "<name>-<version>-<python>-<abi>-<platform>" (name repeated).
+    entry = tmp_path / "wheels-v4" / "pypi" / "networkx" / "networkx-3.4.2-py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "networkx"
+    assert result.version == "3.4.2"
+
+
+def test_classify_uv_wheel_index_legacy_underscored_name_prefix(lang: PythonLanguage, tmp_path: Path) -> None:
+    # Legacy leaf prefix uses the dist's underscored form even though the
+    # parent dir (and normalised name) uses hyphens.
+    entry = (
+        tmp_path / "wheels-v4" / "pypi" / "markdown-it-py"
+        / "markdown_it_py-3.0.0-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "markdown-it-py"
+    assert result.version == "3.0.0"
+
+
+def test_classify_uv_wheel_index_build_hash_schema(lang: PythonLanguage, tmp_path: Path) -> None:
+    # wheels-v5 (and others): locally built wheels are keyed by a 16-char hex
+    # build hash instead of platform tags. A build-hash leaf is always a
+    # symlink into archive-v0 in real uv — see
+    # test_classify_uv_wheel_index_build_hash_schema_truncated_version below
+    # for why the leaf name's own version can't be trusted directly.
+    entry = tmp_path / "wheels-v5" / "pypi" / "multidict" / "6.7.0-516d0c2242d49034"
+    entry.parent.mkdir(parents=True)
+    archive = tmp_path / "archive-v0" / "somehash"
+    archive.mkdir(parents=True)
+    (archive / "multidict-6.7.0.dist-info").mkdir()
+    entry.symlink_to(archive, target_is_directory=True)
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "multidict"
+    assert result.version == "6.7.0"
+
+
+def test_classify_uv_wheel_index_build_hash_schema_truncated_version(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # uv's WheelFilename::cache_key() also produces the "<version>-<16-hex
+    # digest>" shape when the untruncated "<version>-<tags>" key exceeds 64
+    # characters — in that case it's the *version* that gets truncated (to
+    # 47 chars, trimming trailing "."/"+") before the digest is appended, so
+    # the leaf name's version group is not reliably the real version. This
+    # is uv's own cache_key() test case for that: a 69-character version
+    # that gets truncated to 47 chars in the leaf name.
+    real_version = "1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7.8.9.0.1.2.1.2.3.4.5.6.7.8.9.0.1.1.2"
+    truncated_leaf_version = "1.2.3.4.5.6.7.8.9.0.1.2.3.4.5.6.7.8.9.0.1.2.1.2"
+    assert len(truncated_leaf_version) == 47
+    assert real_version != truncated_leaf_version
+
+    entry = tmp_path / "wheels-v6" / "pypi" / "example" / f"{truncated_leaf_version}-80bf8598e9647cf7"
+    entry.parent.mkdir(parents=True)
+    archive = tmp_path / "archive-v0" / "somehash"
+    archive.mkdir(parents=True)
+    (archive / f"example-{real_version}.dist-info").mkdir()
+    entry.symlink_to(archive, target_is_directory=True)
+
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "example"
+    assert result.version == real_version
+
+
+def test_classify_uv_wheel_index_build_hash_schema_broken_symlink_declines(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # If the archive-v0 symlink can't be resolved, the real version can't be
+    # recovered — must decline classification rather than report the
+    # leaf name's (possibly-truncated) version.
+    entry = tmp_path / "wheels-v6" / "pypi" / "example" / "1.0.0-516d0c2242d49034"
+    entry.parent.mkdir(parents=True)
+    entry.symlink_to(tmp_path / "archive-v0" / "doesnotexist")
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_wheel_index_build_hash_schema_missing_distinfo_declines(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # The archive-v0 target resolves, but has no matching .dist-info for
+    # this package — must decline rather than guess.
+    entry = tmp_path / "wheels-v6" / "pypi" / "example" / "1.0.0-516d0c2242d49034"
+    entry.parent.mkdir(parents=True)
+    archive = tmp_path / "archive-v0" / "somehash"
+    archive.mkdir(parents=True)
+    entry.symlink_to(archive, target_is_directory=True)
+    assert lang.classify_cache_file(entry) is None
+
+
+@pytest.mark.parametrize("suffix", [".http", ".msgpack", ".rev", ".lock"])
+def test_classify_uv_wheel_index_companion_files_ignored(
+    lang: PythonLanguage, tmp_path: Path, suffix: str
+) -> None:
+    # .http/.msgpack companions sit alongside the leaf for a wheel downloaded
+    # from a remote registry; .rev is the equivalent pointer for a wheel
+    # resolved from a local/--find-links index; .lock is an advisory
+    # cross-process lock uv creates before extraction even starts (and never
+    # deletes afterwards, so it persists on disk like the others). All four
+    # match the tags regex the same way the real leaf does (e.g.
+    # "1.37.0-py3-none-any.rev" -> version "1.37.0"), so none of them must
+    # classify — that would double- or prematurely-classify the same
+    # install (and must not be mistaken for a build-hash leaf either).
+    parent = tmp_path / "wheels-v6" / "pypi" / "msal"
+    parent.mkdir(parents=True)
+    companion = parent / f"1.37.0-py3-none-any{suffix}"
+    companion.touch()
+    assert lang.classify_cache_file(companion) is None
+
+
+def test_classify_uv_wheel_index_name_dir_itself_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    # The intermediate "<name>" directory (created before any version leaf)
+    # must not misclassify.
+    name_dir = tmp_path / "wheels-v6" / "pypi" / "msal"
+    name_dir.mkdir(parents=True)
+    assert lang.classify_cache_file(name_dir) is None
+
+
+def test_classify_uv_sdist_index_pypi(lang: PythonLanguage, tmp_path: Path) -> None:
+    entry = tmp_path / "sdists-v9" / "pypi" / "mozdebug" / "0.3.1"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "mozdebug"
+    assert result.version == "0.3.1"
+    assert result.ecosystem == "PyPI"
+
+
+def test_classify_uv_sdist_build_wheel_and_version_dir_both_classify(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: building a wheel from a cached sdist writes the built
+    .whl several levels beneath that sdist's own pypi/<name>/<version>
+    index entry — real uv layout is sdists-v9/pypi/<name>/<version>/
+    <revision-hash>/<name>-<version>-*.whl. Both the version directory
+    (created when the build *starts*) and the wheel (only appearing once
+    the build *finishes*, which can be minutes later for a large sdist)
+    must classify independently — neither is suppressed based on the
+    other's presence.
+
+    This was previously suppressed (based on whether the version
+    directory's path still classified as a valid index entry), but that's
+    a static, pathname-only check: the version directory persists across
+    installs (it's uv's own cache, not deleted after use), so it stays
+    classifiable long after any actual event for it was emitted — or
+    without this daemon session having ever observed its creation at all
+    (e.g. the daemon started after the directory already existed, or a
+    second build happens under an already-cached version). In either case
+    the wheel is the only real signal for that specific install; suppressing
+    it produced zero events, not just a deduplicated one — confirmed
+    directly, and worse than the duplicate the suppression existed to
+    prevent. A wheel must always be classified as its own event; any actual
+    same-session duplicate against the version-directory event is
+    daemon._consume()'s job to dedupe when the two land in the same batch,
+    not classify_cache_file()'s.
+    """
+    version_dir = tmp_path / "sdists-v9" / "pypi" / "mozdebug" / "0.3.1"
+    revision_dir = version_dir / "oA3zsNe7yXsTUicUjYvEi"
+    revision_dir.mkdir(parents=True)
+    wheel = revision_dir / "mozdebug-0.3.1-py2.py3-none-any.whl"
+    wheel.touch()
+
+    version_result = lang.classify_cache_file(version_dir)
+    assert version_result is not None
+    assert version_result.name == "mozdebug"
+    assert version_result.version == "0.3.1"
+
+    wheel_result = lang.classify_cache_file(wheel)
+    assert wheel_result is not None
+    assert wheel_result.name == "mozdebug"
+    assert wheel_result.version == "0.3.1"
+
+
+def test_classify_uv_sdist_build_wheel_custom_build_shard_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """uv inserts an additional cache shard between the revision (build)
+    directory and the wheel whenever BuildInfo::cache_shard() is
+    non-empty — custom config settings, extra build requirements, or extra
+    build variables are configured for that package (uv-distribution/src/
+    source/mod.rs, e.g. url()/path() building a source distribution). In
+    that layout the version directory sits THREE levels above the wheel
+    (wheel -> build-settings-digest dir -> revision-hash dir -> version
+    dir), not two — sdists-v9/pypi/<name>/<version>/<revision-hash>/
+    <build-settings-digest>/<name>-<version>-*.whl. The wheel must still
+    classify correctly regardless of this extra shard depth — see
+    test_classify_uv_sdist_build_wheel_and_version_dir_both_classify above
+    for why it's never suppressed based on the version directory's
+    presence.
+    """
+    version_dir = tmp_path / "sdists-v9" / "pypi" / "customdeps" / "1.0.0"
+    revision_dir = version_dir / "revHash456"
+    build_shard_dir = revision_dir / "buildSettingsDigest789"
+    build_shard_dir.mkdir(parents=True)
+    wheel = build_shard_dir / "customdeps-1.0.0-py3-none-any.whl"
+    wheel.touch()
+
+    version_result = lang.classify_cache_file(version_dir)
+    assert version_result is not None
+    assert version_result.name == "customdeps"
+    assert version_result.version == "1.0.0"
+
+    wheel_result = lang.classify_cache_file(wheel)
+    assert wheel_result is not None
+    assert wheel_result.name == "customdeps"
+    assert wheel_result.version == "1.0.0"
+
+
+def test_classify_uv_sdist_build_wheel_under_preexisting_version_dir_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: the previous ancestor-based suppression checked whether
+    the wheel's version-directory ancestor "currently classifies as a
+    valid index entry" — a static, pathname-only fact. That directory
+    persists across installs (it's uv's own cache, not deleted after use),
+    so it stays classifiable indefinitely regardless of whether this daemon
+    session ever actually observed (and emitted an event for) its
+    creation.
+
+    Two concrete cases this must handle correctly, both simulated here by
+    the version directory already existing with an unrelated prior
+    revision/wheel before the "new" build's revision directory and wheel
+    are created:
+      1. A daemon started after the version directory already existed
+         (e.g. from an earlier `uv sync` outside the daemon's lifetime) —
+         no creation event for the directory was ever emitted by this
+         session.
+      2. A second, genuinely new build under an already-cached version
+         (e.g. a hash mismatch or different platform tag forcing a
+         rebuild) — the directory's own creation event, if any, belongs to
+         the FIRST build, not this one.
+
+    In both cases the new wheel is the only real signal for that specific
+    install. It must always classify as its own event rather than being
+    suppressed by the mere continued existence of an ancestor directory
+    that may have nothing to do with this particular build.
+    """
+    version_dir = tmp_path / "sdists-v9" / "pypi" / "mozdebug" / "0.3.1"
+    old_revision_dir = version_dir / "oldrevisionhash"
+    old_revision_dir.mkdir(parents=True)
+    (old_revision_dir / "mozdebug-0.3.1-py2.py3-none-any.whl").touch()
+
+    # A second, later build under the SAME (already-existing, already
+    # "classifiable") version directory.
+    new_revision_dir = version_dir / "newrevisionhash"
+    new_revision_dir.mkdir(parents=True)
+    new_wheel = new_revision_dir / "mozdebug-0.3.1-py2.py3-none-any.whl"
+    new_wheel.touch()
+
+    # The ancestor genuinely still classifies (confirming this is a
+    # meaningful test of the fix, not a case where suppression could never
+    # have applied anyway).
+    assert lang.classify_cache_file(version_dir) is not None
+
+    result = lang.classify_cache_file(new_wheel)
+    assert result is not None, (
+        "the new build's wheel must classify as its own event — it is the only "
+        "signal for this specific install, and must not be suppressed just "
+        "because the version directory (from an earlier, unrelated build) "
+        "still exists and still classifies"
+    )
+    assert result.name == "mozdebug"
+    assert result.version == "0.3.1"
+
+
+def test_classify_whl_file_outside_sdist_root_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # The sdists-v* exclusion above must not reach unrelated .whl files —
+    # pip's wheel cache (~/.cache/pip/wheels/**) has no sdists-v* ancestor
+    # and a bare .whl there is the sole, canonical event for that install.
+    whl = tmp_path / "pip-wheels-cache" / "requests-2.31.0-py3-none-any.whl"
+    whl.parent.mkdir(parents=True)
+    whl.touch()
+    result = lang.classify_cache_file(whl)
+    assert result is not None
+    assert result.name == "requests"
+    assert result.version == "2.31.0"
+
+
+def test_classify_uv_sdist_build_wheel_from_git_source_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # Regression: sdists-v*/git/<hash> (and path/<hash>, editable/<hash>)
+    # subtrees hold locally-sourced sdists, not registry packages —
+    # _uv_sdist_index_entry_to_metadata() deliberately does not classify
+    # them (see its own docstring and
+    # test_classify_uv_sdist_index_non_pypi_git_subtree_not_misclassified
+    # below). A wheel built from one of those has no "index entry" event to
+    # stand in for it, so the earlier blanket "any .whl under an sdists-v*
+    # ancestor is suppressed" exclusion silently dropped every git/path/
+    # editable install's only event — worse than the duplicate it was fixing.
+    # Real uv layout: sdists-v9/git/<hash>/<revision-hash>/<name>-<version>-*.whl.
+    whl = (
+        tmp_path / "sdists-v9" / "git" / "d0b92d87155cfc26" / "8a547958489291c2"
+        / "serena_agent-1.5.4.dev0-py3-none-any.whl"
+    )
+    whl.parent.mkdir(parents=True)
+    whl.touch()
+    result = lang.classify_cache_file(whl)
+    assert result is not None
+    assert result.name == "serena-agent"
+    assert result.version == "1.5.4.dev0"
+
+
+def test_classify_uv_sdist_build_wheel_lookalike_root_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # Regression: a bare startswith("sdists-v") check (rather than the
+    # validated _UV_CACHE_SCHEMA_DIR_RE-backed shape check
+    # _uv_sdist_index_entry_to_metadata() already applies) would suppress a
+    # completely unrelated wheel sitting under a lookalike directory such as
+    # "sdists-volume", which is not a real uv cache root.
+    whl = tmp_path / "sdists-volume" / "pip-wheels" / "requests-2.31.0-py3-none-any.whl"
+    whl.parent.mkdir(parents=True)
+    whl.touch()
+    result = lang.classify_cache_file(whl)
+    assert result is not None
+    assert result.name == "requests"
+    assert result.version == "2.31.0"
+
+
+def test_classify_uv_sdist_index_by_index_hash(lang: PythonLanguage, tmp_path: Path) -> None:
+    entry = tmp_path / "sdists-v9" / "index" / "b2a7eb67d4c26b82" / "certifi" / "0.0.1"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "certifi"
+    assert result.version == "0.0.1"
+
+
+def test_classify_uv_sdist_index_name_dir_itself_returns_none(lang: PythonLanguage, tmp_path: Path) -> None:
+    name_dir = tmp_path / "sdists-v9" / "pypi" / "mozdebug"
+    name_dir.mkdir(parents=True)
+    assert lang.classify_cache_file(name_dir) is None
+
+
+def test_classify_uv_sdist_index_non_pypi_git_subtree_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # sdists-v*/git/<hash> is one level shallower than pypi/<name>/<version>;
+    # a path that happens to share the "sdists-v*" ancestor but isn't under
+    # pypi/ or index/ should still fail classification (it won't be globbed
+    # in practice — this guards classify_cache_file() directly).
+    entry = tmp_path / "sdists-v9" / "git" / "d0b92d87155cfc26"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_git_hash_starting_with_digit_not_misread_as_version(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # Regression: sdists-v9/git/<hash> was misclassified as package "git"
+    # whenever the hash happened to start with a digit (path.parent.name
+    # ("git") became the name, and the digit-first hash passed the old
+    # version[0].isdigit() check).
+    entry = tmp_path / "sdists-v9" / "git" / "0123456789abcdef"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_pypi_dir_with_digit_leading_name_not_misread_as_version(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # Regression: sdists-v9/pypi/3to2 (the "<name>" dir, no version leaf yet)
+    # was misclassified as package "pypi" version "3to2" — path.parent.name
+    # ("pypi") became the name, and "3to2" starting with a digit passed the
+    # old version check. "3to2" is a real PyPI package name.
+    entry = tmp_path / "sdists-v9" / "pypi" / "3to2"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_path_subtree_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = tmp_path / "sdists-v9" / "path" / "248afbecd64dfb30"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_editable_subtree_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = tmp_path / "sdists-v9" / "editable" / "565f165538b51c36"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_bare_index_dir_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # sdists-v*/index/<hash> itself (before any <name>/<version> exists under it).
+    entry = tmp_path / "sdists-v9" / "index" / "b2a7eb67d4c26b82"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_root_itself_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = tmp_path / "sdists-v9"
+    entry.mkdir(parents=True)
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_wheel_index_bare_index_dir_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # wheels-v6/index/<hash> itself, mirroring the sdist-side index shape.
+    entry = tmp_path / "wheels-v6" / "index" / "b2a7eb67d4c26b82"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_wheel_index_direct_url_dependency(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: a wheel installed from a direct URL (e.g. `pip install
+    https://.../pkg-1.0-py3-none-any.whl`) is cached by uv under
+    wheels-v*/url/<16-hex digest of the URL>/<name>/<leaf> — uv's
+    WheelCache::Url (uv-cache/src/wheel.rs) roots this bucket at
+    "url/<digest>", and CacheBucket::Wheels callers (uv-distribution/src/
+    distribution_database.rs) join the package name onto it, same as the
+    "index/<hash>/<name>/<leaf>" shape but keyed by URL digest instead of
+    index-URL digest. Verified against a real isolated `uv pip install` of
+    a direct wheel URL: wheels-v6/url/d36b7b1fdbf148cf/msal/
+    1.37.0-py3-none-any (a symlink into archive-v0, same as pypi/index
+    entries). Since archive-v0 is unwatched, missing this shape meant every
+    direct-URL wheel install produced no cache event at all.
+    """
+    entry = tmp_path / "wheels-v6" / "url" / "d36b7b1fdbf148cf" / "msal" / "1.37.0-py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "msal"
+    assert result.version == "1.37.0"
+
+
+def test_classify_uv_wheel_index_direct_url_companion_files_ignored(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    parent = tmp_path / "wheels-v6" / "url" / "d36b7b1fdbf148cf" / "msal"
+    parent.mkdir(parents=True)
+    for suffix in (".http", ".msgpack"):
+        companion = parent / f"1.37.0-py3-none-any{suffix}"
+        companion.touch()
+        assert lang.classify_cache_file(companion) is None
+
+
+def test_classify_uv_wheel_git_path_dependency(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: a wheel file committed directly to a Git repository
+    (`pip install "pkg @ git+https://...#egg=pkg&path=dist/pkg-1.0-py3-none-any.whl"`,
+    uv's BuiltDist::GitPath) is cached at wheels-v*/git/<url-digest>/
+    <git-sha>/<wheel-filename-stem> — structurally different from pypi/
+    index/url, which all have a "<name>" directory: here the WHOLE wheel
+    filename (name included) is the leaf itself, with no name-bearing
+    parent directory at all. uv-cache/src/wheel.rs's WheelCacheKind::Git
+    doc comment claims "wheels can't be delivered through Git", but that's
+    stale — uv-distribution/src/distribution_database.rs's
+    `BuiltDist::GitPath(wheel) =>` arm contradicts it directly, persisting
+    `cache.entry(CacheBucket::Wheels, WheelCache::Git(url,
+    sha).root(), wheel.filename.stem())`. Verified against a real isolated
+    `uv pip install` of a wheel committed to a local git repo:
+    wheels-v6/git/be39b86fcc0314b1/d03148887d48ab70/
+    mypkg-1.2.3-py3-none-any (a symlink into archive-v0, same as every
+    other index shape). Since archive-v0 is unwatched, missing this shape
+    meant every Git-hosted wheel install produced no cache event at all.
+    """
+    entry = (
+        tmp_path / "wheels-v6" / "git" / "be39b86fcc0314b1" / "d03148887d48ab70"
+        / "mypkg-1.2.3-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "mypkg"
+    assert result.version == "1.2.3"
+
+
+def test_classify_uv_wheel_git_path_dependency_compound_platform_tag(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: unlike the pypi/index/url index shapes — which strip the
+    package name first and then parse the remaining leaf with
+    _UV_WHEEL_INDEX_TAGS_RE, whose platform group already absorbs dots to
+    the end — the Git-wheel leaf has no name-bearing parent directory to
+    strip, so it's parsed directly by the shared parse_wheel_filename()
+    (via _WHEEL_RE) instead. That parser's platform group used to stop at
+    the first dot, so it silently rejected the whole filename for any
+    wheel with a compound (dot-joined) platform tag — a common,
+    non-hypothetical shape for compiled packages (e.g. manylinux wheels
+    ship as "manylinux_2_17_x86_64.manylinux2014_x86_64"), not just the
+    simpler "py3-none-any" shape the sibling test above covers.
+    """
+    entry = (
+        tmp_path / "wheels-v6" / "git" / "be39b86fcc0314b1" / "d03148887d48ab70"
+        / "cryptography-42.0.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "cryptography"
+    assert result.version == "42.0.0"
+
+
+def test_classify_uv_wheel_git_path_companion_file_ignored(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # The .rev companion is keyed by WheelFilename::cache_key() rather than
+    # the leaf's own full stem, so its base name differs from the leaf's —
+    # but the suffix check that excludes it doesn't depend on the base name.
+    parent = tmp_path / "wheels-v6" / "git" / "be39b86fcc0314b1" / "d03148887d48ab70"
+    parent.mkdir(parents=True)
+    companion = parent / "1.2.3-py3-none-any.rev"
+    companion.touch()
+    assert lang.classify_cache_file(companion) is None
+
+
+def test_classify_uv_wheel_git_path_hash_dir_itself_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    # The git-sha directory itself (before any wheel leaf has been written
+    # under it) must not misclassify.
+    entry = tmp_path / "wheels-v6" / "git" / "be39b86fcc0314b1" / "d03148887d48ab70"
+    entry.mkdir(parents=True)
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_git_wheel_not_misclassified_by_wheel_shape(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """The wheels-v*/git/<hash>/<sha>/<leaf> shape must not extend to
+    sdists-v* — sdists-v*/git/<hash>/<revision>/ is an unrelated,
+    already-established shape (a source distribution built from Git,
+    unnamed by design — see _uv_sdist_index_entry_to_metadata()). Its own
+    built wheel is still correctly picked up by the generic .whl handling
+    regardless, exactly as before this fix.
+    """
+    entry = (
+        tmp_path / "sdists-v9" / "git" / "d0b92d87155cfc26" / "8a547958489291c2"
+        / "serena_agent-1.5.4.dev0-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    assert lang.classify_cache_file(entry) is None
+
+    wheel = entry.parent / "serena_agent-1.5.4.dev0-py3-none-any.whl"
+    wheel.touch()
+    result = lang.classify_cache_file(wheel)
+    assert result is not None
+    assert result.name == "serena-agent"
+    assert result.version == "1.5.4.dev0"
+
+
+def test_classify_uv_sdist_url_bucket_not_misclassified_as_wheel_shape(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """The wheels-v*/url/<hash>/<name>/<leaf> shape must NOT extend to
+    sdists-v* — a direct-URL SOURCE distribution shards by revision hash
+    directly under "url/<hash>/" with no "<name>" directory at all
+    (uv-distribution/src/source/mod.rs, BuildableSource::Dist(SourceDist::
+    DirectUrl(..)) uses WheelCache::Url(&dist.url).root(), not
+    .wheel_dir(name)) — the same "no name/version encoded in the index
+    path" shape as git/path/editable sdists, which are already correctly
+    left unclassified. Verified against a real isolated `uv pip install` of
+    a direct sdist URL: sdists-v9/url/91d26772607dbdcb/Kl8BcQnLkauesLdg/
+    (a revision-hash dir, not a package name) containing the built wheel.
+    A path that happens to have 4 components under an sdists-v* "url" root
+    — coincidentally matching the wheel-side shape's length — must still be
+    rejected.
+    """
+    entry = tmp_path / "sdists-v9" / "url" / "91d26772607dbdcb" / "Kl8BcQnLkauesLdg" / "six-1.16.0-py2.py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_url_bucket_built_wheel_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """The direct-URL sdist's built .whl (buried inside the revision-hash
+    dir, with no index-entry replacement event available — see above) must
+    still classify normally via the generic .whl handling, exactly as for
+    git/path/editable sdists.
+    """
+    wheel = (
+        tmp_path / "sdists-v9" / "url" / "91d26772607dbdcb" / "Kl8BcQnLkauesLdg"
+        / "six-1.16.0-py2.py3-none-any.whl"
+    )
+    wheel.parent.mkdir(parents=True)
+    wheel.touch()
+    result = lang.classify_cache_file(wheel)
+    assert result is not None
+    assert result.name == "six"
+    assert result.version == "1.16.0"
+
+
+def test_classify_uv_wheel_index_survives_coincidental_ancestor_prefix_match(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: an unrelated ancestor directory that happens to start with
+    "wheels-v" (e.g. a home directory or mount point literally named
+    "wheels-volume") must not shadow the real wheels-v6 root further down
+    the path. Anchoring on the first "wheels-v"-prefixed path component from
+    the filesystem root — rather than the one nearest the leaf — would
+    silently reject this otherwise valid entry.
+    """
+    entry = (
+        tmp_path / "wheels-volume" / "home" / "user" / ".cache" / "uv"
+        / "wheels-v6" / "pypi" / "msal" / "1.37.0-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "msal"
+    assert result.version == "1.37.0"
+
+
+def test_classify_uv_sdist_index_survives_coincidental_ancestor_prefix_match(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = (
+        tmp_path / "sdists-volume" / "home" / "user" / ".cache" / "uv"
+        / "sdists-v9" / "pypi" / "mozdebug" / "0.3.1"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "mozdebug"
+    assert result.version == "0.3.1"
+
+
+def test_classify_uv_wheel_index_multiple_coincidental_ancestor_matches(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Two ancestor components both start with "wheels-v" (an outer
+    lookalike plus the real root further down) — the nearest one to the
+    leaf must win.
+    """
+    entry = (
+        tmp_path / "wheels-v-old" / "wheels-v6" / "pypi" / "requests" / "2.31.0-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "requests"
+    assert result.version == "2.31.0"
+
+
+def test_classify_uv_wheel_index_lookalike_root_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: a directory that merely starts with "wheels-v" — never a
+    real "wheels-v<digits>" cache root at all — must not be accepted just
+    because it happens to contain a pypi/<name>/<leaf>-shaped subtree.
+    startswith("wheels-v") alone can't tell "wheels-volume" apart from a
+    real uv cache root; only _UV_CACHE_SCHEMA_DIR_RE can.
+    """
+    entry = tmp_path / "wheels-volume" / "pypi" / "foo" / "1.0-py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_wheel_index_vnext_lookalike_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = tmp_path / "wheels-vNext" / "pypi" / "foo" / "1.0-py3-none-any"
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_sdist_index_lookalike_root_not_misclassified(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    entry = tmp_path / "sdists-volume" / "pypi" / "foo" / "1.0"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    assert lang.classify_cache_file(entry) is None
+
+
+def test_classify_uv_wheel_index_lookalike_with_real_root_further_down(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """A genuine lookalike ancestor (not schema-shaped) alongside the real
+    root further down the path — the lookalike must be skipped entirely
+    (not just deprioritised), and the real root still resolved correctly.
+    """
+    entry = (
+        tmp_path / "wheels-volume" / ".cache" / "uv"
+        / "wheels-v6" / "pypi" / "msal" / "1.37.0-py3-none-any"
+    )
+    entry.parent.mkdir(parents=True)
+    entry.touch()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "msal"
+    assert result.version == "1.37.0"
+
+
+def test_classify_uv_sdist_index_under_wheels_lookalike_ancestor_still_classifies(
+    lang: PythonLanguage, tmp_path: Path
+) -> None:
+    """Regression: classify_cache_file()'s "wheels-v*" branch previously
+    returned unconditionally the moment ANY path component merely started
+    with "wheels-v" — even when _uv_wheel_index_entry_to_metadata() itself
+    correctly rejected that ancestor as a lookalike (not schema-shaped, see
+    _UV_CACHE_SCHEMA_DIR_RE). A genuine sdists-v* entry sitting under such a
+    lookalike ancestor (e.g. a mount point literally named "wheels-volume",
+    as in /mnt/wheels-volume/.../sdists-v9/pypi/foo/1.0) would therefore
+    return None before the sdist branch ever ran, contradicting this
+    method's own stated goal of ignoring coincidental ancestors. Only an
+    actual wheel match may short-circuit before the sdist check is tried.
+    """
+    entry = tmp_path / "wheels-volume" / "sdists-v9" / "pypi" / "foo" / "1.0"
+    entry.parent.mkdir(parents=True)
+    entry.mkdir()
+    result = lang.classify_cache_file(entry)
+    assert result is not None
+    assert result.name == "foo"
+    assert result.version == "1.0"
 
 
 # ---------------------------------------------------------------------------

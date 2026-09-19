@@ -12,6 +12,7 @@ import time
 import types
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import cast
 
 import typer
 from rich.console import Console
@@ -340,7 +341,17 @@ async def _run_scan_cache(cfg):
     for lang in lang_registry.all_languages():
         try:
             globs = lang.cache_file_globs()
-            cache_dirs = lang.cache_paths()
+            # scan-cache is a one-shot glob-and-classify pass, not a
+            # recursive inotify watch — poll_only_cache_paths() roots exist
+            # only to avoid the COST of a permanent recursive watch (see
+            # CacheMonitor._poll_cache_dirs()), which doesn't apply here, so
+            # they're included in the same one-shot scan as cache_paths().
+            poll_only_fn = getattr(lang, "poll_only_cache_paths", None)
+            # poll_only_cache_paths() is duck-typed, not a LanguageBase
+            # Protocol member (see its comment in languages/base.py), so its
+            # return type is unknown to the type checker.
+            poll_only_dirs = cast("list[Path]", poll_only_fn()) if callable(poll_only_fn) else []
+            cache_dirs = lang.cache_paths() + poll_only_dirs
         except Exception:
             log.warning(
                 "cache_file_globs/cache_paths raised unexpectedly for lang=%s — skipping",

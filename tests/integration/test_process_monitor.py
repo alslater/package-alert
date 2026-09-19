@@ -167,3 +167,120 @@ def test_package_managers_skips_buggy_plugin():
     # Built-in managers still present despite bad plugin
     assert "pip" in result
     assert "npm" in result
+
+
+@pytest.mark.asyncio
+async def test_scan_processes_immediate_install_carries_pid(tmp_path):
+    """The immediate-parse path (a non-deferred install, e.g. `pip install
+    flask` with the package named directly on the command line) must stamp
+    the detecting process's PID — and its create_time() — onto the emitted
+    PackageEvent.
+
+    CacheMonitor.add_site_packages_watch() uses this PID to know a
+    site-packages watch's install is still in flight, keeping it alive past
+    the idle timeout for as long as the process runs — without it, the
+    watch could be idled out mid-install for a slow package manager.
+
+    create_time() must come from this same process_iter() scan, not be
+    re-sampled later: the event can sit behind OSV lookups and risk
+    analysis before the daemon's consumer reaches it, long enough for this
+    PID to have been reused by an unrelated process by then. Carrying the
+    create_time observed here lets the consumer verify the PID still refers
+    to the process actually observed running the install, rather than
+    trusting whatever now holds that PID number — see
+    CacheMonitor._resolve_owning_pid().
+    """
+    from packagealert.languages.base import PackageSpec, ProcessInstall
+
+    monitor = _make_monitor()
+
+    fake_proc = MagicMock()
+    fake_proc.info = {
+        "pid": 424242,
+        "ppid": 1,
+        "cmdline": ["pip", "install", "flask"],
+        "cwd": str(tmp_path),
+        "create_time": 1700000000.5,
+    }
+
+    good_lang = MagicMock()
+    good_lang.name = "pip"
+    good_lang.process_names = frozenset(["pip"])
+
+    parsed = ProcessInstall(
+        manager="pip",
+        packages=[PackageSpec(name="flask", version="3.0.0", ecosystem="PyPI")],
+        defer_to_lockfile=False,
+    )
+
+    with (
+        patch("packagealert.monitors.process.psutil.process_iter", return_value=[fake_proc]),
+        patch.object(monitor, "_pm_names", frozenset(["pip"])),
+        patch.object(monitor, "_try_parse", return_value=parsed),
+    ):
+        await monitor._scan_processes()
+
+    assert not monitor._queue.empty()
+    event = monitor._queue.get_nowait()
+    assert event.pid == 424242
+    assert event.pid_create_time == 1700000000.5
+    assert event.package_name == "flask"
+
+
+@pytest.mark.asyncio
+async def test_scan_processes_does_not_carry_pid_when_create_time_unavailable(tmp_path):
+    """Regression: psutil.Process.as_dict() (which process_iter() uses
+    internally) has PER-ATTRIBUTE error handling — AccessDenied or
+    ZombieProcess raised fetching one specific attribute is caught and
+    replaced with `ad_value` (None by default) for just that attribute,
+    without the whole as_dict() call raising. So `info["pid"]` can be a
+    real, valid PID while `info["create_time"]` is None for that same
+    process, in the same scan.
+
+    If that None were carried through as event.pid=<real pid>,
+    event.pid_create_time=None, CacheMonitor._resolve_owning_pid(pid, None)
+    can't tell "no process was ever observed" (its own no-pid-known caller)
+    apart from "a process WAS observed here, but create_time specifically
+    couldn't be read" — it treats None as licence to sample
+    psutil.Process(pid).create_time() itself, fresh, at consume time. If
+    this pid has since been reused by an unrelated process, that silently
+    binds the watch to the wrong process's create_time — exactly the
+    PID-reuse race pid_create_time exists to prevent, just reopened one
+    level up. So a pid observed without a matching create_time must not be
+    carried on the event at all.
+    """
+    from packagealert.languages.base import PackageSpec, ProcessInstall
+
+    monitor = _make_monitor()
+
+    fake_proc = MagicMock()
+    fake_proc.info = {
+        "pid": 555555,
+        "ppid": 1,
+        "cmdline": ["pip", "install", "flask"],
+        "cwd": str(tmp_path),
+        "create_time": None,  # as_dict()'s ad_value for this one attribute
+    }
+
+    good_lang = MagicMock()
+    good_lang.name = "pip"
+    good_lang.process_names = frozenset(["pip"])
+
+    parsed = ProcessInstall(
+        manager="pip",
+        packages=[PackageSpec(name="flask", version="3.0.0", ecosystem="PyPI")],
+        defer_to_lockfile=False,
+    )
+
+    with (
+        patch("packagealert.monitors.process.psutil.process_iter", return_value=[fake_proc]),
+        patch.object(monitor, "_pm_names", frozenset(["pip"])),
+        patch.object(monitor, "_try_parse", return_value=parsed),
+    ):
+        await monitor._scan_processes()
+
+    assert not monitor._queue.empty()
+    event = monitor._queue.get_nowait()
+    assert event.pid is None, "pid must not be carried when its create_time couldn't be read"
+    assert event.pid_create_time is None
+    assert event.package_name == "flask"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import cast
 
 import typer
 from rich.console import Console
@@ -97,7 +98,22 @@ def languages_info(
     except Exception:
         log.warning("lang=%s cache_paths() raised unexpectedly", getattr(lang, "name", "?"), exc_info=True)
         paths_str = _ERROR_DISPLAY
-    console.print(f"Cache paths: {paths_str}")
+    console.print(f"Cache paths (watched): {paths_str}")
+
+    try:
+        poll_only_fn = getattr(lang, "poll_only_cache_paths", None)
+        # poll_only_cache_paths() is duck-typed, not a LanguageBase Protocol
+        # member (see its comment in languages/base.py), so its return type
+        # is unknown to the type checker.
+        poll_only_paths = cast("list[Path]", poll_only_fn()) if callable(poll_only_fn) else []
+        home = str(Path.home())
+        poll_paths_str = ", ".join(str(p).replace(home, "~") for p in poll_only_paths) or "none"
+    except Exception:
+        log.warning(
+            "lang=%s poll_only_cache_paths() raised unexpectedly", getattr(lang, "name", "?"), exc_info=True
+        )
+        poll_paths_str = _ERROR_DISPLAY
+    console.print(f"Cache paths (polled): {poll_paths_str}")
 
     try:
         top_url = lang.top_packages_url()

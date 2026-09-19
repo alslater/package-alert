@@ -270,6 +270,11 @@ class PackageEvent(BaseModel):
     project_path: Path | None
     timestamp: datetime
     site_packages_dir: Path | None = None
+    pid: int | None = None  # the package-manager process this event was observed from, if any
+    # psutil.Process(pid).create_time() as sampled by the monitor at the moment it
+    # observed `pid`, not re-sampled by a later consumer — see CacheMonitor's
+    # _resolve_owning_pid() for why a fresh sample at consume time is PID-reuse-unsafe.
+    pid_create_time: float | None = None
 
     @field_validator("ecosystem", mode="before")
     @classmethod

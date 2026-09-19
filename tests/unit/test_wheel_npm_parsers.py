@@ -25,6 +25,25 @@ def test_parse_wheel_normalizes_underscores(tmp_path):
     assert info.name == "my-package"
 
 
+def test_parse_wheel_compound_platform_tag(tmp_path):
+    """Regression: the platform tag may itself contain dots — a manylinux
+    wheel commonly ships as two platform tags joined by a dot (e.g.
+    "manylinux_2_17_x86_64.manylinux2014_x86_64"), which is a real,
+    extremely common shape for any package with a compiled extension
+    (cryptography, numpy, etc.), not a rare edge case. The old
+    "(?P<platform>[^.]+)\\.whl$" platform group stopped at the first dot and
+    then required ".whl" to follow immediately, so it never matched this
+    shape at all — parse_wheel_filename() returned None for the whole
+    filename, not just a wrong platform value.
+    """
+    p = tmp_path / "cryptography-42.0.0-cp39-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
+    p.touch()
+    info = parse_wheel_filename(p)
+    assert info is not None
+    assert info.name == "cryptography"
+    assert info.version == "42.0.0"
+
+
 def test_parse_invalid_filename_returns_none(tmp_path):
     p = tmp_path / "notawheel.tar.gz"
     p.touch()

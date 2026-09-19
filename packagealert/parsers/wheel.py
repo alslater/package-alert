@@ -9,11 +9,19 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 # PEP 427 wheel filename: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
+# The platform tag may itself contain dots — e.g. a manylinux wheel commonly
+# ships as "...-manylinux_2_17_x86_64.manylinux2014_x86_64.whl" (two
+# platform tags joined with a dot, both satisfied by the same wheel) — so it
+# is matched greedily to the end rather than stopping at the first dot;
+# python/abi are matched as single hyphen-free tags since only the platform
+# tag is ever compound in practice. Mirrors _UV_WHEEL_INDEX_TAGS_RE in
+# languages/python.py, which parses the same tag shape from a different
+# leaf format and needs the same platform-tag treatment for the same reason.
 _WHEEL_RE = re.compile(
     r"^(?P<name>[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)"
     r"-(?P<version>[A-Za-z0-9_.!+]+)"
     r"(-(?P<build>\d[^-]*))?"
-    r"-(?P<python>[^-]+)-(?P<abi>[^-]+)-(?P<platform>[^.]+)\.whl$"
+    r"-(?P<python>[^-]+)-(?P<abi>[^-]+)-(?P<platform>.+)\.whl$"
 )
 
 
