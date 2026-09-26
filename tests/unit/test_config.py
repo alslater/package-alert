@@ -15,6 +15,7 @@ from packagealert.config import (
     load_config,
     warn_missing_paths,
 )
+from packagealert.languages.base import PackageMetadata
 
 
 @pytest.fixture(autouse=True)
@@ -212,6 +213,124 @@ async def test_run_scan_cache_skips_lang_when_cache_paths_raises():
 
 
 @pytest.mark.asyncio
+async def test_run_scan_cache_scans_cache_paths_when_poll_only_cache_paths_raises(tmp_path):
+    """Regression: poll_only_cache_paths() is an optional plugin hook (see
+    LanguageBase's comment on it) — a bug in one plugin's implementation
+    must degrade to "unavailable" (no extra roots), not discard the
+    cache_paths() roots that same plugin already returned successfully.
+    An earlier version of _run_scan_cache() wrapped cache_file_globs(),
+    cache_paths(), AND poll_only_cache_paths() in one shared try/except, so
+    a raising poll_only_cache_paths() skipped this language's scan
+    entirely — confirmed empirically to discard a real, already-resolved
+    cache_paths() artifact that should still have been found.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
+    whl.touch()
+
+    lang = MagicMock()
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.whl"]
+    lang.cache_paths.return_value = [tmp_path]
+    lang.poll_only_cache_paths.side_effect = RuntimeError("buggy plugin")
+    lang.classify_cache_file.return_value = PackageMetadata(
+        name="requests", version="2.31.0", ecosystem="PyPI"
+    )
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+    ):
+        await _run_scan_cache(cfg)  # must not raise
+
+    lang.classify_cache_file.assert_called_once_with(whl)
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_scans_cache_paths_when_poll_only_cache_paths_returns_none(tmp_path):
+    """Regression: poll_only_cache_paths() is duck-typed, third-party-
+    implementable, and optional — a plugin can return None instead of
+    raising. cast("list[Path]", ...) is only a type-checker hint, not a
+    runtime check, so an earlier version let None survive the try/except
+    unflagged and only failed later, unguarded, at `cache_dirs +
+    poll_only_dirs` (TypeError: list + None) — aborting the ENTIRE
+    scan-cache command, not just this one language's scan, confirmed
+    empirically. A malformed return must degrade to "unavailable" (no
+    extra roots) exactly like a raised exception does, not crash the
+    whole command.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
+    whl.touch()
+
+    lang = MagicMock()
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.whl"]
+    lang.cache_paths.return_value = [tmp_path]
+    lang.poll_only_cache_paths.return_value = None
+    lang.classify_cache_file.return_value = PackageMetadata(
+        name="requests", version="2.31.0", ecosystem="PyPI"
+    )
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+    ):
+        await _run_scan_cache(cfg)  # must not raise
+
+    lang.classify_cache_file.assert_called_once_with(whl)
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_scans_cache_paths_when_poll_only_cache_paths_returns_non_path_elements(
+    tmp_path,
+):
+    """Regression: a plugin returning a list containing a non-Path element
+    (e.g. a bare str) doesn't raise anywhere in _run_scan_cache()'s
+    poll_only_cache_paths() try/except — list concatenation and iteration
+    both work fine on a str element — so it silently passed straight
+    through into `cache_dirs`, and only failed later, unguarded, at
+    `cache_dir.exists()` (AttributeError: str has no such method) —
+    aborting the entire scan-cache command. Confirmed empirically.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
+    whl.touch()
+
+    lang = MagicMock()
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.whl"]
+    lang.cache_paths.return_value = [tmp_path]
+    lang.poll_only_cache_paths.return_value = ["not-a-path-object"]
+    lang.classify_cache_file.return_value = PackageMetadata(
+        name="requests", version="2.31.0", ecosystem="PyPI"
+    )
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+    ):
+        await _run_scan_cache(cfg)  # must not raise
+
+    lang.classify_cache_file.assert_called_once_with(whl)
+
+
+@pytest.mark.asyncio
 async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
     """classify_cache_file raising for one entry must not abort scan of remaining entries."""
     from packagealert.cli.app import _run_scan_cache
@@ -219,7 +338,14 @@ async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
     whl = tmp_path / "requests-2.31.0-py3-none-any.whl"
     whl.touch()
 
-    lang = MagicMock()
+    # spec= constrains which attributes this mock has at all: without it, a
+    # bare MagicMock() auto-creates poll_only_cache_paths() too (matching
+    # callable(getattr(lang, "poll_only_cache_paths", None))'s guard), whose
+    # return value is itself a MagicMock rather than a list — cache_paths()
+    # + poll_only_cache_paths() then raises inside _run_scan_cache()'s own
+    # try/except, silently skipping this plugin entirely rather than
+    # exercising the classify_cache_file() failure this test is for.
+    lang = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
     lang.name = "python"
     lang.cache_file_globs.return_value = ["*.whl"]
     lang.cache_paths.return_value = [tmp_path]
@@ -236,6 +362,364 @@ async def test_run_scan_cache_skips_entry_when_classify_raises(tmp_path):
         await _run_scan_cache(cfg)  # must not raise
 
     lang.classify_cache_file.assert_called_once_with(whl)
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_dedups_same_package_version_across_paths(tmp_path):
+    """Regression: classify_cache_file() deliberately classifies a
+    source-build wheel as its own event even when its
+    sdists-v*/pypi/<name>/<version> ANCESTOR directory also independently
+    classifies (see that method's own dual-classification comment in
+    languages/python.py) — a single uv sdist build therefore glob-matches
+    as TWO different paths that both classify to the SAME
+    (ecosystem, name, version). The per-cache_dir `seen` set only
+    deduplicates by glob-matched PATH, so it can never catch this — both
+    paths are genuinely different paths. Without command-level dedup by
+    (ecosystem, name, version), a single malicious package was queried
+    and alerted on TWICE: alert_malicious() called twice, `found`
+    incremented twice, and the printed "N malicious package(s) found"
+    count overstated how many distinct malicious packages were actually
+    found — confirmed empirically.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    version_dir = tmp_path / "pypi" / "mypkg" / "1.0.0"
+    rev_dir = version_dir / "abcdef0123456789"
+    rev_dir.mkdir(parents=True)
+    wheel = rev_dir / "mypkg-1.0.0-py3-none-any.whl"
+    wheel.touch()
+
+    # Two DIFFERENT paths (the version-dir itself, and the wheel file
+    # nested under it) both classify to the identical package/version —
+    # mirroring classify_cache_file()'s real dual-classification behavior
+    # for a uv sdist build, without needing the real PythonLanguage glob
+    # patterns to match both shapes.
+    lang = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["**/*"]
+    lang.cache_paths.return_value = [tmp_path]
+
+    def classify(path):
+        if path in (version_dir, wheel):
+            return PackageMetadata(name="mypkg", version="1.0.0", ecosystem="PyPI")
+        return None
+
+    lang.classify_cache_file.side_effect = classify
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    fake_osv_cache = FakeOsvCache.return_value
+    fake_osv_cache.get = AsyncMock(return_value=None)
+    fake_osv_client = FakeOsvClient.return_value
+    malicious_result = MagicMock(has_malicious=True, degraded=False)
+    fake_osv_client.batch_query = AsyncMock(return_value=[malicious_result])
+
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+        patch("packagealert.alerts.terminal.alert_malicious") as mock_alert,
+    ):
+        await _run_scan_cache(cfg)
+
+    assert mock_alert.call_count == 1, (
+        f"expected the same (ecosystem, name, version) found via two "
+        f"different paths to alert exactly once, got {mock_alert.call_count} calls"
+    )
+    assert fake_osv_client.batch_query.call_count == 1, (
+        "expected only one OSV query for the deduplicated package, not one "
+        "per glob-matched path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_dedups_across_name_spellings(tmp_path):
+    """Regression: the command-level dedup key is described as canonical
+    (ecosystem, name, version), but used `metadata.name` RAW.
+    PackageMetadata is a plain dataclass with no validation, so a plugin
+    may return any spelling — PythonLanguage normalises its own, but
+    NodeLanguage's cacache index-key branch returns the key unlowercased.
+    PackageEvent, meanwhile, normalises `package_name` through the shared
+    ecosystem-specific helper, so two spellings of ONE package missed each
+    other in seen_packages and were queried and alerted TWICE — with both
+    alerts displaying the same normalised name, since the event normalised
+    what the key had not. Confirmed empirically.
+
+    The name is now normalised once, up front, and that canonical value is
+    used for the key, both OSV lookups and the event.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    a = tmp_path / "a.entry"
+    b = tmp_path / "b.entry"
+    a.touch()
+    b.touch()
+
+    lang = MagicMock(
+        spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file", "normalise_name"]
+    )
+    lang.name = "node"
+    lang.cache_file_globs.return_value = ["*.entry"]
+    lang.cache_paths.return_value = [tmp_path]
+    # npm's rule: lowercase only, never collapse separators (so "socket.io"
+    # survives intact — see normalise_package_name_for()'s own docstring).
+    lang.normalise_name.side_effect = lambda n: n.lower()
+
+    def classify(path):
+        # Two cache entries for the SAME npm package, differing only in
+        # case — exactly what an unnormalised index key can yield.
+        if path == a:
+            return PackageMetadata(name="Express", version="1.0.0", ecosystem="npm")
+        if path == b:
+            return PackageMetadata(name="express", version="1.0.0", ecosystem="npm")
+        return None
+
+    lang.classify_cache_file.side_effect = classify
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    fake_osv_cache = FakeOsvCache.return_value
+    fake_osv_cache.get = AsyncMock(return_value=None)
+    fake_osv_client = FakeOsvClient.return_value
+    malicious_result = MagicMock(has_malicious=True, degraded=False)
+    fake_osv_client.batch_query = AsyncMock(return_value=[malicious_result])
+
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+        patch("packagealert.languages.registry.for_ecosystem", return_value=lang),
+        patch("packagealert.alerts.terminal.alert_malicious") as mock_alert,
+    ):
+        await _run_scan_cache(cfg)
+
+    assert mock_alert.call_count == 1, (
+        f"expected two spellings of one package to alert exactly once, got "
+        f"{mock_alert.call_count} calls"
+    )
+    assert fake_osv_client.batch_query.call_count == 1, (
+        "expected only one OSV query once the two spellings normalise to "
+        "the same name"
+    )
+    queried = fake_osv_client.batch_query.call_args[0][0]
+    assert queried == [("npm", "express", "1.0.0")], (
+        f"expected the canonical (normalised) name to be queried, got {queried}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_skips_entry_with_malformed_metadata_types(tmp_path):
+    """Regression: PackageMetadata is a plain dataclass and
+    classify_cache_file() is a duck-typed, third-party-implementable
+    hook, so a plugin can return a non-string name/ecosystem/version.
+
+    normalise_package_name_for() documents itself as never raising, but
+    that only holds for a string: with a non-string the plugin's own
+    normalise_name hook raises (caught and logged, as designed) and then
+    the FALLBACK raises on the same value and escapes. That TypeError
+    propagated out of _run_scan_cache() and aborted the WHOLE command —
+    every remaining language and cache dir went unscanned, confirmed
+    empirically. The per-entry try/except around classify_cache_file()
+    cannot help, because the malformed value escapes it later.
+
+    The types are now validated at that boundary, so only the offending
+    entry is skipped and the rest of the scan still runs.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    bad_name = tmp_path / "bad_name.entry"
+    bad_eco = tmp_path / "bad_eco.entry"
+    good = tmp_path / "good.entry"
+    for f in (bad_name, bad_eco, good):
+        f.touch()
+
+    lang = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.entry"]
+    lang.cache_paths.return_value = [tmp_path]
+
+    def classify(path):
+        # Deliberately violating the annotations: PackageMetadata is a
+        # plain dataclass, so a third-party plugin really can return
+        # these at runtime — that is the whole point of the fix.
+        if path == bad_name:
+            return PackageMetadata(name=None, version="1.0.0", ecosystem="PyPI")  # type: ignore[reportArgumentType]
+        if path == bad_eco:
+            return PackageMetadata(name="pkg", version="1.0.0", ecosystem=123)  # type: ignore[reportArgumentType]
+        return PackageMetadata(name="goodpkg", version="1.0.0", ecosystem="PyPI")
+
+    lang.classify_cache_file.side_effect = classify
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    fake_osv_cache = FakeOsvCache.return_value
+    fake_osv_cache.get = AsyncMock(return_value=None)
+    fake_osv_client = FakeOsvClient.return_value
+    fake_osv_client.batch_query = AsyncMock(return_value=[MagicMock(has_malicious=True, degraded=False)])
+
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+        patch("packagealert.alerts.terminal.alert_malicious") as mock_alert,
+    ):
+        # Must not raise: a malformed entry cannot abort the whole command.
+        await _run_scan_cache(cfg)
+
+    alerted = [c.args[0].package_name for c in mock_alert.call_args_list]
+    assert alerted == ["goodpkg"], (
+        f"expected the well-formed package to still be scanned and alerted "
+        f"after the malformed entries were skipped, got {alerted}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_scan_cache_skips_entry_with_non_metadata_shaped_return(tmp_path):
+    """Regression: classify_cache_file() is duck-typed, so a third-party
+    plugin can return an object that is not metadata-shaped at ALL —
+    missing name/ecosystem/version outright, not merely holding the wrong
+    value types.
+
+    The version field was dereferenced (to skip unversioned entries)
+    BEFORE any shape validation, so such an object raised AttributeError
+    right there. The per-entry try/except around classify_cache_file()
+    guards the CALL, not the returned value, so it escaped and aborted
+    the WHOLE command — every remaining entry, cache dir and language
+    went unscanned, confirmed empirically.
+
+    All three fields are now checked via getattr() before any is
+    dereferenced, so only the offending entry is skipped.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    no_version = tmp_path / "no_version.entry"
+    no_name = tmp_path / "no_name.entry"
+    unversioned = tmp_path / "unversioned.entry"
+    good = tmp_path / "good.entry"
+    for f in (no_version, no_name, unversioned, good):
+        f.touch()
+
+    class NoVersionAttr:
+        """No .version at all — the shape that aborted the command."""
+        name = "evil"
+        ecosystem = "PyPI"
+
+    class NoNameAttr:
+        """No .name at all."""
+        version = "1.0.0"
+        ecosystem = "PyPI"
+
+    lang = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
+    lang.name = "python"
+    lang.cache_file_globs.return_value = ["*.entry"]
+    lang.cache_paths.return_value = [tmp_path]
+
+    def classify(path):
+        if path == no_version:
+            return NoVersionAttr()
+        if path == no_name:
+            return NoNameAttr()
+        if path == unversioned:
+            # version=None is legitimate (PackageMetadata.version is
+            # `str | None`) — skipped quietly, never treated as malformed.
+            return PackageMetadata(name="unversioned", version=None, ecosystem="PyPI")
+        return PackageMetadata(name="goodpkg", version="1.0.0", ecosystem="PyPI")
+
+    lang.classify_cache_file.side_effect = classify
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    FakeOsvCache.return_value.get = AsyncMock(return_value=None)
+    FakeOsvClient.return_value.batch_query = AsyncMock(
+        return_value=[MagicMock(has_malicious=True, degraded=False)]
+    )
+
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[lang]),
+        patch("packagealert.alerts.terminal.alert_malicious") as mock_alert,
+    ):
+        # Must not raise: a non-metadata-shaped return cannot abort the command.
+        await _run_scan_cache(cfg)
+
+    alerted = [c.args[0].package_name for c in mock_alert.call_args_list]
+    assert alerted == ["goodpkg"], (
+        f"expected the well-formed package to still be scanned after the "
+        f"shape-invalid entries were skipped, got {alerted}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label,cache_paths_ret,globs_ret",
+    [
+        ("cache_paths returns None", None, ["*.entry"]),
+        ("cache_paths returns [str]", ["/tmp/notapath"], ["*.entry"]),
+        ("cache_file_globs returns [int]", "USE_TMP", [123]),
+        ("cache_file_globs returns a bare str", "USE_TMP", "notalist"),
+    ],
+)
+async def test_run_scan_cache_isolates_malformed_required_hook_returns(
+    tmp_path, label, cache_paths_ret, globs_ret
+):
+    """Regression: cache_paths()/cache_file_globs() were caught if they RAISED
+    but not validated if they returned a malformed shape.
+
+    Both are duck-typed, third-party-implementable hooks. A malformed return
+    survived the try/except (it is not an exception) and only failed later,
+    unguarded: cache_paths() -> None at `cache_dirs + poll_only_dirs`
+    (TypeError), a non-Path element at `cache_dir.exists()` (AttributeError),
+    and a non-str glob inside cache_dir.glob() (TypeError). Each aborted the
+    WHOLE scan-cache command, leaving every other language unscanned —
+    confirmed empirically. Mirrors the validation
+    CacheMonitor._discover_dirs_by() already performs.
+    """
+    from packagealert.cli.app import _run_scan_cache
+
+    (tmp_path / "good.entry").touch()
+
+    bad = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
+    bad.name = "buggy"
+    bad.cache_file_globs.return_value = globs_ret
+    bad.cache_paths.return_value = (
+        [tmp_path] if cache_paths_ret == "USE_TMP" else cache_paths_ret
+    )
+
+    good = MagicMock(spec=["name", "cache_file_globs", "cache_paths", "classify_cache_file"])
+    good.name = "python"
+    good.cache_file_globs.return_value = ["*.entry"]
+    good.cache_paths.return_value = [tmp_path]
+    good.classify_cache_file.return_value = PackageMetadata(
+        name="goodpkg", version="1.0.0", ecosystem="PyPI"
+    )
+
+    fake_open_db, FakeOsvClient, FakeOsvCache = _make_fake_osv()
+    FakeOsvCache.return_value.get = AsyncMock(return_value=None)
+    FakeOsvClient.return_value.batch_query = AsyncMock(
+        return_value=[MagicMock(has_malicious=True, degraded=False)]
+    )
+
+    cfg = load_config(None)
+    with (
+        patch("packagealert.storage.db.open_db", fake_open_db),
+        patch("packagealert.osv.client.OsvClient", FakeOsvClient),
+        patch("packagealert.osv.cache.OsvCache", FakeOsvCache),
+        patch("packagealert.languages.registry.all_languages", return_value=[bad, good]),
+        patch("packagealert.alerts.terminal.alert_malicious") as mock_alert,
+    ):
+        # Must not raise: one malformed plugin cannot abort the whole command.
+        await _run_scan_cache(cfg)
+
+    alerted = [c.args[0].package_name for c in mock_alert.call_args_list]
+    assert alerted == ["goodpkg"], (
+        f"{label}: the well-formed plugin must still be scanned after the "
+        f"malformed one was skipped, got {alerted}"
+    )
 
 
 def test_cooldown_config_defaults():

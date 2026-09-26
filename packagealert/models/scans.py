@@ -22,3 +22,9 @@ class ScanResult:
     # acting on "no risks found" would treat a broken scan as a passing one. Defaulted
     # for the same positional-construction reason as `risks`.
     risk_failures: int = 0
+    # Packages whose OSV lookup could not be completed (see OsvResult.degraded).
+    # Exactly the same ambiguity `risk_failures` exists for, one layer up: a
+    # degraded OSV result may be missing advisories, so without this an empty
+    # `findings` cannot be told apart from a genuinely clean project, and a
+    # consumer acting on "no findings" would treat an OSV outage as a pass.
+    osv_failures: int = 0

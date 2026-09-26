@@ -275,6 +275,65 @@ def test_build_scan_payload_includes_risks():
     assert payload["risk_failures"] == 2
 
 
+def test_build_scan_payload_degraded_scan_is_not_reported_clean():
+    """Regression: a scan whose OSV lookups all failed was uploaded as clean.
+
+    build_scan_payload() set status purely from finding_count, and dropped
+    ScanResult.osv_failures entirely — so a fully degraded scan (no advisories
+    obtained for ANY package, because OSV could not be reached) was stored and
+    displayed by the central server as "clean", losing the exact distinction
+    that field exists to carry.
+    """
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        osv_failures=12,
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["osv_failures"] == 12, "the count must reach the server"
+    assert payload["status"] != "clean", (
+        "a scan whose packages were never checked must not be reported clean"
+    )
+    assert payload["status"] == "degraded"
+
+
+def test_build_scan_payload_findings_win_over_degraded():
+    """A real finding is still a finding, whatever else could not be checked."""
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=1,
+        findings=[{"package": "evil"}], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+        osv_failures=3,
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["status"] == "findings"
+    assert payload["osv_failures"] == 3, (
+        "the degraded count must still be carried alongside the findings"
+    )
+
+
+def test_build_scan_payload_clean_scan_stays_clean():
+    """The new status must not over-trigger on a genuinely clean scan."""
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+
+    scan = ScanResult(
+        project_path="/home/user/proj", scan_type="project", finding_count=0,
+        findings=[], sources=["pypi"],
+        scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    payload = build_scan_payload("host", scan)
+    assert payload["status"] == "clean"
+    assert payload["osv_failures"] == 0
+
+
 def test_build_scan_payload_risks_default_empty():
     from packagealert.models.scans import ScanResult
     from packagealert.plugins.central.client import build_scan_payload
