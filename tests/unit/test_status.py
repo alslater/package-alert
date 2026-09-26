@@ -129,6 +129,46 @@ async def test_gather_status_daemon_running(mem_db, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_gather_status_includes_watch_stats_when_daemon_running(mem_db, tmp_path):
+    from packagealert.monitors.watch_stats import WatchStats
+
+    create_time = time.time() - 3600
+    mock_proc = MagicMock()
+    mock_proc.create_time.return_value = create_time
+
+    with (
+        patch("packagealert.cli.status.find_daemon_pid", return_value=12345),
+        patch("packagealert.cli.status.psutil.Process", return_value=mock_proc),
+        patch("packagealert.cli.status.is_started_by_systemd", return_value=False),
+        patch(
+            "packagealert.monitors.watch_stats.get_daemon_watch_stats",
+            return_value=WatchStats(watch_count=514980, max_watches=524288),
+        ),
+        patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
+        patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
+    ):
+        (tmp_path / "daemon.pid").write_text("12345")
+        data = await gather_status(None, _db=mem_db)
+
+    assert data.watch_count == 514980
+    assert data.watch_max == 524288
+
+
+@pytest.mark.asyncio
+async def test_gather_status_watch_stats_none_when_daemon_stopped(mem_db, tmp_path):
+    with (
+        patch("packagealert.cli.status.find_daemon_pid", return_value=None),
+        patch("packagealert.cli.status.psutil.process_iter", return_value=[]),
+        patch("packagealert.cli.status._DB_PATH", tmp_path / "test.db"),
+        patch("packagealert.cli.status._PID_FILE", tmp_path / "daemon.pid"),
+    ):
+        data = await gather_status(None, _db=mem_db)
+
+    assert data.watch_count is None
+    assert data.watch_max is None
+
+
+@pytest.mark.asyncio
 async def test_gather_status_daemon_stopped(mem_db, tmp_path):
     with (
         patch("packagealert.cli.status.find_daemon_pid", return_value=None),
@@ -421,6 +461,62 @@ def test_render_status_rich_no_systemd_label_when_user_started():
     render_status(data, as_json=False, console=console)
     output = buf.getvalue()
     assert "systemd" not in output
+
+
+def test_render_status_rich_shows_watch_count():
+    data = _make_status_data()
+    data.watch_count = 514980
+    data.watch_max = 524288
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = buf.getvalue()
+    assert "514,980" in output
+    assert "98%" in output
+    assert "524,288" in output
+
+
+def test_render_status_rich_omits_watch_line_when_unavailable():
+    data = _make_status_data()
+    data.watch_count = None
+    data.watch_max = None
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = buf.getvalue()
+    assert "Watches:" not in output
+
+
+def test_render_status_rich_watch_count_without_max():
+    data = _make_status_data()
+    data.watch_count = 42
+    data.watch_max = None
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False)
+    render_status(data, as_json=False, console=console)
+    output = buf.getvalue()
+    assert "42 inotify" in output
+    assert "%" not in output.split("Watches:")[1].split("\n")[0]
+
+
+def test_render_status_json_includes_watch_count(capsys):
+    data = _make_status_data()
+    data.watch_count = 514980
+    data.watch_max = 524288
+    render_status(data, as_json=True)
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["daemon"]["watch_count"] == 514980
+    assert parsed["daemon"]["watch_max"] == 524288
+
+
+def test_render_status_json_watch_count_null_when_unavailable(capsys):
+    data = _make_status_data()
+    render_status(data, as_json=True)
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    assert parsed["daemon"]["watch_count"] is None
+    assert parsed["daemon"]["watch_max"] is None
 
 
 def test_render_status_json_managed_by_systemd(capsys):

@@ -38,9 +38,67 @@ class OsvClient:
             try:
                 resp = await self._client.post("/querybatch", json=payload)
                 if resp.status_code == 200:
-                    results = _parse_batch_response(resp.json(), queries)
-                    await self._enrich(results)
-                    return results
+                    # A 200 does not guarantee a well-formed body: resp.json()
+                    # raises on invalid JSON, and a VALID but non-object body
+                    # (null, [], a bare string) makes _parse_batch_response()'s
+                    # own .get() raise. Neither is an httpx.RequestError, so
+                    # without this both escaped batch_query() entirely — past
+                    # every retry, past the degraded-result fallback below, and
+                    # into callers with no guard of their own (pa scan aborts
+                    # the whole command). Treat a malformed body like any other
+                    # failed attempt: retry, then fall through to degraded.
+                    try:
+                        body = resp.json()
+                    except (ValueError, UnicodeDecodeError) as exc:
+                        # json.JSONDecodeError subclasses ValueError; a body
+                        # that isn't decodable text raises UnicodeDecodeError.
+                        log.warning(
+                            "OSV returned a 200 with an unparseable body: %s "
+                            "(attempt %d)", exc, attempt + 1,
+                        )
+                        body = None
+                    if isinstance(body, dict):
+                        # isinstance(body, dict) only clears the TOP level, and
+                        # a parse failure is not an httpx.RequestError — without
+                        # this guard it escapes every retry AND the degraded
+                        # fallback, into callers that have none of their own
+                        # (pa scan and the scheduler both abort outright).
+                        #
+                        # What reaches here is a WHOLE-RESPONSE failure: a
+                        # result count that doesn't match the query count, or a
+                        # "results" value that isn't a list. Both destroy the
+                        # positional pairing every verdict depends on, so the
+                        # response is retried and then degraded in full.
+                        # Malformation confined to ONE result ("vulns": null, a
+                        # vuln with no "id", a field failing OsvAdvisory's
+                        # validation) is caught per result inside
+                        # _parse_batch_response() and degrades only that
+                        # package, leaving its siblings' verdicts intact.
+                        try:
+                            results = _parse_batch_response(body, queries)
+                        except Exception as exc:  # noqa: BLE001 — any parse failure degrades
+                            log.warning(
+                                "OSV returned a 200 whose body could not be "
+                                "parsed: %s (attempt %d)", exc, attempt + 1,
+                            )
+                        else:
+                            # Deliberately OUTSIDE the guard above: the verdict
+                            # is already parsed and authoritative at this point,
+                            # and _enrich() only decorates it with summary/
+                            # severity detail (it already swallows per-advisory
+                            # failures via return_exceptions=True). Letting an
+                            # enrich failure degrade the result would discard a
+                            # real malicious verdict to save some display text.
+                            await self._enrich(results)
+                            return results
+                    else:
+                        log.warning(
+                            "OSV returned a 200 whose body is %s, not an object "
+                            "(attempt %d)", type(body).__name__, attempt + 1,
+                        )
+                    if attempt < self._cfg.max_retries - 1:
+                        await asyncio.sleep(2 ** attempt)
+                    continue
                 if resp.status_code in (429, 503):
                     wait = 2 ** attempt
                     log.warning("OSV API returned %d, retrying in %ds", resp.status_code, wait)
@@ -53,10 +111,38 @@ class OsvClient:
                 if attempt < self._cfg.max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
 
-        return [OsvResult(package_name=pkg, ecosystem=eco, version=ver) for eco, pkg, ver in queries]
+        # Every retry/fallback path lands here, so this is a FAILED lookup, not a
+        # clean answer. Mark it degraded: an advisory-free OsvResult is otherwise
+        # indistinguishable from "OSV knows this package and it has no
+        # advisories", and callers that persist it would cache an outage as a
+        # clean verdict for the whole osv_cache TTL.
+        log.error(
+            "OSV lookup failed for %d package(s) after %d attempt(s); returning a "
+            "degraded (non-authoritative) result — it will NOT be cached: %s",
+            len(queries), self._cfg.max_retries,
+            ", ".join(f"{pkg}@{ver or 'any'}" for _, pkg, ver in queries),
+        )
+        return [
+            OsvResult(package_name=pkg, ecosystem=eco, version=ver, degraded=True)
+            for eco, pkg, ver in queries
+        ]
 
     async def _enrich(self, results: list[OsvResult]) -> None:
-        """Fetch full advisory details for each advisory ID in parallel."""
+        """Fetch full advisory details for each advisory ID in parallel.
+
+        Best-effort, per advisory: the verdict in `results` is already parsed
+        and authoritative by the time this runs, and enrichment only decorates
+        it with summary/severity/fixed-version detail. A failure here must
+        never discard that verdict — an advisory keeps whatever the batch
+        response already gave it.
+
+        return_exceptions=True covers only the FETCH. A /vulns/{id} call can
+        succeed and still return a body this cannot parse (`affected: [null]`,
+        a null `ranges`/`events` entry, a non-list `affected`), which raised
+        out of _extract_fixed_versions(), escaped batch_query() entirely, and
+        aborted the caller — discarding an already-parsed MALICIOUS verdict to
+        save some display text.
+        """
         # Pair each advisory with its result so we have ecosystem/package context for
         # fixed_versions extraction (the batch response omits the `affected` array).
         adv_with_ctx = [(adv, r.package_name, r.ecosystem) for r in results for adv in r.advisories]
@@ -69,11 +155,39 @@ class OsvClient:
         for (adv, pkg_name, ecosystem), data in zip(adv_with_ctx, fetched):
             if isinstance(data, Exception) or not isinstance(data, dict):
                 continue
-            adv.summary = data.get("summary", adv.summary)
-            adv.details = data.get("details")
-            adv.severity = _severity_from_response(data)
-            if not adv.fixed_versions:
-                adv.fixed_versions = _extract_fixed_versions(data, pkg_name, ecosystem)
+            # Guarded per advisory so one malformed body cannot cost the
+            # others their enrichment, let alone the batch its verdicts.
+            #
+            # Applied atomically, and only after validation. OsvAdvisory has no
+            # validate_assignment, so writing fields straight onto `adv` bypasses
+            # Pydantic: a dict-valued "summary" was stored as-is and later broke
+            # notify_malicious()'s `adv.summary[:200]` — the desktop alert for a
+            # MALICIOUS package. And assigning field by field meant a later
+            # failure (_extract_fixed_versions() raising) left the new summary/
+            # details mixed with the old fixed versions. Every update is built
+            # first, validated as a whole advisory, and only then written back,
+            # so `adv` is either fully enriched or exactly as the batch response
+            # left it.
+            try:
+                updates: dict[str, Any] = {
+                    "summary": data.get("summary", adv.summary),
+                    "details": data.get("details"),
+                    "severity": _severity_from_response(data),
+                }
+                if not adv.fixed_versions:
+                    updates["fixed_versions"] = _extract_fixed_versions(
+                        data, pkg_name, ecosystem
+                    )
+                validated = OsvAdvisory.model_validate({**adv.model_dump(), **updates})
+            except Exception:  # enrichment is decoration, never a verdict
+                log.warning(
+                    "Could not parse advisory detail for %s (%s/%s) — keeping the "
+                    "verdict from the batch response without enrichment",
+                    adv.id, ecosystem, pkg_name, exc_info=True,
+                )
+                continue
+            for field in updates:
+                setattr(adv, field, getattr(validated, field))
 
     async def _fetch_vuln(self, vuln_id: str) -> dict:
         resp = await self._client.get(f"/vulns/{vuln_id}")
@@ -146,9 +260,88 @@ def _parse_batch_response(
     queries: list[tuple[str, str, str | None]],
 ) -> list[OsvResult]:
     results = []
-    for (eco, pkg, ver), item in zip(queries, data.get("results", [])):
-        advisories = []
-        for vuln in item.get("vulns", []):
+    raw = data.get("results", [])
+    if not isinstance(raw, list):
+        raw = []
+    # OSV returns one entry per query, IN ORDER, and the batch response carries
+    # no per-result identifier — no package name, no index — which is why these
+    # are paired positionally at all. A count mismatch therefore destroys the
+    # only means of alignment there is, and the payload cannot say WHICH entry
+    # is missing: "the tail was truncated" and "an earlier element was omitted"
+    # look identical.
+    #
+    # Padding the tail was tried and assumes truncation. If the omission was
+    # actually earlier, every later verdict shifts onto the wrong package: a
+    # malicious advisory is attributed to an innocent one (a false alarm) AND
+    # the genuinely malicious package is marked degraded, so it is never
+    # alerted — one malformed response producing both a wrong verdict and a
+    # silent miss.
+    #
+    # A mismatch is therefore treated as an INVALID WHOLE RESPONSE: raising
+    # here lets batch_query() retry it (a later attempt may be well-formed) and
+    # degrade every query if it cannot. That trades a possible wrong verdict
+    # for a "could not be checked" warning, which is the tradeoff this module
+    # makes everywhere else.
+    if len(raw) != len(queries):
+        raise ValueError(
+            f"OSV returned {len(raw)} result(s) for {len(queries)} query/queries; "
+            f"the batch response carries no per-result identifier, so a count "
+            f"mismatch leaves no way to align verdicts with packages"
+        )
+    for (eco, pkg, ver), item in zip(queries, raw):
+        # A malformed element (anything that isn't a result object) is treated
+        # the same as a missing one: degraded, never a clean verdict.
+        if not isinstance(item, dict):
+            results.append(
+                OsvResult(package_name=pkg, ecosystem=eco, version=ver, degraded=True)
+            )
+            continue
+        # Parsed per result, so malformed nesting for ONE package degrades only
+        # that package. A single guard around the whole loop was tried and is a
+        # real security regression: a batch where one sibling had a null
+        # "vulns" degraded EVERY result, discarding a genuine MAL- advisory
+        # that OSV had plainly returned for a different package — the sandbox
+        # gate then saw no malicious entry, failed open, and installed it with
+        # only an "unchecked" warning.
+        vulns = item.get("vulns", [])
+        # An absent key is OSV's normal clean answer, but a present non-list
+        # must be rejected explicitly: an empty {} or "" iterates zero times
+        # and would otherwise read as an authoritative clean verdict.
+        if not isinstance(vulns, list):
+            log.warning(
+                "OSV returned a malformed result for %s@%s: 'vulns' is %s, not a "
+                "list — treating it as degraded (non-authoritative); other "
+                "packages in this batch are unaffected",
+                pkg, ver or "any", type(vulns).__name__,
+            )
+            results.append(
+                OsvResult(package_name=pkg, ecosystem=eco, version=ver, degraded=True)
+            )
+            continue
+        advisories, partial = _parse_vulns(vulns, pkg, eco, ver)
+        results.append(OsvResult(
+            package_name=pkg, ecosystem=eco, version=ver,
+            advisories=advisories, degraded=partial,
+        ))
+    return results
+
+
+def _parse_vulns(
+    vulns: list[Any], pkg: str, eco: str, ver: str | None
+) -> tuple[list[OsvAdvisory], bool]:
+    """Parse one result's vulns independently; return (advisories, partial).
+
+    A malformed vuln must not cost its siblings: a MAL- advisory that parsed
+    is an authoritative positive even when the entry beside it is garbage, so
+    it is kept and the result is only marked partial (degraded), meaning its
+    ABSENCES prove nothing. A vuln whose details fail to parse but whose id is
+    usable is kept id-only for the same reason — the id (and any MAL- alias)
+    is what makes it malicious; the rest is decoration.
+    """
+    advisories: list[OsvAdvisory] = []
+    partial = False
+    for vuln in vulns:
+        try:
             advisories.append(OsvAdvisory(
                 id=vuln["id"],
                 summary=vuln.get("summary", ""),
@@ -157,8 +350,24 @@ def _parse_batch_response(
                 aliases=vuln.get("aliases", []),
                 fixed_versions=_extract_fixed_versions(vuln, pkg, eco),
             ))
-        results.append(OsvResult(package_name=pkg, ecosystem=eco, version=ver, advisories=advisories))
-    return results
+            continue
+        except Exception as exc:  # noqa: BLE001 — any parse failure marks this result partial
+            partial = True
+            log.warning(
+                "OSV returned a malformed advisory for %s@%s: %s — result is "
+                "partial (non-authoritative); advisories that did parse are kept",
+                pkg, ver or "any", exc,
+            )
+        vuln_id = vuln.get("id") if isinstance(vuln, dict) else None
+        if isinstance(vuln_id, str):
+            aliases = vuln.get("aliases")
+            advisories.append(OsvAdvisory(
+                id=vuln_id,
+                summary="",
+                aliases=[a for a in aliases if isinstance(a, str)]
+                if isinstance(aliases, list) else [],
+            ))
+    return advisories, partial
 
 
 # CVSS 3.1 base metric weights (section 7.1 of the spec)

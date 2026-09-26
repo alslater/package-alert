@@ -37,7 +37,13 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-_STATUS_COLOUR = {"findings": "yellow", "clean": "green", "error": "red"}
+_STATUS_COLOUR = {
+    "findings": "yellow",
+    "clean": "green",
+    # Not clean: some package could not be checked against OSV at all.
+    "degraded": "yellow",
+    "error": "red",
+}
 _SEV_COLOUR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "bright_yellow", "LOW": "green"}
 
 
@@ -151,6 +157,11 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     findings = record.get("findings") or []
     risks = record.get("risks") or []
     risk_failures = record.get("risk_failures") or 0
+    # See ScanResult.osv_failures: a degraded OSV lookup contributes no
+    # advisories, so an empty findings list alone cannot be told apart from a
+    # genuinely clean project. A server that predates this field simply
+    # reports 0, which reads exactly as it did before.
+    osv_failures = record.get("osv_failures") or 0
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
@@ -172,6 +183,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "findings": findings,
             "risks": risks,
             "risk_failures": risk_failures,
+            "osv_failures": osv_failures,
         }, indent=2))
         return
 
@@ -185,6 +197,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             Path(project_path), sources, [], findings,
             risks=_visible_risks(risks, show_details=show_details),
             risk_total=len(risks), risk_failures=risk_failures,
+            osv_failures=osv_failures,
             scanned_at=date_str,
         )
         if fmt == "browser":
@@ -196,7 +209,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     console.print(f"\nScan [bold]#{escape(str(scan_id))}[/bold] — {escape(project_path)}")
     console.print(f"Run at: {date_str}  |  Type: {escape(scan_type)}\n")
 
-    if not findings and not risks and not risk_failures:
+    if not findings and not risks and not risk_failures and not osv_failures:
         console.print("[green]No findings — all clear.[/green]")
         return
 
@@ -256,6 +269,12 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     if risk_failures:
         console.print(
             f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
+        )
+
+    if osv_failures:
+        console.print(
+            f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
+            f"these were NOT checked for advisories[/yellow]"
         )
 
 

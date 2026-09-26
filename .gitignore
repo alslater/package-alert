@@ -230,11 +230,11 @@ cache/
 /data
 .web/
 .superpowers/
-.claude/settings.local.json
 requirements.txt
 superpowers/
 .python-version
 .worktrees/
 *.sqlite3
-.claude
+.claude/*
+!.claude/CLAUDE.md
 .serena/

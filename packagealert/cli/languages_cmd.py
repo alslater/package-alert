@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import cast
 
 import typer
 from rich.console import Console
@@ -92,12 +93,58 @@ def languages_info(
 
     try:
         cache_paths = lang.cache_paths()
+        # Validated for the same reason poll_only_cache_paths() is below: a
+        # malformed return doesn't raise on its own here, it renders as
+        # GARBAGE. A bare str is itself iterable, so the join below walked it
+        # character by character ("a, b, c"), and a list[int] stringified with
+        # no error at all — displayed as if it were a real answer rather than
+        # degrading to the [error] marker. Confirmed empirically.
+        if not isinstance(cache_paths, list) or not all(
+            isinstance(p, Path) for p in cache_paths
+        ):
+            raise TypeError(
+                f"cache_paths() must return list[Path], got {cache_paths!r}"
+            )
         home = str(Path.home())
         paths_str = ", ".join(str(p).replace(home, "~") for p in cache_paths) or "none"
     except Exception:
-        log.warning("lang=%s cache_paths() raised unexpectedly", getattr(lang, "name", "?"), exc_info=True)
+        log.warning(
+            "lang=%s cache_paths() raised unexpectedly, or returned a malformed result",
+            getattr(lang, "name", "?"), exc_info=True,
+        )
         paths_str = _ERROR_DISPLAY
-    console.print(f"Cache paths: {paths_str}")
+    console.print(f"Cache paths (watched): {paths_str}")
+
+    try:
+        poll_only_fn = getattr(lang, "poll_only_cache_paths", None)
+        # poll_only_cache_paths() is duck-typed, not a LanguageBase Protocol
+        # member (see its comment in languages/base.py), so its return type
+        # is unknown to the type checker — cast() is only a type-checker
+        # hint, not a runtime check, so the result is validated explicitly
+        # below, inside this same try, matching CacheMonitor._discover_dirs_by()
+        # and _run_scan_cache()'s own validation of this identical hook.
+        # Without it, a malformed return (e.g. a bare string) sailed past
+        # this try/except unflagged and was silently rendered as garbled
+        # output instead of the error display — a string is iterable, so
+        # `", ".join(... for p in poll_only_paths)` iterated it character
+        # by character, and a list of ints stringified without error —
+        # confirmed empirically.
+        poll_only_paths = cast("list[Path]", poll_only_fn()) if callable(poll_only_fn) else []
+        if not isinstance(poll_only_paths, list) or not all(
+            isinstance(p, Path) for p in poll_only_paths
+        ):
+            raise TypeError(
+                f"poll_only_cache_paths() must return list[Path], got {poll_only_paths!r}"
+            )
+        home = str(Path.home())
+        poll_paths_str = ", ".join(str(p).replace(home, "~") for p in poll_only_paths) or "none"
+    except Exception:
+        log.warning(
+            "lang=%s poll_only_cache_paths() raised unexpectedly, or returned a malformed "
+            "result", getattr(lang, "name", "?"), exc_info=True
+        )
+        poll_paths_str = _ERROR_DISPLAY
+    console.print(f"Cache paths (polled): {poll_paths_str}")
 
     try:
         top_url = lang.top_packages_url()

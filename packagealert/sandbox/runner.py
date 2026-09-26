@@ -1702,6 +1702,7 @@ class SandboxRunner:
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
+        unchecked: list[str] = []
 
         status = self._console.status(f"[dim]Pre-flight: {len(queries)} packages ({sources})...[/dim]")
         status.start()
@@ -1719,13 +1720,23 @@ class SandboxRunner:
                 if uncached:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
-                        if r:
+                        # Never cache a degraded (failed-lookup) result — see
+                        # OsvResult.degraded: it would record an OSV outage as a
+                        # clean verdict for the whole osv_cache TTL.
+                        if r and not r.degraded:
                             ecosystem, package_name, version = q
                             await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
+                    # Malicious first: a degraded result's advisory list is
+                    # incomplete, but a MAL- advisory that did parse is still an
+                    # authoritative positive. Otherwise track it as unchecked, so
+                    # the summary below never claims "no known advisories" for a
+                    # package OSV could not fully answer. See OsvResult.degraded.
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
+                    elif r and r.degraded:
+                        unchecked.append(r.package_name)
         finally:
             status.stop()
             await client.aclose()
@@ -1737,7 +1748,18 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        if unchecked:
+            # Fail open (the install still proceeds, matching this module's
+            # standing treatment of an unavailable service — see _typo_for's
+            # own fail-open), but never report an unobtained answer as clean.
+            self._console.print(
+                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
+                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
+            )
+            for name in sorted(set(unchecked)):
+                self._console.print(f"  [yellow]• {name}[/yellow]")
+        else:
+            self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
     def _resolve_query_packages(
@@ -1895,6 +1917,7 @@ class SandboxRunner:
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
+        unchecked: list[str] = []
 
         status = self._console.status(f"[dim]Pre-flight: {source}...[/dim]")
         status.start()
@@ -1912,13 +1935,23 @@ class SandboxRunner:
                 if uncached:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
-                        if r:
+                        # Never cache a degraded (failed-lookup) result — see
+                        # OsvResult.degraded: it would record an OSV outage as a
+                        # clean verdict for the whole osv_cache TTL.
+                        if r and not r.degraded:
                             ecosystem, package_name, version = q
                             await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
+                    # Malicious first: a degraded result's advisory list is
+                    # incomplete, but a MAL- advisory that did parse is still an
+                    # authoritative positive. Otherwise track it as unchecked, so
+                    # the summary below never claims "no known advisories" for a
+                    # package OSV could not fully answer. See OsvResult.degraded.
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
+                    elif r and r.degraded:
+                        unchecked.append(r.package_name)
         finally:
             status.stop()
             await client.aclose()
@@ -1930,7 +1963,18 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        if unchecked:
+            # Fail open (the install still proceeds, matching this module's
+            # standing treatment of an unavailable service — see _typo_for's
+            # own fail-open), but never report an unobtained answer as clean.
+            self._console.print(
+                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
+                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
+            )
+            for name in sorted(set(unchecked)):
+                self._console.print(f"  [yellow]• {name}[/yellow]")
+        else:
+            self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
     async def _scan_updated_lock_files(
@@ -2034,6 +2078,7 @@ class SandboxRunner:
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
+        unchecked: list[str] = []
 
         try:
             for i in range(0, len(queries), 50):
@@ -2049,13 +2094,23 @@ class SandboxRunner:
                 if uncached:
                     fresh = await client.batch_query(uncached)
                     for q, r in zip(uncached, fresh):
-                        if r:
+                        # Never cache a degraded (failed-lookup) result — see
+                        # OsvResult.degraded: it would record an OSV outage as a
+                        # clean verdict for the whole osv_cache TTL.
+                        if r and not r.degraded:
                             ecosystem, package_name, version = q
                             await cache.set(ecosystem, package_name, version, r)
                 for r in cached_results + fresh:
+                    # Malicious first: a degraded result's advisory list is
+                    # incomplete, but a MAL- advisory that did parse is still an
+                    # authoritative positive. Otherwise track it as unchecked, so
+                    # the summary below never claims "no known advisories" for a
+                    # package OSV could not fully answer. See OsvResult.degraded.
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
+                    elif r and r.degraded:
+                        unchecked.append(r.package_name)
         finally:
             await client.aclose()
             await db.close()
@@ -2068,7 +2123,18 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        self._console.print("[green]✓ Lock file scan: clean[/green]")
+        if unchecked:
+            # Fail open (the install still proceeds, matching this module's
+            # standing treatment of an unavailable service — see _typo_for's
+            # own fail-open), but never report an unobtained answer as clean.
+            self._console.print(
+                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
+                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
+            )
+            for name in sorted(set(unchecked)):
+                self._console.print(f"  [yellow]• {name}[/yellow]")
+        else:
+            self._console.print("[green]✓ Lock file scan: clean[/green]")
         return True
 
     async def _post_scan(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:
@@ -2085,6 +2151,7 @@ class SandboxRunner:
         client = OsvClient(self._cfg.osv)
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
+        unchecked: list[str] = []
 
         # OSV queries are (ecosystem, name, version) only.
         osv_queries = [(eco, name, ver) for eco, name, ver, _root in packages]
@@ -2094,12 +2161,20 @@ class SandboxRunner:
                 batch = osv_queries[i : i + 50]
                 results = await client.batch_query(batch)
                 for q, r in zip(batch, results):
-                    if r:
+                    # Never cache a degraded (failed-lookup) result — see
+                    # OsvResult.degraded: it would record an OSV outage as a
+                    # clean verdict for the whole osv_cache TTL.
+                    if r and not r.degraded:
                         ecosystem, package_name, version = q
                         await cache.set(ecosystem, package_name, version, r)
+                    # Malicious first: a partial (degraded) result can still carry
+                    # a MAL- advisory that did parse, and that is an authoritative
+                    # positive — checking degraded first failed open on it.
                     if r and r.has_malicious:
                         adv_id = next((a.id for a in r.advisories if a.is_malicious), "?")
                         malicious.append((r.package_name, adv_id))
+                    elif r and r.degraded:
+                        unchecked.append(r.package_name)
         finally:
             await client.aclose()
             await db.close()
@@ -2110,7 +2185,18 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        self._console.print("[green]✓ Post-install: no known advisories[/green]")
+        if unchecked:
+            # Fail open (the install still proceeds, matching this module's
+            # standing treatment of an unavailable service — see _typo_for's
+            # own fail-open), but never report an unobtained answer as clean.
+            self._console.print(
+                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
+                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
+            )
+            for name in sorted(set(unchecked)):
+                self._console.print(f"  [yellow]• {name}[/yellow]")
+        else:
+            self._console.print("[green]✓ Post-install: no known advisories[/green]")
         return await self._post_scan_risk(packages)
 
     async def _post_scan_risk(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:

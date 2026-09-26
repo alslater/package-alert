@@ -272,3 +272,102 @@ async def test_list_all_scan_results_limit(db):
                                scan_type="project", findings=[], sources=[])
     records = await list_all_scan_results(db, limit=3)
     assert len(records) == 3
+
+
+@pytest.mark.asyncio
+async def test_scan_history_round_trips_osv_failures(tmp_path):
+    """Regression: the built-in scan history dropped the degraded-OSV count.
+
+    `save_scan_result()` never received osv_failures, and `scan_results` had
+    no column for it, so a scheduled scan run during an OSV outage was stored
+    as 0 findings with nothing to say the packages were never checked — the
+    same "an empty list is ambiguous" bug already fixed for the live scan, the
+    plugin ScanResult and the fleet payload, still open for `pa scans`.
+    """
+    from packagealert.scheduler.db import (
+        get_scan_result,
+        list_scan_results,
+        save_scan_result,
+    )
+    from packagealert.storage.db import open_db
+
+    db = await open_db(tmp_path / "t.db")
+    try:
+        record_id = await save_scan_result(
+            db, project_path="/proj", schedule="daily", scan_type="project",
+            findings=[], sources=["uv.lock"], osv_failures=67,
+        )
+        record = await get_scan_result(db, record_id)
+        assert record is not None
+        assert record.osv_failures == 67, "the count must survive a round trip"
+
+        listed = await list_scan_results(db, "/proj", limit=5)
+        assert listed[0].osv_failures == 67, "the list view must carry it too"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_history_defaults_osv_failures_for_a_clean_scan(tmp_path):
+    """A scan that checked everything reports 0, unchanged from before."""
+    from packagealert.scheduler.db import get_scan_result, save_scan_result
+    from packagealert.storage.db import open_db
+
+    db = await open_db(tmp_path / "t.db")
+    try:
+        record_id = await save_scan_result(
+            db, project_path="/proj", schedule="daily", scan_type="project",
+            findings=[], sources=["uv.lock"],
+        )
+        record = await get_scan_result(db, record_id)
+        assert record is not None
+        assert record.osv_failures == 0
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_scan_results_migration_adds_osv_failures_to_an_existing_db(tmp_path):
+    """An existing database predating the column must migrate, not fail.
+
+    Legacy rows default to 0 — the pre-existing meaning ("every package was
+    checked") — so an old record reads exactly as it did before.
+    """
+    import sqlite3
+
+    from packagealert.scheduler.db import get_scan_result
+    from packagealert.storage.db import open_db
+
+    db_path = tmp_path / "old.db"
+    con = sqlite3.connect(db_path)
+    con.executescript(
+        """
+        CREATE TABLE scan_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_path TEXT NOT NULL, scanned_at REAL NOT NULL,
+            schedule TEXT NOT NULL CHECK(schedule IN ('daily','weekly')),
+            scan_type TEXT NOT NULL DEFAULT 'project'
+                CHECK(scan_type IN ('project','installed')),
+            findings_json TEXT NOT NULL, sources_json TEXT NOT NULL,
+            max_severity TEXT, finding_count INTEGER NOT NULL DEFAULT 0);
+        """
+    )
+    con.execute(
+        "INSERT INTO scan_results(project_path,scanned_at,schedule,scan_type,"
+        "findings_json,sources_json,max_severity,finding_count) "
+        "VALUES('/old',1.0,'daily','project','[]','[\"uv.lock\"]',NULL,0)"
+    )
+    con.commit()
+    con.close()
+
+    db = await open_db(db_path)
+    try:
+        record = await get_scan_result(db, 1)
+        assert record is not None
+        assert record.osv_failures == 0
+    finally:
+        await db.close()
+
+    # Re-opening must not fail: the migration has to be idempotent.
+    db = await open_db(db_path)
+    await db.close()

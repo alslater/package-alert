@@ -258,6 +258,31 @@ class LanguageBase(Protocol):
         """Inspect a downloaded package artifact (wheel, tarball, etc). Return None if the format is not supported."""
         ...
     def cache_paths(self) -> list[Path]: ...
+    # poll_only_cache_paths() -> list[Path] is a genuinely optional capability,
+    # deliberately NOT declared here as a Protocol member: adding it as a
+    # required member would make every existing plugin (including in-tree
+    # NodeLanguage/PhpLanguage) fail LanguageBase's structural check until they
+    # implement it, forcing either a contract-version bump (with its
+    # DeprecationWarning for every v5 plugin, node/php/third-party alike) for
+    # what is a purely additive, internal detection-mechanism detail, or a
+    # _VERSION_SHIMS entry for a method whose only sane default is "none" —
+    # neither justified for this. Callers use
+    # `getattr(lang, "poll_only_cache_paths", None)` + `callable(...)` instead
+    # (see CacheMonitor._discover_poll_only_cache_dirs(), cli/app.py's
+    # scan-cache, cli/languages_cmd.py) exactly like available_flags()'s own
+    # call site already does for the same reason. A plugin that wants this
+    # capability just defines the method; nothing about the base contract
+    # needs to change for it to be picked up.
+    #
+    # Cache roots returned here are scanned periodically instead of watched
+    # with a recursive inotify watch — for a root whose subtree can contain
+    # arbitrarily many directories with no classification value (e.g. an
+    # unpacked source tree sitting alongside the build artifact that's
+    # actually worth detecting, uv's sdists-v* — see PythonLanguage), where a
+    # permanent recursive watch would risk exhausting the inotify watch
+    # budget the same way cache_paths() itself is scoped to avoid.
+    # classify_cache_file() and cache_file_globs() are reused for these
+    # roots; only the detection mechanism differs.
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
         """Classify a file or directory created in a watched cache or site-packages dir. Return None if not a recognisable package artifact."""
         ...
