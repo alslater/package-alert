@@ -73,6 +73,149 @@ class TestIsDue:
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
 
+class TestScheduledScannerHistory:
+    @pytest.mark.asyncio
+    async def test_degraded_scan_is_recorded_in_the_built_in_history(self, tmp_path):
+        """Regression: osv_failures reached the plugin ScanResult but not
+        save_scan_result(), so the built-in `pa scans` history stored a
+        degraded scan as 0 findings with no indication anything was unchecked.
+        """
+        from packagealert.config import AppConfig
+        from packagealert.scheduler.db import (
+            add_project,
+            get_scan_result,
+            list_scan_results,
+        )
+        from packagealert.storage.db import open_db
+
+        proj = tmp_path / "proj"
+        proj.mkdir()
+
+        db = await open_db(tmp_path / "t.db")
+        try:
+            await add_project(db, path=str(proj), schedule="daily", scan_type="project")
+            scanner = ScheduledScanner(AppConfig(), db)
+
+            with patch.object(
+                scanner, "_scan_project",
+                new=AsyncMock(return_value=([], ["uv.lock"], 67)),
+            ):
+                await scanner.run_due_scans()
+
+            records = await list_scan_results(db, str(proj), limit=5)
+            assert records, "the scan must be recorded"
+            assert records[0].osv_failures == 67, (
+                "the built-in history must record how many packages could not "
+                "be checked, or a degraded scan reads as a clean one"
+            )
+            detail = await get_scan_result(db, records[0].id)
+            assert detail is not None
+            assert detail.osv_failures == 67
+        finally:
+            await db.close()
+
+
+class TestScheduledScannerOsvFailures:
+    @pytest.mark.asyncio
+    async def test_run_osv_queries_returns_the_degraded_count(self):
+        """Regression: a degraded lookup was logged but never counted, so the
+        scheduled ScanResult kept osv_failures at its default 0.
+
+        A degraded result carries no advisories (see OsvResult.degraded), so
+        findings alone cannot tell an OSV outage apart from a clean project.
+        on_scan_complete consumers act on that ScanResult — the pa-central
+        plugin turns finding_count == 0 with osv_failures == 0 into a
+        fleet-visible status of "clean", so an unattended scan during an outage
+        was reported as a passing scan. A log warning does not reach a
+        programmatic consumer.
+        """
+        from packagealert.config import AppConfig
+        from packagealert.models.advisories import OsvResult
+
+        scanner = ScheduledScanner(AppConfig(), MagicMock())
+
+        degraded = [
+            OsvResult(
+                package_name=f"p{i}", ecosystem="PyPI", version="1.0", degraded=True
+            )
+            for i in range(3)
+        ]
+        fake_cache = MagicMock()
+        fake_cache.get = AsyncMock(return_value=None)
+        fake_cache.set = AsyncMock(
+            side_effect=AssertionError("a degraded result must never be cached")
+        )
+        fake_client = MagicMock()
+        fake_client.batch_query = AsyncMock(return_value=degraded)
+        fake_client.aclose = AsyncMock()
+
+        with (
+            patch("packagealert.osv.cache.OsvCache", MagicMock(return_value=fake_cache)),
+            patch(
+                "packagealert.osv.client.OsvClient", MagicMock(return_value=fake_client)
+            ),
+        ):
+            findings, osv_failures = await scanner._run_osv_queries(
+                [("pypi", f"p{i}", "1.0") for i in range(3)]
+            )
+
+        assert findings == [], "a degraded lookup yields no advisories"
+        assert osv_failures == 3, (
+            "every degraded lookup must be counted, or the scan is "
+            "indistinguishable from a clean one"
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_result_still_yields_its_parsed_findings(self):
+        """A degraded result is counted as a failure but NOT skipped: a MAL-
+        advisory that parsed beside a malformed one is still a real finding."""
+        from packagealert.config import AppConfig
+        from packagealert.models.advisories import OsvAdvisory, OsvResult
+
+        scanner = ScheduledScanner(AppConfig(), MagicMock())
+        partial = OsvResult(
+            package_name="evil", ecosystem="PyPI", version="1.0", degraded=True,
+            advisories=[OsvAdvisory(id="MAL-2024-9999", summary="")],
+        )
+        fake_cache = MagicMock()
+        fake_cache.get = AsyncMock(return_value=None)
+        fake_cache.set = AsyncMock(
+            side_effect=AssertionError("a degraded result must never be cached")
+        )
+        fake_client = MagicMock()
+        fake_client.batch_query = AsyncMock(return_value=[partial])
+        fake_client.aclose = AsyncMock()
+
+        with (
+            patch("packagealert.osv.cache.OsvCache", MagicMock(return_value=fake_cache)),
+            patch(
+                "packagealert.osv.client.OsvClient", MagicMock(return_value=fake_client)
+            ),
+        ):
+            findings, osv_failures = await scanner._run_osv_queries([("pypi", "evil", "1.0")])
+
+        assert [f["advisory_id"] for f in findings] == ["MAL-2024-9999"]
+        assert findings[0]["is_malicious"] is True
+        assert osv_failures == 1
+
+    @pytest.mark.asyncio
+    async def test_degraded_scheduled_scan_is_not_reported_clean_to_the_fleet(self):
+        """The count must survive all the way to the central payload."""
+        from datetime import UTC, datetime
+
+        from packagealert.models.scans import ScanResult
+        from packagealert.plugins.central.client import build_scan_payload
+
+        scan = ScanResult(
+            project_path="/proj", scan_type="project", finding_count=0,
+            findings=[], sources=["uv.lock"], scanned_at=datetime.now(UTC),
+            osv_failures=3,
+        )
+        payload = build_scan_payload("host", scan)
+        assert payload["status"] == "degraded"
+        assert payload["osv_failures"] == 3
+
+
 class TestScheduledScanner:
     @pytest.mark.asyncio
     async def test_run_due_scans_skips_nonexistent_project(self, tmp_path):
@@ -112,7 +255,7 @@ class TestScheduledScanner:
              "fixed_versions": ["2.32.0"], "url": "https://osv.dev/CVE-2025-1"}
         ]
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=(mock_findings, ["requirements.txt"]))):
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=(mock_findings, ["requirements.txt"], 0))):
             await scanner.run_due_scans()
 
         results = await list_scan_results(db, str(project_dir), scan_type="project")
@@ -139,8 +282,8 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"]))) as mock_p, \
-             patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"]))) as mock_i:
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))) as mock_p, \
+             patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0))) as mock_i:
             await scanner.run_due_scans()
             mock_p.assert_called_once()
             mock_i.assert_called_once()
@@ -166,8 +309,8 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"]))) as mock_installed, \
-             patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], []))) as mock_project:
+        with patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0))) as mock_installed, \
+             patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], [], 0))) as mock_project:
             await scanner.run_due_scans()
             mock_installed.assert_called_once()
             mock_project.assert_not_called()
@@ -198,7 +341,7 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"]))):
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))):
             await scanner.run_due_scans()
 
         results = await list_scan_results(db, str(project_dir), scan_type="project")
@@ -232,7 +375,7 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"]))), \
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))), \
              patch("packagealert.plugins.registry.plugin_registry.fire_on_scan_complete", new=AsyncMock()), \
              patch("packagealert.plugins.registry.plugin_registry.has_scan_store", return_value=True):
             await scanner.run_due_scans()

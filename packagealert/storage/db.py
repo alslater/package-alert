@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     findings_json   TEXT NOT NULL,
     sources_json    TEXT NOT NULL,
     max_severity    TEXT,
-    finding_count   INTEGER NOT NULL DEFAULT 0
+    finding_count   INTEGER NOT NULL DEFAULT 0,
+    osv_failures    INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_scan_results_project
     ON scan_results(project_path, scanned_at DESC);
@@ -380,6 +381,17 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     if "project_path" not in columns:
         await conn.execute("ALTER TABLE alerts ADD COLUMN project_path TEXT")
         log.debug("Migrated alerts table: added project_path column")
+
+    async with conn.execute("PRAGMA table_info(scan_results)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    if "osv_failures" not in columns:
+        # Existing rows default to 0 — they predate the distinction, and 0 is
+        # the pre-existing meaning ("every package was checked"), so an old
+        # record reads exactly as it did before.
+        await conn.execute(
+            "ALTER TABLE scan_results ADD COLUMN osv_failures INTEGER NOT NULL DEFAULT 0"
+        )
+        log.debug("Migrated scan_results table: added osv_failures column")
 
     async with conn.execute("PRAGMA table_info(top_packages_cache)") as cur:
         columns = {row["name"] for row in await cur.fetchall()}

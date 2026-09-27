@@ -12,6 +12,7 @@ import time
 import types
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
+from typing import cast
 
 import typer
 from rich.console import Console
@@ -27,6 +28,10 @@ from packagealert.logging_setup import configure_logging
 from packagealert.plugins.registry import plugin_registry
 
 log = logging.getLogger(__name__)
+
+# Sentinel for "attribute absent entirely", so a getattr() shape check can tell
+# a missing field apart from one legitimately set to None.
+_MISSING = object()
 
 app = typer.Typer(
     name="package-alert",
@@ -326,7 +331,11 @@ async def _run_scan_cache(cfg):
 
     from packagealert.alerts.terminal import alert_malicious
     from packagealert.languages import registry as lang_registry
-    from packagealert.models.events import PackageEvent, normalise_ecosystem
+    from packagealert.models.events import (
+        PackageEvent,
+        normalise_ecosystem,
+        normalise_package_name_for,
+    )
     from packagealert.osv.cache import OsvCache
     from packagealert.osv.client import OsvClient
     from packagealert.storage.db import open_db
@@ -335,20 +344,110 @@ async def _run_scan_cache(cfg):
     osv_client = OsvClient(cfg.osv)
     osv_cache = OsvCache(db, cfg.osv)
     found = 0
+    # Packages whose OSV lookup could not be completed. A degraded result
+    # may be missing advisories, so without counting it the final "N malicious
+    # package(s) found" line reads as a clean result for packages that were
+    # never actually checked — see OsvResult.degraded.
+    osv_failures = 0
+    # Command-level dedup by (canonical ecosystem, name, version) — NOT just
+    # by glob-matched path, which the per-cache_dir `seen` set below already
+    # covers. classify_cache_file() deliberately classifies a source-build
+    # wheel as its own event even when its sdists-v*/pypi/<name>/<version>
+    # ancestor directory also independently classifies (see that method's
+    # own dual-classification comment) — both are real, DIFFERENT paths, so
+    # the path-only `seen` set never catches this. Without this, a single
+    # malicious sdist build was queried and alerted on TWICE (once for the
+    # version-dir path, once for the completed .whl path) — alert_malicious()
+    # called twice, `found` incremented twice, and the printed count
+    # overstated how many distinct malicious packages were actually found —
+    # confirmed empirically. Scoped across the WHOLE scan (every language,
+    # every cache_dir), not reset per language/dir, since two different
+    # roots or plugins could in principle glob-match paths that classify to
+    # the same package/version too.
+    seen_packages: set[tuple[str, str, str]] = set()
 
     lang_registry.load()
     for lang in lang_registry.all_languages():
         try:
             globs = lang.cache_file_globs()
             cache_dirs = lang.cache_paths()
+            # Both are duck-typed, third-party-implementable hooks, so a
+            # plugin can return a malformed shape instead of raising — and
+            # neither is validated by the type checker at runtime. Validated
+            # HERE, inside this same try, so a malformed return is isolated to
+            # this one plugin exactly like a raised exception already is.
+            # Without it the failure escaped this guard and aborted the WHOLE
+            # scan-cache command, leaving every other language unscanned:
+            # cache_paths() -> None failed at `cache_dirs + poll_only_dirs`
+            # (TypeError), a non-Path element at `cache_dir.exists()`
+            # (AttributeError), and a non-str glob inside cache_dir.glob()
+            # (TypeError) — all confirmed empirically. Mirrors
+            # CacheMonitor._discover_dirs_by()'s identical validation.
+            if not isinstance(globs, list) or not all(isinstance(g, str) for g in globs):
+                raise TypeError(
+                    f"cache_file_globs() must return list[str], got {globs!r}"
+                )
+            if not isinstance(cache_dirs, list) or not all(
+                isinstance(d, Path) for d in cache_dirs
+            ):
+                raise TypeError(
+                    f"cache_paths() must return list[Path], got {cache_dirs!r}"
+                )
         except Exception:
             log.warning(
-                "cache_file_globs/cache_paths raised unexpectedly for lang=%s — skipping",
+                "cache_file_globs/cache_paths raised unexpectedly, or returned a "
+                "malformed result, for lang=%s — skipping",
                 getattr(lang, "name", "?"), exc_info=True,
             )
             continue
         if not globs:
             continue
+        # scan-cache is a one-shot glob-and-classify pass, not a recursive
+        # inotify watch — poll_only_cache_paths() roots exist only to avoid
+        # the COST of a permanent recursive watch (see
+        # CacheMonitor._poll_cache_dirs()), which doesn't apply here, so
+        # they're included in the same one-shot scan as cache_paths(). This
+        # is a SEPARATE try/except from cache_file_globs()/cache_paths()
+        # above — an optional plugin hook must degrade to "unavailable"
+        # (an empty list here) on failure without discarding the required
+        # cache_paths() roots already retrieved successfully for this same
+        # language (see CacheMonitor._discover_poll_only_cache_dirs() and
+        # sandbox/cooldown.py's publication_date_parse() for the same
+        # isolation pattern applied to other optional hooks) — confirmed
+        # empirically that lumping both into one try/except skipped this
+        # language's scan entirely, discarding real, already-resolved
+        # cache_paths() artifacts, whenever only the optional hook raised.
+        try:
+            poll_only_fn = getattr(lang, "poll_only_cache_paths", None)
+            # poll_only_cache_paths() is duck-typed, not a LanguageBase
+            # Protocol member (see its comment in languages/base.py), so its
+            # return type is unknown to the type checker — cast() is only a
+            # type-checker hint here, not a runtime check, so a malformed
+            # return (None, or a list with non-Path elements) is validated
+            # explicitly below, inside this same try, rather than trusted.
+            # Without it, None survived straight past this try/except (it's
+            # not an exception) and only failed later at `cache_dirs +
+            # poll_only_dirs` (TypeError, list + None) or a non-Path
+            # element only failed later at `cache_dir.exists()`
+            # (AttributeError, str has no such method) — both unguarded,
+            # aborting the entire scan-cache command instead of degrading
+            # this one language's optional hook to "unavailable" the way a
+            # raised exception already does — confirmed empirically.
+            poll_only_dirs = cast("list[Path]", poll_only_fn()) if callable(poll_only_fn) else []
+            if not isinstance(poll_only_dirs, list) or not all(
+                isinstance(p, Path) for p in poll_only_dirs
+            ):
+                raise TypeError(
+                    f"poll_only_cache_paths() must return list[Path], got {poll_only_dirs!r}"
+                )
+        except Exception:
+            log.warning(
+                "poll_only_cache_paths raised unexpectedly, or returned a malformed result, "
+                "for lang=%s — treating as unavailable",
+                getattr(lang, "name", "?"), exc_info=True,
+            )
+            poll_only_dirs = []
+        cache_dirs = cache_dirs + poll_only_dirs
         for cache_dir in cache_dirs:
             if not cache_dir.exists():
                 continue
@@ -366,7 +465,54 @@ async def _run_scan_cache(cfg):
                             getattr(lang, "name", "?"), entry, exc_info=True,
                         )
                         continue
-                    if not metadata or not metadata.version:
+                    if not metadata:
+                        continue
+                    # PackageMetadata is a plain dataclass with no
+                    # validation, and classify_cache_file() is a
+                    # duck-typed, third-party-implementable hook — so a
+                    # plugin can hand back an object that is not
+                    # metadata-shaped at all (missing name/ecosystem/
+                    # version outright), or one whose fields are not
+                    # strings. Both must be checked HERE, before ANY
+                    # field is dereferenced: reading metadata.version
+                    # first to skip unversioned entries raised
+                    # AttributeError for an attribute-less object, which
+                    # escaped the per-entry try/except around
+                    # classify_cache_file() above (that guards the CALL,
+                    # not the returned value) and aborted the WHOLE
+                    # command, leaving every remaining language and cache
+                    # dir unscanned — confirmed empirically.
+                    #
+                    # The string check matters for the same reason:
+                    # normalise_package_name_for() documents itself as
+                    # never raising, but that holds only for a string —
+                    # with a non-string the plugin hook raises (caught and
+                    # logged, as designed) and then the FALLBACK raises on
+                    # the same value and escapes. metadata.ecosystem is
+                    # equally exposed via the .lower() fallback below.
+                    # Skip just this entry instead.
+                    # version is legitimately `str | None` on
+                    # PackageMetadata, so None is a well-formed "no version
+                    # resolved" answer, not a malformed one — it is allowed
+                    # through this shape check and skipped quietly below.
+                    if not (
+                        isinstance(getattr(metadata, "name", None), str)
+                        and isinstance(getattr(metadata, "ecosystem", None), str)
+                        and isinstance(getattr(metadata, "version", _MISSING), str | None)
+                    ):
+                        log.warning(
+                            "classify_cache_file returned malformed metadata for "
+                            "lang=%s path=%s (name=%r ecosystem=%r version=%r) — skipping",
+                            getattr(lang, "name", "?"), entry,
+                            getattr(metadata, "name", None),
+                            getattr(metadata, "ecosystem", None),
+                            getattr(metadata, "version", None),
+                        )
+                        continue
+                    # An entry with no resolvable version is a normal,
+                    # well-formed outcome (not malformed), so it is skipped
+                    # quietly rather than warned about.
+                    if not metadata.version:
                         continue
                     # Canonicalise exactly as the daemon does. Lowercasing here wrote
                     # rows keyed "nuget" while the daemon wrote "NuGet" for the same
@@ -376,29 +522,94 @@ async def _run_scan_cache(cfg):
                         cache_eco = normalise_ecosystem(metadata.ecosystem)
                     except ValueError:
                         cache_eco = metadata.ecosystem.lower()
-                    result = await osv_cache.get(cache_eco, metadata.name, metadata.version)
+                    # Normalise the NAME too, not just the ecosystem, and use
+                    # that one canonical value for the dedup key, both OSV
+                    # lookups and the event below. PackageMetadata is a plain
+                    # dataclass with no validation, so a plugin may return a
+                    # name in any spelling — PythonLanguage normalises its
+                    # own, but NodeLanguage's cacache index-key branch returns
+                    # whatever the key held, unlowercased. PackageEvent
+                    # normalises `package_name` via this same helper, so a raw
+                    # key here meant two spellings of ONE package (npm
+                    # "Express"/"express", or PyPI "foo_bar"/"foo-bar") missed
+                    # each other in seen_packages and were queried and alerted
+                    # twice — both alerts displaying the SAME normalised name,
+                    # since the event normalised what the key had not.
+                    # Confirmed empirically. normalise_package_name_for() is
+                    # the shared, ecosystem-specific entry point (PEP 503
+                    # separator collapsing for PyPI, lowercase-only for npm so
+                    # "socket.io" is not rewritten) and never raises.
+                    cache_name = normalise_package_name_for(cache_eco, metadata.name)
+                    package_key = (cache_eco, cache_name, metadata.version)
+                    if package_key in seen_packages:
+                        continue
+                    seen_packages.add(package_key)
+                    result = await osv_cache.get(cache_eco, cache_name, metadata.version)
                     if result is None:
-                        results = await osv_client.batch_query([(cache_eco, metadata.name, metadata.version)])
+                        results = await osv_client.batch_query([(cache_eco, cache_name, metadata.version)])
                         if results:
                             result = results[0]
-                            await osv_cache.set(cache_eco, metadata.name, metadata.version, result)
-                    if result and result.has_malicious:
-                        try:
-                            _eco = normalise_ecosystem(metadata.ecosystem)
-                        except ValueError:
+                            # Never cache a degraded (failed-lookup) result — see
+                            # OsvResult.degraded.
+                            if not result.degraded:
+                                await osv_cache.set(
+                                    cache_eco, cache_name, metadata.version, result
+                                )
+                    if result is not None and result.degraded:
+                        osv_failures += 1
+                        # A partial result can still carry a MAL- advisory
+                        # that parsed — an authoritative positive, so it must
+                        # still alert rather than be skipped as unchecked.
+                        if not result.has_malicious:
                             continue
-                        ev = PackageEvent(
-                            ecosystem=_eco,
-                            package_name=metadata.name,
-                            version=metadata.version,
-                            source="cache",
-                            manager="unknown",
-                            project_path=None,
-                            timestamp=datetime.now(UTC),
-                        )
+                    if result and result.has_malicious:
+                        # Reuses the SAME canonical value the dedup key and
+                        # both OSV lookups used, rather than calling
+                        # normalise_ecosystem() a second time — that second
+                        # call could only ever disagree with the first, and
+                        # it ran AFTER seen_packages.add() had claimed the
+                        # key, so on ValueError it `continue`d and a later,
+                        # differently spelled ecosystem for the same package
+                        # that WOULD canonicalise was skipped as a duplicate
+                        # and never alerted.
+                        #
+                        # Still guarded: cache_eco falls back to a plain
+                        # .lower() for an unregistered ecosystem (so the OSV
+                        # cache key matches the daemon's), which
+                        # PackageEvent's own validator then rejects. Let
+                        # that escape and one misbehaving plugin would abort
+                        # the WHOLE scan, losing every remaining language's
+                        # results — log and skip just this entry instead.
+                        try:
+                            ev = PackageEvent(
+                                ecosystem=cache_eco,
+                                # Already canonical (see above); PackageEvent's
+                                # own validator would apply the identical rule,
+                                # so this just keeps the alerted name consistent
+                                # with the key and the OSV lookups.
+                                package_name=cache_name,
+                                version=metadata.version,
+                                source="cache",
+                                manager="unknown",
+                                project_path=None,
+                                timestamp=datetime.now(UTC),
+                            )
+                        except Exception:
+                            log.warning(
+                                "Could not build a PackageEvent for %s/%s@%s "
+                                "(from lang=%s) — skipping this entry",
+                                cache_eco, cache_name, metadata.version,
+                                getattr(lang, "name", "?"), exc_info=True,
+                            )
+                            continue
                         alert_malicious(ev, result)
                         found += 1
 
+    if osv_failures:
+        console.print(
+            f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
+            f"these were NOT checked for advisories[/yellow]"
+        )
     console.print(f"Scan complete. [bold red]{found}[/bold red] malicious package(s) found.")
     await osv_client.aclose()
     await db.close()
@@ -429,10 +640,33 @@ async def _run_query(cfg, ecosystem: str, package: str, version: str | None):
     if result is None:
         results = await client.batch_query([(ecosystem, package, version)])
         result = results[0] if results else None
-        if result:
+        # Never cache a degraded (failed-lookup) result — see OsvResult.degraded.
+        if result and not result.degraded:
             await cache.set(ecosystem, package, version, result)
 
-    if result and result.advisories:
+    if result is not None and result.degraded and not result.advisories:
+        # A degraded result's advisory list is incomplete, so an empty one is
+        # "unknown", not "clean" — reporting it green would tell the user the
+        # package is safe when OSV never gave a usable answer. See
+        # OsvResult.degraded.
+        console.print(
+            f"[bold yellow]OSV lookup unavailable for {ecosystem}/{package}"
+            f"{' ' + version if version else ''}[/bold yellow]"
+        )
+        console.print(
+            "  The query could not be completed: OSV was unreachable, stayed "
+            "rate-limited after retries, returned an error, or sent a response "
+            "that could not be parsed. This is NOT a clean result."
+        )
+    elif result and result.advisories:
+        if result.degraded:
+            # Partial: the advisories below parsed and are real, but OSV's
+            # response also held entries that could not be read.
+            console.print(
+                "[bold yellow]OSV returned a partially malformed response — "
+                "the advisories below are real, but others may be missing."
+                "[/bold yellow]"
+            )
         for adv in result.advisories:
             colour = "red" if adv.is_malicious else "yellow"
             label = "[MALICIOUS]" if adv.is_malicious else "[VULN]"
@@ -904,6 +1138,10 @@ async def _run_scan_project(
     osv_cache = OsvCache(db, cfg.osv)
 
     findings = []  # list of dicts for structured output
+    # Packages whose OSV lookup could not be completed. Counted separately so an
+    # empty `findings` is never mistaken for a clean result — see
+    # OsvResult.degraded and ScanResult.osv_failures.
+    osv_failures = 0
 
     batch_size = 50
     for i in range(0, len(to_query), batch_size):
@@ -923,11 +1161,18 @@ async def _run_scan_project(
         if uncached_queries:
             fresh = await osv_client.batch_query(uncached_queries)
             for q, r in zip(uncached_queries, fresh):
-                if r:
+                # Never cache a degraded (failed-lookup) result — see
+                # OsvResult.degraded: it would record an OSV outage as a clean
+                # verdict for the whole osv_cache TTL.
+                if r and not r.degraded:
                     ecosystem, name, version = q
                     await osv_cache.set(ecosystem, name, version, r)
 
         for osv_result in cached + fresh:
+            if osv_result is not None and osv_result.degraded:
+                # Counted as unchecked, but NOT skipped: a partial result's
+                # advisories that did parse are real findings.
+                osv_failures += 1
             if not osv_result or not osv_result.advisories:
                 continue
             for adv in osv_result.advisories:
@@ -964,6 +1209,7 @@ async def _run_scan_project(
         scanned_at=datetime.now(UTC),
         risks=risks,
         risk_failures=risk_failures,
+        osv_failures=osv_failures,
     )
     await plugin_registry.fire_on_scan_complete(scan)
 
@@ -981,6 +1227,10 @@ async def _run_scan_project(
             # machine consumer read "scoring broke" as "nothing is risky". The text
             # output has always warned about this; JSON callers could not see it.
             "risk_failures": risk_failures,
+            # Same reasoning, for the OSV pass: a degraded lookup contributes no
+            # advisories, so "findings": [] alone cannot be told apart from a
+            # genuinely clean project. See OsvResult.degraded.
+            "osv_failures": osv_failures,
         }, indent=2))
         return
 
@@ -993,6 +1243,7 @@ async def _run_scan_project(
             risks=_visible_risks(risks, show_details=show_details),
             risk_total=len(risks),
             risk_failures=risk_failures,
+            osv_failures=osv_failures,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -1075,8 +1326,22 @@ async def _run_scan_project(
             f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
         )
 
+    if osv_failures:
+        console.print(
+            f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
+            f"these were NOT checked for advisories[/yellow]"
+        )
+
+    # "checked" must exclude the lookups that failed, or the summary contradicts
+    # the warning directly above it — a fully degraded scan reported "67 NOT
+    # checked" and "(67 packages checked)" on adjacent lines. The unchecked
+    # count is stated alongside rather than silently dropped, so the two numbers
+    # still add up to everything that was attempted.
+    checked = len(to_query) - osv_failures
+    unchecked_note = f", {osv_failures} unchecked" if osv_failures else ""
     console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow], "
-                  f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] ({len(to_query)} packages checked)")
+                  f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] "
+                  f"({checked} packages checked{unchecked_note})")
 
 
 def open_html_in_browser(html: str) -> None:
@@ -1094,7 +1359,7 @@ def open_html_in_browser(html: str) -> None:
     Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, scanned_at: str = "") -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "") -> str:
     """Render a self-contained HTML report.
 
     *risks* is the already-filtered set of rows to table (low-signal rows are
@@ -1104,6 +1369,12 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
 
     *risk_failures* is surfaced so an empty risk table cannot be misread as a clean
     result when scoring actually failed — the same distinction the text output makes.
+
+    *osv_failures* is surfaced for the identical reason on the OSV side: a degraded
+    lookup may be missing advisories (see OsvResult.degraded), so without it a
+    "0 malicious, 0 vulnerable" summary reads as a clean report for packages that
+    were never actually checked. The text and JSON outputs both report it, so an
+    HTML report that omitted it was the one format that still looked clean.
     """
     from html import escape
     malicious = sum(1 for f in findings if f["is_malicious"])
@@ -1168,6 +1439,8 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   .summary span {{ margin-right: 1.5em; font-weight: bold; }}
   .malicious {{ color: #dc2626; }}
   .vulnerable {{ color: #d97706; }}
+  .warn {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b;
+           padding: 0.6em 0.9em; margin: 0.5em 0 1em; border-radius: 4px; }}
   table {{ border-collapse: collapse; width: 100%; margin-top: 1.5em; }}
   th {{ background: #f3f4f6; text-align: left; padding: 8px 12px; border-bottom: 2px solid #e5e7eb; }}
   td {{ padding: 8px 12px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
@@ -1189,7 +1462,9 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   <span>{len(unpinned)} unpinned</span>
   <span>{risk_total if risk_total is not None else len(risks or [])} at risk</span>
   {f'<span class="malicious">{risk_failures} unscored</span>' if risk_failures else ""}
+  {f'<span class="malicious">{osv_failures} unchecked</span>' if osv_failures else ""}
 </div>
+{f'<div class="warn">&#9888; OSV lookup unavailable for {osv_failures} package(s) &mdash; these were NOT checked for advisories, so this report is not a clean result.</div>' if osv_failures else ""}
 {"<h2>Unpinned dependencies</h2><ul>" + unpinned_rows + "</ul>" if unpinned else ""}
 <table>
   <thead><tr><th></th><th>Package</th><th>Ecosystem</th><th>Version</th><th>Advisory</th><th>Summary</th><th>Fix</th></tr></thead>
@@ -1957,11 +2232,25 @@ async def _scans_list(cfg, project_path: str, limit: int) -> None:
             date_str,
             r.schedule,
             r.scan_type,
-            str(r.finding_count),
+            _findings_cell(r),
             f"[{colour}]{sev}[/{colour}]",
         )
 
     console.print(table)
+
+
+def _findings_cell(record) -> str:
+    """Findings count for a scan-history table, flagging unchecked packages.
+
+    A degraded OSV lookup may be missing advisories (see OsvResult.degraded),
+    so a bare count reads as a clean scan for packages that were never
+    actually checked. Records written before osv_failures existed report 0 and
+    render exactly as they did before.
+    """
+    unchecked = getattr(record, "osv_failures", 0) or 0
+    if unchecked:
+        return f"{record.finding_count} [yellow](+{unchecked} unchecked)[/yellow]"
+    return str(record.finding_count)
 
 
 @scans_app.command("listall")
@@ -2017,7 +2306,7 @@ async def _scans_listall(cfg, limit: int) -> None:
             date_str,
             r.schedule,
             r.scan_type,
-            str(r.finding_count),
+            _findings_cell(r),
             f"[{colour}]{sev}[/{colour}]",
         )
 
@@ -2058,6 +2347,9 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
         raise typer.Exit(1)
 
     findings = record.findings
+    # Records written before osv_failures existed report 0, so they render
+    # exactly as they did before — see OsvResult.degraded.
+    osv_failures = getattr(record, "osv_failures", 0) or 0
     root_str = record.project_path
     sources = record.sources
     date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")  # noqa: DTZ006 — local time for display
@@ -2071,11 +2363,17 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
             "scan_type": record.scan_type,
             "sources": sources,
             "findings": findings,
+            # A degraded lookup may be missing advisories, so "findings": []
+            # alone cannot be told apart from a genuinely clean scan.
+            "osv_failures": osv_failures,
         }, indent=2))
         return
 
     if fmt in ("html", "browser"):
-        html = _render_html(Path(root_str), sources, [], findings, scanned_at=date_str)
+        html = _render_html(
+            Path(root_str), sources, [], findings,
+            osv_failures=osv_failures, scanned_at=date_str,
+        )
         if fmt == "browser":
             open_html_in_browser(html)
         else:
@@ -2089,8 +2387,15 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
         f"Type: {record.scan_type}  |  Sources: {', '.join(sources)}\n"
     )
 
+    if osv_failures:
+        console.print(
+            f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
+            f"these were NOT checked for advisories[/yellow]"
+        )
+
     if not findings:
-        console.print("[green]No findings — all clear.[/green]")
+        if not osv_failures:
+            console.print("[green]No findings — all clear.[/green]")
         return
 
     malicious = 0

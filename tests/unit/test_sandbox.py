@@ -4025,8 +4025,12 @@ class TestRunnerUsesBackendForSnapshot:
 # _scan_updated_lock_files
 # ---------------------------------------------------------------------------
 
-def _fake_osv_context(malicious_names: set[str]):
-    """Return (fake_open_db, FakeClient, FakeCache) that flag packages in malicious_names."""
+def _fake_osv_context(malicious_names: set[str], *, partial: bool = False):
+    """Return (fake_open_db, FakeClient, FakeCache) that flag packages in malicious_names.
+
+    With partial=True each malicious result is also degraded, modelling an OSV
+    result where one vuln was malformed but the MAL- advisory beside it parsed.
+    """
 
     async def fake_open_db(*args, **kwargs):
         return unittest.mock.AsyncMock()
@@ -4043,15 +4047,23 @@ def _fake_osv_context(malicious_names: set[str]):
             self.is_malicious = malicious
 
     class FakeResult:
-        def __init__(self, name, malicious):
+        def __init__(self, name, malicious, degraded=False):
             self.package_name = name
             self.advisories = [FakeAdvisory(malicious)] if malicious else []
             self.has_malicious = malicious
+            # Mirrors OsvResult.degraded: a real lookup result is never degraded.
+            self.degraded = degraded
 
     class FakeClient:
         def __init__(self, cfg): pass
         async def batch_query(self, queries):
-            return [FakeResult(name, name in malicious_names) for _, name, _ in queries]
+            return [
+                FakeResult(
+                    name, name in malicious_names,
+                    degraded=partial and name in malicious_names,
+                )
+                for _, name, _ in queries
+            ]
         async def aclose(self): pass
 
     return fake_open_db, FakeClient, FakeCache
@@ -4405,6 +4417,58 @@ class TestPreflightShouldGate:
         # should_gate=False must short-circuit before the DB is even opened —
         # confirms OSV was never queried for the dry-run's explicit package.
         mock_open_db.assert_not_called()
+
+
+class TestGatesBlockOnPartialMaliciousResult:
+    """Every OSV gate must block on a degraded result that still carries a
+    MAL- advisory; checking `degraded` first reported it as merely unchecked
+    and let the install proceed."""
+
+    def _patches(self):
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(
+            malicious_names={"evilpkg"}, partial=True
+        )
+        scan_result = _fake_scan_result([("pypi", "evilpkg", "1.0.0")])
+        return (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch(
+                "packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan_result
+            ),
+        )
+
+    def test_preflight_shell(self, tmp_path):
+        import asyncio
+        (tmp_path / "Pipfile.lock").write_bytes(b"content")
+        a, b, c, _ = self._patches()
+        scan = unittest.mock.patch(
+            "packagealert.parsers.lockfiles.scan_project",
+            return_value=_fake_scan_result([("pypi", "evilpkg", "1.0.0")]),
+        )
+        with a, b, c, scan:
+            assert asyncio.run(_make_runner()._preflight_shell(tmp_path)) is False
+
+    def test_preflight(self, tmp_path):
+        import asyncio
+
+        import packagealert.sandbox.runner as runner_mod
+        (tmp_path / "Pipfile.lock").write_bytes(b"content")
+        argv = ["pipenv", "install"]
+        ctx = runner_mod._Context(argv=argv, parsed=runner_mod._try_parse(argv), cwd=tmp_path)
+        a, b, c, d = self._patches()
+        with a, b, c, d:
+            assert asyncio.run(_make_runner()._preflight(ctx)) is False
+
+    def test_scan_updated_lock_files(self, tmp_path):
+        import asyncio
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"updated content")
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
+        a, b, c, d = self._patches()
+        with a, b, c, d:
+            result = asyncio.run(_make_runner()._scan_updated_lock_files(tmp_path, snapshots))
+        assert result is False
 
 
 class TestScanUpdatedLockFiles:

@@ -44,10 +44,80 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Internal regex constants
 # ---------------------------------------------------------------------------
-_DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
+_DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info\Z")
+# uv wheel-cache index leaf, name prefix already stripped. Two shapes:
+# "<version>-<build>?-<python>-<abi>-<platform>" for prebuilt wheels (each of
+# python/abi/platform is itself a dot-separated PEP 425 "compressed tag set"
+# whenever a wheel satisfies more than one of that field — e.g. "py2.py3-none-
+# any", a python tag compressing py2 and py3 — not just platform, which
+# commonly compresses as "manylinux_2_17_x86_64.manylinux2014_x86_64"; all
+# three are matched as hyphen-delimited, not dot-delimited, fields, each a
+# dot-separated run of real PEP 425 tag characters ([A-Za-z0-9_]+) — no
+# component is excluded by content (a tag's CONTENT isn't constrained by PEP
+# 425 beyond its character set — see _WHEEL_RE in parsers/wheel.py for the
+# fuller version of this same comment, and why reserving a word there was
+# tried and reverted after it caused a real cache-detection bypass). The
+# optional PEP 427 build tag (e.g. "202206090410" in
+# "1.2.3-202206090410-py3-none-any") sits between version and python tag —
+# uv's own WheelFilename::cache_key() is "{version}-{tags}" where `tags`'
+# Display impl writes the wheel's ORIGINAL tag repr verbatim (uv-distribution-
+# filename/src/wheel_tag.rs, WheelTagLarge's Display), including the build tag
+# prefix exactly as it appeared in the source filename — so a build-tagged
+# wheel's index leaf genuinely has 4 hyphen-delimited fields after the
+# version, not 3. uv's own parser (WheelFilename::parse(), uv-distribution-
+# filename/src/wheel.rs) distinguishes the two shapes purely by FIELD COUNT (5
+# vs 6 total fields from name through platform), never by a tag's content, and
+# BuildTag::from_str (uv-distribution-filename/src/build_tag.rs) requires a
+# build tag to start with a digit and contain only ASCII-
+# alphanumeric/underscore/period — no hyphens — so a leading digit-prefixed
+# field, matched non-greedily against this narrower BUILD_TAG character class,
+# unambiguously means "build tag present" in exactly the same way uv's own
+# count-based grammar decides it: a real wheel filename can only have 3 or 4
+# fields after the version, never an ambiguous "malformed 4-field, no-build-
+# tag" case. Confirmed against uv's actual source, not just the filename
+# convention — a missing build-tag case previously caused a real build-tagged
+# wheel's leaf to be rejected outright, producing no cache event at all (the
+# same failure mode as every other missed cache-layout shape this module has
+# been audited for — see "Auditing the uv cache-layout assumptions" in
+# .claude/CLAUDE.md). Or "<version>-<build-hash>" (a 16-char lowercase hex
+# build cache key) for wheels built locally from an sdist. Version char class
+# matches _WHEEL_RE. The ".http"/".msgpack"/".rev"/".lock" companion-file
+# suffixes this leaf shape can otherwise collide with are rejected by
+# path.suffix before either regex ever runs — see
+# _uv_wheel_index_entry_to_metadata()). Audited against: uv 0.12.5 — see
+# "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md for how/when
+# to re-check this.
+_UV_TAG_COMPONENT_RE = r"[A-Za-z0-9_]+"
+_UV_TAG_SET_RE = rf"{_UV_TAG_COMPONENT_RE}(\.{_UV_TAG_COMPONENT_RE})*"
+_UV_BUILD_TAG_RE = r"\d[A-Za-z0-9_.]*"
+_UV_WHEEL_INDEX_TAGS_RE = re.compile(
+    rf"^(?P<version>[A-Za-z0-9_.!+]+?)-(?:(?P<build>{_UV_BUILD_TAG_RE})-)?"
+    rf"{_UV_TAG_SET_RE}-{_UV_TAG_SET_RE}-{_UV_TAG_SET_RE}\Z"
+)
+_UV_WHEEL_INDEX_BUILD_HASH_RE = re.compile(r"^(?P<version>[A-Za-z0-9_.!+]+?)-[0-9a-f]{16}\Z")
+# Matches both the alternative-index digest ("index/<hash>/...") and the
+# direct-URL digest ("url/<hash>/...", wheels-v* only — see
+# _uv_index_name_dir()) — both are uv's cache_digest(), a fixed 16-hex-char
+# hash (uv-cache-key/src/digest.rs). Git's short SHA (as_short_str()) is also
+# exactly 16 characters. Matched at exactly this width, not merely a minimum,
+# so a lookalike subtree using a shorter hex string in the same position
+# doesn't get treated as a real digest and misclassified. Audited against: uv
+# 0.12.5 — see "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md
+# for how/when to re-check this.
+_UV_CACHE_HASH_RE = re.compile(r"^[0-9a-f]{16}\Z")
+# uv cache-schema root directory names: "wheels-v6", "sdists-v9", etc. — the
+# version suffix is always digits-only. A bare Path.glob("wheels-v*") also
+# matches "wheels-v6.backup", "wheels-vNext", or a non-directory like
+# "wheels-v6.txt"; recursively watching any such lookalike (e.g. a manual
+# backup of the whole cache) could reopen the inotify watch exhaustion this
+# scoping was meant to prevent, so glob matches are filtered through this
+# pattern before being watched. Audited against: uv 0.12.5 — see "Auditing the
+# uv cache-layout assumptions" in .claude/CLAUDE.md for how/when to re-check
+# this.
+_UV_CACHE_SCHEMA_DIR_RE = re.compile(r"^(?:wheels|sdists)-v\d+\Z")
 # Dist-info normalisation: collapse runs of [-_.] to a single underscore for
-# comparison. PEP 503 uses hyphens, but dist-info stems use underscores, so
-# we normalise to underscores to match the filesystem representation.
+# comparison. PEP 503 uses hyphens, but dist-info stems use underscores, so we
+# normalise to underscores to match the filesystem representation.
 _PKG_NORM_RE = re.compile(r"[-_.]+")
 
 
@@ -249,13 +319,13 @@ def _marker_references_interpreter_identity(marker: str) -> bool:
 
 # `extra` is PEP 508's selection variable for optional dependency groups
 # (`package[foo]`). Marker.evaluate() defaults it to '' when no environment
-# dict is supplied — unlike `dependency_groups` (PEP 751's analogous
-# selection variable), which has no default and raises
-# UndefinedEnvironmentName, already caught by the exception-based fail-open
-# path below. That means `extra == 'foo'` silently evaluates False here
-# regardless of what extras a real install selected, rather than failing
-# loudly. parse_lockfile() receives no selected-extras context, so this must
-# be checked explicitly and failed open too.
+# dict is supplied — unlike `dependency_groups` (PEP 751's analogous selection
+# variable), which has no default and raises UndefinedEnvironmentName, already
+# caught by the exception-based fail-open path below. That means `extra ==
+# 'foo'` silently evaluates False here regardless of what extras a real
+# install selected, rather than failing loudly. parse_lockfile() receives no
+# selected-extras context, so this must be checked explicitly and failed open
+# too.
 _EXTRA_MARKER_VAR_RE = re.compile(r"\bextra\b")
 
 
@@ -355,20 +425,20 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
         data = tomllib.loads(path.read_text())
         packages = data.get("package", [])
 
-        # Build a name -> dep-names adjacency map from the lock (all packages),
-        # both with marker-inapplicable edges dropped and with all edges kept.
-        # The unfiltered map distinguishes a package that's excluded because
-        # its only path from root requires a marker that doesn't apply here
-        # (e.g. httpx2-jsfetch, gated behind sys_platform == 'emscripten') from
-        # one that's unreachable from root for unrelated reasons (a workspace
-        # member, an unresolvable marker) — only the former should be dropped
-        # from the results entirely; the latter keeps today's is_dev=None.
-        # A forked resolution emits multiple [[package]] records for the same
-        # name (one per resolution-markers branch), each with its own
-        # dependency list — union rather than overwrite so edges from every
-        # record are captured. A record whose own resolution-markers don't
-        # apply here contributes no edges at all: uv would never install that
-        # record, so its listed dependencies aren't real either.
+        # Build a name -> dep-names adjacency map from the lock (all
+        # packages), both with marker-inapplicable edges dropped and with all
+        # edges kept. The unfiltered map distinguishes a package that's
+        # excluded because its only path from root requires a marker that
+        # doesn't apply here (e.g. httpx2-jsfetch, gated behind sys_platform
+        # == 'emscripten') from one that's unreachable from root for unrelated
+        # reasons (a workspace member, an unresolvable marker) — only the
+        # former should be dropped from the results entirely; the latter keeps
+        # today's is_dev=None. A forked resolution emits multiple [[package]]
+        # records for the same name (one per resolution-markers branch), each
+        # with its own dependency list — union rather than overwrite so edges
+        # from every record are captured. A record whose own resolution-
+        # markers don't apply here contributes no edges at all: uv would never
+        # install that record, so its listed dependencies aren't real either.
         deps_of: dict[str, set[str]] = {}
         deps_of_unfiltered: dict[str, set[str]] = {}
         for pkg in packages:
@@ -425,8 +495,8 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
         if found_root:
             prod_reachable = _reachable(prod_seeds, deps_of)
             dev_reachable = _reachable(dev_seeds, deps_of)
-            # Reachable at all, ignoring markers — used only to detect
-            # marker-excluded packages below, never for is_dev classification.
+            # Reachable at all, ignoring markers — used only to detect marker-
+            # excluded packages below, never for is_dev classification.
             reachable_unfiltered = _reachable(
                 prod_seeds_unfiltered | dev_seeds_unfiltered, deps_of_unfiltered
             )
@@ -440,15 +510,16 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
             name = pkg.get("name", "")
             if not name:
                 continue
-            # Skip the root project itself — it's the package being scanned, not a dependency.
+            # Skip the root project itself — it's the package being scanned,
+            # not a dependency.
             src = pkg.get("source", {})
             if isinstance(src, dict) and src.get("editable") == ".":
                 continue
             if not _uv_lock_resolution_markers_apply(pkg):
-                # This record is one fork-specific variant (e.g. a Windows-only
-                # resolution of a package that also has a non-Windows record)
-                # and doesn't apply on this platform — uv would never install
-                # it here.
+                # This record is one fork-specific variant (e.g. a Windows-
+                # only resolution of a package that also has a non-Windows
+                # record) and doesn't apply on this platform — uv would never
+                # install it here.
                 continue
             norm = _normalize_name(name)
             in_prod = norm in prod_reachable
@@ -496,9 +567,9 @@ def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
 # Conventional virtualenv directory names, searched in preference order.
 #
 # Defined once because several call sites need the same answer and had drifted
-# apart: installed-package detection scanned all four while the interpreter lookup
-# and site-packages discovery scanned only the first two, so packages in `env` or
-# `.env` were found by one code path and invisible to another.
+# apart: installed-package detection scanned all four while the interpreter
+# lookup and site-packages discovery scanned only the first two, so packages
+# in `env` or `.env` were found by one code path and invisible to another.
 VENV_DIR_NAMES: tuple[str, ...] = (".venv", "venv", "env", ".env")
 
 
@@ -586,22 +657,23 @@ def all_installed_site_packages(root: Path) -> list[Path]:
                 # well-formed pyvenv.cfg.
                 sp = None
         except ValueError:
-            # Invalid/unreadable pyvenv.cfg — already warned by the helper. Fall
-            # back to enumerating the site-packages trees directly, matching what
-            # detect_installed_packages' dist-info scan does: it never reads
-            # pyvenv.cfg, so it finds packages here regardless. Skipping the
-            # environment made those packages detectable but unresolvable, silently
-            # downgrading them to metadata-only scoring — and an invalid cfg is
-            # flagged as a possible sign of tampering, which is precisely when
-            # source-code heuristics matter most.
+            # Invalid/unreadable pyvenv.cfg — already warned by the helper.
+            # Fall back to enumerating the site-packages trees directly,
+            # matching what detect_installed_packages' dist-info scan does: it
+            # never reads pyvenv.cfg, so it finds packages here regardless.
+            # Skipping the environment made those packages detectable but
+            # unresolvable, silently downgrading them to metadata-only scoring
+            # — and an invalid cfg is flagged as a possible sign of tampering,
+            # which is precisely when source-code heuristics matter most.
             found.extend(_enumerate_site_packages(venv_root, root))
             continue
-        # Union the primary result with every contained tree, rather than trusting
-        # venv_site_packages alone. Without a pyvenv.cfg it returns the *first*
-        # lib/python*/site-packages glob match, while detection's dist-info scan walks
-        # them all — so a venv holding two interpreter trees left every package in the
-        # others detectable but unresolvable, silently downgraded to metadata-only
-        # scoring. Detection and resolution must agree on what is in scope.
+        # Union the primary result with every contained tree, rather than
+        # trusting venv_site_packages alone. Without a pyvenv.cfg it returns
+        # the *first* lib/python*/site-packages glob match, while detection's
+        # dist-info scan walks them all — so a venv holding two interpreter
+        # trees left every package in the others detectable but unresolvable,
+        # silently downgraded to metadata-only scoring. Detection and
+        # resolution must agree on what is in scope.
         if sp is not None and sp.is_dir():
             found.append(sp)
         for extra in _enumerate_site_packages(venv_root, root):
@@ -673,8 +745,8 @@ def _safe_site_packages_subpath(
 # when in truth RECORD said nothing about *anything* because it could not be
 # read at all. Both call sites in resolve_package_dir must check for this
 # sentinel and refuse to fall back to *any* bare-name guess — RECORD's
-# corruption forfeits trust in the distribution's whole manifest, not just
-# the names it happened to enumerate correctly.
+# corruption forfeits trust in the distribution's whole manifest, not just the
+# names it happened to enumerate correctly.
 _RECORD_CORRUPT = object()
 
 
@@ -763,8 +835,8 @@ def _owned_subpaths(file_parts: list[list[str]], depth: int = 0) -> list[list[st
     identical for every `parts` in *file_parts* — taking it from the first entry
     is equivalent to (but cheaper than) computing it across all of them.
     """
-    # Any path with nothing beyond `depth` is a file directly in the directory this
-    # recursion has reached.
+    # Any path with nothing beyond `depth` is a file directly in the directory
+    # this recursion has reached.
     if any(depth >= len(parts) - 1 for parts in file_parts):
         has_init = any(
             depth == len(parts) - 1 and parts[depth] == "__init__.py"
@@ -797,20 +869,21 @@ def _owned_subpaths(file_parts: list[list[str]], depth: int = 0) -> list[list[st
         by_next.setdefault(nxt, []).append(parts)
 
     if len(order) == 1:
-        # No divergence at this depth: still one shared branch, so keep walking
-        # down together rather than recursing into a group of one.
+        # No divergence at this depth: still one shared branch, so keep
+        # walking down together rather than recursing into a group of one.
         return _owned_subpaths(file_parts, depth + 1)
 
-    # Diverged: each next-component group may itself still share more depth below
-    # it (google/auth/transport/... alongside google/auth/_helpers.py), so recurse
-    # into each rather than stopping at this single level. No prefix is re-added
-    # here: each group in by_next still carries the *full* original path (including
-    # everything up to `depth`), so the recursive call's own base case reconstructs
-    # the complete path via `parts[:depth]` once it stops — prepending anything here
-    # too would duplicate that prefix. Divergence bounds this branch to paths
-    # distinct from its siblings *within this distribution's own files* — it does
-    # not establish exclusivity against another distribution, so the __init__.py
-    # test above still applies independently at every depth reached from here.
+    # Diverged: each next-component group may itself still share more depth
+    # below it (google/auth/transport/... alongside google/auth/_helpers.py),
+    # so recurse into each rather than stopping at this single level. No
+    # prefix is re-added here: each group in by_next still carries the *full*
+    # original path (including everything up to `depth`), so the recursive
+    # call's own base case reconstructs the complete path via `parts[:depth]`
+    # once it stops — prepending anything here too would duplicate that
+    # prefix. Divergence bounds this branch to paths distinct from its
+    # siblings *within this distribution's own files* — it does not establish
+    # exclusivity against another distribution, so the __init__.py test above
+    # still applies independently at every depth reached from here.
     results: list[list[str]] = []
     for nxt in order:
         results.extend(_owned_subpaths(by_next[nxt], depth + 1))
@@ -900,6 +973,361 @@ def _distinfo_to_metadata(path: Path) -> PackageMetadata | None:
     if not _VALID_PKG_NAME_RE.match(name):
         return None
     return PackageMetadata(name=name, version=m.group(2), ecosystem="PyPI")
+
+
+def _uv_index_name_dir(path: Path, root_prefix: str) -> Path | None:
+    """Return the "<name>" directory of a uv wheels-v*/sdists-v* index entry,
+    or None unless `path` sits exactly at "<root_prefix*>/pypi/<name>/<leaf>",
+    "<root_prefix*>/index/<hash>/<name>/<leaf>", or — "wheels-v" only, see
+    below — "<root_prefix*>/url/<hash>/<name>/<leaf>", relative to its
+    nearest ancestor matching `root_prefix` (e.g. "wheels-v", "sdists-v").
+
+    Other subtrees under the same root — sdists-v*/git/<hash>,
+    sdists-v*/path/<hash>, sdists-v*/editable/<hash>, or an intermediate
+    "<name>" directory before any leaf has been created under it — must not
+    reach the caller's name/version extraction, since path.parent.name there
+    is a hash or a literal "pypi"/"index"/"url", not a package name.
+
+    An ancestor further up the path (e.g. a home directory or mount point
+    literally named "wheels-volume") can also start with `root_prefix`
+    without being the real cache root. Trying only the first such match from
+    the filesystem root would reject a valid entry in that case, so every
+    matching component is tried, nearest to `path` first, until one yields
+    a valid relative shape.
+
+    A bare startswith(root_prefix) is not enough on its own, though: it
+    would also accept "wheels-volume" or "wheels-vNext" as if they were a
+    real cache root, since nothing constrains what follows the prefix. Each
+    candidate is additionally checked against _UV_CACHE_SCHEMA_DIR_RE (the
+    same "wheels-v<digits>"/"sdists-v<digits>" pattern cache_paths() uses to
+    filter its own glob matches), so a lookalike directory that happens to
+    contain a pypi/<name>/<leaf>-shaped subtree can't produce a false
+    PackageEvent.
+
+    The "url" bucket (a direct-URL dependency, e.g. `pip install
+    https://.../pkg-1.0-py3-none-any.whl`) is real and distinct from "pypi"/
+    "index"/"git"/"path"/"editable" — uv's WheelCache::Url (uv-cache/src/
+    wheel.rs) roots it at "url/<16-hex digest of the canonical URL>", and
+    for a WHEEL fetched this way that's followed by `.wheel_dir(name)`
+    (uv-distribution/src/distribution_database.rs), giving exactly
+    "url/<hash>/<name>/<leaf>" — the same shape as "index/<hash>/<name>/
+    <leaf>", just keyed by URL digest instead of index-URL digest. archive-
+    v0 being unwatched means this class of install produced no cache event
+    at all before this shape was recognised here.
+
+    This does NOT extend to sdists-v*, though: a direct-URL SOURCE
+    distribution shards by revision hash directly under "url/<hash>/"
+    (uv-distribution/src/source/mod.rs, BuildableSource::Dist(SourceDist::
+    DirectUrl(..))) — there is no "<name>" directory in that path at all,
+    unlike the wheel case, so it has the same "no name/version encoded in
+    the index path" shape as git/path/editable and must be left
+    unclassified here for the same reason (a real
+    `uv pip install <direct-url-sdist>` produces "sdists-v9/url/<hash>/
+    <revision-hash>/...", not "sdists-v9/url/<hash>/<name>/<version>"). Its
+    built wheel is still correctly picked up by the .whl-under-sdists-v*
+    handling in classify_cache_file() regardless, exactly as for git/path/
+    editable sdists.
+    """
+    parts = path.parts
+    root_indices = [
+        i for i, part in enumerate(parts)
+        if part.startswith(root_prefix) and _UV_CACHE_SCHEMA_DIR_RE.match(part)
+    ]
+    for root_idx in reversed(root_indices):
+        rel = parts[root_idx + 1:]
+        if len(rel) == 3 and rel[0] == "pypi":
+            return path.parent
+        if len(rel) == 4 and rel[0] == "index" and _UV_CACHE_HASH_RE.match(rel[1]):
+            return path.parent
+        if (
+            root_prefix == "wheels-v"
+            and len(rel) == 4
+            and rel[0] == "url"
+            and _UV_CACHE_HASH_RE.match(rel[1])
+        ):
+            return path.parent
+    return None
+
+
+def _uv_wheel_index_entry_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv wheels-v*/pypi/<name>/<leaf> index entry to PackageMetadata.
+
+    `path` is the entry watchdog reports on creation — a symlink into
+    archive-v0 on current uv (wheels-v6+), whose target holds the extracted
+    wheel including its .dist-info. archive-v0 itself is unwatched (content-
+    addressed, hundreds of thousands of dirs — see cache_paths()), so this
+    classifies from the index path alone rather than the target's contents,
+    EXCEPT for the build-hash leaf shape below, which must resolve into
+    archive-v0 to get a trustworthy version.
+
+    The parent directory is always the normalised package name. The leaf is
+    "<version>-<build>?-<python>-<abi>-<platform>" for a prebuilt wheel
+    (the PEP 427 build tag is optional — see _UV_WHEEL_INDEX_TAGS_RE's own
+    comment for why uv's index leaf can genuinely carry it), or
+    "<version>-<build-hash>" (current schema) — or either prefixed with
+    "<name>-" (legacy, e.g. wheels-v4) — strip a matching name prefix
+    first, then extract the version. See _UV_WHEEL_INDEX_TAGS_RE /
+    _UV_WHEEL_INDEX_BUILD_HASH_RE. The stripped form is adopted only if it
+    actually matches one of those two regexes; a leaf that merely starts
+    with the name as a coincidence of its OWN version/build-hash value
+    (e.g. a package named "1" at version "1": leaf "1-py3-none-any" would
+    otherwise strip to the unparseable "py3-none-any") falls back to
+    parsing the original, unstripped leaf instead; an unconditional strip
+    silently misses such an entry entirely.
+
+    The build-hash form is NOT reliably "<version>-<16-hex build cache
+    key>": uv's WheelFilename::cache_key() also produces this exact shape
+    when the normal "<version>-<tags>" key exceeds 64 characters, and in
+    that case it truncates the *version itself* (to 64 - 1 - 16 = 47 chars,
+    trimming trailing "." / "+") before appending the digest — see uv's
+    crates/uv-distribution-filename/src/wheel.rs. So the "version" the
+    build-hash regex extracts can be a truncated prefix of the real
+    version, not the real version, whenever the true version is longer than
+    that width (uv's own cache_key() test covers exactly this with a
+    69-character version). Reporting that prefix as the install's version
+    would query OSV and risk-score a version that was never installed.
+    Since only the build-hash form is ambiguous like this — the tags form's
+    version is always the literal, complete version, uv never truncates
+    that shape — this resolves the symlink and re-derives the version from
+    the linked archive-v0 entry's own "<name>-<version>.dist-info" (whose
+    version is never truncated, and is what's actually authoritative for
+    what was really installed) rather than trusting the leaf name's
+    (possibly-truncated) version group. If that can't be recovered — the
+    symlink is broken, or no .dist-info is found alongside it — the entry
+    is not classified at all rather than risking a wrong version.
+
+    Each entry has companion metadata files alongside it, all named
+    "<leaf>.<ext>" (e.g. "1.0.0-py3-none-any.http") — reject those
+    rather than relying on the tags regex alone, whose greedy platform
+    group would otherwise swallow the extension and double-classify (or,
+    for ".lock", prematurely classify before the real entry even exists —
+    see below) the same install:
+      - ".http": the pointer uv's RegistryWheelIndex reads for a wheel
+        downloaded from a remote registry (PyPI or a URL index).
+      - ".msgpack": companion metadata cached alongside a ".http" pointer.
+      - ".rev": the equivalent pointer for a wheel resolved from a local/
+        `--find-links` (path) index — same role as ".http", different index
+        kind (uv-distribution/src/distribution_database.rs, load_wheel()).
+      - ".lock": an advisory cross-process lock file uv creates at the very
+        start of loading a wheel (uv-distribution/src/distribution_database.rs,
+        lock_wheel()) — i.e. before extraction, so watchdog can observe it
+        created well before the real archive-v0 symlink exists. It is never
+        deleted after use (only unlocked — see uv-fs/src/locked_file.rs,
+        Drop for LockedFile), so it also persists on disk exactly like the
+        other companions once the install finishes.
+
+    The suffix alone is NOT sufficient to identify a companion, and using
+    it alone was a real cache-detection bypass: a wheel's platform field
+    is a PEP 425 "compressed tag set" whose components are constrained
+    only by character class, and uv preserves an UNRECOGNISED component
+    verbatim rather than rejecting the wheel — WheelFilename::parse()
+    builds WheelTagLarge with `repr` set to the original tag string, and
+    parse_large_tag_component() SKIPS any component T::from_str() can't
+    parse (`if let Ok(tag) = T::from_str(tag)`) instead of erroring. So
+    "evil-1.0.0-py3-none-any.http.whl" parses fine, stays installable
+    (its parsed platform set still contains the compatible "any"; only
+    the unparseable "http" is dropped for compatibility purposes), and
+    its WheelFilename::cache_key() — "{version}-{tags}", using that
+    verbatim `repr` — yields the index leaf "1.0.0-py3-none-any.http".
+    A suffix-only check discards that as if it were the ".http"
+    companion, so the install produces NO cache event at all. Confirmed
+    empirically. The same applies to ".rev", ".lock" and ".msgpack".
+
+    The discriminator is therefore structural, not lexical: a real index
+    entry is the archive-v0 SYMLINK uv creates via Cache::persist_with_id
+    (uv-cache/src/lib.rs), while every companion is an ordinary regular
+    file written alongside it. Verified against a real populated cache:
+    of 6,974 companion-suffixed paths, zero were symlinks, and of 1,442
+    genuine wheel index entries, every single one was a symlink (none
+    was a regular file). A companion-suffixed path is therefore only
+    suppressed when it is NOT a symlink — a symlinked leaf is a real
+    entry whose platform tag merely happens to end in one of these
+    words, and must still classify. Deliberately not the inverse rule
+    ("only classify symlinks"): an index entry that is a plain file for
+    any reason must still be classified rather than silently dropped,
+    matching this module's standing preference for an occasional
+    duplicate over a silent miss.
+
+    Only paths sitting exactly at "pypi/<name>/<leaf>" or
+    "index/<hash>/<name>/<leaf>" are classified — see _uv_index_name_dir().
+    Any other path under wheels-v* (an index hash dir, the bare "pypi"/
+    "index" dir, an intermediate "<name>" dir with no leaf yet) is rejected
+    rather than risking a shape-shaped-like-a-leaf coincidence.
+    """
+    if path.suffix in (".http", ".msgpack", ".rev", ".lock") and not path.is_symlink():
+        return None
+    name_dir = _uv_index_name_dir(path, "wheels-v")
+    if name_dir is None:
+        return _uv_git_wheel_leaf_to_metadata(path)
+    name = _normalize_name(name_dir.name)
+    if not _VALID_PKG_NAME_RE.match(name):
+        return None
+    leaf = path.name
+    # Candidate legacy "<name>-" prefixes. The directory holds the name in one
+    # spelling and the leaf embeds it in the WHEEL FILENAME spelling, which
+    # PEP 503/427 escape by collapsing every run of [-_.] to a single "_" — so
+    # a dotted or hyphenated distribution ("zope.interface", "my-pkg") appears
+    # in the leaf as "zope_interface"/"my_pkg". Trying only the raw directory
+    # name and a naive "-"->"_" swap missed exactly those: for
+    # wheels-v4/pypi/zope.interface/zope_interface-6.0-py3-none-any neither
+    # candidate matched, so the UNSTRIPPED leaf was parsed and
+    # _UV_WHEEL_INDEX_TAGS_RE matched it with version="zope_interface" (the
+    # name itself read as the version, "6.0" absorbed as a build tag) — a
+    # bogus OSV query and alert for a version that does not exist. The mirror
+    # case (underscored dir, hyphenated leaf) matched nothing at all and
+    # returned None: a silent miss. Bothinterface, backports.zoneinfo,
+    # ruamel.yaml).
+    escaped = _PKG_NORM_RE.sub("_", name_dir.name)
+    for prefix in (
+        name_dir.name + "-",
+        name_dir.name.replace("-", "_") + "-",
+        escaped + "-",
+    ):
+        if not leaf.startswith(prefix):
+            continue
+        stripped = leaf[len(prefix):]
+        # Only adopt the stripped form if it actually matches one of the two
+        # supported leaf schemas — otherwise this "prefix" was never a genuine
+        # legacy name prefix at all, just a coincidence where the package's
+        # OWN version (or a build-hash version prefix) happens to equal its
+        # name (e.g. a package named "1" at version "1": leaf "1-py3-none-any"
+        # strips to "py3-none-any", which has too few hyphen-separated fields
+        # to match _UV_WHEEL_INDEX_TAGS_RE at all) Falling back to the
+        # ORIGINAL, unstripped leaf lets the regexes below parse it correctly
+        # instead.
+        #
+        # Deliberately keeps trying the remaining candidates rather than
+        # breaking on the first one that merely string-matches: an earlier
+        # version broke unconditionally, so a candidate that matched but did
+        # not yield a parseable leaf shadowed a later candidate that would
+        # have.
+        if _UV_WHEEL_INDEX_TAGS_RE.match(stripped) or _UV_WHEEL_INDEX_BUILD_HASH_RE.match(stripped):
+            leaf = stripped
+            break
+    tags_match = _UV_WHEEL_INDEX_TAGS_RE.match(leaf)
+    if tags_match:
+        return PackageMetadata(name=name, version=tags_match.group("version"), ecosystem="PyPI")
+    if not _UV_WHEEL_INDEX_BUILD_HASH_RE.match(leaf):
+        return None
+    version = _version_from_archive_dist_info(path, name)
+    if version is None:
+        return None
+    return PackageMetadata(name=name, version=version, ecosystem="PyPI")
+
+
+def _version_from_archive_dist_info(path: Path, expected_name: str) -> str | None:
+    """Resolve `path` (a uv wheels-v* index entry symlinked into archive-v0)
+    and return the untruncated version from its "<name>-<version>.dist-info"
+    entry, or None if the symlink is broken, doesn't resolve to a directory,
+    or no matching .dist-info is found — see
+    _uv_wheel_index_entry_to_metadata()'s docstring for why the build-hash
+    leaf name alone can't be trusted for the version.
+
+    `expected_name` guards against a .dist-info for some other package
+    sitting alongside — shouldn't happen for a single-wheel archive-v0
+    entry, but classification must still decline rather than guess if it
+    ever does.
+    """
+    try:
+        target = path.resolve(strict=True)
+    except OSError:
+        return None
+    if not target.is_dir():
+        return None
+    try:
+        entries = list(target.iterdir())
+    except OSError:
+        return None
+    for entry in entries:
+        m = _DISTINFO_RE.match(entry.name)
+        if not m:
+            continue
+        if _normalize_name(m.group(1)) != expected_name:
+            continue
+        return m.group(2)
+    return None
+
+
+def _uv_git_wheel_leaf_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv wheels-v*/git/<url-digest>/<git-sha>/<wheel-filename-stem>
+    index entry to PackageMetadata, or None if `path` doesn't sit at that
+    exact shape.
+
+    A wheel file committed directly to a Git repository (`pip install
+    "pkg @ git+https://...#egg=pkg&path=dist/pkg-1.0-py3-none-any.whl"`,
+    uv's BuiltDist::GitPath) is cached differently from every other index
+    shape _uv_index_name_dir() recognises: uv-cache/src/wheel.rs's
+    WheelCacheKind::Git enum-doc comment claims "wheels can't be delivered
+    through Git", but that's stale — uv-distribution/src/
+    distribution_database.rs's `BuiltDist::GitPath(wheel) =>` arm
+    contradicts it directly, persisting the entry at exactly this shape:
+    `cache.entry(CacheBucket::Wheels, WheelCache::Git(&wheel.url,
+    git_sha).root(), wheel.filename.stem())` — the third argument, the
+    leaf, is the WHEEL'S OWN FILENAME STEM, not a leaf under a "<name>"
+    directory the way pypi/index/url are. Verified against a
+    real isolated `uv pip install` of a wheel committed to a local git
+    repo: wheels-v6/git/<16-hex URL digest>/<16-hex short git SHA>/
+    <name>-<version>-<python>-<abi>-<platform> (a bare symlink into
+    archive-v0, same as every other index shape), with a companion
+    "<version>-<tags>.rev" pointer file (excluded by suffix in the caller,
+    same as the other companion kinds — note its base name differs from
+    the leaf's, since it's keyed by WheelFilename::cache_key() rather than
+    the full stem, but the suffix check doesn't care).
+
+    Since there's no name-bearing parent directory here — the name is only
+    ever present in the leaf itself — this parses the leaf the same way a
+    real *.whl file is parsed elsewhere in classify_cache_file(): append
+    ".whl" back onto the stem and hand it to the shared PEP 427 filename
+    parser, rather than duplicating that regex. If it doesn't parse as a
+    valid wheel filename, declines rather than guessing.
+    """
+    parts = path.parts
+    root_indices = [
+        i for i, part in enumerate(parts)
+        if part.startswith("wheels-v") and _UV_CACHE_SCHEMA_DIR_RE.match(part)
+    ]
+    matches_shape = False
+    for root_idx in reversed(root_indices):
+        rel = parts[root_idx + 1:]
+        if (
+            len(rel) == 4
+            and rel[0] == "git"
+            and _UV_CACHE_HASH_RE.match(rel[1])
+            and _UV_CACHE_HASH_RE.match(rel[2])
+        ):
+            matches_shape = True
+            break
+    if not matches_shape:
+        return None
+    info = parse_wheel_filename(path.with_name(path.name + ".whl"))
+    if info is None or not _VALID_PKG_NAME_RE.match(info.name):
+        return None
+    return PackageMetadata(name=info.name, version=info.version, ecosystem="PyPI")
+
+
+def _uv_sdist_index_entry_to_metadata(path: Path) -> PackageMetadata | None:
+    """Convert a uv sdists-v*/{pypi,index/<hash>}/<name>/<version> index entry
+    to PackageMetadata. Unlike the wheel index, the leaf is a bare version —
+    no tags to strip.
+
+    Only paths sitting exactly at "pypi/<name>/<version>" or
+    "index/<hash>/<name>/<version>" are classified — see
+    _uv_index_name_dir(). sdists-v* also holds git/<hash>, path/<hash>, and
+    editable/<hash> subtrees (locally-sourced sdists, not registry
+    packages); without shape validation, a path.parent.name of "git" or a
+    hex hash starting with a digit could otherwise be misread as a package
+    name/version.
+    """
+    name_dir = _uv_index_name_dir(path, "sdists-v")
+    if name_dir is None:
+        return None
+    name = _normalize_name(name_dir.name)
+    if not _VALID_PKG_NAME_RE.match(name):
+        return None
+    version = path.name
+    if not version or not version[0].isdigit():
+        return None
+    return PackageMetadata(name=name, version=version, ecosystem="PyPI")
 
 
 def _fingerprint_distinfo(path: Path) -> str:
@@ -1010,8 +1438,9 @@ def venv_site_packages(venv_root: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-# Matches scp-style git@host:path — colon (not slash) after hostname distinguishes
-# this from HTTPS URLs like git+https://git@host/path which are NOT SSH.
+# Matches scp-style git@host:path — colon (not slash) after hostname
+# distinguishes this from HTTPS URLs like git+https://git@host/path which are
+# NOT SSH.
 _SCP_SSH_RE = re.compile(r"git@[^/:]+:[^/]")
 
 
@@ -1262,10 +1691,10 @@ class PythonLanguage:
     name: str = "python"
     # Not annotated ClassVar: LanguageBase declares these as read-only
     # properties (to admit both class-level and per-instance implementers -
-    # see base.py), and pyright only accepts a plain class attribute against
-    # a property, not one explicitly typed ClassVar. Safe to share across
-    # calls regardless — there is exactly one PythonLanguage instance per
-    # process and nothing ever mutates the list in place.
+    # see base.py), and pyright only accepts a plain class attribute against a
+    # property, not one explicitly typed ClassVar. Safe to share across calls
+    # regardless — there is exactly one PythonLanguage instance per process
+    # and nothing ever mutates the list in place.
     ecosystems = ["PyPI"]  # noqa: RUF012
     process_names = ["pip", "pip3", "uv", "pipenv", "pipx", "python", "python3"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
@@ -1305,8 +1734,8 @@ class PythonLanguage:
                 "uv-project": "uv.lock",
             }
             # If argv[0] is inside a venv's bin/ but VIRTUAL_ENV is not set
-            # (e.g. venv not activated, called directly via shim), derive it so
-            # the sandbox runner and pip both see the correct venv.
+            # (e.g. venv not activated, called directly via shim), derive it
+            # so the sandbox runner and pip both see the correct venv.
             suggested_env: dict[str, str] = {}
             if result.venv_exe and not os.environ.get("VIRTUAL_ENV"):
                 venv_bin = Path(result.venv_exe).resolve().parent
@@ -1381,11 +1810,67 @@ class PythonLanguage:
     # ------------------------------------------------------------------
     # cache_paths
     # ------------------------------------------------------------------
+    #
+    # cache_paths(), cache_file_globs(), classify_cache_file(), and the
+    # _uv_wheel_index_entry_to_metadata() /
+    # _uv_sdist_index_entry_to_metadata() / _uv_index_name_dir() helpers below
+    # all hardcode assumptions about uv's ~/.cache/uv on-disk layout, which uv
+    # does not document as a stable interface and has changed before
+    # (wheels-v4 -> wheels-v6, sdists-v9). See "Auditing the uv cache-layout
+    # assumptions" in .claude/CLAUDE.md for how and when to re-verify all of
+    # this against a real cache and uv's actual source — last done against uv
+    # 0.12.5.
 
     def cache_paths(self) -> list[Path]:
+        # Watch only the structured wheel index, not uv's archive-v0
+        # (extracted package contents, no classifiable filenames), git-v0 (git
+        # checkouts), sdists-v* (see poll_only_cache_paths() — its index
+        # entries are shallow like wheels-v*'s, but each source-build shard
+        # also unpacks a full sdist into a `src/` subdirectory right alongside
+        # the built wheel, which a recursive watch here can't avoid descending
+        # into), or pip's http/http-v2 (opaque HTTP response cache). Those
+        # content-addressed/unpacked stores add unboundedly many dirs of zero
+        # classification value and exhaust inotify watch limits — see
+        # NodeLanguage.cache_paths() for the same fix applied to npm's
+        # _cacache.
+        uv_cache = Path.home() / ".cache" / "uv"
+        pip_cache = Path.home() / ".cache" / "pip"
+        candidates = sorted(uv_cache.glob("wheels-v*"))
+        # glob("wheels-v*") also matches lookalikes like "wheels-v6.backup" or
+        # "wheels-vNext", and glob doesn't filter by type — a stray non-
+        # directory ("wheels-v6.txt") would match too. Recursively watching an
+        # unintended directory here (e.g. a manual backup of the whole cache)
+        # could reopen the watch exhaustion this scoping exists to prevent, so
+        # only exact "wheels-v<digits>" directories are kept.
+        paths = [
+            p for p in candidates
+            if _UV_CACHE_SCHEMA_DIR_RE.match(p.name) and p.is_dir()
+        ]
+        paths.append(pip_cache / "wheels")
+        return paths
+
+    def poll_only_cache_paths(self) -> list[Path]:
+        # sdists-v*'s index entries (pypi/<name>/<version>, index/<hash>/
+        # <name>/<version>) are as shallow as wheels-v*'s, but uv unpacks each
+        # source-build shard into a real `src/` directory containing the
+        # sdist's full extracted contents (its own subpackages, build/, egg-
+        # info/, etc.) sitting right alongside the built .whl — confirmed
+        # against a real ~/.cache/uv (a single package revision can easily add
+        # tens of directories under src/ alone). There is no way to
+        # recursively watch deep enough to catch the .whl via inotify (it's a
+        # sibling of src/ in the same directory) without also recursing into
+        # src/ itself: watchdog's/inotify's recursive watch has no path-
+        # exclusion or depth limit. See CacheMonitor._poll_cache_dirs(), which
+        # classifies this root's cache_file_globs() matches via a periodic
+        # glob() walk instead of a permanent recursive watch — bounding the
+        # cost to one traversal per maintenance interval rather than a
+        # permanently-held kernel resource that scales with the number of
+        # packages ever built from source, the same failure mode this file
+        # exists to prevent.
+        uv_cache = Path.home() / ".cache" / "uv"
         return [
-            Path.home() / ".cache" / "pip",
-            Path.home() / ".cache" / "uv",
+            p for p in sorted(uv_cache.glob("sdists-v*"))
+            if _UV_CACHE_SCHEMA_DIR_RE.match(p.name) and p.is_dir()
         ]
 
     # ------------------------------------------------------------------
@@ -1393,12 +1878,106 @@ class PythonLanguage:
     # ------------------------------------------------------------------
 
     def cache_file_globs(self) -> list[str]:
-        return ["**/*.whl", "**/*.dist-info", "**/*.tar.gz"]
+        return [
+            "**/*.whl", "**/*.dist-info", "**/*.tar.gz",
+            # uv index entries: wheels-v*/pypi/<name>/<leaf>,
+            # sdists-v*/pypi/<name>/<version>,
+            # sdists-v*/index/<hash>/<name>/<version>,
+            # wheels-v*/url/<hash>/<name>/<leaf> (a direct-URL wheel
+            # dependency — see _uv_index_name_dir() for why this doesn't
+            # extend to sdists-v*), wheels-v*/git/<url-digest>/<git-
+            # sha>/<wheel-filename-stem> (a wheel committed directly to a Git
+            # repo — see _uv_git_wheel_leaf_to_metadata()). This glob list is
+            # shared across BOTH cache_paths() (wheels-v*, watched with a live
+            # inotify watch) AND poll_only_cache_paths() (sdists-v*,
+            # periodically glob-scanned instead — see
+            # CacheMonitor._poll_cache_dirs()); classify_cache_file() itself
+            # is what rejects a git/*/*/* match under an sdists-v* root
+            # (confirmed against a real sdists-v*/git/<hash>/<revision>/...
+            # tree: its own .whl already classifies through the dedicated .whl
+            # branch, and the bare revision-hash-dir entries correctly stay
+            # unclassified since _uv_git_wheel_leaf_to_metadata() only matches
+            # under a wheels-v* ancestor), not this glob.
+            "pypi/*/*", "index/*/*/*", "url/*/*/*", "git/*/*/*",
+        ]
 
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
         """Classify a path in the cache or site-packages as a known package artifact."""
+        # uv unpacks each source build's own sources into a `src/` directory
+        # inside the revision shard, and cache_file_globs()' artifact patterns
+        # (**/*.whl, **/*.dist-info, **/*.tar.gz) are recursive, so they also
+        # match anything a source distribution happens to BUNDLE — test
+        # fixtures, vendored wheels, nested sdists. Those are file contents,
+        # not installed packages: classifying one reported a package that was
+        # never installed.
+        #
+        # Verified against a real populated cache: uv writes the BUILT wheel
+        # directly into the revision shard, as a SIBLING of `src/` — never
+        # inside it — so excluding src/ descendants cannot hide a genuine
+        # build output. Applied before every branch below so it covers all
+        # three artifact patterns at once, not just .whl.
+        #
+        # SCOPED to a validated sdists-v<digits> root, not the whole path: an
+        # unscoped `"src" in path.parts` check also matched ordinary project
+        # layouts — a venv under `/project/src/.venv/lib/.../site-packages/`
+        # stopped classifying entirely, so installs in any project whose path
+        # merely CONTAINS a `src` component produced no events at all.
+        #
+        # Only counted BELOW the <name>/<version> pair, never at the name
+        # position itself: `src` is a real PyPI package, and its own entries
+        # put that component in the NAME slot —
+        # sdists-v*/pypi/src/<version>/<revision>/src-<version>-*.whl — where
+        # a plain membership check suppressed both the built wheel and the
+        # version directory, so installing it produced no event at all. uv's
+        # unpacked tree only ever appears as a child of the revision shard,
+        # which always follows <name>/<version>, so skipping that many
+        # components separates the two. The name offset is bucket-dependent
+        # (pypi/<name>, index/<hash>/<name> — the same shapes
+        # _uv_sdist_index_entry_to_metadata() validates), and depth below the
+        # shard is deliberately not fixed: uv's optional build shard adds a
+        # level, and a real cache shows src/ at three different depths.
+        parts = path.parts
+        for i, part in enumerate(parts[:-1]):
+            if _UV_CACHE_SCHEMA_DIR_RE.match(part) and part.startswith("sdists-v"):
+                rel = parts[i + 1 : -1]
+                # Components before the revision shard: the bucket, the name
+                # and the version. Anything at or after that index is inside
+                # the shard, which is the only place uv unpacks sources.
+                name_offset = 2 if rel[:1] == ("index",) else 1
+                shard_start = name_offset + 2
+                if "src" in rel[shard_start:]:
+                    return None
+                break
+
         # .whl files
         if path.suffix == ".whl":
+            # uv builds a wheel from a cached sdist several levels beneath
+            # that sdist's own pypi/<name>/<version> (or index/<hash>/
+            # <name>/<version>) index entry — sdists-v9/pypi/<name>/
+            # <version>/<revision-hash>/<name>-<version>-*.whl — the current
+            # uv cache layout explicitly stores the built wheel there. This is
+            # always classified as its own event: a version directory can
+            # exist (and still classify as a valid index entry, purely by its
+            # shape on disk) without this daemon session ever having actually
+            # emitted an event for it — the directory persists across
+            # installs/builds (it's uv's own cache, not deleted after use),
+            # and a daemon started after the directory already existed, or a
+            # second build under an already-cached version (e.g. a hash
+            # mismatch, or a different platform tag, forcing a rebuild), both
+            # leave the wheel as the ONLY signal for that specific install.
+            # Suppressing it based on "does a classifiable ancestor exist
+            # right now" — rather than "did this session actually emit an
+            # event for it" — can silently drop the install with zero events
+            # at all, A wheel is always the last, definitive signal a build
+            # produced *something*, so it is never worth risking that over
+            # avoiding an occasional duplicate: if the version-directory event
+            # for the same build also happens to have been observed in this
+            # same session, daemon.py's own per-batch dedup (same
+            # ecosystem/name/version/ project_path) already collapses the two
+            # when they land in the same batch; when they don't (the original
+            # motivation for trying to suppress this — see git history), a
+            # duplicate alert is a UX annoyance, not a missed one, which is
+            # the asymmetry that matters here.
             info = parse_wheel_filename(path)
             if info and _VALID_PKG_NAME_RE.match(info.name):
                 return PackageMetadata(name=info.name, version=info.version, ecosystem="PyPI")
@@ -1417,6 +1996,32 @@ class PythonLanguage:
                 name = _normalize_name(m.group(1))
                 if _VALID_PKG_NAME_RE.match(name):
                     return PackageMetadata(name=name, version=m.group(2), ecosystem="PyPI")
+            return None
+
+        # uv wheels-v*/sdists-v* index entries — see cache_paths() for why
+        # archive-v0 (where the actual .dist-info lives) is unwatched, and
+        # poll_only_cache_paths() for why sdists-v* is polled rather than
+        # watched; either way, these index paths are classified directly from
+        # the path shape rather than the target's contents.
+        #
+        # A path can have a "wheels-v"-prefixed ancestor without that being
+        # the real cache root — e.g. a mount point or directory literally
+        # named "wheels-volume" that happens to contain a genuine sdists-v9
+        # entry further down (/mnt/wheels-volume/.../sdists-v9/pypi/foo/1.0).
+        # Returning unconditionally the moment any ancestor merely starts with
+        # "wheels-v" would report None for that entry without ever trying the
+        # sdist classifier, even though _uv_wheel_index_entry_to_metadata()
+        # itself correctly rejects the lookalike (via _uv_index_name_dir()'s
+        # _UV_CACHE_SCHEMA_DIR_RE check) — so only a genuine wheel match
+        # short-circuits here; a rejection falls through to the sdist check
+        # below instead of ending classification outright.
+        parts = path.parts
+        if any(part.startswith("wheels-v") for part in parts):
+            wheel_result = _uv_wheel_index_entry_to_metadata(path)
+            if wheel_result is not None:
+                return wheel_result
+        if any(part.startswith("sdists-v") for part in parts):
+            return _uv_sdist_index_entry_to_metadata(path)
 
         return None
 
@@ -1436,7 +2041,8 @@ class PythonLanguage:
             "uv.lock",
             "Pipfile.lock",
             "requirements.txt",
-            # Subdirectory variants — only reached when no top-level file matched.
+            # Subdirectory variants — only reached when no top-level file
+            # matched.
             "requirements/base.txt",
             "requirements/prod.txt",
             "requirements/production.txt",
@@ -1477,10 +2083,11 @@ class PythonLanguage:
                 for p in pkgs
                 if isinstance(p, dict) and p.get("name")
             ]
-            # A non-empty response that yields nothing usable is a failure, not an
-            # empty environment: returning [] would suppress the dist-info fallback
-            # and silently lose every package in this venv. A genuinely empty venv
-            # sends [], which correctly returns [] and skips the fallback.
+            # A non-empty response that yields nothing usable is a failure,
+            # not an empty environment: returning [] would suppress the dist-
+            # info fallback and silently lose every package in this venv. A
+            # genuinely empty venv sends [], which correctly returns [] and
+            # skips the fallback.
             if pkgs and not results:
                 raise ValueError("no usable entries in the pip list response")
         except Exception:
@@ -1531,9 +2138,10 @@ class PythonLanguage:
         results: list[PackageMetadata] = []
         for venv_name in VENV_DIR_NAMES:
             venv_root = root / venv_name
-            # Containment first, and against the *project* root: this path executes
-            # <venv>/bin/python, so a .venv symlinked to an external tree would run
-            # an attacker-supplied binary and trust its fabricated pip output.
+            # Containment first, and against the *project* root: this path
+            # executes <venv>/bin/python, so a .venv symlinked to an external
+            # tree would run an attacker-supplied binary and trust its
+            # fabricated pip output.
             if not _venv_is_contained(venv_root, root):
                 continue
             venv_python = venv_root / "bin" / "python"
@@ -1544,8 +2152,9 @@ class PythonLanguage:
             )
             from_disk = self._scan_dist_infos(venv_root, root)
             if listed is None:
-                # pip list failed outright (missing/broken interpreter, unparseable
-                # output) — the disk scan is all there is for this venv.
+                # pip list failed outright (missing/broken interpreter,
+                # unparseable output) — the disk scan is all there is for this
+                # venv.
                 results.extend(from_disk)
                 continue
             results.extend(listed)
@@ -1587,9 +2196,10 @@ class PythonLanguage:
             "PYENV_ROOT", "PYENV_VERSION", "PYENV_VERSION_FILE",
             "PIPENV_VENV_IN_PROJECT", "PIPENV_IGNORE_VIRTUALENVS", "PIPENV_VERBOSITY",
             "WORKON_HOME",
-            # Forward PIPX_HOME so _build_sandbox_env includes it; configure_sandbox
-            # then overwrites it with the sanitised _pipx_home() result and drops
-            # XDG_DATA_HOME, so the sandbox process always sees the resolved value.
+            # Forward PIPX_HOME so _build_sandbox_env includes it;
+            # configure_sandbox then overwrites it with the sanitised
+            # _pipx_home() result and drops XDG_DATA_HOME, so the sandbox
+            # process always sees the resolved value.
             "PIPX_HOME",
         ]
 
@@ -1606,10 +2216,11 @@ class PythonLanguage:
         resp.raise_for_status()
         data = resp.json()
         rows = data.get("rows", [])
-        # self.normalise_name, not the module-level normalise_package_name directly:
-        # they happen to be the same PEP 503 rule for PyPI, but calling the method
-        # keeps every fetcher's normalisation traceable to its own normalise_name
-        # hook rather than three independent call sites relying on the same helper.
+        # self.normalise_name, not the module-level normalise_package_name
+        # directly: they happen to be the same PEP 503 rule for PyPI, but
+        # calling the method keeps every fetcher's normalisation traceable to
+        # its own normalise_name hook rather than three independent call sites
+        # relying on the same helper.
         packages = [self.normalise_name(r["project"]) for r in rows[:MAX_TOP_PACKAGES]]
         return packages if packages else None
 
@@ -1669,7 +2280,8 @@ class PythonLanguage:
                 path_part = val[:bracket] if bracket != -1 else val
                 p = Path(path_part)
                 resolved = p.resolve() if p.is_absolute() else (cwd / p).resolve()
-                # Only return paths outside cwd — the runner already binds cwd writable.
+                # Only return paths outside cwd — the runner already binds cwd
+                # writable.
                 if resolved.exists() and not resolved.is_relative_to(cwd):
                     paths.append(resolved)
         return paths
@@ -1680,8 +2292,9 @@ class PythonLanguage:
         The runner uses the first path as the rollback root (removes the entire venv)
         and the last path as the scan target (diffs for new packages).
         """
-        # Tool installs (uv tool, pipx) — venv created inside a tool venvs directory.
-        # extra_write_home_dirs carries the venvs parent; derive the tool venv from it.
+        # Tool installs (uv tool, pipx) — venv created inside a tool venvs
+        # directory. extra_write_home_dirs carries the venvs parent; derive
+        # the tool venv from it.
         extra_write_home_dirs: list[Path] = getattr(parsed, "extra_write_home_dirs", [])
         tool_venvs_dirs = [
             Path.home() / ".local" / "share" / "uv" / "tools",
@@ -1707,8 +2320,9 @@ class PythonLanguage:
                         targets = _venv_targets(tool_venv)
                         if targets:
                             return targets
-        # Tool-manager commands must never fall back to project-local venvs — doing
-        # so would cause the runner to delete an unrelated .venv on rollback.
+        # Tool-manager commands must never fall back to project-local venvs —
+        # doing so would cause the runner to delete an unrelated .venv on
+        # rollback.
         if is_tool_manager_cmd:
             return []
 
@@ -1728,7 +2342,7 @@ class PythonLanguage:
                 if targets:
                     return targets
         # 3. pipenv-managed venv outside the project (common on first sync).
-        #    pipenv creates the venv under WORKON_HOME, not under cwd.
+        # pipenv creates the venv under WORKON_HOME, not under cwd.
         manager = getattr(parsed, "manager", None)
         if manager == "pipenv" and not os.environ.get("PIPENV_VENV_IN_PROJECT"):
             pipenv_venv = _find_pipenv_venv(cwd)
@@ -1736,8 +2350,8 @@ class PythonLanguage:
                 targets = _venv_targets(pipenv_venv)
                 if targets:
                     return targets
-        # 4. External managed venv (pyenv-virtualenv, etc.) — VIRTUAL_ENV set but
-        #    venv lives outside the project tree.
+        # 4. External managed venv (pyenv-virtualenv, etc.) — VIRTUAL_ENV set
+        # but venv lives outside the project tree.
         venv_env = os.environ.get("VIRTUAL_ENV")
         if venv_env and manager in ("pip", "pipenv", "uv"):
             venv_root = Path(venv_env)
@@ -1753,7 +2367,8 @@ class PythonLanguage:
         cwd: Path,
         flags: frozenset[str] = frozenset(),
     ) -> PreRunResult:
-        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv/uv, skipped in cross-namespace calls)
+        # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv/uv, skipped in
+        # cross-namespace calls)
         if parsed is not None and parsed.manager in ("pip", "pipenv", "uv"):
             virtual_env = os.environ.get("VIRTUAL_ENV")
             if virtual_env:
@@ -1822,9 +2437,10 @@ class PythonLanguage:
                 required_flag="python:ssh-keys",
             )
 
-        # SSH keys granted — confirm interactively before proceeding.
-        # Only warn/prompt when ~/.ssh actually exists; configure_sandbox only
-        # mounts it conditionally, so there is nothing to warn about otherwise.
+        # SSH keys granted — confirm interactively before proceeding. Only
+        # warn/prompt when ~/.ssh actually exists; configure_sandbox only
+        # mounts it conditionally, so there is nothing to warn about
+        # otherwise.
         if ssh_granted and (Path.home() / ".ssh").exists():
             import sys
 
@@ -1871,30 +2487,32 @@ class PythonLanguage:
 
         # Normalise PIPX_HOME so the sandboxed process uses the same install
         # location that resolve_sandbox_targets() snapshotted/bind-mounted.
-        # _pipx_home() rejects unsafe overrides (traversal, credential dirs) and
-        # falls back to the platform default — setting it explicitly here ensures
-        # the sandbox never honours a raw unsafe host env var that we already
-        # rejected on the host side.  XDG_DATA_HOME is removed afterwards because
-        # pipx derives its data dir from PIPX_HOME when that is set, so forwarding
-        # a potentially unsafe XDG_DATA_HOME alongside a corrected PIPX_HOME would
-        # have no effect on pipx but could confuse other tools.
+        # _pipx_home() rejects unsafe overrides (traversal, credential dirs)
+        # and falls back to the platform default — setting it explicitly here
+        # ensures the sandbox never honours a raw unsafe host env var that we
+        # already rejected on the host side. XDG_DATA_HOME is removed
+        # afterwards because pipx derives its data dir from PIPX_HOME when
+        # that is set, so forwarding a potentially unsafe XDG_DATA_HOME
+        # alongside a corrected PIPX_HOME would have no effect on pipx but
+        # could confuse other tools.
         from packagealert.parsers.process_args import _pipx_home
         sandbox_env["PIPX_HOME"] = str(_pipx_home())
         sandbox_env.pop("XDG_DATA_HOME", None)
 
         # When uv-auth is active, uv inside the sandbox must resolve the same
         # credentials directory that _uv_credentials_dir() snapshotted on the
-        # host.  If XDG_DATA_HOME was set on the host, removing it would cause
+        # host. If XDG_DATA_HOME was set on the host, removing it would cause
         # uv to fall back to ~/.local/share/uv/credentials — a different path
-        # from the bind-mount destination.  Restore it in sandbox_env so the
+        # from the bind-mount destination. Restore it in sandbox_env so the
         # paths agree, and ro-bind $XDG_DATA_HOME/uv so the bind-mount point
-        # exists inside the sandbox namespace (bwrap requires the dest to exist).
+        # exists inside the sandbox namespace (bwrap requires the dest to
+        # exist).
         #
-        # Only do this when XDG_DATA_HOME is strictly under $HOME: the runner's
-        # _is_safe_writable_bind_dest() will reject bind destinations outside
-        # $HOME, so forwarding an out-of-home XDG_DATA_HOME would make uv look
-        # somewhere the snapshot was never mounted (silent failure) and would also
-        # ro-bind paths outside the intended home boundary.
+        # Only do this when XDG_DATA_HOME is strictly under $HOME: the
+        # runner's _is_safe_writable_bind_dest() will reject bind destinations
+        # outside $HOME, so forwarding an out-of-home XDG_DATA_HOME would make
+        # uv look somewhere the snapshot was never mounted (silent failure)
+        # and would also ro-bind paths outside the intended home boundary.
         if "uv-auth" in flags:
             xdg = os.environ.get("XDG_DATA_HOME")
             if xdg:
@@ -2038,23 +2656,27 @@ class PythonLanguage:
                         if site_pkgs:
                             targets.scan_targets.append(site_pkgs)
                             targets.write_dirs.append(site_pkgs)
-                            # Snapshot tool_venv/bin so rollback reverts entry-point
-                            # scripts added/modified by an upgrade.  Mirrors the
-                            # venv/bin handling in prepare_sandbox_env().
+                            # Snapshot tool_venv/bin so rollback reverts
+                            # entry-point scripts added/modified by an
+                            # upgrade. Mirrors the venv/bin handling in
+                            # prepare_sandbox_env().
                             tool_bin = tool_venv / "bin"
                             if tool_bin.exists():
                                 targets.write_dirs.append(tool_bin)
                                 targets.snapshot_only_dirs.append(tool_bin)
                         else:
-                            # Venv absent (fresh install) — pre-register it with an
-                            # absent snapshot so rollback can remove a partially-created
-                            # venv if the install exits non-zero before post_run_scan_targets
-                            # fires.  The backend records existed=False; restore() then
-                            # calls shutil.rmtree if the path was created during the run.
+                            # Venv absent (fresh install) — pre-register it
+                            # with an absent snapshot so rollback can remove a
+                            # partially-created venv if the install exits non-
+                            # zero before post_run_scan_targets fires. The
+                            # backend records existed=False; restore() then
+                            # calls shutil.rmtree if the path was created
+                            # during the run.
                             targets.snapshot_only_dirs.append(tool_venv)
                     else:
-                        # No single tool name (e.g. pipx upgrade-all) — snapshot the
-                        # entire venvs directory so rollback can revert all mutations.
+                        # No single tool name (e.g. pipx upgrade-all) —
+                        # snapshot the entire venvs directory so rollback can
+                        # revert all mutations.
                         targets.snapshot_only_dirs.append(matched_venvs_dir)
                 else:
                     targets.snapshot_only_dirs.append(p)
@@ -2062,7 +2684,8 @@ class PythonLanguage:
             try:
                 site_pkgs = _find_site_packages(parsed, cwd)
             except ValueError as exc:
-                # venv_site_packages raised — invalid pyvenv.cfg, already logged.
+                # venv_site_packages raised — invalid pyvenv.cfg, already
+                # logged.
                 targets.warnings.append(str(exc))
                 site_pkgs = None
             if site_pkgs:
@@ -2073,7 +2696,8 @@ class PythonLanguage:
                     targets.write_dirs.append(site_pkgs)
             else:
                 if not targets.warnings:
-                    # Only add the generic message if a more specific one wasn't already added.
+                    # Only add the generic message if a more specific one
+                    # wasn't already added.
                     msg = "⚠ Could not detect site-packages directory — Python packages will not be scanned for this install."
                     log.warning(msg)
                     targets.warnings.append(msg)
@@ -2130,8 +2754,9 @@ class PythonLanguage:
                         "Or use uv:         package-alert run uv sync"
                     )
         else:
-            # pipenv manages its own virtualenv — don't inject VIRTUAL_ENV/PATH
-            # but snapshot the venv root so rollback also reverts venv/bin/ scripts.
+            # pipenv manages its own virtualenv — don't inject
+            # VIRTUAL_ENV/PATH but snapshot the venv root so rollback also
+            # reverts venv/bin/ scripts.
             venv_path = None
             if not os.environ.get("PIPENV_VENV_IN_PROJECT"):
                 pipenv_venv = _find_pipenv_venv(cwd)
@@ -2141,9 +2766,10 @@ class PythonLanguage:
         if venv_path and venv_path.exists():
             venv_bin = str(venv_path / "bin")
             env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
-            # Snapshot venv/bin so rollback reverts console scripts added during install.
-            # Avoid snapshotting the entire venv root — site-packages is already a
-            # scan_target and snapshotting the parent would duplicate ~71 MB of work.
+            # Snapshot venv/bin so rollback reverts console scripts added
+            # during install. Avoid snapshotting the entire venv root — site-
+            # packages is already a scan_target and snapshotting the parent
+            # would duplicate ~71 MB of work.
             bin_path = venv_path / "bin"
             if bin_path.exists():
                 extra_write.append(bin_path)
@@ -2237,9 +2863,9 @@ class PythonLanguage:
         times = [u["upload_time"] for u in data.get("urls", []) if "upload_time" in u]
         if not times:
             return None
-        # PyPI's `upload_time` is naive and documented as UTC, so attaching UTC is
-        # right; `upload_time_iso_8601` is Zulu. The helper handles both, so this
-        # stays correct if the field ever carries an offset.
+        # PyPI's `upload_time` is naive and documented as UTC, so attaching
+        # UTC is right; `upload_time_iso_8601` is Zulu. The helper handles
+        # both, so this stays correct if the field ever carries an offset.
         earliest = min(parse_registry_timestamp(t) for t in times)
         return earliest.timestamp()
 
@@ -2287,18 +2913,20 @@ class PythonLanguage:
         for entry in site_packages_dir.iterdir():
             if not entry.is_dir() or not entry.name.endswith(".dist-info"):
                 continue
-            # _DISTINFO_RE captures the name portion as group 1 and the version as
-            # group 2; it splits at the last "-\d" boundary so hyphenated names
-            # like "google-cloud-storage" are matched correctly.
+            # _DISTINFO_RE captures the name portion as group 1 and the
+            # version as group 2; it splits at the last "-\d" boundary so
+            # hyphenated names like "google-cloud-storage" are matched
+            # correctly.
             m = _DISTINFO_RE.match(entry.name)
             if not m:
                 continue
             dist_name = _norm_pkg(m.group(1))
             if dist_name != normalised:
                 continue
-            # When the caller names a version, it must match: a caller searching
-            # several venvs would otherwise get whichever is scanned first, and
-            # inspect the wrong source tree for the version it asked about.
+            # When the caller names a version, it must match: a caller
+            # searching several venvs would otherwise get whichever is scanned
+            # first, and inspect the wrong source tree for the version it
+            # asked about.
             if version is not None and not _versions_equal(m.group(2), version):
                 continue
 
@@ -2330,25 +2958,26 @@ class PythonLanguage:
             for name in top_names:
                 candidates: list[Path] = []
                 if by_top_dict is not None and name in by_top_dict:
-                    # RECORD has full path depth for this name: find every distinct
-                    # directory this distribution actually owns under it, rather
-                    # than trusting the bare name — the namespace-package case, and
-                    # the reason this can be more than one path per name (google-auth
-                    # owns both google/auth and google/oauth2).
+                    # RECORD has full path depth for this name: find every
+                    # distinct directory this distribution actually owns under
+                    # it, rather than trusting the bare name — the namespace-
+                    # package case, and the reason this can be more than one
+                    # path per name (google-auth owns both google/auth and
+                    # google/oauth2).
                     for rel in _owned_subpaths(by_top_dict[name]):
                         candidate = _safe_site_packages_subpath(rel, site_packages_dir, sp_resolved)
                         if candidate is not None:
                             candidates.append(candidate)
                 elif by_top is not _RECORD_CORRUPT:
-                    # top_level.txt named this but RECORD has no entries for it (or
-                    # RECORD itself is unavailable) — a single-segment name is all
-                    # there is to go on. Skipped entirely when RECORD is corrupt
-                    # rather than absent: RECORD's silence about this specific
-                    # name is only meaningful if RECORD could actually be read —
-                    # a corrupted RECORD has nothing verified to say about *any*
-                    # name, so trusting top_level.txt here would be exactly the
-                    # same unverified guess the bare-name fallback below refuses
-                    # to make.
+                    # top_level.txt named this but RECORD has no entries for
+                    # it (or RECORD itself is unavailable) — a single-segment
+                    # name is all there is to go on. Skipped entirely when
+                    # RECORD is corrupt rather than absent: RECORD's silence
+                    # about this specific name is only meaningful if RECORD
+                    # could actually be read — a corrupted RECORD has nothing
+                    # verified to say about *any* name, so trusting
+                    # top_level.txt here would be exactly the same unverified
+                    # guess the bare-name fallback below refuses to make.
                     candidate = _safe_site_packages_child(name, site_packages_dir, sp_resolved)
                     if candidate is not None:
                         candidates.append(candidate)
@@ -2363,12 +2992,12 @@ class PythonLanguage:
             # distribution installs — including its silence about a name it
             # never mentions. Guessing a bare name past that point (e.g.
             # normalised == an unrelated distribution's own directory) would
-            # attribute someone else's files to this one, so the fallback below
-            # is reached only when RECORD itself was absent (by_top is None) —
-            # never when it was present but corrupt (_RECORD_CORRUPT), which is
-            # just as authoritative-and-untrustworthy as an empty RECORD — and
-            # top_level.txt (if present) yielded nothing resolvable either —
-            # there is genuinely no manifest to defer to.
+            # attribute someone else's files to this one, so the fallback
+            # below is reached only when RECORD itself was absent (by_top is
+            # None) — never when it was present but corrupt (_RECORD_CORRUPT),
+            # which is just as authoritative-and-untrustworthy as an empty
+            # RECORD — and top_level.txt (if present) yielded nothing
+            # resolvable either — there is genuinely no manifest to defer to.
             if by_top is None:
                 # Last resort: the normalised distribution name often *is* the
                 # import name (checked only after RECORD/top_level.txt so a
@@ -2441,8 +3070,8 @@ class PythonLanguage:
         return ["pip", "pip3", "uv", "pipenv", "pipx"]
 
     def project_shim_names(self) -> list[str]:
-        # uv installs a versioned copy of itself into .venv/bin/uv — shimming it
-        # causes version mismatches and recursive invocation issues.
+        # uv installs a versioned copy of itself into .venv/bin/uv — shimming
+        # it causes version mismatches and recursive invocation issues.
         return ["pip", "pip3", "pipenv"]
 
     def interpreter_names(self) -> list[str]:

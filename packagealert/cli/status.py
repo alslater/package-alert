@@ -65,6 +65,9 @@ class StatusData:
     # projects
     scheduled_projects_count: int = 0
     daemon_managed_by_systemd: bool = False
+    # watches
+    watch_count: int | None = None
+    watch_max: int | None = None
     # paths
     pid_file_path: str = ""
     pid_file_exists: bool = False
@@ -83,6 +86,8 @@ class StatusData:
                 "pid": self.daemon_pid,
                 "uptime_seconds": self.daemon_uptime_seconds,
                 "managed_by_systemd": self.daemon_managed_by_systemd,
+                "watch_count": self.watch_count,
+                "watch_max": self.watch_max,
             },
             "config": {
                 "path": self.config_path,
@@ -162,6 +167,23 @@ def _format_uptime(seconds: float | None) -> str:
     return f"{minutes}m"
 
 
+def _format_watch_count(count: int, max_watches: int | None) -> str:
+    count_str = f"{count:,} inotify"
+    if not max_watches:
+        return count_str
+    percent = 100 * count / max_watches
+    if percent >= 90:
+        colour = "bold red"
+    elif percent >= 50:
+        colour = "yellow"
+    else:
+        colour = "dim"
+    # max_user_watches is a per-UID limit (see inotify(7)), not system-wide —
+    # another user on the same machine has their own independent budget.
+    suffix = f"[{colour}]({percent:.0f}% of user limit {max_watches:,})[/{colour}]"
+    return f"{count_str} {suffix}"
+
+
 _SEV_COLOUR = {
     "CRITICAL": "bold red",
     "MEDIUM": "yellow",
@@ -203,6 +225,8 @@ def render_status(
         proc = "[green]✓[/green]" if data.process_monitoring else "[red]✗[/red]"
         sched = "[green]✓[/green]" if data.scheduler_enabled else "[red]✗[/red]"
         console.print(f"  Monitors: cache {cache}  process {proc}  scheduler {sched}")
+        if data.watch_count is not None:
+            console.print(f"  Watches:  {_format_watch_count(data.watch_count, data.watch_max)}")
 
     console.print()
 
@@ -337,6 +361,15 @@ async def gather_status(
         except psutil.NoSuchProcess:
             pid = None
 
+    watch_count: int | None = None
+    watch_max: int | None = None
+    if pid is not None:
+        from packagealert.monitors.watch_stats import get_daemon_watch_stats
+        watch_stats = get_daemon_watch_stats(pid)
+        if watch_stats is not None:
+            watch_count = watch_stats.watch_count
+            watch_max = watch_stats.max_watches
+
     # ── Paths ─────────────────────────────────────────────────────────────────
     log_path = cfg.log.file
     log_path_str = str(log_path) if log_path else ""
@@ -441,6 +474,8 @@ async def gather_status(
         daemon_pid=pid,
         daemon_uptime_seconds=uptime,
         daemon_managed_by_systemd=managed_by_systemd,
+        watch_count=watch_count,
+        watch_max=watch_max,
         config_path=resolved_cfg_path,
         cache_monitoring=cfg.watch.enable_cache_monitoring,
         process_monitoring=cfg.watch.enable_process_monitoring,
