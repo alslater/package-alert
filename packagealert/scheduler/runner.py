@@ -76,9 +76,13 @@ class ScheduledScanner:
             log.info("Running scheduled scan for %s (%s)", project.path, project.schedule)
             try:
                 if project.scan_type == "installed":
-                    findings, sources = await self._scan_installed(project_path)
+                    findings, sources, osv_failures = await self._scan_installed(
+                        project_path
+                    )
                 else:
-                    findings, sources = await self._scan_project(project_path)
+                    findings, sources, osv_failures = await self._scan_project(
+                        project_path
+                    )
             except Exception:
                 log.exception("Scheduled scan failed for %s", project.path)
                 continue
@@ -93,6 +97,7 @@ class ScheduledScanner:
                 findings=findings,
                 sources=sources,
                 scanned_at=now_utc,
+                osv_failures=osv_failures,
             )
             plugin_stores_scans = plugin_registry.has_scan_store()
             if not plugin_stores_scans:
@@ -103,6 +108,7 @@ class ScheduledScanner:
                     scan_type=project.scan_type,
                     findings=findings,
                     sources=sources,
+                    osv_failures=osv_failures,
                 )
             await plugin_registry.fire_on_scan_complete(scan)
             await update_last_scanned(self._db, project.path, project.scan_type, scanned_at)
@@ -114,14 +120,26 @@ class ScheduledScanner:
                 "Scheduled scan complete for %s: %d finding(s)", project.path, len(findings)
             )
 
-    async def _run_osv_queries(self, pinned: list[tuple[str, str, str]]) -> list[dict]:
-        """Query OSV for a list of (ecosystem, name, version) tuples, using the cache."""
+    async def _run_osv_queries(
+        self, pinned: list[tuple[str, str, str]]
+    ) -> tuple[list[dict], int]:
+        """Query OSV for (ecosystem, name, version) tuples, using the cache.
+
+        Returns (findings, osv_failures). The count must reach the ScanResult:
+        a degraded lookup may be missing advisories (see OsvResult.degraded),
+        so findings alone cannot tell an outage apart from a clean project, and
+        an on_scan_complete consumer acting on "no findings" would treat the
+        outage as a pass — the pa-central plugin turns exactly that into a
+        fleet-visible status of "clean". A log warning alone does not protect a
+        programmatic consumer.
+        """
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
 
         osv_client = OsvClient(self._cfg.osv)
         osv_cache = OsvCache(self._db, self._cfg.osv)
         findings: list[dict] = []
+        osv_failures = 0
 
         try:
             batch_size = 50
@@ -138,10 +156,27 @@ class ScheduledScanner:
                 if uncached_queries:
                     fresh = await osv_client.batch_query(uncached_queries)
                     for q, r in zip(uncached_queries, fresh):
-                        if r:
+                        # Never cache a degraded (failed-lookup) result — see
+                        # OsvResult.degraded: it would record an OSV outage as a
+                        # clean verdict for the whole osv_cache TTL.
+                        if r and not r.degraded:
                             ecosystem, package_name, version = q
                             await osv_cache.set(ecosystem, package_name, version, r)
                 for osv_result in cached + fresh:
+                    # A degraded result's advisory list is incomplete, so a
+                    # missing advisory is indistinguishable from a clean answer.
+                    # This scan runs unattended with no console to warn at, so
+                    # record it in the log rather than letting an OSV outage read
+                    # as "0 findings" — but do not skip it: any advisories that
+                    # did parse are still real findings. See OsvResult.degraded.
+                    if osv_result is not None and osv_result.degraded:
+                        osv_failures += 1
+                        log.warning(
+                            "OSV lookup unavailable or partial for %s/%s %s during "
+                            "scheduled scan — it was NOT fully checked for advisories",
+                            osv_result.ecosystem, osv_result.package_name,
+                            osv_result.version,
+                        )
                     if not osv_result or not osv_result.advisories:
                         continue
                     for adv in osv_result.advisories:
@@ -160,25 +195,32 @@ class ScheduledScanner:
         finally:
             await osv_client.aclose()
 
-        return findings
+        return findings, osv_failures
 
-    async def _scan_project(self, project_path: Path) -> tuple[list[dict], list[str]]:
-        """Run a full project scan and return (findings, sources)."""
+    async def _scan_project(
+        self, project_path: Path
+    ) -> tuple[list[dict], list[str], int]:
+        """Run a full project scan and return (findings, sources, osv_failures)."""
         from packagealert.parsers.lockfiles import scan_project as detect_project
 
         result = detect_project(project_path)
         if not result.sources:
-            return [], []
+            return [], [], 0
         queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
-        findings = await self._run_osv_queries(queries)
-        return findings, result.sources
+        findings, osv_failures = await self._run_osv_queries(queries)
+        return findings, result.sources, osv_failures
 
-    async def _scan_installed(self, project_path: Path) -> tuple[list[dict], list[str]]:
-        """Enumerate actually-installed packages and scan them against OSV."""
+    async def _scan_installed(
+        self, project_path: Path
+    ) -> tuple[list[dict], list[str], int]:
+        """Enumerate actually-installed packages and scan them against OSV.
+
+        Returns (findings, sources, osv_failures).
+        """
         from packagealert.parsers.lockfiles import scan_installed
         result = scan_installed(project_path)
         if not result.sources:
-            return [], []
+            return [], [], 0
         queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
-        findings = await self._run_osv_queries(queries)
-        return findings, result.sources
+        findings, osv_failures = await self._run_osv_queries(queries)
+        return findings, result.sources, osv_failures

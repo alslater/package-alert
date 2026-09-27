@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 from typer.testing import CliRunner
@@ -124,6 +125,85 @@ def test_languages_info_buggy_top_packages_url():
 
     assert result.exit_code == 0, result.output
     assert "[error]" in result.output
+
+
+def test_languages_info_buggy_poll_only_cache_paths():
+    """languages info must not crash when poll_only_cache_paths() raises."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "poll_only_cache_paths", side_effect=RuntimeError("boom")):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "[error]" in result.output
+
+
+def test_languages_info_malformed_poll_only_cache_paths_shows_error():
+    """Regression: poll_only_cache_paths() is duck-typed and optional —
+    cast("list[Path]", ...) is only a type-checker hint, not a runtime
+    check, so a malformed return (e.g. a bare string, or a list of the
+    wrong element type) used to sail past the try/except unflagged and
+    render as garbled output instead of the [error] display: a string is
+    iterable, so ", ".join(... for p in poll_only_paths) iterated it
+    character by character, and a list of ints stringified without
+    error — confirmed empirically. The result must now be validated
+    explicitly, matching CacheMonitor._discover_dirs_by()'s and
+    _run_scan_cache()'s own validation of this identical hook.
+    """
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "poll_only_cache_paths", return_value="not-a-list"):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "[error]" in result.output
+    assert "n, o, t, -, a" not in result.output, (
+        "expected the malformed string to be rejected, not iterated "
+        "character by character into the display"
+    )
+
+
+def test_languages_info_malformed_cache_paths_shows_error():
+    """The REQUIRED cache_paths() hook needed the same validation.
+
+    Its result is only stringified inside the try, so a malformed return never
+    raised there — it rendered as garbage instead of the [error] display: a
+    bare string is iterable, so the join walked it character by character, and
+    a list of ints stringified with no error at all. Confirmed empirically.
+    Mirrors the poll_only_cache_paths() test above and the identical
+    validation in _run_scan_cache() and CacheMonitor._discover_dirs_by().
+    """
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "cache_paths", return_value="not-a-list"):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "[error]" in result.output
+    assert "n, o, t, -, a" not in result.output, (
+        "expected the malformed string to be rejected, not iterated "
+        "character by character into the display"
+    )
+
+
+def test_languages_info_valid_cache_paths_still_render():
+    """The new validation must not reject a well-formed return."""
+    _registry_module.load()
+    lang = _registry_module.get("python")
+    assert lang is not None
+
+    with patch.object(lang, "cache_paths", return_value=[Path("/tmp/wheels-v6")]):
+        result = runner.invoke(app, ["languages", "info", "python"])
+
+    assert result.exit_code == 0, result.output
+    assert "/tmp/wheels-v6" in result.output
+    assert "[error]" not in result.output
 
 
 def test_languages_info_shows_available_flags():

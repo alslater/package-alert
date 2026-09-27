@@ -21,6 +21,7 @@ class ScanPayload(TypedDict):
     findings: list[dict]
     risks: list[dict]
     risk_failures: int
+    osv_failures: int
     sources: list[str]
     scanned_at: str
 
@@ -158,11 +159,33 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         "hostname": hostname,
         "root": scan.project_path,
         "scan_type": scan.scan_type,
-        "status": "findings" if scan.finding_count > 0 else "clean",
+        # A scan with no findings is only "clean" if the packages were
+        # actually CHECKED. A degraded OSV lookup may be missing advisories
+        # (see OsvResult.degraded), so a scan whose lookups all failed has
+        # finding_count == 0 and would otherwise be uploaded, stored and
+        # displayed as clean — the exact ambiguity ScanResult.osv_failures
+        # exists to remove, lost again at this boundary. Findings still win:
+        # something genuinely malicious was found regardless of what else
+        # could not be checked.
+        #
+        # REQUIRES a pa-central whose ScanStatus enum includes "degraded"
+        # (backend/app/models/__init__.py). Against a server without it this
+        # value fails schema validation with a 422, which _classify_http_status
+        # treats as `payload_specific` — so the scan is DROPPED rather than
+        # retried, losing it from the fleet entirely. The server is not
+        # deployed anywhere yet, so the two land together; if that ever stops
+        # being true, gate this on a server capability rather than sending a
+        # value the server will reject.
+        "status": (
+            "findings" if scan.finding_count > 0
+            else "degraded" if scan.osv_failures > 0
+            else "clean"
+        ),
         "finding_count": scan.finding_count,
         "findings": scan.findings,
         "risks": scan.risks,
         "risk_failures": scan.risk_failures,
+        "osv_failures": scan.osv_failures,
         "sources": scan.sources,
         "scanned_at": scan.scanned_at.isoformat(),
     }

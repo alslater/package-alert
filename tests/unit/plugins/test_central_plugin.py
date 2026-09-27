@@ -784,3 +784,53 @@ def test_render_scan_detail_text_reports_suppressed_low_signal_count(capsys):
     out = capsys.readouterr().out
     assert "1 low-signal row" in out
     assert "--details" in out
+
+
+def _degraded_record() -> dict:
+    return {
+        "id": 340, "project_path": "/proj",
+        "scanned_at": "2026-09-24T12:28:26+00:00", "scan_type": "project",
+        "status": "degraded", "finding_count": 0,
+        "sources": ["python (uv.lock)"], "findings": [], "risks": [],
+        "risk_failures": 0, "osv_failures": 67,
+    }
+
+
+def test_retrieved_degraded_scan_is_not_rendered_clean_in_html(capsys):
+    """Regression: the retrieval path's HTML view dropped osv_failures.
+
+    _render_scan_detail() reads the field and reports it in the text and JSON
+    views, but its _render_html() call passed only risk_failures — so
+    `pa central scan <id> --format html` rendered a scan whose packages were
+    never checked as a bare "0 malicious, 0 vulnerable" report. The write path
+    and every other retrieval view already carried the distinction.
+    """
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    _render_scan_detail(_degraded_record(), fmt="html", show_details=False)
+    html = capsys.readouterr().out
+    assert "67 unchecked" in html
+    assert "NOT checked for advisories" in html
+
+
+def test_retrieved_degraded_scan_reports_unavailable_in_text(capsys):
+    """The text view must say the packages were not checked, not "all clear"."""
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    _render_scan_detail(_degraded_record(), fmt="text", show_details=False)
+    out = capsys.readouterr().out
+    assert "No findings — all clear." not in out
+    assert "OSV lookup unavailable for 67 package(s)" in out
+
+
+def test_retrieved_scan_from_a_server_without_the_field_still_renders(capsys):
+    """A server predating osv_failures omits the key; it must default to 0."""
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    record = _degraded_record()
+    del record["osv_failures"]
+    record["status"] = "clean"
+    _render_scan_detail(record, fmt="text", show_details=False)
+    out = capsys.readouterr().out
+    assert "No findings — all clear." in out
+    assert "unavailable" not in out
