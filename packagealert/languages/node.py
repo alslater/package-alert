@@ -206,6 +206,12 @@ class NodeLanguage:
             # `packages`.
             is_lockfile_install=result.is_lockfile_install,
             should_gate=result.should_gate,
+            # `npm --prefix`, `yarn --cwd`, `pnpm -C`: the directory whose
+            # package.json and lock file the command actually uses.
+            working_dir=result.working_dir,
+            project_dir=result.project_dir,
+            # pnpm's `--lockfile-dir`: the lock file lives apart from the project.
+            lockfile_dir=result.lockfile_dir,
         )
 
     # ------------------------------------------------------------------

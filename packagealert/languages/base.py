@@ -207,6 +207,20 @@ class ProcessInstall:
     # apply VIRTUAL_ENV/CONDA_PREFIX-based version discovery when this is
     # True.
     is_system_python_target: bool = False
+    # Where the command effectively runs, and where it discovers its project
+    # (lock file), when the invocation moves either (e.g. uv's `--directory`/
+    # `--project`). Each exactly as given (unresolved), None when not moved,
+    # and each with its OWN base: `working_dir` is relative to the process's
+    # cwd; `project_dir` is relative to the effective working directory (the
+    # cwd joined with `working_dir`), as uv resolves `--project`. See
+    # parsers.process_args.resolve_invocation_dirs().
+    working_dir: str | None = None
+    project_dir: str | None = None
+    # Where the lock file lives when the invocation moves it independently of
+    # the project (pnpm's `--lockfile-dir`): relative to the process's cwd —
+    # NOT to `working_dir` — and None means the project directory. See
+    # parsers.process_args.resolve_lockfile_dir().
+    lockfile_dir: str | None = None
 
 
 @runtime_checkable

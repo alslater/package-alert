@@ -6577,3 +6577,492 @@ class TestCleanupWritableBinds:
                 assert f"{param}:" in body, (
                     f"a documented resolve_package_dir omits `{param}`"
                 )
+
+
+class TestRunFollowsTheInvocationsProject:
+    """`uv --directory backend sync` operates on backend/, so the lock-file
+    snapshot, the post-run lock-file scan and the environment scanned for new
+    packages must all be backend's — not the cwd's."""
+
+    def test_run_uses_the_moved_project_dir(self, tmp_path, monkeypatch):
+        import asyncio
+        import subprocess
+
+        import packagealert.sandbox.runner as runner_mod
+
+        backend = tmp_path / "backend"
+        site = backend / ".venv" / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        (backend / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (backend / "uv.lock").write_text('[[package]]\nname = "x"\nversion = "1"\n')
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+
+        monkeypatch.setattr(
+            runner_mod.subprocess, "run",
+            lambda *a, **k: subprocess.CompletedProcess(args=a[0], returncode=0),
+        )
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+
+        async def _ok(*a, **kw):
+            return True
+
+        async def _no_cooldown(*a, **kw):
+            return []
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _no_cooldown)
+
+        snapshot_roots: list[Path] = []
+        real_snapshot = runner_mod._snapshot_lock_files
+
+        def _record_snapshot(root, **kw):
+            snapshot_roots.append(root)
+            return real_snapshot(root, **kw)
+
+        scan_roots: list[Path] = []
+
+        async def _record_scan(self, root, *a, **kw):
+            scan_roots.append(root)
+            return True
+
+        targets: list[Path] = []
+        real_resolve = runner_mod._resolve_targets
+
+        def _record_targets(ctx, *a, **kw):
+            real_resolve(ctx, *a, **kw)
+            targets.extend(ctx.scan_targets)
+
+        monkeypatch.setattr(runner_mod, "_snapshot_lock_files", _record_snapshot)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _record_scan)
+        monkeypatch.setattr(runner_mod, "_resolve_targets", _record_targets)
+
+        asyncio.run(_make_runner().run(["uv", "--directory", "backend", "sync"]))
+
+        assert snapshot_roots == [backend]
+        assert scan_roots and set(scan_roots) == {backend}
+        assert any(t.is_relative_to(backend / ".venv") for t in targets), targets
+
+
+class TestRunFollowsTheInvocationsProjectAfterTheRun:
+    """The post-run and argv-rewriting hooks must follow the command's own
+    directories too, not only the pre-run target resolver."""
+
+    @staticmethod
+    def _patch_common(monkeypatch, on_run=None):
+        import subprocess
+
+        import packagealert.sandbox.runner as runner_mod
+
+        cmds: list[list[str]] = []
+
+        def fake_run(*a, **k):
+            cmd = list(a[0])
+            cmds.append(cmd)
+            if on_run is not None and cmd and cmd[0] == "bwrap":
+                on_run()
+            return subprocess.CompletedProcess(args=cmd, returncode=0)
+
+        async def _ok(*a, **kw):
+            return True
+
+        async def _no_cooldown(*a, **kw):
+            return []
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _no_cooldown)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _ok)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        return cmds
+
+    def test_environment_created_by_the_run_is_scanned(self, tmp_path, monkeypatch):
+        """`uv --directory backend sync` creating backend/.venv from scratch:
+        the post-run fallback must look in backend/, or the new environment is
+        never scanned (nor registered for rollback)."""
+        import asyncio
+
+        import packagealert.sandbox.runner as runner_mod
+
+        backend = tmp_path / "backend"
+        backend.mkdir()
+        (backend / "uv.lock").write_text('[[package]]\nname = "x"\nversion = "1"\n')
+        monkeypatch.chdir(tmp_path)
+        site = backend / ".venv" / "lib" / "python3.12" / "site-packages"
+
+        def create_venv():
+            site.mkdir(parents=True)
+            (backend / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+
+        self._patch_common(monkeypatch, on_run=create_venv)
+        scanned: list[Path] = []
+
+        def _record(targets, *a, **kw):
+            scanned.extend(targets)
+            return []
+
+        monkeypatch.setattr(runner_mod, "_collect_new_packages", _record)
+
+        asyncio.run(_make_runner().run(["uv", "--directory", "backend", "sync"]))
+
+        assert site in scanned, scanned
+
+    def test_editable_path_is_resolved_against_the_moved_directory(self, tmp_path, monkeypatch):
+        """`-e ./pkg` under `--directory d` means d/pkg; rewriting it against
+        cwd made the sandbox install a different path from the one asked for."""
+        import asyncio
+
+        (tmp_path / "d" / "pkg").mkdir(parents=True)
+        (tmp_path / "pkg").mkdir()
+        monkeypatch.chdir(tmp_path)
+        cmds = self._patch_common(monkeypatch)
+
+        asyncio.run(_make_runner().run(
+            ["uv", "--directory", "d", "pip", "install", "-e", "./pkg"]
+        ))
+
+        bwrap = next(c for c in cmds if c and c[0] == "bwrap")
+        i = bwrap.index("-e")
+        assert bwrap[i + 1] == str(tmp_path / "d" / "pkg"), bwrap[i - 4:i + 2]
+
+
+class TestSandboxEnvFollowsTheInvocationsProject:
+    """prepare_sandbox_env() detects the project's venv and injects it as
+    VIRTUAL_ENV; it must detect the venv of the project the command targets."""
+
+    @staticmethod
+    def _run(tmp_path, monkeypatch, argv):
+        import asyncio
+        import subprocess
+
+        import packagealert.sandbox.runner as runner_mod
+
+        cmds: list[list[str]] = []
+
+        def fake_run(*a, **k):
+            cmds.append(list(a[0]))
+            return subprocess.CompletedProcess(args=a[0], returncode=0)
+
+        async def _ok(*a, **kw):
+            return True
+
+        async def _no_cooldown(*a, **kw):
+            return []
+
+        monkeypatch.setattr(runner_mod.subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _ok)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _no_cooldown)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _ok)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        asyncio.run(_make_runner().run(argv))
+        cmd = next(c for c in cmds if c and c[0] == "bwrap")
+        setenv = {cmd[i + 1]: cmd[i + 2] for i, t in enumerate(cmd) if t == "--setenv"}
+        binds = [cmd[i + 1] for i, t in enumerate(cmd) if t == "--bind"]
+        return setenv, binds
+
+    @staticmethod
+    def _venv(root: Path) -> Path:
+        (root / ".venv" / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+        (root / ".venv" / "bin").mkdir()
+        (root / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        return root / ".venv"
+
+    def test_injected_virtual_env_is_the_moved_projects(self, tmp_path, monkeypatch):
+        """With a venv in BOTH cwd and d/, `uv --directory d pip install x`
+        must run against d/.venv — `uv pip` honours VIRTUAL_ENV, so injecting
+        cwd's venv installed into a different environment."""
+        project = tmp_path / "proj"
+        project.mkdir()
+        self._venv(project)
+        target = self._venv(project / "d")
+        monkeypatch.chdir(project)
+
+        setenv, _binds = self._run(
+            project, monkeypatch, ["uv", "--directory", "d", "pip", "install", "x"]
+        )
+        assert setenv.get("VIRTUAL_ENV") == str(target)
+
+    def test_move_outside_cwd_does_not_widen_writability(self, tmp_path, monkeypatch):
+        project = tmp_path / "proj"
+        project.mkdir()
+        elsewhere = self._venv(tmp_path / "elsewhere")
+        monkeypatch.chdir(project)
+
+        _setenv, binds = self._run(
+            project, monkeypatch,
+            ["uv", "--directory", str(tmp_path / "elsewhere"), "pip", "install", "x"],
+        )
+        assert not any(b.startswith(str(elsewhere)) for b in binds), binds
+
+
+def test_run_snapshots_and_rescans_the_pnpm_lockfile_dir(tmp_path, monkeypatch):
+    """The lock-file snapshot/post-run scan/restore must use `--lockfile-dir`,
+    not the project directory."""
+    import asyncio
+    import subprocess
+
+    import packagealert.sandbox.runner as runner_mod
+
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "pnpm-lock.yaml").write_text("lockfileVersion: '6.0'\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        runner_mod.subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(args=a[0], returncode=0),
+    )
+    monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+
+    async def _ok(*a, **kw):
+        return True
+
+    async def _no_cooldown(*a, **kw):
+        return []
+
+    monkeypatch.setattr(runner_mod.SandboxRunner, "_preflight", _ok)
+    monkeypatch.setattr(runner_mod.SandboxRunner, "_cooldown_check", _no_cooldown)
+    roots: list[Path] = []
+    real = runner_mod._snapshot_lock_files
+
+    def _snap(root, **kw):
+        roots.append(root)
+        return real(root, **kw)
+
+    async def _scan(self, root, *a, **kw):
+        roots.append(root)
+        return True
+
+    monkeypatch.setattr(runner_mod, "_snapshot_lock_files", _snap)
+    monkeypatch.setattr(runner_mod.SandboxRunner, "_scan_updated_lock_files", _scan)
+
+    asyncio.run(_make_runner().run(["pnpm", "install", "--lockfile-dir", "locks"]))
+
+    assert roots and set(roots) == {tmp_path / "locks"}, roots
+
+
+def test_resolve_targets_does_not_widen_for_a_project_moved_outside_cwd(tmp_path, monkeypatch):
+    """Any plugin's write_dirs under a project that the command's options
+    moved outside cwd must stay read-only — the runner enforces it rather than
+    relying on each plugin."""
+    import packagealert.sandbox.runner as runner_mod
+    from packagealert.languages.base import SandboxTargets
+
+    project = tmp_path / "proj"
+    elsewhere = tmp_path / "elsewhere"
+    project.mkdir()
+    (elsewhere / "deps").mkdir(parents=True)
+    monkeypatch.chdir(project)
+    # The exposure is a project elsewhere UNDER $HOME, which the runner's
+    # safe-root check alone would accept; outside $HOME it is rejected anyway.
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    class _Lang:
+        name = "fake"
+
+        def resolve_sandbox_targets(self, parsed, cwd):
+            return SandboxTargets(write_dirs=[cwd / "deps"])
+
+    parsed = runner_mod.ParsedInstall(
+        manager="fake", ecosystem="fake", working_dir=str(elsewhere)
+    )
+    monkeypatch.setattr(runner_mod.lang_registry, "for_ecosystem", lambda eco: _Lang())
+    ctx = runner_mod._Context(argv=["fake"], parsed=parsed, cwd=project)
+    runner_mod._resolve_targets(ctx)
+    assert elsewhere / "deps" not in ctx.write_dirs
+    assert project in ctx.write_dirs
+
+
+class TestMovedDirectoryEscapeCannotWidenWritability:
+    """A directory option that LEXICALLY stays under cwd but really leaves it
+    — `../elsewhere`, a symlinked directory, or a symlink inside the moved
+    project — must not make paths outside cwd writable. Path.is_relative_to()
+    is lexical, so `cwd / "../elsewhere"` passes it."""
+
+    @staticmethod
+    def _layout(tmp_path):
+        project = tmp_path / "proj"
+        project.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        TestSandboxEnvFollowsTheInvocationsProject._venv(elsewhere)
+        return project, elsewhere
+
+    @pytest.mark.parametrize("how", ["dotdot", "symlinked_dir"])
+    def test_prepare_sandbox_env_path(self, tmp_path, monkeypatch, how):
+        project, elsewhere = self._layout(tmp_path)
+        if how == "dotdot":
+            directory = "../elsewhere"
+        else:
+            (project / "link").symlink_to(elsewhere)
+            directory = "link"
+        monkeypatch.chdir(project)
+
+        _setenv, binds = TestSandboxEnvFollowsTheInvocationsProject._run(
+            project, monkeypatch, ["uv", "--directory", directory, "pip", "install", "x"]
+        )
+        real = str(elsewhere)
+        assert not any(Path(b).resolve().is_relative_to(real) for b in binds), binds
+
+    def test_symlink_inside_a_moved_project_is_not_made_writable(self, tmp_path, monkeypatch):
+        """`--directory sub` stays inside cwd, but sub/.venv is a symlink to a
+        venv outside it."""
+        project, elsewhere = self._layout(tmp_path)
+        (project / "sub").mkdir()
+        (project / "sub" / ".venv").symlink_to(elsewhere / ".venv")
+        monkeypatch.chdir(project)
+
+        _setenv, binds = TestSandboxEnvFollowsTheInvocationsProject._run(
+            project, monkeypatch, ["uv", "--directory", "sub", "pip", "install", "x"]
+        )
+        assert not any(Path(b).resolve().is_relative_to(elsewhere) for b in binds), binds
+
+    @pytest.mark.parametrize("how", ["dotdot", "symlinked_dir"])
+    def test_resolve_targets_write_dirs(self, tmp_path, monkeypatch, how):
+        import packagealert.sandbox.runner as runner_mod
+        from packagealert.languages.base import SandboxTargets
+
+        project, elsewhere = self._layout(tmp_path)
+        if how == "dotdot":
+            directory = "../elsewhere"
+        else:
+            (project / "link").symlink_to(elsewhere)
+            directory = "link"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        class _Lang:
+            name = "fake"
+
+            def resolve_sandbox_targets(self, parsed, cwd):
+                return SandboxTargets(write_dirs=[cwd / "deps"])
+
+        monkeypatch.setattr(runner_mod.lang_registry, "for_ecosystem", lambda eco: _Lang())
+        parsed = runner_mod.ParsedInstall(manager="fake", ecosystem="fake", working_dir=directory)
+        ctx = runner_mod._Context(argv=["fake"], parsed=parsed, cwd=project)
+        runner_mod._resolve_targets(ctx)
+        assert not any(p.resolve().is_relative_to(elsewhere) for p in ctx.write_dirs), ctx.write_dirs
+
+
+def test_resolve_invocation_dirs_canonicalises_a_moved_directory(tmp_path):
+    from packagealert.parsers.process_args import (
+        resolve_invocation_dirs,
+        resolve_lockfile_dir,
+    )
+
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "proj" / "link").symlink_to(tmp_path / "elsewhere")
+    cwd = tmp_path / "proj"
+    assert resolve_invocation_dirs(cwd, "../elsewhere", None)[0] == tmp_path / "elsewhere"
+    assert resolve_invocation_dirs(cwd, "link", None)[1] == tmp_path / "elsewhere"
+    assert resolve_lockfile_dir(cwd, "../elsewhere", cwd) == tmp_path / "elsewhere"
+    # an unmoved invocation is left exactly as given
+    assert resolve_invocation_dirs(cwd, None, None) == (cwd, cwd)
+
+
+def test_symlink_under_cwd_into_the_moved_project_is_not_made_writable(tmp_path, monkeypatch):
+    """A path written under cwd that resolves INTO a project moved outside it
+    is still outside cwd in reality, so it must not become writable."""
+    import packagealert.sandbox.runner as runner_mod
+    from packagealert.languages.base import SandboxTargets
+
+    project = tmp_path / "proj"
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "deps").mkdir(parents=True)
+    project.mkdir()
+    (project / "alias").symlink_to(elsewhere / "deps")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    class _Lang:
+        name = "fake"
+
+        def resolve_sandbox_targets(self, parsed, cwd):
+            return SandboxTargets(write_dirs=[project / "alias"])
+
+    monkeypatch.setattr(runner_mod.lang_registry, "for_ecosystem", lambda eco: _Lang())
+    parsed = runner_mod.ParsedInstall(manager="fake", ecosystem="fake", working_dir="../elsewhere")
+    ctx = runner_mod._Context(argv=["fake"], parsed=parsed, cwd=project)
+    runner_mod._resolve_targets(ctx)
+    assert project / "alias" not in ctx.write_dirs
+
+
+def _raise_resolving(monkeypatch, marker: str):
+    """Make Path.resolve() fail for paths containing `marker`, as Python 3.12
+    does for a symlink loop (RuntimeError); 3.13+ returns it unresolved."""
+    real = Path.resolve
+
+    def fake(self, strict=False):
+        if marker in str(self):
+            raise RuntimeError(f"Symlink loop from {self}")
+        return real(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake)
+
+
+def test_unresolvable_directory_option_raises_a_specific_error(tmp_path, monkeypatch):
+    from packagealert.parsers.process_args import (
+        InvalidInvocationDirectory,
+        resolve_invocation_dirs,
+        resolve_lockfile_dir,
+    )
+
+    _raise_resolving(monkeypatch, "loopdir")
+    with pytest.raises(InvalidInvocationDirectory):
+        resolve_invocation_dirs(tmp_path, "loopdir", None)
+    with pytest.raises(InvalidInvocationDirectory):
+        resolve_lockfile_dir(tmp_path, "loopdir", tmp_path)
+
+
+def test_run_refuses_an_unresolvable_directory_option(tmp_path, monkeypatch, capsys):
+    """Fail closed: `package-alert run` must refuse the command, not crash."""
+    import asyncio
+
+    import packagealert.sandbox.runner as runner_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+    _raise_resolving(monkeypatch, "loopdir")
+
+    rc = asyncio.run(_make_runner().run(["uv", "--directory", "loopdir", "sync"]))
+    assert rc == 1
+    assert "cannot be resolved" in capsys.readouterr().out
+
+
+def _symlink_loop(root: Path) -> str:
+    """A REAL symlink loop `root/a -> root/b -> root/a`; returns "a"."""
+    (root / "a").symlink_to(root / "b")
+    (root / "b").symlink_to(root / "a")
+    return "a"
+
+
+def test_real_symlink_loop_is_rejected_on_this_python(tmp_path):
+    """Not simulated: on Python 3.13+ a non-strict resolve() returns a loop
+    UNRESOLVED instead of raising, so only a real loop shows whether the
+    rejection works on the running interpreter."""
+    from packagealert.parsers.process_args import (
+        InvalidInvocationDirectory,
+        resolve_invocation_dirs,
+        resolve_lockfile_dir,
+    )
+
+    loop = _symlink_loop(tmp_path)
+    for directory in (loop, f"{loop}/deeper"):
+        with pytest.raises(InvalidInvocationDirectory):
+            resolve_invocation_dirs(tmp_path, directory, None)
+        with pytest.raises(InvalidInvocationDirectory):
+            resolve_lockfile_dir(tmp_path, directory, tmp_path)
+    # a merely MISSING directory is legitimate (pnpm creates --lockfile-dir)
+    assert resolve_lockfile_dir(tmp_path, "locks", tmp_path) == tmp_path / "locks"
+
+
+def test_run_refuses_a_real_symlink_loop(tmp_path, monkeypatch, capsys):
+    import asyncio
+
+    import packagealert.sandbox.runner as runner_mod
+
+    loop = _symlink_loop(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+
+    rc = asyncio.run(_make_runner().run(["uv", "--directory", loop, "sync"]))
+    assert rc == 1
+    assert "cannot be resolved" in capsys.readouterr().out

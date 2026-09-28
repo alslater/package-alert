@@ -89,3 +89,58 @@ def test_cargo_language_gets_the_v5_hook_shim_defaults(monkeypatch):
     assert lang.publication_date_parse({}, "1.0") is None
     assert lang.osv_ecosystem() is None
     assert lang.normalise_name("Serde") == "serde"
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["cargo", "add", "serde"], [("serde", None)]),
+        # options before the subcommand must not hide it: None means the
+        # sandbox runs the command directly, with no pre-flight
+        (["cargo", "-q", "add", "serde"], [("serde", None)]),
+        (["cargo", "--color", "never", "install", "ripgrep"], [("ripgrep", None)]),
+        (["cargo", "+nightly", "install", "ripgrep"], [("ripgrep", None)]),
+        # an option's value is never a package
+        (["cargo", "add", "serde", "--features", "derive"], [("serde", None)]),
+        (["cargo", "install", "--bin", "rg", "ripgrep"], [("ripgrep", None)]),
+        # --version (and its hidden alias --vers) is folded into the spec
+        (["cargo", "install", "--version", "14.1.0", "ripgrep"], [("ripgrep", "14.1.0")]),
+        (["cargo", "install", "--vers=14.1.0", "ripgrep"], [("ripgrep", "14.1.0")]),
+        # positionals are specs: the `@version` is split off the name
+        (["cargo", "install", "ripgrep@14.1.0"], [("ripgrep", "14.1.0")]),
+        # a version requirement pins nothing, however it is given
+        (["cargo", "install", "--version", "^14.0", "ripgrep"], [("ripgrep", None)]),
+        # a partial version is a range, so it pins nothing
+        (["cargo", "add", "serde@1", "tokio"], [("serde", None), ("tokio", None)]),
+    ],
+)
+def test_example_parser_follows_the_parsing_rules(argv, expected):
+    result = CargoLanguage().parse_process_install(argv)
+    assert result is not None
+    assert [(p.name, p.version) for p in result.packages] == expected
+
+
+def test_example_parser_reports_the_directory_it_acts_on():
+    lang = CargoLanguage()
+    moved = lang.parse_process_install(["cargo", "-C", "sub", "add", "serde"])
+    assert moved is not None and moved.working_dir == "sub"
+    manifest = lang.parse_process_install(
+        ["cargo", "add", "--manifest-path", "crates/a/Cargo.toml", "serde"]
+    )
+    assert manifest is not None and manifest.project_dir == "crates/a"
+
+
+def test_example_parser_leaves_non_install_commands_unrecognised():
+    assert CargoLanguage().parse_process_install(["cargo", "build"]) is None
+
+
+def test_example_cargo_install_is_a_global_install():
+    """Rule 5: `cargo install` installs outside any project."""
+    lang = CargoLanguage()
+    install = lang.parse_process_install(["cargo", "install", "ripgrep"])
+    assert install is not None
+    assert install.global_install is True
+    assert install.defer_to_lockfile is False
+    add = lang.parse_process_install(["cargo", "add", "serde"])
+    assert add is not None
+    assert add.global_install is False

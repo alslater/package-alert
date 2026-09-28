@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1089,3 +1090,209 @@ async def test_scan_processes_pid_reuse_across_polls_is_tracked_separately(tmp_p
         f"expected the genuinely different install to be detected despite "
         f"reusing the same pid number, got {[e.package_name for e in second_events]}"
     )
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "project"),
+    [
+        (["uv", "--directory", "backend", "sync"], "backend"),
+        (["uv", "sync", "--project", "backend"], "backend"),
+        (["uv", "-q", "sync"], "."),  # a leading global option alone
+    ],
+)
+async def test_deferred_install_scans_the_invocations_project_lockfile(
+    tmp_path, cmdline, project
+):
+    """The deferred lock-file scan must read the lock file of the project the
+    command actually targets. uv's `--directory`/`--project` move it away
+    from the process cwd; scanning cwd reported the decoy instead."""
+    lock = 'version = 1\n[[package]]\nname = "{}"\nversion = "1.0"\n'
+    (tmp_path / "uv.lock").write_text(lock.format("decoy"))
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "uv.lock").write_text(lock.format("evilpkg"))
+    expected = "decoy" if project == "." else "evilpkg"
+
+    polls = iter([True])
+
+    def fake_process_iter(attrs=None):
+        if next(polls, False) is False:
+            return []
+        proc = MagicMock()
+        proc.info = {
+            "pid": 5151, "ppid": 1, "cmdline": cmdline,
+            "cwd": str(tmp_path), "create_time": 100.0,
+        }
+        return [proc]
+
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", fake_process_iter):
+        await monitor._scan_processes()
+        await monitor._scan_processes()  # the process has exited
+
+    events = monitor.drain()
+    assert [e.package_name for e in events] == [expected]
+    assert events[0].project_path == (tmp_path / project if project != "." else tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "lockfile", "body"),
+    [
+        (
+            ["npm", "--prefix", "sub", "ci"],
+            "package-lock.json",
+            (
+                '{{"name":"p","lockfileVersion":3,"packages":{{"":{{"name":"p"}},'
+                '"node_modules/{}":{{"version":"1.0.0"}}}}}}'
+            ),
+        ),
+        (
+            ["composer", "-d", "sub", "install"],
+            "composer.lock",
+            '{{"packages":[{{"name":"vendor/{}","version":"1.0.0"}}],"packages-dev":[]}}',
+        ),
+    ],
+)
+async def test_deferred_install_follows_the_managers_directory_option(
+    tmp_path, cmdline, lockfile, body
+):
+    """The monitor's deferred lock-file scan must follow npm's `--prefix` /
+    composer's `-d` just as it follows uv's `--directory` — which needs each
+    language plugin to pass the parser's working_dir through."""
+    (tmp_path / lockfile).write_text(body.format("decoy"))
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / lockfile).write_text(body.format("evilpkg"))
+
+    polls = iter([True])
+
+    def fake_process_iter(attrs=None):
+        if next(polls, False) is False:
+            return []
+        proc = MagicMock()
+        proc.info = {
+            "pid": 6161, "ppid": 1, "cmdline": cmdline,
+            "cwd": str(tmp_path), "create_time": 100.0,
+        }
+        return [proc]
+
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", fake_process_iter):
+        await monitor._scan_processes()
+        await monitor._scan_processes()
+
+    events = monitor.drain()
+    assert [e.package_name.split("/")[-1] for e in events] == ["evilpkg"]
+    assert events[0].project_path == tmp_path / "sub"
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "expected"),
+    [
+        (["uv", "--directory", "backend", "pip", "install", "evilpkg"], "backend"),
+        (["npm", "--prefix", "backend", "install", "-g", "evilpkg"], "backend"),
+        (["uv", "pip", "install", "evilpkg"], "."),
+    ],
+)
+async def test_immediate_event_is_attributed_to_the_moved_project(tmp_path, cmdline, expected):
+    """An immediate (non-deferred) event must name the project the command
+    acts on: the daemon resolves the installed package's source under
+    project_path, so the process cwd sent heuristics to the wrong
+    environment."""
+    (tmp_path / "backend").mkdir()
+
+    def fake_process_iter(attrs=None):
+        proc = MagicMock()
+        proc.info = {
+            "pid": 7171, "ppid": 1, "cmdline": cmdline,
+            "cwd": str(tmp_path), "create_time": 100.0,
+        }
+        return [proc]
+
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", fake_process_iter):
+        await monitor._scan_processes()
+
+    events = monitor.drain()
+    assert [e.package_name for e in events] == ["evilpkg"]
+    assert events[0].project_path == (tmp_path / expected if expected != "." else tmp_path)
+
+
+async def test_deferred_pnpm_scan_reads_the_lockfile_dir(tmp_path):
+    """pnpm's `--lockfile-dir` moves the lock file alone: the deferred scan
+    must read it there, while the event stays attributed to the project."""
+    body = (
+        "lockfileVersion: '6.0'\n\npackages:\n\n"
+        "  /{}@1.0.0:\n    resolution: {{integrity: sha512-x}}\n"
+    )
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "pnpm-lock.yaml").write_text(body.format("decoy"))
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "pnpm-lock.yaml").write_text(body.format("evilpkg"))
+    polls = iter([True])
+
+    def fake_process_iter(attrs=None):
+        if next(polls, False) is False:
+            return []
+        proc = MagicMock()
+        proc.info = {
+            "pid": 8181, "ppid": 1,
+            "cmdline": ["pnpm", "-C", "sub", "install", "--lockfile-dir", "locks"],
+            "cwd": str(tmp_path), "create_time": 100.0,
+        }
+        return [proc]
+
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", fake_process_iter):
+        await monitor._scan_processes()
+        await monitor._scan_processes()
+
+    events = monitor.drain()
+    assert [e.package_name for e in events] == ["evilpkg"]
+    assert events[0].project_path == tmp_path / "sub"
+
+
+async def test_unresolvable_directory_option_skips_only_that_process(tmp_path, monkeypatch):
+    """A process whose directory option cannot be resolved is skipped — the
+    poll must neither crash nor stop reporting the processes after it."""
+    real = Path.resolve
+
+    def fake(self, strict=False):
+        if "loopdir" in str(self):
+            raise RuntimeError(f"Symlink loop from {self}")
+        return real(self, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", fake)
+
+    def proc(pid, cmdline):
+        p = MagicMock()
+        p.info = {"pid": pid, "ppid": 1, "cmdline": cmdline, "cwd": str(tmp_path), "create_time": 100.0}
+        return p
+
+    procs = [
+        proc(9001, ["uv", "--directory", "loopdir", "pip", "install", "decoy"]),
+        proc(9002, ["uv", "pip", "install", "evilpkg"]),
+    ]
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", lambda attrs=None: procs):
+        await monitor._scan_processes()
+
+    assert [e.package_name for e in monitor.drain()] == ["evilpkg"]
+
+
+async def test_real_symlink_loop_skips_only_that_process(tmp_path):
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+
+    def proc(pid, cmdline):
+        p = MagicMock()
+        p.info = {"pid": pid, "ppid": 1, "cmdline": cmdline, "cwd": str(tmp_path), "create_time": 100.0}
+        return p
+
+    procs = [
+        proc(9101, ["uv", "--directory", "a", "pip", "install", "decoy"]),
+        proc(9102, ["uv", "pip", "install", "evilpkg"]),
+    ]
+    monitor = _make_monitor()
+    with patch("psutil.process_iter", lambda attrs=None: procs):
+        await monitor._scan_processes()
+
+    assert [e.package_name for e in monitor.drain()] == ["evilpkg"]

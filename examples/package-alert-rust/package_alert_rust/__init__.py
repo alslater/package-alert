@@ -48,6 +48,77 @@ def _parse_cargo_lock(path: Path) -> list[PackageSpec]:
     return result
 
 
+# Options that consume the next argument (`<VALUE>` in `cargo <cmd> --help`).
+# cargo's global options may appear before the subcommand or after it.
+# Audited against: cargo 1.97.1 `cargo --help` / `cargo add --help` /
+# `cargo install --help`, plus the hidden `--vers` alias from cargo's source
+# (src/bin/cargo/commands/install.rs) — help output does not list aliases.
+_CARGO_GLOBAL_VALUE_FLAGS = frozenset({"--explain", "--color", "-C", "--config", "-Z"})
+_CARGO_ADD_VALUE_FLAGS = _CARGO_GLOBAL_VALUE_FLAGS | frozenset({
+    "-F", "--features", "--rename", "-m", "--manifest-path", "--path", "--base",
+    "--git", "--branch", "--tag", "--rev", "--registry", "--target",
+})
+_CARGO_INSTALL_VALUE_FLAGS = _CARGO_GLOBAL_VALUE_FLAGS | frozenset({
+    "--version", "--vers", "--index", "--registry", "--git", "--branch", "--tag",
+    "--rev", "--path", "--root", "--message-format", "-F", "--features", "-j",
+    "--jobs", "--profile", "--target-dir",
+})
+# OPTIONAL values (`[<VALUE>]`): clap consumes the next argument for these
+# only when it does not start with `-`.
+_CARGO_ADD_OPTIONAL_VALUE_FLAGS = frozenset({"-p", "--package"})
+_CARGO_INSTALL_OPTIONAL_VALUE_FLAGS = frozenset({"--bin", "--example", "--target"})
+
+
+def _consumes(flag: str, nxt: str | None, value_flags: frozenset[str], optional: frozenset[str]) -> bool:
+    if flag in value_flags:
+        return True
+    return flag in optional and nxt is not None and not nxt.startswith("-")
+
+
+def _skip_options(args: list[str], value_flags: frozenset[str], optional: frozenset[str]) -> int:
+    """Index of the first argument that is neither an option nor its value."""
+    i = 0
+    while i < len(args) and args[i].startswith("-") and args[i] != "--":
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        i += 2 if _consumes(args[i], nxt, value_flags, optional) else 1
+    return i
+
+
+def _positionals(args: list[str], value_flags: frozenset[str], optional: frozenset[str]) -> list[str]:
+    """Positional arguments, skipping options and the values they consume."""
+    result: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            result.extend(args[i + 1:])
+            break
+        if arg.startswith("-"):
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            i += 2 if _consumes(arg, nxt, value_flags, optional) else 1
+            continue
+        result.append(arg)
+        i += 1
+    return result
+
+
+def _option_value(args: list[str], names: frozenset[str]) -> str | None:
+    """The value of the last of `names` (`--opt X`, `--opt=X` or `-CX`)."""
+    value: str | None = None
+    for i, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg in names and i + 1 < len(args):
+            value = args[i + 1]
+            continue
+        for name in names:
+            if name.startswith("--") and arg.startswith(name + "="):
+                value = arg[len(name) + 1:]
+            elif len(name) == 2 and arg.startswith(name) and len(arg) > 2:
+                value = arg[2:]
+    return value
+
+
 class CargoLanguage:
     """package-alert language plugin for Rust / Cargo / crates.io."""
 
@@ -82,37 +153,90 @@ class CargoLanguage:
         return f"{name}@{version}" if version else name
 
     def parse_process_install(self, args: list[str]) -> ProcessInstall | None:
-        """Detect `cargo add <crate>` and `cargo install <crate>` invocations."""
+        """Detect `cargo add <crate>` and `cargo install <crate>` invocations.
+
+        Applies the rules in LANGUAGES.md, "Parsing process arguments"; the two
+        most important:
+
+        1. Find the subcommand behind any options that precede it. Returning
+           None means "not an install" — the sandbox runner then executes the
+           command directly with no sandbox and no pre-flight — so
+           `cargo -q install x` must not be misread just because `-q` came first.
+        2. Never read an option's VALUE as a package: `cargo add serde
+           --features derive` adds `serde`, not a crate called `derive`.
+        """
         if not args:
             return None
         exe = args[0].rsplit("/", 1)[-1]
         if exe != "cargo":
             return None
-        if len(args) < 2:
+        rest = args[1:]
+        # rustup's toolchain selector (`cargo +nightly install x`) is consumed
+        # by the rustup proxy before cargo sees its arguments.
+        if rest and rest[0].startswith("+"):
+            rest = rest[1:]
+        i = _skip_options(rest, _CARGO_GLOBAL_VALUE_FLAGS, frozenset())
+        if i >= len(rest):
             return None
-        subcmd = args[1]
+        subcmd, tail = rest[i], rest[i + 1:]
+        # `-C <dir>` changes the directory cargo runs in; `--manifest-path`
+        # names the Cargo.toml to act on. Report both so package-alert scans
+        # the right project (see ProcessInstall.working_dir / project_dir).
+        working_dir = _option_value(rest, frozenset({"-C"}))
+        manifest = _option_value(tail, frozenset({"-m", "--manifest-path"}))
+        project_dir = str(Path(manifest).parent) if manifest else None
 
         if subcmd == "add":
-            # cargo add serde serde_json  (skip flags)
+            # cargo add serde serde_json
+            # Positionals are specs, not bare names (`serde@1.0.38`): split
+            # each one, or the name keeps its `@version` and is not a valid
+            # crate name at all.
             packages = [
-                PackageSpec(name=a, version=None, ecosystem="crates.io")
-                for a in args[2:]
-                if not a.startswith("-")
+                PackageSpec(name=name, version=version, ecosystem="crates.io")
+                for name, version in (
+                    self.parse_package_spec(a)
+                    for a in _positionals(tail, _CARGO_ADD_VALUE_FLAGS, _CARGO_ADD_OPTIONAL_VALUE_FLAGS)
+                )
             ]
             return ProcessInstall(
                 manager="cargo",
                 packages=packages,
                 defer_to_lockfile=True,
+                working_dir=working_dir,
+                project_dir=project_dir,
             )
 
         if subcmd == "install":
-            # cargo install ripgrep  (name only — no lockfile)
-            packages = [
-                PackageSpec(name=a, version=None, ecosystem="crates.io")
-                for a in args[2:]
-                if not a.startswith("-")
+            # cargo install ripgrep  /  cargo install --version 14.1.0 ripgrep
+            specs = [
+                self.parse_package_spec(a)
+                for a in _positionals(tail, _CARGO_INSTALL_VALUE_FLAGS, _CARGO_INSTALL_OPTIONAL_VALUE_FLAGS)
             ]
-            return ProcessInstall(manager="cargo", packages=packages)
+            # `--version` applies only when exactly one crate is named; a spec's
+            # own `@version` takes precedence over it.
+            # A requirement (`--version '^14.0'`) pins nothing: run it through
+            # the same exact-version check as a positional `crate@version`.
+            raw_flag_version = _option_value(tail, frozenset({"--version", "--vers"}))
+            flag_version = (
+                self.parse_package_spec(f"_@{raw_flag_version}")[1] if raw_flag_version else None
+            )
+            packages = [
+                PackageSpec(
+                    name=name,
+                    version=version or (flag_version if len(specs) == 1 else None),
+                    ecosystem="crates.io",
+                )
+                for name, version in specs
+            ]
+            # `cargo install` puts binaries in ~/.cargo/bin (or `--root`), not in
+            # a project: a global install (rule 5) — checked in pre-flight but
+            # not sandboxed, and with no project lock file to read back.
+            return ProcessInstall(
+                manager="cargo",
+                packages=packages,
+                global_install=True,
+                working_dir=working_dir,
+            )
 
         return None
 

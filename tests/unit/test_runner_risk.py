@@ -3029,3 +3029,304 @@ async def test_open_gate_resources_does_not_build_httpx_client_when_preflight_di
     assert res.pop_client is None
     assert res.engine is None
     assert res.detector is not None
+
+
+def _uv_ctx(argv, cwd):
+    """Parse through the real plugin path the sandbox uses (`_try_parse`), so
+    plugin-added fields such as the uv.lock hint are exercised too."""
+    from packagealert.languages import registry as lang_registry
+    from packagealert.sandbox.runner import _try_parse
+
+    lang_registry.load()
+    parsed = _try_parse(argv)
+    assert parsed is not None, f"{argv} must be recognised as a uv command"
+    return _Context(argv=argv, parsed=parsed, cwd=cwd)
+
+
+def _names(queries):
+    return sorted(name for _eco, name, _ver in queries)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "-q", "add", "evilpkg"],
+        ["uv", "--color", "never", "add", "evilpkg"],
+        ["uv", "--cache-dir=/tmp/c", "add", "evilpkg"],
+    ],
+)
+def test_uv_leading_global_option_is_still_gated(tmp_path, argv):
+    """A uv global option before the subcommand made the command unparseable,
+    and an unparseable command is exec'd directly — no sandbox, no pre-flight.
+    """
+    queries, blocked, _ = _runner()._resolve_query_packages(_uv_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "--directory", "sub", "pip", "sync", "requirements.txt"],
+        ["uv", "pip", "sync", "--directory", "sub", "requirements.txt"],
+        ["uv", "pip", "sync", "--directory=sub", "requirements.txt"],
+    ],
+)
+def test_uv_directory_requirements_resolved_against_moved_dir(tmp_path, argv):
+    """`--directory` is a chdir: uv reads sub/requirements.txt, so pre-flight
+    must too — not the decoy of the same name in cwd."""
+    (tmp_path / "requirements.txt").write_text("decoy==1.0\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "requirements.txt").write_text("evilpkg==1.0\n")
+
+    queries, blocked, _ = _runner()._resolve_query_packages(_uv_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "--directory", "backend", "sync"],
+        ["uv", "--project", "backend", "sync"],
+        ["uv", "sync", "--project", "backend"],
+        # --project resolves relative to --directory
+        ["uv", "--directory", "backend", "--project", ".", "sync"],
+    ],
+)
+def test_uv_moved_project_lockfile_is_the_one_scanned(tmp_path, argv):
+    lock = '[[package]]\nname = "{}"\nversion = "1.0"\n'
+    (tmp_path / "uv.lock").write_text(lock.format("decoy"))
+    (tmp_path / "backend").mkdir()
+    (tmp_path / "backend" / "uv.lock").write_text(lock.format("evilpkg"))
+
+    queries, blocked, _ = _runner()._resolve_query_packages(_uv_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+def test_uv_pip_ignores_project_for_requirement_files(tmp_path):
+    """`--project` has no effect under `uv pip`: relative requirement files
+    still resolve against the working directory."""
+    (tmp_path / "requirements.txt").write_text("evilpkg==1.0\n")
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "requirements.txt").write_text("decoy==1.0\n")
+
+    ctx = _uv_ctx(["uv", "--project", "other", "pip", "sync", "requirements.txt"], tmp_path)
+    queries, _blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert _names(queries) == ["evilpkg"]
+
+
+def _any_ctx(argv, cwd):
+    from packagealert.languages import registry as lang_registry
+    from packagealert.sandbox.runner import _try_parse
+
+    lang_registry.load()
+    parsed = _try_parse(argv)
+    assert parsed is not None, f"{argv} must be recognised as an install"
+    return _Context(argv=argv, parsed=parsed, cwd=cwd)
+
+
+def _lock(name: str, pkg: str) -> str:
+    import json
+
+    return {
+        "package-lock.json": json.dumps({
+            "name": "p", "lockfileVersion": 3,
+            "packages": {"": {"name": "p"}, f"node_modules/{pkg}": {"version": "1.0.0"}},
+        }),
+        "yarn.lock": f'# yarn lockfile v1\n\n"{pkg}@^1.0.0":\n  version "1.0.0"\n',
+        "pnpm-lock.yaml": (
+            "lockfileVersion: '6.0'\n\npackages:\n\n"
+            f"  /{pkg}@1.0.0:\n    resolution: {{integrity: sha512-x}}\n"
+        ),
+        "composer.lock": json.dumps(
+            {"packages": [{"name": f"vendor/{pkg}", "version": "1.0.0"}], "packages-dev": []}
+        ),
+        "Pipfile.lock": json.dumps(
+            {"_meta": {}, "default": {pkg: {"version": "==1.0.0"}}, "develop": {}}
+        ),
+    }[name]
+
+
+@pytest.mark.parametrize(
+    ("argv", "lockfile"),
+    [
+        (["npm", "--prefix", "sub", "ci"], "package-lock.json"),
+        (["npm", "ci", "-C", "sub"], "package-lock.json"),
+        (["yarn", "--cwd", "sub"], "yarn.lock"),
+        (["yarn", "--cwd", "sub", "install"], "yarn.lock"),
+        (["pnpm", "-C", "sub", "install"], "pnpm-lock.yaml"),
+        (["pnpm", "install", "--dir", "sub"], "pnpm-lock.yaml"),
+        (["composer", "-d", "sub", "install"], "composer.lock"),
+        (["composer", "--working-dir=sub", "install"], "composer.lock"),
+    ],
+)
+def test_moved_directory_lockfile_is_the_one_scanned(tmp_path, argv, lockfile):
+    """Each manager's directory option moves the lock file it installs from;
+    pre-flight must scan THAT one, not the cwd's decoy."""
+    (tmp_path / lockfile).write_text(_lock(lockfile, "decoy"))
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / lockfile).write_text(_lock(lockfile, "evilpkg"))
+
+    queries, blocked, _ = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
+    assert blocked is None
+    assert [n.split("/")[-1] for n in _names(queries)] == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["npm", "--silent", "install", "evilpkg"],
+        ["npm", "--loglevel", "warn", "install", "evilpkg"],
+        # a unique abbreviation of a value-taking option (--prefi = --prefix)
+        ["npm", "--prefi", "sub", "install", "evilpkg"],
+        ["yarn", "--silent", "add", "evilpkg"],
+        ["yarn", "--registry", "https://r.example", "add", "evilpkg"],
+        ["pnpm", "--silent", "add", "evilpkg"],
+        ["pnpm", "--filter", "web", "add", "evilpkg"],
+        ["composer", "--no-interaction", "require", "vendor/evilpkg"],
+        ["pipenv", "--python", "3.12", "install", "evilpkg"],
+    ],
+)
+def test_leading_global_option_is_still_gated(tmp_path, argv):
+    """A leading global option made the command unparseable, and an
+    unparseable command is exec'd directly with no sandbox and no pre-flight."""
+    queries, blocked, _ = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
+    assert blocked is None
+    assert [n.split("/")[-1] for n in _names(queries)] == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "lockfile"),
+    [
+        (["pipenv", "install", "--python", "3.12"], "Pipfile.lock"),
+        (["npm", "install", "--loglevel", "warn"], "package-lock.json"),
+    ],
+)
+def test_option_value_is_not_mistaken_for_a_package(tmp_path, argv, lockfile):
+    """An option's value was counted as a package, which also switched off the
+    lock-file scan — so the lock file's contents were never checked."""
+    (tmp_path / lockfile).write_text(_lock(lockfile, "evilpkg"))
+    queries, blocked, _ = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+def test_pipenv_requirements_file_is_scanned(tmp_path):
+    """`-r FILE` is scanned as a requirements file. The name is deliberately
+    one the project-wide scan does not pick up on its own (it matches
+    requirements*.txt), so this only passes via `-r` itself."""
+    (tmp_path / "deps").mkdir()
+    (tmp_path / "deps" / "base.in").write_text("evilpkg==1.0\n")
+    ctx = _any_ctx(["pipenv", "install", "-r", "deps/base.in"], tmp_path)
+    queries, _blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "pip", "-q", "install", "evilpkg"],
+        ["uv", "tool", "--color", "never", "install", "evilpkg"],
+        ["uv", "pip", "--color", "never", "sync", "requirements.txt"],
+    ],
+)
+def test_uv_nested_command_after_global_option_is_gated(tmp_path, argv):
+    (tmp_path / "requirements.txt").write_text("evilpkg==1.0\n")
+    queries, blocked, _ = _runner()._resolve_query_packages(_uv_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["yarn", "global", "add", "evilpkg"],
+        ["yarn", "--silent", "global", "add", "evilpkg"],
+        ["pnpm", "add", "-g", "evilpkg"],
+        # the global flag may also precede the subcommand
+        ["pnpm", "-g", "add", "evilpkg"],
+        ["pnpm", "--global", "add", "evilpkg"],
+        ["composer", "global", "require", "vendor/evilpkg"],
+        ["composer", "-n", "global", "require", "vendor/evilpkg"],
+    ],
+)
+def test_global_install_subcommands_are_gated(tmp_path, argv):
+    """`yarn global add` / `composer global require` parsed to None — exec'd
+    with no pre-flight at all. They are global installs, like `npm -g`: the
+    named packages are checked, and no project lock file is scanned."""
+    (tmp_path / "yarn.lock").write_text('"decoy@^1.0.0":\n  version "1.0.0"\n')
+    ctx = _any_ctx(argv, tmp_path)
+    assert ctx.parsed is not None and ctx.parsed.global_install
+    queries, blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert blocked is None
+    assert [n.split("/")[-1] for n in _names(queries)] == ["evilpkg"]
+
+
+def test_composer_global_does_not_scan_the_cwd_lockfile():
+    """COMPOSER_HOME's lock file is not the cwd's: neither pre-flight nor the
+    process monitor's deferred scan may read the cwd's composer.lock."""
+    from packagealert.languages.php import PhpLanguage
+
+    pi = PhpLanguage().parse_process_install(["composer", "global", "update"])
+    assert pi is not None
+    assert pi.global_install is True
+    assert pi.is_lockfile_install is False
+    assert pi.defer_to_lockfile is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pnpm", "--lockfile-dir", "locks", "install"],
+        ["pnpm", "install", "--lockfile-dir=locks"],
+        # relative to the PROCESS cwd, not to -C (measured against pnpm 7)
+        ["pnpm", "-C", "sub", "install", "--lockfile-dir", "locks"],
+    ],
+)
+def test_pnpm_lockfile_dir_is_the_lockfile_scanned(tmp_path, argv):
+    """`--lockfile-dir` moves pnpm-lock.yaml apart from the project; scanning
+    the project's (or cwd's) instead left the real dependency set unchecked."""
+    for decoy in (tmp_path, tmp_path / "sub", tmp_path / "sub" / "locks"):
+        decoy.mkdir(parents=True, exist_ok=True)
+        (decoy / "pnpm-lock.yaml").write_text(_lock("pnpm-lock.yaml", "decoy"))
+    (tmp_path / "locks").mkdir()
+    (tmp_path / "locks" / "pnpm-lock.yaml").write_text(_lock("pnpm-lock.yaml", "evilpkg"))
+
+    ctx = _any_ctx(argv, tmp_path)
+    queries, blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+def test_uv_pip_install_requirements_plural_is_scanned(tmp_path):
+    """uv spells it `--requirements`; the file was read as a package name and
+    never scanned."""
+    (tmp_path / "deps.in").write_text("evilpkg==1.0\n")
+    ctx = _uv_ctx(["uv", "pip", "install", "--requirements", "deps.in"], tmp_path)
+    queries, blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "filename"),
+    [
+        (["uv", "add", "--requirement", "deps.in"], "deps.in"),
+        (["pipenv", "install", "--requirem", "deps.in"], "deps.in"),
+    ],
+)
+def test_requirement_spellings_are_scanned(tmp_path, argv, filename):
+    (tmp_path / filename).write_text("evilpkg==1.0\n")
+    queries, blocked, _ = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+def test_abbreviated_pipenv_option_value_does_not_switch_off_the_lockfile_scan(tmp_path):
+    (tmp_path / "Pipfile.lock").write_text(_lock("Pipfile.lock", "evilpkg"))
+    ctx = _any_ctx(["pipenv", "install", "--pyth", "3.12"], tmp_path)
+    queries, blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]

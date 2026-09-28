@@ -85,12 +85,20 @@ class PhpLanguage:
         return ProcessInstall(
             manager="composer",
             packages=specs,
-            defer_to_lockfile=True,
+            # A global command's lock file is COMPOSER_HOME's, not the cwd's,
+            # so reading the cwd's back afterwards would report the wrong
+            # project (matches the Node plugin's handling of `npm -g`).
+            defer_to_lockfile=not parsed.global_install,
+            global_install=parsed.global_install,
             # composer has no removal subcommand of its own that parse_composer_args
             # recognises (it returns None for anything but require/install/update/
             # upgrade), so this only needs to reflect what that parser already set.
             is_lockfile_install=parsed.is_lockfile_install,
             should_gate=parsed.should_gate,
+            # `composer -d`/`--working-dir`: the directory whose composer.json
+            # and composer.lock the command actually uses.
+            working_dir=parsed.working_dir,
+            project_dir=parsed.project_dir,
         )
 
     def parse_lockfile(self, path: Path) -> list[PackageSpec]:
