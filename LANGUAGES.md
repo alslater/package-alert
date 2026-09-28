@@ -59,9 +59,24 @@ class PackageMetadata:
 @dataclass
 class ProcessInstall:
     manager: str                  # canonical name used for lockfile lookup
-    packages: list[PackageSpec]   # empty when defer_to_lockfile is True
-    defer_to_lockfile: bool = False
+    packages: list[PackageSpec]   # packages named on the command line
+    defer_to_lockfile: bool = False   # monitor re-reads the lock file after the process exits
     venv_exe: str | None = None   # absolute path to interpreter, for site-packages discovery
+    lockfile_hint: str | None = None  # preferred lock file basename (e.g. "Cargo.lock")
+    req_files: list[str] = field(default_factory=list)  # requirement files to scan (-r FILE)
+    global_install: bool = False  # installs outside any project (npm -g): pre-flight only, not sandboxed
+    suggested_env: dict[str, str] = field(default_factory=dict)
+    extra_write_home_dirs: list[Path] = field(default_factory=list)
+    target_env_name: str | None = None  # env receiving the packages, when not packages[0]
+    is_lockfile_install: bool = False   # installs the EXISTING lock file in full (npm ci)
+    should_gate: bool = True            # False for report-only runs (--dry-run)
+    is_system_python_target: bool = False
+    # Where the command acts, when its own options move it: each exactly as
+    # given (unresolved), None when not moved. The BASE differs per field —
+    # resolve them as the tool does (see "Parsing process arguments" below):
+    working_dir: str | None = None   # chdir-style (uv --directory, npm --prefix, cargo -C); relative to the process cwd
+    project_dir: str | None = None   # project discovery only (uv --project); relative to the effective working dir
+    lockfile_dir: str | None = None  # lock file alone (pnpm --lockfile-dir); relative to the process cwd
 
 @dataclass
 class SandboxPaths:
@@ -112,6 +127,11 @@ class LanguageBase(Protocol):
 
         Set venv_exe to the absolute interpreter path when the invocation is
         inside a venv so the monitor can derive the correct site-packages dir.
+
+        Returning None means "not an install": the sandbox runner then executes
+        the command DIRECTLY — no sandbox, no pre-flight. Read "Parsing process
+        arguments" below before implementing this; the rules there are
+        security requirements, not style.
         """
 
     # ── Lock file parsing ──────────────────────────────────────────────────
@@ -166,8 +186,9 @@ class LanguageBase(Protocol):
         another. Every directory in the returned list must therefore actually
         belong to *this* distribution and no other's.
 
-        *project_path* is the cwd of the install process (the project root for
-        npm/composer installs, or None if unknown). *site_packages_dir* is the
+        *project_path* is the project the install acted on — the install
+        process's cwd, or the directory its own options moved it to (see
+        ProcessInstall.working_dir/project_dir) — or None if unknown. *site_packages_dir* is the
         active venv's site-packages directory (set for PyPI events when detectable,
         None otherwise).
 
@@ -357,7 +378,9 @@ class LanguageBase(Protocol):
         (not ``ProcessInstall``). Useful fields: ``manager`` (str), ``ecosystem``
         (str), ``packages`` (list[str]), ``venv_exe`` (str | None),
         ``req_files`` (list[str]), ``lockfile_hint`` (str | None),
-        ``global_install`` (bool).
+        ``global_install`` (bool), ``working_dir``/``project_dir``/
+        ``lockfile_dir`` (str | None — already applied to the *cwd* argument
+        this hook receives; see "Which directory each hook receives").
 
         Return a list of paths ordered from outermost to innermost:
         - The first path is the **rollback root** — removed entirely on rollback.
@@ -569,6 +592,62 @@ class LanguageBase(Protocol):
         """Diff two snapshots and return packages that appeared in after but not before."""
 ```
 
+#### Parsing process arguments
+
+`parse_process_install()` decides whether a command is gated at all, so its
+mistakes are security holes rather than cosmetic ones. Each rule below was a
+real bypass in a built-in parser:
+
+1. **Find the subcommand behind any options that precede it.** Every package
+   manager accepts global options before the subcommand (`cargo -q install x`,
+   `npm --silent install x`, `uv --directory backend sync`). A parser that reads
+   `args[1]` as the subcommand returns None for these — and None means the
+   command runs with no sandbox and no pre-flight. Skip leading options using
+   the tool's own list of options that take a value, and apply the same rule
+   between nested command levels if the tool has them (`uv pip -q install`).
+2. **Never read an option's value as a package.** `[a for a in args if not
+   a.startswith("-")]` turns `cargo add serde --features derive` into a crate
+   called `derive`, and — worse — a non-empty package list can switch off the
+   lock-file scan, so the real lock file is never checked. Collect positionals
+   with the same value-flag list.
+3. **Build the value-flag list from the tool itself, not from memory**: its
+   `--help`, and its source for aliases that help does not show (cargo's
+   `--vers`, uv's `--constraint`). Options with an *optional* value
+   (`[<VALUE>]` in clap/commander help) usually consume the next argument when
+   it does not start with `-`. Many parsers also accept any UNIQUE PREFIX of
+   a long option (Python's argparse and optparse by default, npm): expand
+   those against the full list of long options — Boolean ones included —
+   before consulting your value-flag list, or `--pyth 3.12` reads `3.12` as a
+   package. Record the tool version you audited against.
+4. **Report where the command acts** when its options move it: `working_dir`
+   for a chdir-style option, `project_dir` for one that only moves project
+   discovery, `lockfile_dir` for one that moves the lock file alone. Relative
+   paths are resolved exactly as the tool resolves them — measure it; pnpm
+   resolves `--lockfile-dir` against the process cwd even under `-C`.
+5. **Mark global installs** (`global_install=True`, and `defer_to_lockfile`
+   False): their lock file is not the current project's.
+
+See the example plugin's `parse_process_install()` for all five applied to
+cargo.
+
+#### Which directory each hook receives
+
+Several hooks take a `cwd: Path` argument. When the command's own options
+move it (rule 4 above), the runner passes the directory that hook needs rather
+than the literal process cwd:
+
+| Hook | Receives |
+|------|----------|
+| `prepare_sandbox_argv` | the effective **working** directory — relative argv paths (`-e ./pkg`) resolve against it, as the tool resolves them |
+| `resolve_sandbox_targets`, `prepare_sandbox_env`, `post_run_scan_targets` | the **project** directory — where the command's environment lives |
+| `sandbox_extra_ro_paths`, `sandbox_extra_write_paths`, `pre_run_check`, `configure_sandbox*` | the real process **cwd** — they reason about the sandbox's writable bind, which is always the cwd |
+
+Moving the directory never widens what is writable: a path under a moved
+project that lies outside the cwd stays read-only, so such an install fails
+closed. The runner enforces this on canonical paths — `..` and symlinks are
+resolved first — so a directory option such as `../elsewhere` or a symlinked
+directory cannot pass as "inside the cwd".
+
 #### `configure_sandbox_writable` (optional, contract v4)
 
 ```python
@@ -657,7 +736,9 @@ class RubyLanguage:
     contract_version = 5
 
     def parse_process_install(self, args: list[str]) -> ProcessInstall | None:
-        return None  # implement me
+        # Implement per "Parsing process arguments" — returning None for an
+        # install means it runs with no sandbox and no pre-flight.
+        return None
 
     def parse_lockfile(self, path: Path) -> list[PackageSpec]:
         return []
@@ -865,7 +946,7 @@ provided as a reference implementation and a starting point — not for producti
 |-----------|--------|
 | Entry-point wiring | ✅ loads correctly; visible in `package-alert languages list` |
 | `scan-project` | ✅ parses `Cargo.lock` and returns all crates with versions |
-| Process detection | ✅ recognises `cargo add` (defers to lockfile) and `cargo install` |
+| Process detection | ✅ recognises `cargo add` (defers to lockfile) and `cargo install` (a global install), behind leading options (`-q`, `--color`, `+toolchain`), without mistaking option values for crates; reports `-C` / `--manifest-path` |
 | `scan-cache` | ✅ walks `~/.cargo/registry/src` via `Cargo.toml` pattern |
 | Typosquatting baseline | ✅ fetches top-100 crates from crates.io API; has static fallback |
 | Snapshot diffing | ✅ diffs `Cargo.lock` before and after an install |
@@ -875,8 +956,9 @@ provided as a reference implementation and a starting point — not for producti
 - **`detect_installed_packages()`** returns nothing — needs to parse `~/.cargo/.crates.toml`
 - **`classify_cache_file()` can false-positive** on workspace members and path-dependency `Cargo.toml` files that are not registry crates
 - **No heuristics** — `build.rs` (Rust build scripts) are the primary supply-chain attack surface and are not yet flagged
-- **Version specifiers not parsed** — `cargo add serde@1.0` and `cargo install ripgrep --version 14.0` are silently dropped
-- **No tests**
+- **Version requirements are only approximated** — an exact `cargo install ripgrep@14.1.0` / `--version 14.1.0` is pinned and an operator form (`^14.0`, `~1.2`, a partial `1.0`) is treated as unpinned, but `cargo add serde@1.0.38` is pinned too, although `cargo add` reads a bare version as the caret requirement `^1.0.38` (only `serde@=1.0.38` is exact there); and the exact-version check matches a prefix, so a compound requirement such as `1.2.3,<2` is taken as exact
+- **Workspace lock files** — `cargo add` in a workspace member updates the workspace root's `Cargo.lock`, which is not discovered
+- Parser coverage lives in `tests/unit/test_example_rust_plugin.py`
 
 ### Install and test manually
 

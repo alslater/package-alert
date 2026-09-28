@@ -18,7 +18,12 @@ from packagealert.languages.registry import _normalise_process_name
 from packagealert.managers import manager_registry_name
 from packagealert.models.events import PackageEvent, normalise_ecosystem
 from packagealert.monitors.base import AbstractMonitor
-from packagealert.parsers.process_args import derive_site_packages
+from packagealert.parsers.process_args import (
+    InvalidInvocationDirectory,
+    derive_site_packages,
+    resolve_invocation_dirs,
+    resolve_lockfile_dir,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +49,14 @@ class _PendingInstall:
     cwd: Path
     site_pkgs: Path | None
     lockfile_hint: str | None = None
+    # The project the command acts on, and the directory its lock file lives
+    # in, when the invocation moves them away from cwd (uv's `--directory`/
+    # `--project`, npm's `--prefix`; pnpm's `--lockfile-dir` moves the lock
+    # file alone). None means cwd / the project respectively. Kept separate
+    # from `cwd`, which must stay the process's real cwd — the PID-reuse
+    # migration in _scan_processes() correlates on it.
+    project_dir: Path | None = None
+    lockfile_dir: Path | None = None
     # The same (pid, create_time) sampling _scan_processes() carries onto an
     # immediate PackageEvent (see its own comment on event_pid/create_time
     # there) — carried through here too so a DEFERRED, lockfile-driven event
@@ -58,6 +71,29 @@ class _PendingInstall:
     # lockfile scan, not just an edge case)
     pid: int | None = None
     pid_create_time: float | None = None
+
+
+def _moved_project_dir(cwd: Path, parsed: ProcessInstall) -> Path | None:
+    """The project directory `parsed` moved away from `cwd`, or None.
+
+    getattr defaults: a plugin predating working_dir/project_dir never moves
+    either.
+    """
+    _work, project = resolve_invocation_dirs(
+        cwd,
+        getattr(parsed, "working_dir", None),
+        getattr(parsed, "project_dir", None),
+    )
+    return project if project != cwd else None
+
+
+def _moved_lockfile_dir(cwd: Path, parsed: ProcessInstall, project: Path | None) -> Path | None:
+    """The lock-file directory, when the invocation moves it apart from the
+    project (pnpm's `--lockfile-dir`, relative to the process cwd), or None."""
+    lockfile_dir = getattr(parsed, "lockfile_dir", None)
+    if not lockfile_dir:
+        return None
+    return resolve_lockfile_dir(cwd, lockfile_dir, project or cwd)
 
 
 class ProcessMonitor(AbstractMonitor):
@@ -290,6 +326,27 @@ class ProcessMonitor(AbstractMonitor):
                 self._seen_processes.add(process_identity)
                 cwd_str = info.get("cwd")
                 project_path = Path(cwd_str) if cwd_str else None
+                # The project the command acts on, which uv's `--directory`/
+                # `--project`, npm's `--prefix` etc. can move off the process
+                # cwd. Events are attributed to it (the daemon resolves the
+                # installed package's source under it); the real cwd is kept
+                # only where it identifies the PROCESS — _PendingInstall.cwd,
+                # which the PID-reuse migration correlates on.
+                try:
+                    moved_project = (
+                        _moved_project_dir(project_path, parsed) if project_path else None
+                    )
+                    moved_lockfile = (
+                        _moved_lockfile_dir(project_path, parsed, moved_project or project_path)
+                        if project_path else None
+                    )
+                except InvalidInvocationDirectory as exc:
+                    # The command names a directory that cannot be resolved,
+                    # so it cannot install there either; skip it rather than
+                    # attribute it to the wrong project — or fail the poll.
+                    log.warning("Skipping %s pid=%d: %s", parsed.manager, pid, exc)
+                    continue
+                event_project_path = moved_project or project_path
                 site_pkgs = derive_site_packages(parsed.venv_exe) if parsed.venv_exe else None
                 if parsed.defer_to_lockfile:
                     if project_path:
@@ -299,6 +356,8 @@ class ProcessMonitor(AbstractMonitor):
                             cwd=project_path,
                             site_pkgs=site_pkgs,
                             lockfile_hint=parsed.lockfile_hint,
+                            project_dir=moved_project,
+                            lockfile_dir=moved_lockfile,
                             pid=event_pid,
                             pid_create_time=create_time,
                         )
@@ -329,7 +388,7 @@ class ProcessMonitor(AbstractMonitor):
                         version=spec.version,
                         source="process",
                         manager=parsed.manager,
-                        project_path=project_path,
+                        project_path=event_project_path,
                         timestamp=datetime.now(UTC),
                         site_packages_dir=site_pkgs,
                         pid=event_pid,
@@ -359,6 +418,8 @@ class ProcessMonitor(AbstractMonitor):
         self._seen_processes &= current_processes  # gc dead processes
 
     async def _emit_from_lockfile(self, pending: _PendingInstall) -> None:
+        project_dir = pending.project_dir or pending.cwd
+        lock_dir = pending.lockfile_dir or project_dir
         lang = lang_registry.for_process(pending.registry_name)
         if lang is None:
             log.debug("No language registered for registry_name='%s' (manager='%s'), skipping lockfile scan", pending.registry_name, pending.manager)
@@ -380,7 +441,7 @@ class ProcessMonitor(AbstractMonitor):
             if pattern in seen:
                 continue
             seen.add(pattern)
-            candidate = pending.cwd / pattern
+            candidate = lock_dir / pattern
             if candidate.exists():
                 try:
                     packages = lang.parse_lockfile(candidate)
@@ -394,9 +455,9 @@ class ProcessMonitor(AbstractMonitor):
                     break
 
         if not packages:
-            log.debug("No lock file found in %s after %s install", pending.cwd, pending.manager)
+            log.debug("No lock file found in %s after %s install", lock_dir, pending.manager)
             return
-        log.info("%s install finished in %s, scanning %d package(s) from lock file", pending.manager, pending.cwd, len(packages))
+        log.info("%s install finished in %s, scanning %d package(s) from lock file", pending.manager, project_dir, len(packages))
         for spec in packages:
             try:
                 eco = normalise_ecosystem(spec.ecosystem)
@@ -409,7 +470,7 @@ class ProcessMonitor(AbstractMonitor):
                 version=spec.version,
                 source="process",
                 manager=pending.manager,
-                project_path=pending.cwd,
+                project_path=project_dir,
                 timestamp=datetime.now(UTC),
                 site_packages_dir=pending.site_pkgs,
                 pid=pending.pid,

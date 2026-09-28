@@ -1,0 +1,16250 @@
+[
+[
+[
+"-h",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-h",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-h",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--help",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--help",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--help",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--h",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--h",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--h",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--he",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--he",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--he",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--hel",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--hel",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--hel",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--where",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--where",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--where",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--w",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--w",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--w",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--wh",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--wh",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--wh",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--whe",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--whe",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--whe",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--wher",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--wher",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--wher",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--venv",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--venv",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--venv",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--ven",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ven",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ven",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--py",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--py",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--py",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--envs",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--envs",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--envs",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--e",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--e",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--e",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--en",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--en",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--en",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--env",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--env",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--env",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--rm",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--rm",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--rm",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--r",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--r",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--r",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--bare",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--bare",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--bare",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--b",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--b",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--b",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--ba",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ba",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ba",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--bar",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--bar",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--bar",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--man",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--man",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--man",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--m",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--m",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--m",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--ma",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ma",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--ma",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--support",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--support",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--support",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--su",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--su",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--su",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--sup",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--sup",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--sup",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--supp",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--supp",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--supp",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--suppo",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--suppo",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--suppo",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--suppor",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--suppor",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--suppor",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirror",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirror",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirror",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pyp",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyp",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyp",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-m",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-m",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-m",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mi",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mi",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mi",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mir",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mir",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mir",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirr",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirr",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirr",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirro",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirro",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pypi-mirro",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--verbose",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbose",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbose",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"-v",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-v",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-v",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--verb",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verb",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verb",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--verbo",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbo",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbo",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--verbos",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbos",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--verbos",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--quiet",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--quiet",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--quiet",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"-q",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-q",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"-q",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--q",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--q",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--q",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--qu",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--qu",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--qu",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--qui",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--qui",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--qui",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--quie",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--quie",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--quie",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--clear",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--clear",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--clear",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--c",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--c",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--c",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--cl",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--cl",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--cl",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--cle",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--cle",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--cle",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--clea",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--clea",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--clea",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--python",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--python",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--python",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pyt",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyt",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyt",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pyth",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyth",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pyth",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--pytho",
+"VAL",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pytho",
+"VAL",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--pytho",
+"VAL",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-packages",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packages",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packages",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--si",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--si",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--si",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--sit",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--sit",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--sit",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-p",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-p",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-p",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-pa",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pa",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pa",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-pac",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pac",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pac",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-pack",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pack",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-pack",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-packa",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packa",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packa",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-packag",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packag",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-packag",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--site-package",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-package",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--site-package",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packages",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packages",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packages",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--n",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--n",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--n",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-s",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-s",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-s",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-si",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-si",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-si",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-sit",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-sit",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-sit",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-p",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-p",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-p",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pa",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pa",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pa",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pac",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pac",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pac",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pack",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pack",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-pack",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packa",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packa",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packa",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packag",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packag",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-packag",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"--no-site-package",
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-package",
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"--no-site-package",
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"second"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg",
+"second"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-h",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-h"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--help",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--help"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--h",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--h"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--he",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--he"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--hel",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--hel"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--system",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--system"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--sy",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--sy"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--sys",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--sys"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--syst",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--syst"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--syste",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--syste"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--deploy",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--deploy"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--dep",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--dep"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--depl",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--depl"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--deplo",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--deplo"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-packages",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-packages"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--si",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--si"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--sit",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--sit"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-p",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-p"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-pa",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-pa"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-pac",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-pac"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-pack",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-pack"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-packa",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-packa"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-packag",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-packag"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--site-package",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--site-package"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-packages",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-packages"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--n",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--n"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-s",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-s"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-si",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-si"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-sit",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-sit"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-p",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-p"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-pa",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-pa"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-pac",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-pac"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-pack",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-pack"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-packa",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-packa"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-packag",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-packag"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--no-site-package",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--no-site-package"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-mirror",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirror",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirror=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pyp",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyp",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyp=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-m",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-m",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-m=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-mi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mi",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mi=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-mir",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mir",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mir=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-mirr",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirr",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirr=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pypi-mirro",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirro",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pypi-mirro=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--verbose",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--verbose"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-v",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-v"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--v",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--v"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ve",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ve"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ver",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ver"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--verb",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--verb"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--verbo",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--verbo"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--verbos",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--verbos"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--quiet",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--quiet"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-q",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-q"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--q",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--q"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--qu",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--qu"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--qui",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--qui"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--quie",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--quie"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--clear",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--clear"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--cl",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cl"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--cle",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cle"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--clea",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--clea"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--python",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--python",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--python=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pyt",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyt",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyt=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pyth",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyth",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pyth=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pytho",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pytho",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pytho=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pre",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pre"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--pr",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--pr"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip-args",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-args",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-args=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-p",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-p",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-p=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pi",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pi=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip-a",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-a",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-a=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip-ar",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-ar",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-ar=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extra-pip-arg",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-arg",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extra-pip-arg=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--dev",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--dev"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-d",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-d"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--categories",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categories",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categories=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ca",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ca",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ca=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--cat",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cat",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cat=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--cate",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cate",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--cate=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--categ",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categ",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categ=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--catego",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--catego",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--catego=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--categor",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categor",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categor=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--categori",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categori",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categori=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--categorie",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categorie",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--categorie=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--extras",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extras",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--extras=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--all",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--all"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--a",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--a"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--al",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--al"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-i",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-i",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--index",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--index",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--index=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--in",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--in",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--in=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ind",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ind",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ind=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--inde",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--inde",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--inde=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--requirements",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirements",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirements=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"-r",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-r",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--r",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--r",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--r=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--re",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--re",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--re=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--req",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--req",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--req=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requ",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requ",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requ=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requi",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requi=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requir",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requir",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requir=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--require",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--require",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--require=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requirem",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirem",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirem=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requireme",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requireme",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requireme=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requiremen",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requiremen",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requiremen=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--requirement",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirement",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--requirement=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"install",
+"--ignore-pipfile",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pipfile"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ig",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ig"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ign",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ign"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--igno",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--igno"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignor",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignor"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-p",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-p"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-pi",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pi"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-pip",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pip"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-pipf",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pipf"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-pipfi",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pipfi"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ignore-pipfil",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ignore-pipfil"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"-e",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"-e",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--editable",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editable",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editable=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ed",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ed",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ed=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--edi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edi",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edi=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--edit",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edit",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edit=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--edita",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edita",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--edita=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--editab",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editab",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editab=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--editabl",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editabl",
+"VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--editabl=VAL"
+],
+{
+"cmd": "install",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip-lock",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip-lock"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--sk",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--sk"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--ski",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--ski"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip-",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip-"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip-l",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip-l"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip-lo",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip-lo"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"--skip-loc",
+"evilpkg"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"install",
+"evilpkg",
+"--skip-loc"
+],
+{
+"cmd": "install",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"second"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg",
+"second"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-h",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-h"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--help",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--help"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--h",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--h"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--he",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--he"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--hel",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--hel"
+],
+{
+"cmd": null,
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--bare",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--bare"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--b",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--b"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ba",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ba"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--bar",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--bar"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--outdated",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--outdated"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--o",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--o"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ou",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ou"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--out",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--out"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--outd",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--outd"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--outda",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--outda"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--outdat",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--outdat"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--outdate",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--outdate"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dry-run",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dry-run"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dr",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dr"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dry",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dry"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dry-",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dry-"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dry-r",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dry-r"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dry-ru",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dry-ru"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--system",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--system"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--sy",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--sy"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--sys",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--sys"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--syst",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--syst"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--syste",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--syste"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-mirror",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirror",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirror=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pyp",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyp",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyp=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-m",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-m",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-m=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-mi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mi",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mi=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-mir",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mir",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mir=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-mirr",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirr",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirr=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pypi-mirro",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirro",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pypi-mirro=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--verbose",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--verbose"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-v",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-v"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--v",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--v"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ve",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ve"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ver",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ver"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--verb",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--verb"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--verbo",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--verbo"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--verbos",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--verbos"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--quiet",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--quiet"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-q",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-q"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--q",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--q"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--qu",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--qu"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--qui",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--qui"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--quie",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--quie"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--clear",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--clear"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--cl",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cl"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--cle",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cle"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--clea",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--clea"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--python",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--python",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--python=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pyt",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyt",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyt=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pyth",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyth",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pyth=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pytho",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pytho",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pytho=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pre",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pre"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--pr",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--pr"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip-args",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-args",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-args=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-p",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-p",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-p=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pi",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pi=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip-",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip-a",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-a",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-a=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip-ar",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-ar",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-ar=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extra-pip-arg",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-arg",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extra-pip-arg=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--dev",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--dev"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-d",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-d"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--de",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--de"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--categories",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categories",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categories=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ca",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ca",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ca=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--cat",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cat",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cat=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--cate",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cate",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--cate=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--categ",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categ",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categ=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--catego",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--catego",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--catego=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--categor",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categor",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categor=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--categori",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categori",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categori=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--categorie",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categorie",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--categorie=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--extras",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extras",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--extras=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--all",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--all"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--a",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--a"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--al",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--al"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-i",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-i",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--index",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--index",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--index=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--in",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--in",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--in=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ind",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ind",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ind=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--inde",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--inde",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--inde=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--requirements",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirements",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirements=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"-r",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-r",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--r",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--r",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--r=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--re",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--re",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--re=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--req",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--req",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--req=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requ",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requ",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requ=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requi",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requi=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requir",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requir",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requir=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--require",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--require",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--require=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requirem",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirem",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirem=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requireme",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requireme",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requireme=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requiremen",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requiremen",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requiremen=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--requirement",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirement",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--requirement=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": [
+"VAL"
+]
+}
+],
+[
+[
+"update",
+"--ignore-pipfile",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pipfile"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ig",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ig"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ign",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ign"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--igno",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--igno"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignor",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignor"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-p",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-p"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-pi",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pi"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-pip",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pip"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-pipf",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pipf"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-pipfi",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pipfi"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ignore-pipfil",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ignore-pipfil"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"-e",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"-e",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--editable",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editable",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editable=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ed",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ed",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ed=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--edi",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edi",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edi=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--edit",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edit",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edit=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--edita",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edita",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--edita=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--editab",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editab",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editab=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--editabl",
+"VAL",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editabl",
+"VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--editabl=VAL"
+],
+{
+"cmd": "update",
+"packages": [
+"VAL",
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip-lock",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip-lock"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--sk",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--sk"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--ski",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--ski"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip-",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip-"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip-l",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip-l"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip-lo",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip-lo"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--skip-loc",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--skip-loc"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock-only",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock-only"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--l",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--l"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lo",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lo"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--loc",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--loc"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock-",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock-"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock-o",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock-o"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock-on",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock-on"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"--lock-onl",
+"evilpkg"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"update",
+"evilpkg",
+"--lock-onl"
+],
+{
+"cmd": "update",
+"packages": [
+"evilpkg"
+],
+"req_files": []
+}
+],
+[
+[
+"sync"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-h"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-h"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--help"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--help"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--h"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--h"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--he"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--he"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--hel"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--hel"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--system"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--system"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sy"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sy"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sys"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sys"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--syst"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--syst"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--syste"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--syste"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--bare"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--bare"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--b"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--b"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ba"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ba"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--bar"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--bar"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirror",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirror",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirror=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyp",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyp",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyp=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-m",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-m",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-m=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mi=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mir",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mir",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mir=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirr",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirr",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirr=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirro",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirro",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pypi-mirro=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbose"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbose"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-v"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-v"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--v"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--v"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ve"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ve"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ver"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ver"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verb"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verb"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbo"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbo"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbos"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--verbos"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--quiet"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--quiet"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-q"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-q"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--q"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--q"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--qu"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--qu"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--qui"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--qui"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--quie"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--quie"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--clear"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--clear"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cl"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cl"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cle"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cle"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--clea"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--clea"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--python",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--python",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--python=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyt",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyt",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyt=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyth",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyth",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pyth=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pytho",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pytho",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pytho=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pre"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pre"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pr"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--pr"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-args",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-args",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-args=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-p",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-p",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-p=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pi",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pi=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-a",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-a",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-a=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-ar",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-ar",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-ar=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-arg",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-arg",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extra-pip-arg=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--dev"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--dev"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-d"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"-d"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--d"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--d"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--de"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--de"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categories",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categories",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categories=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ca",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ca",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--ca=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cat",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cat",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cat=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cate",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cate",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--cate=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categ",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categ",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categ=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--catego",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--catego",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--catego=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categor",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categor",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categor=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categori",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categori",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categori=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categorie",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categorie",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--categorie=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extras",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extras",
+"VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--extras=VAL"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--all"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--all"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--a"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--a"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--al"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--al"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packages"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packages"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--si"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--si"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sit"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--sit"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-p"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-p"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pac"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pac"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pack"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-pack"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packag"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-packag"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-package"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--site-package"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packages"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packages"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--n"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--n"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-s"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-s"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-si"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-si"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-sit"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-sit"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-p"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-p"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pac"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pac"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pack"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-pack"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packa"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packag"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-packag"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-package"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+],
+[
+[
+"sync",
+"--no-site-package"
+],
+{
+"cmd": "sync",
+"packages": [],
+"req_files": []
+}
+]
+]

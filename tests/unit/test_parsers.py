@@ -3001,3 +3001,500 @@ class TestScanLockfilesAllDev:
         assert "yarn.lock" in result.dev_undetectable
         # source must also be present — no orphan warning
         assert any("yarn.lock" in s for s in result.sources)
+
+
+# Value-taking flags added by the uv 0.12.19 flag audit. A value flag missing
+# from its set makes the parser read the flag's VALUE as a package or source
+# file — a spurious entry (e.g. a bogus OSV query for "foo=allow").
+def test_uv_add_prerelease_package_value_is_not_a_package():
+    result = parse_uv_args(["uv", "add", "--prerelease-package", "foo=allow", "requests"])
+    assert result is not None
+    assert result.packages == ["requests"]
+
+
+def test_uv_tool_install_prerelease_package_value_is_not_a_package():
+    result = parse_uv_args(
+        ["uv", "tool", "install", "--prerelease-package", "foo=allow", "ruff"]
+    )
+    assert result is not None
+    assert result.packages == ["ruff"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [
+        ("--exclude-newer-package", "foo=2026-01-01"),
+        ("--config-settings-package", "foo:k=v"),
+        ("--no-sources-package", "foo"),
+        ("--no-binary", ":all:"),
+        ("--only-binary", ":all:"),
+        ("--reinstall-package", "foo"),
+        ("--refresh-package", "foo"),
+        ("--torch-backend", "cpu"),
+        ("--output-format", "json"),
+        ("--allow-insecure-host", "example.com"),
+        ("--directory", "/tmp/elsewhere"),
+        ("--project", "/tmp/elsewhere"),
+        ("--config-file", "uv.toml"),
+        ("--color", "never"),
+    ],
+)
+def test_uv_pip_sync_flag_value_is_not_a_src_file(flag, value):
+    result = parse_uv_args(["uv", "pip", "sync", flag, value, "requirements.txt"])
+    assert result is not None
+    assert result.req_files == ["requirements.txt"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pipx", "install", "--backend", "uv", "ruff"],
+        ["pipx", "install", "--fetch-python", "missing", "ruff"],
+    ],
+)
+def test_pipx_value_flag_value_is_not_a_package(argv):
+    """Value-taking flags added by the pipx 1.14.1 flag audit."""
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    result = parse_pipx_args(argv)
+    assert result is not None
+    assert result.packages == ["ruff"]
+
+
+def test_pipx_inject_backend_value_is_not_a_dependency():
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    # Without --backend in the set, "pip" became the TARGET app and the real
+    # target, black, was reported as an injected dependency.
+    result = parse_pipx_args(["pipx", "inject", "--backend", "pip", "black", "rich"])
+    assert result is not None
+    assert result.packages == ["rich"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "manager", "packages", "req_files", "working_dir", "project_dir"),
+    [
+        (["uv", "-q", "add", "requests"], "uv-project", ["requests"], [], None, None),
+        (["uv", "-v", "-v", "--offline", "add", "requests"], "uv-project", ["requests"], [], None, None),
+        (["uv", "--color", "never", "tool", "install", "ruff"], "uv", ["ruff"], [], None, None),
+        (["uv", "--directory", "b", "sync"], "uv-project", [], [], "b", None),
+        (["uv", "--directory=b", "--project=p", "sync"], "uv-project", [], [], "b", "p"),
+        (["uv", "sync", "--project", "p"], "uv-project", [], [], None, "p"),
+        # last occurrence wins, as in uv
+        (["uv", "--directory", "a", "sync", "--directory", "b"], "uv-project", [], [], "b", None),
+        # --project has no effect under `uv pip`
+        (["uv", "--project", "p", "pip", "sync", "r.txt"], "uv", [], ["r.txt"], None, None),
+        (["uv", "--directory", "d", "pip", "sync", "r.txt"], "uv", [], ["r.txt"], "d", None),
+    ],
+)
+def test_uv_global_options(argv, manager, packages, req_files, working_dir, project_dir):
+    result = parse_uv_args(argv)
+    assert result is not None
+    assert (result.manager, result.packages, result.req_files) == (manager, packages, req_files)
+    assert (result.working_dir, result.project_dir) == (working_dir, project_dir)
+
+
+@pytest.mark.parametrize("argv", [["uv", "-q"], ["uv", "--directory"], ["uv", "--color", "never"]])
+def test_uv_global_options_without_a_subcommand(argv):
+    assert parse_uv_args(argv) is None
+
+
+def test_resolve_invocation_dirs():
+    from pathlib import Path
+
+    from packagealert.parsers.process_args import resolve_invocation_dirs
+
+    cwd = Path("/w")
+    assert resolve_invocation_dirs(cwd, None, None) == (cwd, cwd)
+    assert resolve_invocation_dirs(cwd, "b", None) == (Path("/w/b"), Path("/w/b"))
+    assert resolve_invocation_dirs(cwd, "b", "p") == (Path("/w/b"), Path("/w/b/p"))
+    assert resolve_invocation_dirs(cwd, None, "/abs") == (cwd, Path("/abs"))
+    assert resolve_invocation_dirs(cwd, "/x", "p") == (Path("/x"), Path("/x/p"))
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        # Unrecognised subcommands must stay unrecognised: neither a leading
+        # option nor the unknown-value-option fallback may turn a script run
+        # into an install.
+        (["npm", "run", "install"], None),
+        (["yarn", "myscript"], None),
+        (["pnpm", "run", "install"], None),
+        # yarn's optional-value `--prod` consumes a following non-option, as
+        # the real CLI does, leaving a bare (lock-file) `yarn`.
+        (["yarn", "--prod", "install"], ([], True)),
+        (["yarn", "--silent"], ([], True)),
+        # ...and inside `add` too: real yarn reads "lodash" as --prod's value
+        # and then fails with no packages, so nothing is installed.
+        (["yarn", "add", "--prod", "lodash"], ([], False)),
+        # npm's value rules
+        (["npm", "--color", "always", "i", "x"], (["x"], False)),
+        (["npm", "--color", "i", "x"], (["x"], False)),
+        (["npm", "install", "-w", "pkg", "lodash"], (["lodash"], False)),
+        (["npm", "install", "--save-dev", "true", "lodash"], (["lodash"], False)),
+        (["npm", "--prefix", "sub", "install"], ([], True)),
+        # option values are not packages
+        (["pnpm", "add", "--filter", "web", "x"], (["x"], False)),
+        (["composer", "require", "--prefer-install", "dist", "vendor/x"], (["vendor/x"], False)),
+        (["pipenv", "install", "--python", "3.12"], ([], True)),
+        (["pipenv", "install", "-e", "./pkg"], (["./pkg"], False)),
+    ],
+)
+def test_option_handling_across_managers(argv, expected):
+    from packagealert.parsers.process_args import (
+        parse_composer_args,
+        parse_npm_args,
+        parse_pipenv_args,
+        parse_pnpm_args,
+        parse_yarn_args,
+    )
+
+    parser = {
+        "npm": parse_npm_args, "yarn": parse_yarn_args, "pnpm": parse_pnpm_args,
+        "composer": parse_composer_args, "pipenv": parse_pipenv_args,
+    }[argv[0]]
+    result = parser(argv)
+    if expected is None:
+        assert result is None
+    else:
+        assert result is not None
+        assert (result.packages, result.is_lockfile_install) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "working_dir"),
+    [
+        (["npm", "--prefix", "a", "install", "--prefix", "b"], "b"),
+        (["npm", "-C", "a", "ci"], "a"),
+        (["yarn", "--cwd", "a"], "a"),
+        (["pnpm", "--dir=a", "install"], "a"),
+        (["composer", "-da", "install"], "a"),
+        (["composer", "install", "--working-dir", "a"], "a"),
+        (["npm", "install", "x"], None),
+    ],
+)
+def test_directory_options_across_managers(argv, working_dir):
+    from packagealert.parsers.process_args import (
+        parse_composer_args,
+        parse_npm_args,
+        parse_pnpm_args,
+        parse_yarn_args,
+    )
+
+    parser = {
+        "npm": parse_npm_args, "yarn": parse_yarn_args,
+        "pnpm": parse_pnpm_args, "composer": parse_composer_args,
+    }[argv[0]]
+    result = parser(argv)
+    assert result is not None
+    assert result.working_dir == working_dir
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "is_lockfile_install", "working_dir"),
+    [
+        # unambiguous abbreviations resolve, as in npm
+        (["npm", "install", "--prefi", "sub"], [], True, "sub"),
+        (["npm", "--prefi=sub", "ci"], [], True, "sub"),
+        (["npm", "install", "--loglev", "warn"], [], True, None),
+        (["npm", "install", "--regis", "https://r.example", "lodash"], ["lodash"], False, None),
+        # ambiguous ones do not: npm treats them as unknown Booleans, so
+        # `npm install --pref sub` really does install a package named "sub"
+        (["npm", "install", "--pref", "sub"], ["sub"], False, None),
+        # nothing after `--` is an option
+        (["npm", "install", "--", "--prefi"], ["--prefi"], False, None),
+    ],
+)
+def test_npm_option_abbreviations(argv, packages, is_lockfile_install, working_dir):
+    """npm expands an option prefix that matches exactly one config key."""
+    from packagealert.parsers.process_args import parse_npm_args
+
+    result = parse_npm_args(argv)
+    assert result is not None
+    assert result.packages == packages
+    assert result.is_lockfile_install is is_lockfile_install
+    assert result.working_dir == working_dir
+
+
+def test_npm_option_parsing_follows_nopt():
+    """Spot checks of the nopt port; the exhaustive check is the npm oracle in
+    test_argv_oracles.py."""
+    from packagealert.parsers.npm_argv import parse
+
+    assert parse(["--save-d", "install", "x"]) == ({"save-dev": True}, ["install", "x"])
+    assert parse(["--no-save-d", "install", "x"]) == ({"save-dev": False}, ["install", "x"])
+    # --local is a SHORTHAND for --no-global, not an abbreviation of local-address
+    assert parse(["--local", "install", "x"]) == ({"global": False}, ["install", "x"])
+    # an ambiguous prefix is not a key: nopt treats it as an unknown Boolean
+    assert parse(["--pref", "sub", "install"])[1] == ["sub", "install"]
+    # runs of single-letter shorthands expand (--als = -a -l -s)
+    assert parse(["--als", "install"])[0] == {"all": True, "long": True, "loglevel": "silent"}
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "req_files", "working_dir"),
+    [
+        (["uv", "pip", "--color", "never", "sync", "r.txt"], [], ["r.txt"], None),
+        (["uv", "pip", "-q", "install", "evilpkg"], ["evilpkg"], [], None),
+        (["uv", "tool", "--color", "never", "install", "ruff"], ["ruff"], [], None),
+        (["uv", "tool", "-q", "install", "evilpkg"], ["evilpkg"], [], None),
+        (["uv", "-q", "pip", "-v", "install", "x"], ["x"], [], None),
+        (["uv", "pip", "--directory", "d", "sync", "r.txt"], [], ["r.txt"], "d"),
+    ],
+)
+def test_uv_global_options_between_command_levels(argv, packages, req_files, working_dir):
+    """uv accepts its global options between `pip`/`tool` and the nested
+    command; without skipping them `uv tool -q install x` parsed to None (and
+    ran unsandboxed) and `uv pip -q install x` resolved to no packages."""
+    result = parse_uv_args(argv)
+    assert result is not None
+    assert (result.packages, result.req_files, result.working_dir) == (
+        packages, req_files, working_dir,
+    )
+
+
+@pytest.mark.parametrize(
+    ("argv", "working_dir", "lockfile_dir"),
+    [
+        (["pnpm", "--lockfile-dir", "locks", "install"], None, "locks"),
+        (["pnpm", "-C", "sub", "install", "--lockfile-dir=../l"], "sub", "../l"),
+        (["pnpm", "install"], None, None),
+    ],
+)
+def test_pnpm_lockfile_dir_is_recorded(argv, working_dir, lockfile_dir):
+    from packagealert.parsers.process_args import parse_pnpm_args
+
+    result = parse_pnpm_args(argv)
+    assert result is not None
+    assert (result.working_dir, result.lockfile_dir) == (working_dir, lockfile_dir)
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "req_files"),
+    [
+        # uv's own and global value flags: their values are not packages
+        (["uv", "pip", "install", "--directory", "d", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "--color", "never", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "--resolution", "lowest", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "--torch-backend", "cpu", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "-p", "3.12", "evilpkg"], ["evilpkg"], []),
+        # uv spells it --requirements; pip's --requirement still works
+        (["uv", "pip", "install", "--requirements", "reqs.txt"], [], ["reqs.txt"]),
+        (["uv", "pip", "install", "--requirements=reqs.txt"], [], ["reqs.txt"]),
+        (["uv", "pip", "install", "--requirement", "r.txt"], [], ["r.txt"]),
+        (["uv", "pip", "install", "-r", "r.txt", "x"], ["x"], ["r.txt"]),
+    ],
+)
+def test_uv_pip_install_value_flags(argv, packages, req_files):
+    result = parse_uv_args(argv)
+    assert result is not None
+    assert (result.packages, result.req_files) == (packages, req_files)
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "req_files"),
+    [
+        # hidden aliases / hidden options: absent from --help, accepted by uv
+        (["uv", "pip", "install", "--constraint", "c.txt", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "--override", "o.txt", "evilpkg"], ["evilpkg"], []),
+        (["uv", "pip", "install", "--requirement", "r.txt"], [], ["r.txt"]),
+        (["uv", "pip", "sync", "--build-constraint", "b.txt", "r.txt"], [], ["r.txt"]),
+        (["uv", "--python-preference", "only-system", "add", "evilpkg"], ["evilpkg"], []),
+        (["uv", "add", "--trusted-host", "h", "evilpkg"], ["evilpkg"], []),
+        (["uv", "tool", "install", "--constraint", "c.txt", "evilpkg"], ["evilpkg"], []),
+    ],
+)
+def test_uv_hidden_value_options(argv, packages, req_files):
+    """clap hides some aliases and options from --help, so a set built only
+    from help output misses them and reads their value as a package."""
+    result = parse_uv_args(argv)
+    assert result is not None
+    assert (result.packages, result.req_files) == (packages, req_files)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["uv", "tool", "install", "ruff", "--from", "ruff==0.1.0"],
+        ["uv", "tool", "install", "--from", "ruff==0.1.0", "ruff"],
+    ],
+)
+def test_uv_tool_from_is_the_installed_requirement(argv):
+    """uv's hidden `--from <REQ>` is what is actually installed."""
+    result = parse_uv_args(argv)
+    assert result is not None
+    assert result.packages == ["ruff==0.1.0"]
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "req_files", "is_lockfile_install"),
+    [
+        # uv add's hidden --requirement alias names a file to scan
+        (["uv", "add", "--requirement", "deps.txt"], [], ["deps.txt"], False),
+        (["uv", "add", "--requirement=deps.txt"], [], ["deps.txt"], False),
+        # pip/pipenv/pipx expand unique long-option prefixes, as argparse and
+        # optparse do (measured against the real tools)
+        (["pip", "install", "--constr", "c.txt", "evilpkg"], ["evilpkg"], [], False),
+        (["pip", "--cache-d", "/c", "install", "x"], ["x"], [], False),
+        (["pipenv", "install", "--pyth", "3.12"], [], [], True),
+        (["pipenv", "--pyth", "3.12", "install", "evilpkg"], ["evilpkg"], [], False),
+        (["pipenv", "install", "--requirem", "deps.in"], [], ["deps.in"], False),
+        (["pipx", "install", "--suff", "_x", "black"], ["black"], [], False),
+        # pipx inject -r names packages to inject: scan the file
+        (["pipx", "inject", "black", "-r", "reqs.txt", "rich"], ["rich"], ["reqs.txt"], False),
+        (["pipx", "inject", "black", "--requirem", "reqs.txt"], [], ["reqs.txt"], False),
+    ],
+)
+def test_requirement_aliases_and_long_option_abbreviations(argv, packages, req_files, is_lockfile_install):
+    from packagealert.parsers.process_args import (
+        parse_pip_args,
+        parse_pipenv_args,
+        parse_pipx_args,
+    )
+
+    parser = {"uv": parse_uv_args, "pip": parse_pip_args, "pipenv": parse_pipenv_args,
+              "pipx": parse_pipx_args}[argv[0]]
+    result = parser(argv)
+    assert result is not None
+    assert (result.packages, result.req_files, result.is_lockfile_install) == (
+        packages, req_files, is_lockfile_install,
+    )
+
+
+def test_pip_long_option_prefix_expansion_across_versions():
+    """Uniqueness depends on the pip version, which is not known at parse
+    time; see _expand_long_prefix_across()."""
+    from packagealert.parsers.process_args import _pip_expand_install
+
+    # ambiguous in pip 26.1 (--requirements-from-script) but unique in 25.3:
+    # every version that resolves it agrees, so it expands
+    assert _pip_expand_install("--requirem") == "--requirement"
+    assert _pip_expand_install("--constr=c") == "--constraint=c"
+    # `--g` is --global-option in 24.0 and --group from 25: both just take a
+    # value, so either parse is the same for gating
+    assert _pip_expand_install("--g") in ("--global-option", "--group")
+
+
+@pytest.mark.parametrize("argv", [["pnpm", "-g", "install"], ["pnpm", "--global", "add", "x"]])
+def test_pnpm_leading_global_flag_is_not_a_project_lockfile_install(argv):
+    from packagealert.parsers.process_args import parse_pnpm_args
+
+    result = parse_pnpm_args(argv)
+    assert result is not None
+    assert result.global_install is True
+    assert result.is_lockfile_install is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["yarn", "--version"], ["yarn", "-v"], ["yarn", "--help"], ["yarn", "-h"],
+     ["yarn", "--silent", "--version"]],
+)
+def test_yarn_help_and_version_are_not_installs(argv):
+    """A bare `yarn` installs, but these only print."""
+    from packagealert.parsers.process_args import parse_yarn_args
+
+    assert parse_yarn_args(argv) is None
+
+
+def test_yarn_help_consumed_as_a_value_does_not_ungate_the_install():
+    """yarn reads `--cwd --help` as a directory named "--help" (measured), so
+    the install that follows must still be gated."""
+    from packagealert.parsers.process_args import parse_yarn_args
+
+    result = parse_yarn_args(["yarn", "--cwd", "--help", "add", "evilpkg"])
+    assert result is not None
+    assert result.packages == ["evilpkg"]
+
+
+def test_bare_yarn_is_still_a_lockfile_install():
+    from packagealert.parsers.process_args import parse_yarn_args
+
+    for argv in (["yarn"], ["yarn", "--silent"]):
+        result = parse_yarn_args(argv)
+        assert result is not None and result.is_lockfile_install
+
+
+@pytest.mark.parametrize(
+    ("argv", "is_global"),
+    [
+        # measured against npm 11.8.0 with `npm <opts> prefix`
+        (["npm", "install", "--location=global", "x"], True),
+        (["npm", "--location", "global", "install", "x"], True),
+        (["npm", "install", "-L", "global", "x"], True),
+        (["npm", "install", "--locatio=global", "x"], True),  # unique abbreviation
+        (["npm", "install", "--location=global", "--no-global", "x"], True),
+        (["npm", "install", "--location=user", "x"], False),
+        (["npm", "install", "-g", "--location=project", "x"], True),
+        # the LAST boolean spelling wins
+        (["npm", "install", "x", "--global", "--local"], False),
+        (["npm", "install", "x", "--local", "--global"], True),
+        (["npm", "install", "x", "--global=false"], False),
+    ],
+)
+def test_npm_global_mode_follows_npm(argv, is_global):
+    """Wrongly global runs a LOCAL install unsandboxed; wrongly local
+    sandboxes a global one against the wrong targets."""
+    from packagealert.parsers.process_args import parse_npm_args
+
+    result = parse_npm_args(argv)
+    assert result is not None
+    assert result.global_install is is_global
+
+
+@pytest.mark.parametrize("argv", [["npm", "--local", "install", "evilpkg"], ["npm", "--silent", "install", "evilpkg"]])
+def test_npm_word_shorthand_is_not_expanded_as_an_abbreviation(argv):
+    """`--local` is npm's shorthand for --no-global. Expanded as an
+    abbreviation it became the value-taking --local-address, which swallowed
+    "install" and left the command unrecognised — i.e. ungated."""
+    from packagealert.parsers.process_args import parse_npm_args
+
+    result = parse_npm_args(argv)
+    assert result is not None
+    assert result.packages == ["evilpkg"]
+
+
+def test_npm_ambiguous_prefix_before_the_command_matches_npm():
+    """`--pref` is ambiguous, so npm reads it as an unknown Boolean and "sub"
+    as the COMMAND — "Unknown command", nothing installed. Matching npm here
+    is correct; it is not an install to gate."""
+    from packagealert.parsers.process_args import parse_npm_args
+
+    assert parse_npm_args(["npm", "--pref", "sub", "install", "evilpkg"]) is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "packages", "lockfile"),
+    [
+        # verified against each tool's source at the audited version
+        (["yarn", "upgrade", "evilpkg"], ["evilpkg"], False),
+        (["yarn", "upgrade"], [], True),
+        (["yarn", "upgrade-interactive"], [], True),
+        (["yarn", "upgradeInteractive"], [], True),
+        # `yarn workspace <name> <cmd>` re-runs yarn with <cmd> (PROXY_COMMANDS)
+        (["yarn", "workspace", "web", "add", "evilpkg"], ["evilpkg"], False),
+        # pnpm's own commandNames for update
+        (["pnpm", "update", "evilpkg"], ["evilpkg"], False),
+        (["pnpm", "up"], [], True),
+        (["pnpm", "upgrade", "--latest", "evilpkg"], ["evilpkg"], False),
+        # uv's hidden `tool update` alias of `tool upgrade`
+        (["uv", "tool", "update", "evilpkg"], ["evilpkg"], False),
+    ],
+)
+def test_install_commands_found_in_tool_sources(argv, packages, lockfile):
+    """Each of these used to parse to None — run with no sandbox and no
+    pre-flight — although the tool installs packages."""
+    from packagealert.parsers.process_args import parse_pnpm_args, parse_yarn_args
+
+    parser = {"yarn": parse_yarn_args, "pnpm": parse_pnpm_args, "uv": parse_uv_args}[argv[0]]
+    result = parser(argv)
+    assert result is not None
+    assert (result.packages, result.is_lockfile_install) == (packages, lockfile)
+
+
+def test_yarn_workspace_without_a_command_is_not_an_install():
+    from packagealert.parsers.process_args import parse_yarn_args
+
+    assert parse_yarn_args(["yarn", "workspace", "web"]) is None
+    assert parse_yarn_args(["yarn", "workspace", "web", "run", "build"]) is None

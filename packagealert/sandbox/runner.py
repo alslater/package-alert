@@ -27,8 +27,11 @@ from packagealert.languages.base import (
     ShellEnvironment,
 )
 from packagealert.parsers.process_args import (
+    InvalidInvocationDirectory,
     ParsedInstall,
     parse_package_spec,
+    resolve_invocation_dirs,
+    resolve_lockfile_dir,
 )
 from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
@@ -96,6 +99,31 @@ class _Context:
     scan_targets: list[Path] = field(default_factory=list)
     # Directories to snapshot+restore for rollback but not scanned for new packages
     snapshot_only_dirs: list[Path] = field(default_factory=list)
+    # Where the command effectively runs and discovers its project, when the
+    # invocation moves either away from cwd (uv's `--directory`/`--project`);
+    # both are cwd otherwise. Used for what the command READS — requirement
+    # files, lock files, the environment it installs into. Never for where
+    # the process itself starts: that stays cwd, since the command re-applies
+    # its own `--directory` on top of it.
+    work_dir: Path = field(init=False)
+    project_dir: Path = field(init=False)
+    # Where the lock file lives: project_dir, unless the invocation moves the
+    # lock file alone (pnpm's `--lockfile-dir`). Every lock-file operation —
+    # pre-flight scan, containment check, snapshot, post-run scan, restore —
+    # uses this; environment discovery keeps project_dir.
+    lockfile_root: Path = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.work_dir, self.project_dir = resolve_invocation_dirs(
+            self.cwd,
+            self.parsed.working_dir if self.parsed else None,
+            self.parsed.project_dir if self.parsed else None,
+        )
+        self.lockfile_root = resolve_lockfile_dir(
+            self.cwd,
+            self.parsed.lockfile_dir if self.parsed else None,
+            self.project_dir,
+        )
 
 
 class _GateResourcesUnavailable(enum.Enum):
@@ -211,7 +239,16 @@ class SandboxRunner:
                 return 127
             return 0  # unreachable; satisfies type checker
 
-        ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
+        try:
+            ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
+        except InvalidInvocationDirectory as exc:
+            # Fail closed: without the directory the command names, neither
+            # pre-flight nor the sandbox can be pointed at the right project.
+            self._console.print(
+                f"✗ Blocked — a directory option in this command cannot be resolved ({exc}).",
+                style="bold red", markup=False,
+            )
+            return 1
 
         # Show the interception banner only when invoked through a shim or shell
         # function — when the user types `package-alert run ...` directly they
@@ -421,7 +458,7 @@ class SandboxRunner:
                     self._console.print(f"✗ Cannot snapshot rollback target {_t}: {exc}", style="bold red", markup=False)
                     self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                     return 1
-        lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
+        lock_snapshots = _snapshot_lock_files(ctx.lockfile_root, allow_external_lockfiles=allow_external_lockfiles)
 
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
@@ -439,7 +476,13 @@ class SandboxRunner:
                     prepare_env_fn = None
                 if callable(prepare_env_fn):
                     try:
-                        raw_extra_write = prepare_env_fn(parsed, cwd, sandbox_env)
+                        # The project's own environment: with no virtualenv
+                        # active this hook DETECTS `<dir>/.venv` and injects it
+                        # as VIRTUAL_ENV, so passing cwd under uv's
+                        # `--directory d` pointed `uv pip` at cwd's venv — the
+                        # install landed in a different environment from the
+                        # one the command targets.
+                        raw_extra_write = prepare_env_fn(parsed, ctx.project_dir, sandbox_env)
                     except SandboxEnvError as exc:
                         self._console.print(str(exc), style="bold red", markup=False)
                         return 1
@@ -453,6 +496,13 @@ class SandboxRunner:
                             if isinstance(raw_extra_write, list)
                             else []
                         )
+                        # Never let the directory move widen what is writable:
+                        # a path the hook found only because it was pointed at
+                        # a project outside cwd stays read-only, so such an
+                        # install still fails closed (see _resolve_targets()).
+                        extra_write = [
+                            p for p in extra_write if not _introduced_by_move(ctx, p)
+                        ]
                         for p in extra_write:
                             if p not in ctx.write_dirs:
                                 ctx.write_dirs.append(p)
@@ -539,7 +589,15 @@ class SandboxRunner:
                     try:
                         prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
                         if callable(prepare_fn):
-                            raw_argv = prepare_fn(argv, cwd)
+                            # Relative paths in argv (`-e ./pkg`) are made
+                            # absolute against where the COMMAND resolves them
+                            # — uv's `--directory` moves that off cwd, and
+                            # rewriting against cwd made the sandbox install a
+                            # different path from the one requested. The
+                            # extra-path hooks below keep cwd: they receive
+                            # this already-absolute argv, and their "outside
+                            # cwd" test is about the writable cwd bind.
+                            raw_argv = prepare_fn(argv, ctx.work_dir)
                             if isinstance(raw_argv, list) and all(isinstance(a, str) for a in raw_argv):
                                 argv = raw_argv
                     except Exception:
@@ -595,26 +653,26 @@ class SandboxRunner:
             # A failing install can still write or modify lock files, so run the
             # lock-file scan and restore unconditionally — exiting non-zero must
             # not be a way to evade the check.
-            scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+            scan_ok = await self._scan_updated_lock_files(ctx.lockfile_root, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
             if no_change:
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
                 return result.returncode if (scan_ok and restore_ok) else 1
             elif not scan_ok:
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
                 return 1
             return result.returncode if scan_ok else 1
 
-        scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+        scan_ok = await self._scan_updated_lock_files(ctx.lockfile_root, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
         if not no_change and not scan_ok:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
             _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
         if not scan_ok:
             # no_change=True: lock file scan failed — restore everything and exit.
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
             _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
@@ -626,7 +684,9 @@ class SandboxRunner:
             if lang is not None:
                 try:
                     post_run_fn = getattr(lang, "post_run_scan_targets", None)
-                    raw_targets = post_run_fn(parsed, cwd) if callable(post_run_fn) else []
+                    # The environment belongs to the command's project, as
+                    # for _resolve_targets() before the run.
+                    raw_targets = post_run_fn(parsed, ctx.project_dir) if callable(post_run_fn) else []
                     targets = (
                         raw_targets
                         if isinstance(raw_targets, list) and all(isinstance(t, Path) for t in raw_targets)
@@ -656,7 +716,7 @@ class SandboxRunner:
             )
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
             _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
@@ -664,7 +724,7 @@ class SandboxRunner:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
             post_ok = await self._post_scan(new_pkgs)
             if not post_ok:
-                _restore_lock_files(lock_snapshots, cwd, self._console)
+                _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
                 return 1
         else:
@@ -672,7 +732,7 @@ class SandboxRunner:
 
         # --no-change: restore lock files and install targets after all checks pass.
         if no_change:
-            _restore_lock_files(lock_snapshots, cwd, self._console)
+            _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
             restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
             if not restore_ok:
                 return 1
@@ -1817,11 +1877,14 @@ class SandboxRunner:
             visited: set[Path] = set()
             file_sources: list[str] = []
             before = len(queries)
+            # Relative to where the command effectively runs, which uv's
+            # `--directory` can move away from cwd — resolving against cwd
+            # scanned a different file from the one actually installed.
             for rf in parsed.req_files:
-                req_path = ctx.cwd / rf
+                req_path = ctx.work_dir / rf
                 if req_path.exists():
                     pinned, unpinned = collect_requirements_packages(
-                        req_path, visited, ctx.cwd,
+                        req_path, visited, ctx.work_dir,
                         is_system_python_target=parsed.is_system_python_target,
                     )
                     queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
@@ -1844,9 +1907,13 @@ class SandboxRunner:
             # risk signal on the very dependency being removed. See
             # ParsedInstall.is_lockfile_install's own docstring.
             #
+            # The lock file is the PROJECT's, which uv's `--directory` or
+            # `--project` can move away from cwd — or its own, when pnpm's
+            # `--lockfile-dir` moves it alone (see _Context.lockfile_root).
+            #
             # Enforce containment before scan_project() follows any symlinks.
             if not allow_external_lockfiles:
-                bad = _assert_scannable_lock_files_contained(ctx.cwd)
+                bad = _assert_scannable_lock_files_contained(ctx.lockfile_root)
                 if bad is not None:
                     return [], bad, ""
             if parsed.lockfile_hint:
@@ -1854,19 +1921,19 @@ class SandboxRunner:
                 # repos with multiple lockfiles for the same ecosystem (e.g. a
                 # repo with both package-lock.json and yarn.lock).
                 from packagealert.parsers.lockfiles import scan_lockfiles
-                hint_path = ctx.cwd / parsed.lockfile_hint
+                hint_path = ctx.lockfile_root / parsed.lockfile_hint
                 if hint_path.exists():
                     scan = scan_lockfiles([hint_path])
                     # If the hint file exists but parsed to nothing, fall back so
                     # we don't silently skip the pre-flight check.
                     if not scan.pinned and not scan.unpinned:
-                        scan = scan_project(ctx.cwd)
+                        scan = scan_project(ctx.lockfile_root)
                 else:
                     # Hint file absent — fall back to full project scan so we
                     # don't miss an existing lockfile for the same ecosystem.
-                    scan = scan_project(ctx.cwd)
+                    scan = scan_project(ctx.lockfile_root)
             else:
-                scan = scan_project(ctx.cwd)
+                scan = scan_project(ctx.lockfile_root)
             queries = (
                 [(p.ecosystem, p.name, p.version) for p in scan.pinned if p.ecosystem == parsed.ecosystem]
                 + [(p.ecosystem, p.name, None) for p in scan.unpinned if p.ecosystem == parsed.ecosystem]
@@ -2777,6 +2844,11 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         # has no way to signal system-Python targeting, so assume the
         # ordinary venv-discovery path still applies.
         is_system_python_target=getattr(pi, "is_system_python_target", False),
+        # getattr default None: a plugin predating these fields never moves
+        # the working or project directory away from the cwd.
+        working_dir=getattr(pi, "working_dir", None),
+        project_dir=getattr(pi, "project_dir", None),
+        lockfile_dir=getattr(pi, "lockfile_dir", None),
     )
 
 
@@ -3119,6 +3191,29 @@ def _resolve_real_binary(argv: list[str]) -> list[str]:
     return argv
 
 
+def _introduced_by_move(ctx: _Context, p: Path) -> bool:
+    """True if `p` is a path a hook found only because the command's own
+    options moved its project outside cwd — one that must NOT become writable.
+
+    Compared on REAL paths: a lexical `cwd/../elsewhere` passes
+    `is_relative_to(cwd)`, and a symlink inside the moved project can point
+    anywhere. So `p` counts as introduced by the move when it does not really
+    lie under cwd but does lie under the moved project, either as written or
+    once resolved.
+    """
+    if ctx.project_dir == ctx.cwd:
+        return False
+    try:
+        real = p.resolve()
+        real_cwd = ctx.cwd.resolve()
+    except (OSError, RuntimeError):
+        return True
+    if real.is_relative_to(real_cwd):
+        return False
+    project = ctx.project_dir
+    return Path(os.path.normpath(p)).is_relative_to(project) or real.is_relative_to(project)
+
+
 def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     """Populate ctx.write_dirs and ctx.scan_targets from the parsed command."""
     ctx.write_dirs.append(ctx.cwd)
@@ -3130,7 +3225,14 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
     try:
         resolve_fn = getattr(lang, "resolve_sandbox_targets", None)
         if callable(resolve_fn):
-            raw_result = resolve_fn(ctx.parsed, ctx.cwd)
+            # The environment the command installs into belongs to its
+            # project (e.g. `<project>/.venv`), which uv's `--directory` or
+            # `--project` can move away from cwd. This does not widen what is
+            # writable: a site-packages directory found INSIDE the directory
+            # passed here is left to that directory's own bind rather than
+            # added to write_dirs, and only cwd is bound, so an install whose
+            # project lies outside cwd still cannot write there.
+            raw_result = resolve_fn(ctx.parsed, ctx.project_dir)
             if not isinstance(raw_result, SandboxTargets):
                 return
             result = raw_result
@@ -3154,6 +3256,16 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
                             style="bold yellow", markup=False,
                         )
             for p in result.write_dirs:
+                if _introduced_by_move(ctx, p):
+                    # The hook was pointed at a project the command's own
+                    # options moved outside cwd; a path found there must not
+                    # become writable, or the move would widen the sandbox
+                    # (prepare_sandbox_env's paths get the same filter).
+                    log.warning(
+                        "_resolve_targets: not making %r writable — it lies in a "
+                        "project outside the working directory", str(p),
+                    )
+                    continue
                 if _is_safe_sandbox_path(p, editable_roots=_safe_roots):
                     ctx.write_dirs.append(p)
                 else:
