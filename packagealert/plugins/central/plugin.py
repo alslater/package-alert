@@ -44,7 +44,6 @@ _STATUS_COLOUR = {
     "degraded": "yellow",
     "error": "red",
 }
-_SEV_COLOUR = {"CRITICAL": "red", "HIGH": "yellow", "MEDIUM": "bright_yellow", "LOW": "green"}
 
 
 def _render_scans_table(records: list[dict], *, title: str, show_project: bool = False) -> None:
@@ -171,6 +170,8 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
         date_str = scanned_at
 
     if fmt == "json":
+        from packagealert.cli.app import _remediations_json
+
         print(jsonlib.dumps({
             "id": scan_id,
             "project_path": project_path,
@@ -181,6 +182,11 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "finding_count": record.get("finding_count", len(findings)),
             "sources": sources,
             "findings": findings,
+            # Recomputed from the retrieved findings, as the live scan computes
+            # them; the age/cooldown fields are null (live-scan only).
+            "remediations": _remediations_json(
+                [f for f in findings if isinstance(f, dict)], None, None,
+            ),
             "risks": risks,
             "risk_failures": risk_failures,
             "osv_failures": osv_failures,
@@ -213,25 +219,11 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
         console.print("[green]No findings — all clear.[/green]")
         return
 
-    for f in findings:
-        sev = (f.get("severity") or "").upper()
-        colour = _SEV_COLOUR.get(sev, "red" if f.get("is_malicious") else "yellow")
-        label = "[MALICIOUS]" if f.get("is_malicious") else "[VULN]"
-        severity_tag = f" [{escape(sev)}]" if sev else ""
-        summary_tag = f" — {escape(f.get('summary') or '')}" if f.get("summary") else ""
-        console.print(
-            f"[{colour}]{label} {escape(f.get('advisory_id') or '')}{severity_tag}[/{colour}] "
-            f"{escape(f.get('package') or '')}@{escape(f.get('version') or 'unpinned')}{summary_tag}",
-            highlight=False,
-        )
-        if f.get("fixed_versions"):
-            fixed = ", ".join(escape(v) for v in f["fixed_versions"])
-            console.print(f"  [green]→ upgrade to: {fixed}[/green]")
-        if show_details:
-            if f.get("details"):
-                console.print(f"  {escape((f.get('details') or '').strip())}", highlight=False)
-            if f.get("url"):
-                console.print(f"  {escape(f.get('url') or '')}")
+    from packagealert.cli.app import _print_findings_by_package
+
+    _print_findings_by_package(
+        console, [f for f in findings if isinstance(f, dict)], show_details=show_details,
+    )
 
     if risks:
         from packagealert.cli.app import (

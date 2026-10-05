@@ -82,6 +82,8 @@ def _serialize(result: OsvResult) -> dict[str, Any]:
                 "severity": a.severity,
                 "aliases": a.aliases,
                 "fixed_versions": a.fixed_versions,
+                "affected_ranges": a.affected_ranges,
+                "affected_versions": a.affected_versions,
             }
             for a in result.advisories
         ]
@@ -97,6 +99,8 @@ def _deserialize(data: dict[str, Any], package: str, ecosystem: str, version: st
             severity=a.get("severity"),
             aliases=a.get("aliases", []),
             fixed_versions=a.get("fixed_versions", []),
+            affected_ranges=a.get("affected_ranges", []),
+            affected_versions=a.get("affected_versions", []),
         )
         for a in data.get("advisories", [])
     ]

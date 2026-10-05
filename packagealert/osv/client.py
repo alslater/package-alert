@@ -155,6 +155,17 @@ class OsvClient:
         for (adv, pkg_name, ecosystem), data in zip(adv_with_ctx, fetched):
             if isinstance(data, Exception) or not isinstance(data, dict):
                 continue
+            # Aliases first, and apart from the decoration below: the batch
+            # response carries only ids, so this is where a MAL- alias — part
+            # of the is_malicious verdict — arrives, and a malformed "affected"
+            # that fails the decoration must not discard it. Built from str
+            # elements only, so it cannot fail validation.
+            detail_aliases = data.get("aliases")
+            if isinstance(detail_aliases, list):
+                adv.aliases = list(dict.fromkeys([
+                    *adv.aliases, *(a for a in detail_aliases if isinstance(a, str)),
+                ]))
+
             # Guarded per advisory so one malformed body cannot cost the
             # others their enrichment, let alone the batch its verdicts.
             #
@@ -178,8 +189,15 @@ class OsvClient:
                     updates["fixed_versions"] = _extract_fixed_versions(
                         data, pkg_name, ecosystem
                     )
+                if not adv.affected_ranges:
+                    updates["affected_ranges"] = _extract_affected_ranges(
+                        data, pkg_name, ecosystem
+                    )
+                    updates["affected_versions"] = _extract_affected_versions(
+                        data, pkg_name, ecosystem
+                    )
                 validated = OsvAdvisory.model_validate({**adv.model_dump(), **updates})
-            except Exception:  # enrichment is decoration, never a verdict
+            except Exception:  # decoration only; the verdict-bearing aliases are applied above
                 log.warning(
                     "Could not parse advisory detail for %s (%s/%s) — keeping the "
                     "verdict from the batch response without enrichment",
@@ -349,6 +367,8 @@ def _parse_vulns(
                 severity=_severity_from_response(vuln),
                 aliases=vuln.get("aliases", []),
                 fixed_versions=_extract_fixed_versions(vuln, pkg, eco),
+                affected_ranges=_extract_affected_ranges(vuln, pkg, eco),
+                affected_versions=_extract_affected_versions(vuln, pkg, eco),
             ))
             continue
         except Exception as exc:  # noqa: BLE001 — any parse failure marks this result partial
@@ -559,7 +579,102 @@ def _fold(name: str) -> tuple[bool, tuple[str, ...], bool]:
 
 
 def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[str]:
-    """Return fixed versions from OSV affected ranges for the queried package."""
+    """Return fixed versions from OSV affected ranges for the queried package.
+
+    Every string "fixed" value counts, even from a range that is otherwise
+    malformed: unlike _extract_affected_ranges() this is a list of upgrade
+    targets, not a description of what is affected, so a usable entry is not
+    made wrong by a broken sibling.
+    """
+    return [
+        event["fixed"]
+        for events in _matching_range_events(vuln, package_name, ecosystem)
+        for event in events
+        if isinstance(event, dict) and isinstance(event.get("fixed"), str)
+    ]
+
+
+_RANGE_BOUNDARIES = frozenset({"introduced", "fixed", "last_affected", "limit"})
+
+
+def _extract_affected_ranges(
+    vuln: dict[str, Any], package_name: str, ecosystem: str
+) -> list[list[dict[str, str]]]:
+    """Return the SEMVER/ECOSYSTEM range events OSV lists for the queried package.
+
+    Each range is its event list as OSV gives it (`introduced`, `fixed`,
+    `last_affected`, `limit`). The fixed versions alone cannot say which fix
+    applies to an installed version — Django's `[0, 5.2.17)` and `[6.0a1, 6.0.8)`
+    flatten to "5.2.17, 6.0.8" — so the ranges are kept for
+    packagealert.osv.remediation to evaluate.
+
+    All or nothing: if any range is malformed (a non-dict event, or a boundary
+    whose value is not a string), or the explicit `versions` list is, none is
+    returned. The ranges are read as the
+    complete set of affected versions, so dropping only the broken one would
+    make a version inside it look fixed; with none, remediation falls back to
+    the fixed versions and reports the choice as unverified.
+    """
+    # `versions` is part of the affected set too (see _extract_affected_versions),
+    # so one that cannot be read leaves the ranges incomplete in the same way.
+    for affected in _matching_affected(vuln, package_name, ecosystem):
+        versions = affected.get("versions")
+        if versions is not None and not (
+            isinstance(versions, list) and all(isinstance(v, str) for v in versions)
+        ):
+            return []
+    ranges: list[list[dict[str, str]]] = []
+    for events in _matching_range_events(vuln, package_name, ecosystem):
+        if not isinstance(events, list) or not all(
+            isinstance(event, dict)
+            and all(isinstance(v, str) for k, v in event.items() if k in _RANGE_BOUNDARIES)
+            for event in events
+        ):
+            return []
+        ranges.append([
+            {k: v for k, v in event.items() if k in _RANGE_BOUNDARIES} for event in events
+        ])
+    return ranges
+
+
+def _matching_range_events(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[Any]:
+    """The raw event lists of the SEMVER/ECOSYSTEM ranges for the queried package."""
+    return [
+        r.get("events", [])
+        for affected in _matching_affected(vuln, package_name, ecosystem)
+        for r in affected.get("ranges", [])
+        if r.get("type") in ("SEMVER", "ECOSYSTEM")
+    ]
+
+
+def _extract_affected_versions(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[str]:
+    """Explicitly listed affected versions that the extracted ranges do not cover.
+
+    OSV's affected set is `versions` OR `ranges`, so a version listed only in
+    `versions` is affected even though no range contains it. In practice the
+    list repeats what the ranges already say — and runs to hundreds of entries
+    for a long-lived package — so only the versions outside the ranges are
+    kept: usually none. A version that cannot be ordered is kept, since it
+    cannot be shown to be covered. Empty when the ranges are unusable, as
+    remediation then falls back to the fixed versions anyway.
+    """
+    from packagealert.osv.remediation import _in_range, _key_for
+
+    ranges = _extract_affected_ranges(vuln, package_name, ecosystem)
+    if not ranges:
+        return []
+    key = _key_for(ecosystem)
+    outside: list[str] = []
+    for affected in _matching_affected(vuln, package_name, ecosystem):
+        for v in affected.get("versions") or []:
+            k = key(v)
+            if k is None or not any(_in_range(r, k, key) for r in ranges):
+                outside.append(v)
+    return list(dict.fromkeys(outside))
+
+
+def _matching_affected(vuln: dict[str, Any], package_name: str, ecosystem: str) -> list[Any]:
+    """The vuln's `affected` entries for the queried package."""
     # The OSV ecosystem name and the name-normalisation rules both belong to the
     # language module: a hardcoded map here silently produced empty upgrade advice
     # for any plugin ecosystem, because its advisories never matched.
@@ -629,7 +744,7 @@ def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: 
         return value.lower()
 
     query_name = _norm(package_name)
-    fixed: list[str] = []
+    matches: list[Any] = []
     for affected in vuln.get("affected", []):
         pkg = affected.get("package", {})
         if pkg.get("ecosystem", "").lower() != canonical_eco:
@@ -651,9 +766,5 @@ def _extract_fixed_versions(vuln: dict[str, Any], package_name: str, ecosystem: 
                 adv_name, package_name, getattr(lang, "name", "?"),
             )
             continue
-        for r in affected.get("ranges", []):
-            if r.get("type") in ("SEMVER", "ECOSYSTEM"):
-                for event in r.get("events", []):
-                    if "fixed" in event:
-                        fixed.append(event["fixed"])
-    return fixed
+        matches.append(affected)
+    return matches

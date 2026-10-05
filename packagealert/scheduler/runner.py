@@ -190,6 +190,9 @@ class ScheduledScanner:
                             "summary": adv.summary,
                             "details": adv.details,
                             "fixed_versions": adv.fixed_versions,
+                            "affected_ranges": adv.affected_ranges,
+                            "affected_versions": adv.affected_versions,
+                            "aliases": adv.aliases,
                             "url": f"https://osv.dev/vulnerability/{adv.id}",
                         })
         finally:

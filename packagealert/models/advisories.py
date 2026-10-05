@@ -12,6 +12,13 @@ class OsvAdvisory(BaseModel):
     severity: str | None = None
     aliases: list[str] = []
     fixed_versions: list[str] = []
+    # OSV's SEMVER/ECOSYSTEM range events for this package, one list per range.
+    # Needed to tell which fixed version applies to the installed one; see
+    # packagealert.osv.remediation.
+    affected_ranges: list[list[dict[str, str]]] = []
+    # Versions OSV lists explicitly as affected that no range above covers
+    # (usually none); part of the affected set alongside the ranges.
+    affected_versions: list[str] = []
 
     @computed_field
     @property
