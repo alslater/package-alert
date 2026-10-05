@@ -153,7 +153,7 @@ _PIP_INSTALL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
     }),
 )
 # Flags that consume the next argument as their value for `uv add` / `uv remove`.
-# Audited against: uv 0.12.19 `uv add --help` / `uv remove --help`, plus the
+# Audited against: uv 0.12.23 `uv add --help` / `uv remove --help`, plus the
 # hidden names probed from uv's CLI source.
 _UV_PROJECT_VALUE_FLAGS = frozenset({
     # Python selector
@@ -201,7 +201,7 @@ _UV_PROJECT_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `uv tool install/upgrade`.
-# Audited against: uv 0.12.19 `uv tool install --help` / `uv tool upgrade --help`,
+# Audited against: uv 0.12.23 `uv tool install --help` / `uv tool upgrade --help`,
 # plus the hidden names probed from uv's CLI source.
 _UV_TOOL_VALUE_FLAGS = frozenset({
     # Python selector
@@ -842,7 +842,7 @@ def _uv_targets_system_python(rest: list[str]) -> bool:
 # Options that consume the next argument for `uv pip install` — uv's own set,
 # not pip's: `_PIP_VALUE_FLAGS` lacked 35 of these (`--resolution`,
 # `--torch-backend`, the global `--directory`/`--color`, …), so their values
-# were read as package names. Audited against: uv 0.12.19
+# were read as package names. Audited against: uv 0.12.23
 # `uv pip install --help`.
 _UV_PIP_INSTALL_VALUE_FLAGS = frozenset({
     "--allow-insecure-host", "--build-constraints", "--cache-dir", "--cert",
@@ -871,7 +871,7 @@ _UV_PIP_REQUIREMENT_FLAGS = frozenset({"-r", "--requirement", "--requirements"})
 # uv's global options that consume the next argument. uv accepts global options
 # BEFORE the subcommand (`uv -q add requests`, `uv --directory backend sync`),
 # so the subcommand is the first argument that is neither one of these, nor its
-# value, nor a boolean flag. Audited against: uv 0.12.19 `uv --help`.
+# value, nor a boolean flag. Audited against: uv 0.12.23 `uv --help`.
 _UV_GLOBAL_VALUE_FLAGS = frozenset({
     "--cache-dir",
     "--color",
@@ -1026,7 +1026,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
         rest = args[2:]
         req_files: list[str] = []
         skip_value_for: str | None = None
-        # Audited against: uv 0.12.19 `uv pip sync --help`.
+        # Audited against: uv 0.12.23 `uv pip sync --help`.
         _UV_PIP_SYNC_VALUE_FLAGS = frozenset({
             "-c", "--constraints", "-b", "--build-constraints",
             "--extra", "--group", "--cert", "--target", "-t",

@@ -85,7 +85,7 @@ _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info\Z")
 # written alongside a leaf are told apart from the real entry STRUCTURALLY
 # (the entry is a symlink, a companion a regular file), not by suffix alone,
 # which a wheel whose tag set ends in one of those suffixes would defeat —
-# see _uv_wheel_index_entry_to_metadata(). Audited against: uv 0.12.19 — see
+# see _uv_wheel_index_entry_to_metadata(). Audited against: uv 0.12.23 — see
 # "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md for how/when
 # to re-check this.
 _UV_TAG_COMPONENT_RE = r"[A-Za-z0-9_]+"
@@ -103,7 +103,7 @@ _UV_WHEEL_INDEX_BUILD_HASH_RE = re.compile(r"^(?P<version>[A-Za-z0-9_.!+]+?)-[0-
 # exactly 16 characters. Matched at exactly this width, not merely a minimum,
 # so a lookalike subtree using a shorter hex string in the same position
 # doesn't get treated as a real digest and misclassified. Audited against: uv
-# 0.12.19 — see "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md
+# 0.12.23 — see "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md
 # for how/when to re-check this.
 _UV_CACHE_HASH_RE = re.compile(r"^[0-9a-f]{16}\Z")
 # uv cache-schema root directory names: "wheels-v6", "sdists-v9", etc. — the
@@ -112,7 +112,7 @@ _UV_CACHE_HASH_RE = re.compile(r"^[0-9a-f]{16}\Z")
 # "wheels-v6.txt"; recursively watching any such lookalike (e.g. a manual
 # backup of the whole cache) could reopen the inotify watch exhaustion this
 # scoping was meant to prevent, so glob matches are filtered through this
-# pattern before being watched. Audited against: uv 0.12.19 — see "Auditing the
+# pattern before being watched. Audited against: uv 0.12.23 — see "Auditing the
 # uv cache-layout assumptions" in .claude/CLAUDE.md for how/when to re-check
 # this.
 _UV_CACHE_SCHEMA_DIR_RE = re.compile(r"^(?:wheels|sdists)-v\d+\Z")
@@ -1822,7 +1822,7 @@ class PythonLanguage:
     # (wheels-v4 -> wheels-v6, sdists-v9). See "Auditing the uv cache-layout
     # assumptions" in .claude/CLAUDE.md for how and when to re-verify all of
     # this against a real cache and uv's actual source — last done against uv
-    # 0.12.19.
+    # 0.12.23.
 
     def cache_paths(self) -> list[Path]:
         # Watch only the structured wheel index, not uv's archive-v0
