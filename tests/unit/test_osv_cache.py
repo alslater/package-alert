@@ -97,3 +97,17 @@ async def test_none_version_handled(cache):
     await cache.set("pypi", "mypkg", None, result)
     cached = await cache.get("pypi", "mypkg", None)
     assert cached is not None
+
+
+async def test_remediation_fields_survive_the_cache(cache):
+    adv = OsvAdvisory(
+        id="GHSA-1", summary="s", aliases=["PYSEC-1"], fixed_versions=["1.1"],
+        affected_ranges=[[{"introduced": "0"}, {"fixed": "1.1"}]], affected_versions=["2.0"],
+    )
+    await cache.set("pypi", "pkg", "1.0", OsvResult(package_name="pkg", ecosystem="pypi", version="1.0", advisories=[adv]))
+    got = await cache.get("pypi", "pkg", "1.0")
+    assert got is not None
+    [back] = got.advisories
+    assert (back.aliases, back.affected_ranges, back.affected_versions) == (
+        adv.aliases, adv.affected_ranges, adv.affected_versions,
+    )

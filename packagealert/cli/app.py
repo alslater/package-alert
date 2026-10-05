@@ -9,7 +9,6 @@ import subprocess
 import sys
 import threading
 import time
-import types
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import cast
@@ -25,6 +24,7 @@ from packagealert.daemon_pid import (
     is_started_by_systemd,
 )
 from packagealert.logging_setup import configure_logging
+from packagealert.osv.remediation import fixed_versions_of
 from packagealert.plugins.registry import plugin_registry
 
 log = logging.getLogger(__name__)
@@ -750,6 +750,220 @@ def _severity_colour(adv) -> str:
     return "red" if adv.is_malicious else "yellow"
 
 
+_SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+# At most this many recommended-version age lookups at once: each cache miss
+# opens its own registry connection, so a scan with many vulnerable packages
+# must not open them all together. The same bound the risk pass uses.
+_RECOMMENDATION_AGE_CONCURRENCY = 10
+
+
+async def _recommendation_ages(db, groups) -> dict[tuple[str, str, str], float]:
+    """Age in days of each package's recommended version, keyed (ecosystem, package, version).
+
+    Best effort: a version whose publication date cannot be found is simply
+    absent, so it is shown without a cooldown mark rather than failing the scan.
+    Reads and fills the same publication cache the `pa run` cooldown gate uses.
+    Lookups run at most _RECOMMENDATION_AGE_CONCURRENCY at a time, cache reads
+    and writes included.
+    """
+    import time as _time
+
+    from packagealert.languages import registry as lang_registry
+    from packagealert.sandbox.cooldown import fetch_publication_date
+    from packagealert.storage.db import get_publication_date, store_publication_date
+
+    lang_registry.load()
+
+    async def _age(ecosystem: str, name: str, version: str) -> float | None:
+        lang = lang_registry.for_ecosystem(ecosystem)
+        if lang is None:
+            return None
+        try:
+            url = lang.publication_date_url(name, version)
+        except Exception:
+            log.warning("publication_date_url raised for lang=%s pkg=%s", getattr(lang, "name", "?"), name, exc_info=True)
+            return None
+        if not isinstance(url, str):
+            return None
+        cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
+        if cached == "miss":
+            fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
+            if isinstance(fetched, float):
+                await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
+            elif fetched == "not_found":
+                await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=None)
+            cached = fetched
+        if not isinstance(cached, float):
+            return None
+        return (_time.time() - cached) / 86400
+
+    wanted = [
+        (g.ecosystem, g.package, g.recommendation.version)
+        for g in groups
+        if g.recommendation is not None and g.recommendation.version
+    ]
+    sem = asyncio.Semaphore(_RECOMMENDATION_AGE_CONCURRENCY)
+
+    async def _bounded(ecosystem: str, name: str, version: str) -> float | None:
+        async with sem:
+            return await _age(ecosystem, name, version)
+
+    ages = await asyncio.gather(*(_bounded(*w) for w in wanted), return_exceptions=True)
+    return {w: a for w, a in zip(wanted, ages) if isinstance(a, float)}
+
+
+def _cooldown_note(group, ages: dict | None, cooldown_days: int | None) -> str:
+    """'' or a note that the recommended version is still inside the cooldown period."""
+    rec = group.recommendation
+    if not ages or cooldown_days is None or rec is None or not rec.version:
+        return ""
+    age = ages.get((group.ecosystem, group.package, rec.version))
+    if age is None or age >= cooldown_days:
+        return ""
+    return f"in cooldown: published {age:.1f} days ago (cooldown {cooldown_days}d)"
+
+
+def _recommendation_text(group) -> tuple[str, str]:
+    """(text, style) for a package's upgrade advice line."""
+    rec = group.recommendation
+    if rec is None:
+        # Installed version unknown or unorderable: list every fix OSV gave.
+        fixes = sorted({v for f in group.findings for v in fixed_versions_of(f)})
+        return (f"fixed in: {', '.join(fixes)}", "green") if fixes else ("no fixed version known", "yellow")
+    if rec.version is None:
+        return "no fixed version known", "yellow"
+    total = len(group.advisories)
+    open_count = len(group.unfixed_advisories())
+    scope = f"fixes all {total}" if not open_count else f"fixes {total - open_count} of {total}"
+    text = f"upgrade to {rec.version} ({scope})"
+    if rec.major_upgrade:
+        text += " — major version upgrade"
+    return text, "green" if not open_count else "yellow"
+
+
+def _open_advisory_ids(group) -> set[str]:
+    """Ids of the merged advisories to mark as left open by the recommendation.
+
+    Empty when there is no recommended version: the advice line already says
+    no fix is known, so marking each row "not fixed by the recommended
+    version" would describe a version that does not exist.
+    """
+    rec = group.recommendation
+    if rec is None or not rec.version:
+        return set()
+    return {a.id for a in group.unfixed_advisories()}
+
+
+def _advisory_colour(adv) -> str:
+    """_severity_colour() for a merged remediation.Advisory."""
+    if adv.severity:
+        return _SEVERITY_COLOUR.get(adv.severity, "yellow")
+    return "red" if adv.is_malicious else "yellow"
+
+
+def _count_advisories(findings: list[dict]) -> tuple[int, int, int]:
+    """(malicious, vulnerable, packages), counting aliases of one flaw once."""
+    from packagealert.osv.remediation import group_findings
+
+    groups = group_findings(findings)
+    advisories = [a for g in groups for a in g.advisories]
+    malicious = sum(1 for a in advisories if a.is_malicious)
+    return malicious, len(advisories) - malicious, len(groups)
+
+
+def _print_findings_by_package(
+    out: Console,
+    findings: list[dict],
+    *,
+    show_details: bool,
+    ages: dict | None = None,
+    cooldown_days: int | None = None,
+) -> None:
+    """Print findings grouped by package, each with one recommended upgrade.
+
+    Findings that are aliases of one another (a GHSA and its PYSEC twin) are
+    printed as one advisory, its other ids listed after it.
+
+    Every value from an advisory is printed with markup=False: summaries and
+    ids come from OSV and may contain square brackets.
+    """
+    from packagealert.osv.remediation import group_findings
+
+    for i, group in enumerate(group_findings(findings)):
+        if i:
+            out.print()
+        advisories = group.advisories
+        malicious = any(a.is_malicious for a in advisories)
+        worst = max(advisories, key=lambda a: (a.is_malicious, _SEVERITY_RANK.get(a.severity, 0)))
+        n = len(advisories)
+        out.print(
+            f"{'[MALICIOUS]' if malicious else '[VULN]'} {group.package}@{group.version or 'unpinned'} — "
+            f"{n} advisor{'y' if n == 1 else 'ies'}",
+            style=f"bold {'red' if malicious else _advisory_colour(worst)}", markup=False, highlight=False,
+        )
+        text, style = _recommendation_text(group)
+        out.print(f"  → {text}", style=style, markup=False, highlight=False, end="")
+        note = _cooldown_note(group, ages, cooldown_days)
+        out.print(f"  ⏳ {note}" if note else "", style="bold yellow", markup=False, highlight=False)
+
+        unfixed = _open_advisory_ids(group)
+        for adv in advisories:
+            severity_tag = f" [{adv.severity}]" if adv.severity else ""
+            summary_tag = f" — {adv.summary}" if adv.summary else ""
+            also_tag = f" (also {', '.join(adv.other_ids)})" if adv.other_ids else ""
+            out.print(
+                f"    {'MALICIOUS ' if adv.is_malicious else ''}{adv.id}{severity_tag}{summary_tag}",
+                style=_advisory_colour(adv), markup=False, highlight=False, end="",
+            )
+            out.print(also_tag, style="dim", markup=False, highlight=False, end="")
+            out.print(
+                " (no fix in the recommended version)" if adv.id in unfixed else "",
+                style="yellow", markup=False, highlight=False,
+            )
+            if show_details:
+                fixes = list(dict.fromkeys(
+                    v for f in adv.findings for v in fixed_versions_of(f)
+                ))
+                if fixes:
+                    out.print(f"      fixed in: {', '.join(fixes)}", style="dim", markup=False, highlight=False)
+                details = adv.primary.get("details")
+                if details:
+                    out.print(f"      {str(details).strip()}", markup=False, highlight=False)
+                for f in adv.findings:
+                    if f.get("url"):
+                        out.print(f"      {f['url']}", markup=False, highlight=False)
+
+
+def _remediations_json(findings: list[dict], ages: dict | None, cooldown_days: int | None) -> list[dict]:
+    """Per-package upgrade advice for the JSON output."""
+    from packagealert.osv.remediation import group_findings
+
+    out = []
+    for group in group_findings(findings):
+        rec = group.recommendation
+        version = rec.version if rec is not None else None
+        age = (ages or {}).get((group.ecosystem, group.package, version)) if version else None
+        out.append({
+            "package": group.package,
+            "ecosystem": group.ecosystem,
+            "version": group.version,
+            # One entry per vulnerability; `aliases` are the other ids this
+            # scan reported for the same flaw.
+            "advisories": [{"id": a.id, "aliases": a.other_ids} for a in group.advisories],
+            "recommended_version": version,
+            "unfixed_advisory_ids": [a.id for a in group.unfixed_advisories()] if rec is not None else None,
+            "major_upgrade": rec.major_upgrade if rec is not None else None,
+            # False when some advisory had no OSV range data, so the choice rests
+            # on its fixed-version list alone.
+            "verified": rec.verified if rec is not None else None,
+            "recommended_age_days": age,
+            "in_cooldown": (age < cooldown_days) if age is not None and cooldown_days is not None else None,
+        })
+    return out
+
+
 _RISK_LEVEL_COLOUR = {"critical": "red", "warning": "yellow", "info": "cyan"}
 
 
@@ -1186,6 +1400,9 @@ async def _run_scan_project(
                     "summary": adv.summary,
                     "details": adv.details,
                     "fixed_versions": adv.fixed_versions,
+                    "affected_ranges": adv.affected_ranges,
+                    "affected_versions": adv.affected_versions,
+                    "aliases": adv.aliases,
                     "url": f"https://osv.dev/vulnerability/{adv.id}",
                 })
 
@@ -1194,6 +1411,16 @@ async def _run_scan_project(
     risks, risk_failures = await _risk_pass(
         cfg, db, to_query, skip=no_risk, root=root, installed=installed
     )
+
+    from packagealert.osv.remediation import group_findings
+    cooldown_days = cfg.sandbox.cooldown.period_days
+    # Decoration only: a failed lookup must not cost the scan its results, and
+    # must not skip db.close(), whose worker thread otherwise keeps the process alive.
+    try:
+        ages = await _recommendation_ages(db, group_findings(findings)) if findings else {}
+    except Exception:
+        log.warning("Could not check recommended versions against the cooldown period", exc_info=True)
+        ages = {}
 
     await db.close()
 
@@ -1221,6 +1448,9 @@ async def _run_scan_project(
             "sources": result.sources,
             "unpinned": unpinned_list,
             "findings": findings,
+            # One recommended upgrade per vulnerable package; see
+            # packagealert.osv.remediation.
+            "remediations": _remediations_json(findings, ages, cooldown_days),
             "risks": risks,
             # How many packages could not be scored. Without it a fully failed risk
             # pass emitted "risks": [] — indistinguishable from a clean scan, so a
@@ -1244,6 +1474,8 @@ async def _run_scan_project(
             risk_total=len(risks),
             risk_failures=risk_failures,
             osv_failures=osv_failures,
+            ages=ages,
+            cooldown_days=cooldown_days,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -1268,25 +1500,10 @@ async def _run_scan_project(
         console.print("[green]Nothing to scan.[/green]")
         return
 
-    malicious = 0
-    vulnerable = 0
-    for f in findings:
-        adv_obj = types.SimpleNamespace(**f)
-        colour = _severity_colour(adv_obj)
-        label = "[MALICIOUS]" if f["is_malicious"] else "[VULN]"
-        severity_tag = f" [{f['severity']}]" if f["severity"] else ""
-        summary_tag = f" — {f['summary']}" if f["summary"] else ""
-        console.print(f"[{colour}]{label} {f['advisory_id']}{severity_tag}[/{colour}] {f['package']}@{f['version'] or 'unpinned'}{summary_tag}", highlight=False)
-        if f.get("fixed_versions"):
-            console.print(f"  [green]→ upgrade to: {', '.join(f['fixed_versions'])}[/green]")
-        if show_details:
-            if f["details"]:
-                console.print(f"  {f['details'].strip()}", highlight=False)
-            console.print(f"  {f['url']}")
-        if f["is_malicious"]:
-            malicious += 1
-        else:
-            vulnerable += 1
+    _print_findings_by_package(
+        console, findings, show_details=show_details, ages=ages, cooldown_days=cooldown_days,
+    )
+    malicious, vulnerable, vulnerable_packages = _count_advisories(findings)
 
     if risks:
         shown = _visible_risks(risks, show_details=show_details)
@@ -1339,7 +1556,8 @@ async def _run_scan_project(
     # still add up to everything that was attempted.
     checked = len(to_query) - osv_failures
     unchecked_note = f", {osv_failures} unchecked" if osv_failures else ""
-    console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow], "
+    in_packages = f" in {vulnerable_packages} package{'' if vulnerable_packages == 1 else 's'}" if findings else ""
+    console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow]{in_packages}, "
                   f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] "
                   f"({checked} packages checked{unchecked_note})")
 
@@ -1359,7 +1577,7 @@ def open_html_in_browser(html: str) -> None:
     Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "") -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None) -> str:
     """Render a self-contained HTML report.
 
     *risks* is the already-filtered set of rows to table (low-signal rows are
@@ -1377,27 +1595,45 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
     HTML report that omitted it was the one format that still looked clean.
     """
     from html import escape
-    malicious = sum(1 for f in findings if f["is_malicious"])
-    vulnerable = len(findings) - malicious
+    malicious, vulnerable, _ = _count_advisories(findings)
 
     _SEVERITY_BG = {"CRITICAL": "#7f1d1d", "HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"}
 
-    def badge(f: dict) -> str:
-        label = "MALICIOUS" if f["is_malicious"] else f.get("severity") or "VULN"
-        bg = "#7f1d1d" if f["is_malicious"] else _SEVERITY_BG.get((f.get("severity") or "").upper(), "#d97706")
+    def badge(adv) -> str:
+        label = "MALICIOUS" if adv.is_malicious else adv.severity or "VULN"
+        bg = "#7f1d1d" if adv.is_malicious else _SEVERITY_BG.get(adv.severity, "#d97706")
         return f'<span style="background:{bg};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;font-weight:bold">{escape(label)}</span>'
 
+    from packagealert.osv.remediation import group_findings
+
     rows = ""
-    for f in findings:
-        fix_cell = escape(", ".join(f.get("fixed_versions") or [])) or "—"
+    for group in group_findings(findings):
+        advice, _ = _recommendation_text(group)
+        note = _cooldown_note(group, ages, cooldown_days)
+        note_html = f' <span class="cooldown">&#9203; {escape(note)}</span>' if note else ""
         rows += f"""
+        <tr class="pkg">
+          <td colspan="7"><strong>{escape(group.package)}@{escape(group.version or 'unpinned')}</strong>
+            &mdash; {escape(advice)}{note_html}</td>
+        </tr>"""
+        unfixed = _open_advisory_ids(group)
+        for adv in group.advisories:
+            fixes = dict.fromkeys(v for f in adv.findings for v in fixed_versions_of(f))
+            fix_cell = escape(", ".join(fixes)) or "—"
+            if adv.id in unfixed:
+                fix_cell += ' <span class="open">not fixed by the recommended version</span>'
+            id_links = "<br>".join(
+                f'<a href="{escape(str(f.get("url") or ""))}">{escape(str(f.get("advisory_id") or ""))}</a>'
+                for f in sorted(adv.findings, key=lambda f: f is not adv.primary)
+            )
+            rows += f"""
         <tr>
-          <td>{badge(f)}</td>
-          <td><strong>{escape(f['package'])}</strong></td>
-          <td>{escape(f['ecosystem'])}</td>
-          <td>{escape(f['version'] or 'unpinned')}</td>
-          <td><a href="{escape(f['url'])}">{escape(f['advisory_id'])}</a></td>
-          <td>{escape(f['summary'] or '')}</td>
+          <td>{badge(adv)}</td>
+          <td><strong>{escape(group.package)}</strong></td>
+          <td>{escape(group.ecosystem)}</td>
+          <td>{escape(group.version or 'unpinned')}</td>
+          <td>{id_links}</td>
+          <td>{escape(adv.summary)}</td>
           <td>{fix_cell}</td>
         </tr>"""
 
@@ -1445,6 +1681,9 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   th {{ background: #f3f4f6; text-align: left; padding: 8px 12px; border-bottom: 2px solid #e5e7eb; }}
   td {{ padding: 8px 12px; border-bottom: 1px solid #e5e7eb; vertical-align: top; }}
   tr:hover td {{ background: #f9fafb; }}
+  tr.pkg td {{ background: #f3f4f6; border-top: 2px solid #e5e7eb; }}
+  .cooldown {{ color: #92400e; font-weight: bold; }}
+  .open {{ display: block; color: #92400e; font-weight: bold; font-size: 0.9em; }}
   ul {{ margin: 0.5em 0; padding-left: 1.5em; }}
   a {{ color: #2563eb; }}
 </style>
@@ -2242,15 +2481,26 @@ async def _scans_list(cfg, project_path: str, limit: int) -> None:
 def _findings_cell(record) -> str:
     """Findings count for a scan-history table, flagging unchecked packages.
 
+    Counted per vulnerability, as the detail view counts them: aliases of one
+    flaw (a GHSA and its PYSEC twin) are one. The stored finding_count stays
+    the number of finding rows — that is its meaning for plugins and
+    pa-central — so the count is derived from the stored findings here.
+
     A degraded OSV lookup may be missing advisories (see OsvResult.degraded),
     so a bare count reads as a clean scan for packages that were never
     actually checked. Records written before osv_failures existed report 0 and
     render exactly as they did before.
     """
+    findings = [f for f in (getattr(record, "findings", None) or []) if isinstance(f, dict)]
+    if findings:
+        malicious, vulnerable, _ = _count_advisories(findings)
+        count = malicious + vulnerable
+    else:
+        count = record.finding_count
     unchecked = getattr(record, "osv_failures", 0) or 0
     if unchecked:
-        return f"{record.finding_count} [yellow](+{unchecked} unchecked)[/yellow]"
-    return str(record.finding_count)
+        return f"{count} [yellow](+{unchecked} unchecked)[/yellow]"
+    return str(count)
 
 
 @scans_app.command("listall")
@@ -2363,6 +2613,10 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
             "scan_type": record.scan_type,
             "sources": sources,
             "findings": findings,
+            # Recomputed from the stored findings, as the live scan computes
+            # them. The age/cooldown fields are null: those need a registry
+            # lookup that only the live scan makes.
+            "remediations": _remediations_json(findings, None, None),
             # A degraded lookup may be missing advisories, so "findings": []
             # alone cannot be told apart from a genuinely clean scan.
             "osv_failures": osv_failures,
@@ -2398,34 +2652,13 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
             console.print("[green]No findings — all clear.[/green]")
         return
 
-    malicious = 0
-    vulnerable = 0
-    for f in findings:
-        adv_obj = types.SimpleNamespace(**f)
-        colour = _severity_colour(adv_obj)
-        label = "[MALICIOUS]" if f["is_malicious"] else "[VULN]"
-        severity_tag = f" [{f['severity']}]" if f["severity"] else ""
-        summary_tag = f" — {f['summary']}" if f["summary"] else ""
-        console.print(
-            f"[{colour}]{label} {f['advisory_id']}{severity_tag}[/{colour}] "
-            f"{f['package']}@{f['version'] or 'unpinned'}{summary_tag}",
-            highlight=False,
-        )
-        if f.get("fixed_versions"):
-            console.print(f"  [green]→ upgrade to: {', '.join(f['fixed_versions'])}[/green]")
-        if show_details:
-            if f.get("details"):
-                console.print(f"  {f['details'].strip()}", highlight=False)
-            console.print(f"  {f['url']}")
-        if f["is_malicious"]:
-            malicious += 1
-        else:
-            vulnerable += 1
+    _print_findings_by_package(console, findings, show_details=show_details)
+    malicious, vulnerable, packages = _count_advisories(findings)
 
     console.print(
         f"\nScan complete: [bold red]{malicious} malicious[/bold red], "
         f"[bold yellow]{vulnerable} vulnerable[/bold yellow] "
-        f"({len(findings)} total findings)"
+        f"in {packages} package{'' if packages == 1 else 's'}"
     )
 
 

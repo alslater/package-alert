@@ -414,3 +414,44 @@ async def test_batch_query_ghsa_severity_from_database_specific(osv_client):
     results = await osv_client.batch_query([("npm", "somelib", "1.0.0")])
     adv = results[0].advisories[0]
     assert adv.severity == "CRITICAL"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_aliases_populated_from_enrich(osv_client):
+    # /querybatch omits aliases. They come from the advisory detail, and they
+    # decide is_malicious when only an alias carries the MAL- id.
+    respx.post("https://api.osv.dev/v1/querybatch").mock(
+        return_value=httpx.Response(200, json={"results": [{"vulns": [{"id": "GHSA-aaaa-bbbb-cccc"}]}]})
+    )
+    respx.get("https://api.osv.dev/v1/vulns/GHSA-aaaa-bbbb-cccc").mock(
+        return_value=httpx.Response(200, json={
+            "id": "GHSA-aaaa-bbbb-cccc", "summary": "s",
+            "aliases": ["PYSEC-2026-1", "MAL-2026-9", 7],
+        })
+    )
+    [result] = await osv_client.batch_query([("pypi", "pkg", "1.0")])
+    adv = result.advisories[0]
+    assert adv.aliases == ["PYSEC-2026-1", "MAL-2026-9"]
+    assert result.has_malicious
+
+
+@pytest.mark.parametrize("affected", [[None], "not-a-list", [{"package": None}]])
+@respx.mock
+@pytest.mark.asyncio
+async def test_mal_alias_survives_a_malformed_advisory_detail(osv_client, affected):
+    # Aliases feed is_malicious, so a malformed "affected" (which makes the
+    # fixed-version/range extraction raise) must not cost the advisory its
+    # MAL- alias along with the decoration.
+    respx.post("https://api.osv.dev/v1/querybatch").mock(
+        return_value=httpx.Response(200, json={"results": [{"vulns": [{"id": "GHSA-aaaa-bbbb-cccc"}]}]})
+    )
+    respx.get("https://api.osv.dev/v1/vulns/GHSA-aaaa-bbbb-cccc").mock(
+        return_value=httpx.Response(200, json={
+            "id": "GHSA-aaaa-bbbb-cccc", "summary": "s",
+            "aliases": ["MAL-2026-9"], "affected": affected,
+        })
+    )
+    [result] = await osv_client.batch_query([("pypi", "pkg", "1.0")])
+    assert result.advisories[0].aliases == ["MAL-2026-9"]
+    assert result.has_malicious
