@@ -3189,3 +3189,174 @@ class TestConfigureSandboxWritableWarning:
         lang = self._lang()
         msg = lang.configure_sandbox_writable_warning(None, tmp_path, frozenset({"ssh-keys"}), _targets())
         assert msg is None
+
+
+def test_uv_lock_adjacency_unions_forks_and_drops_inapplicable_edges():
+    from packagealert.languages.python import _uv_lock_adjacency
+
+    packages = [
+        {"name": "App", "source": {"editable": "."}, "dependencies": [
+            {"name": "Requests"},
+            {"name": "pyodide-only", "marker": "sys_platform == 'emscripten'"},
+        ]},
+        {"name": "requests", "dependencies": [{"name": "urllib3"}]},
+        {"name": "requests", "dependencies": [{"name": "Charset_Normalizer"}]},
+        {"name": "never-here", "resolution-markers": ["sys_platform == 'emscripten'"],
+         "dependencies": [{"name": "x"}]},
+    ]
+    deps, unfiltered = _uv_lock_adjacency(packages)
+    assert deps["app"] == {"requests"}
+    assert unfiltered["app"] == {"requests", "pyodide-only"}
+    assert deps["requests"] == {"urllib3", "charset-normalizer"}
+    assert deps["never-here"] == set()
+    assert unfiltered["never-here"] == {"x"}
+
+
+def test_ssh_keys_confirmation_is_asked_on_stderr(tmp_path, monkeypatch, capsys):
+    import builtins
+    import sys
+
+    from packagealert.languages.python import PythonLanguage
+
+    (tmp_path / ".ssh").mkdir()
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda *a: "n")
+    result = PythonLanguage().pre_run_check(None, tmp_path, flags=frozenset({"ssh-keys"}))
+    captured = capsys.readouterr()
+    assert result.ok is False
+    assert "Continue with SSH keys exposed?" not in captured.out  # stdout may be a JSON plan
+    assert "Continue with SSH keys exposed?" in captured.err
+
+
+def test_pypi_yank_status_url_is_the_per_version_json():
+    from packagealert.languages.python import PythonLanguage
+
+    assert PythonLanguage().yank_status_url("pypdfium2", "5.12.0") == "https://pypi.org/pypi/pypdfium2/5.12.0/json"
+
+
+@pytest.mark.parametrize("data, expected", [
+    ({"info": {"yanked": True, "yanked_reason": "Setup blunder"}}, (True, "Setup blunder")),
+    ({"info": {"yanked": True, "yanked_reason": ""}}, (True, None)),
+    ({"info": {"yanked": True, "yanked_reason": None}}, (True, None)),
+    ({"info": {"yanked": False, "yanked_reason": None}}, (False, None)),
+    ({"info": {}}, None),                      # the response does not say
+    ({"info": {"yanked": "yes"}}, None),       # not a boolean
+    ({"info": None}, None),
+    ([], None),
+    (None, None),
+])
+def test_pypi_yank_status_parse(data, expected):
+    from packagealert.languages.python import PythonLanguage
+
+    assert PythonLanguage().yank_status_parse(data, "1.0") == expected
+
+
+def test_uv_lock_records_which_packages_come_from_the_public_registry(lang: PythonLanguage, tmp_path: Path) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\nname = "proj"\nversion = "0"\nsource = { editable = "." }\n'
+        '[[package]]\nname = "requests"\nversion = "2.31.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "corp-utils"\nversion = "1.2.0"\nsource = { registry = "https://corp.example/simple" }\n'
+        '[[package]]\nname = "gitdep"\nversion = "1.0"\nsource = { git = "https://example.com/g.git?rev=x#abc" }\n'
+        '[[package]]\nname = "member"\nversion = "0.1"\nsource = { editable = "packages/member" }\n'
+        '[[package]]\nname = "local"\nversion = "0.2"\nsource = { path = "dist/local-0.2.whl" }\n'
+        '[[package]]\nname = "nosource"\nversion = "3.0"\n'
+    )
+    public = {p.name: p.from_public_registry for p in lang.parse_lockfile(uv_lock)}
+    assert public == {"requests": True, "corp-utils": False, "gitdep": False, "member": False,
+                      "local": False, "nosource": True}
+
+
+def test_scanned_lock_packages_keep_their_registry_origin(tmp_path: Path) -> None:
+    from packagealert.parsers.lockfiles import scan_project
+
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "corp-utils"\nversion = "1.2.0"\nsource = { registry = "https://corp.example/simple" }\n')
+    [pkg] = scan_project(tmp_path).pinned
+    assert pkg.from_public_registry is False
+
+
+def _pipfile_lock(tmp_path: Path, sources: list[dict], default: dict) -> Path:
+    import json
+    lock = tmp_path / "Pipfile.lock"
+    lock.write_text(json.dumps({"_meta": {"sources": sources}, "default": default, "develop": {}}))
+    return lock
+
+
+_PYPI = {"name": "pypi", "url": "https://pypi.org/simple", "verify_ssl": True}
+_CORP = {"name": "corp", "url": "https://corp.example/simple", "verify_ssl": True}
+
+
+def test_pipfile_lock_records_which_packages_come_from_the_public_registry(lang: PythonLanguage, tmp_path: Path) -> None:
+    lock = _pipfile_lock(tmp_path, [_PYPI, _CORP], {
+        "requests": {"version": "==2.31.0", "index": "pypi"},
+        "corp-utils": {"version": "==1.2.0", "index": "corp"},
+        "unknown-index": {"version": "==1.0", "index": "nowhere"},
+        "default-index": {"version": "==1.0"},
+        "local": {"path": "./local", "version": "==0.1"},
+        "wheel-file": {"file": "https://corp.example/w.whl", "version": "==0.2"},
+    })
+    public = {p.name: p.from_public_registry for p in lang.parse_lockfile(lock)}
+    assert public == {"requests": True, "corp-utils": False, "unknown-index": False, "default-index": True,
+                      "local": False, "wheel-file": False}
+
+
+def test_pipfile_lock_default_index_is_the_first_source(lang: PythonLanguage, tmp_path: Path) -> None:
+    lock = _pipfile_lock(tmp_path, [_CORP, _PYPI], {"corp-utils": {"version": "==1.2.0"}})
+    [pkg] = lang.parse_lockfile(lock)
+    assert pkg.from_public_registry is False
+
+
+def test_pipfile_lock_without_sources_is_public(lang: PythonLanguage, tmp_path: Path) -> None:
+    lock = _pipfile_lock(tmp_path, [], {"requests": {"version": "==2.31.0"}})
+    [pkg] = lang.parse_lockfile(lock)
+    assert pkg.from_public_registry is True
+
+
+@pytest.mark.parametrize("option", [
+    "--index-url https://corp.example/simple", "-i https://corp.example/simple",
+    "--index-url=https://corp.example/simple", "--extra-index-url https://corp.example/simple",
+    "--find-links ./wheels", "-f ./wheels", "--no-index",
+    "-ihttps://corp.example/simple", "-f./wheels", "--pypi-url https://corp.example/simple",
+    "--extra https://corp.example/simple", "--pre --find-links ./wheels",
+])
+def test_requirements_index_options_make_every_package_private(
+    lang: PythonLanguage, tmp_path: Path, option: str,
+) -> None:
+    (tmp_path / "base.txt").write_text(f"{option}\n")
+    req = tmp_path / "requirements.txt"
+    req.write_text("requests==2.31.0\n-r base.txt\n")
+    assert [p.from_public_registry for p in lang.parse_lockfile(req)] == [False]
+
+
+@pytest.mark.parametrize("option", ["", "--index-url https://pypi.org/simple/", "-i https://pypi.org/simple",
+                                    "--require-hashes"])
+def test_requirements_on_public_pypi_stay_public(lang: PythonLanguage, tmp_path: Path, option: str) -> None:
+    req = tmp_path / "requirements.txt"
+    req.write_text(f"{option}\nrequests==2.31.0\n")
+    assert [p.from_public_registry for p in lang.parse_lockfile(req)] == [True]
+
+
+@pytest.mark.parametrize("registry", ["https://PYPI.org/simple", "https://pypi.org/simple/", "https://pypi.python.org/simple"])
+def test_uv_lock_public_registry_spellings_are_public(lang: PythonLanguage, tmp_path: Path, registry: str) -> None:
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(f'[[package]]\nname = "requests"\nversion = "2.31.0"\nsource = {{ registry = "{registry}" }}\n')
+    assert [p.from_public_registry for p in lang.parse_lockfile(uv_lock)] == [True]
+
+
+def test_uv_lock_virtual_root_is_the_project_not_a_dependency(lang: PythonLanguage, tmp_path: Path) -> None:
+    # A non-package uv project locks itself as source = { virtual = "." }; other
+    # workspace members (virtual or editable elsewhere) are still listed.
+    uv_lock = tmp_path / "uv.lock"
+    uv_lock.write_text(
+        '[[package]]\nname = "requests"\nversion = "0.1.0"\nsource = { virtual = "." }\n'
+        'dependencies = [{ name = "idna" }]\n'
+        '[package.dev-dependencies]\ndev = [{ name = "six" }]\n'
+        '[[package]]\nname = "idna"\nversion = "3.10"\nsource = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "six"\nversion = "1.16.0"\nsource = { registry = "https://pypi.org/simple" }\n'
+        '[[package]]\nname = "member"\nversion = "0.2"\nsource = { virtual = "packages/member" }\n'
+    )
+    result = {p.name: p.is_dev for p in lang.parse_lockfile(uv_lock)}
+    assert "requests" not in result
+    assert result["idna"] is False and result["six"] is True and "member" in result

@@ -1,0 +1,28 @@
+# uv 0.12.23 rc=1
+error: Failed to build `causal-conv1d==1.5.0.post8`
+  cause: The build backend returned an error
+  cause: Call to `setuptools.build_meta:__legacy__.prepare_metadata_for_build_wheel` failed (exit status: 1)
+
+         [stdout]
+
+
+         torch.__version__  = 2.6.0+cu124
+
+
+
+         [stderr]
+         <string>:113: UserWarning: causal_conv1d was requested, but nvcc was not found.  Are you sure your environment has nvcc available?  If you're installing within a container from https://hub.docker.com/r/pytorch/pytorch, only images whose names contain 'devel' will provide nvcc.
+         Traceback (most recent call last):
+           File "<string>", line 14, in <module>
+           File "/home/user/src/Zonos/.venv/lib/python3.12/site-packages/setuptools/build_meta.py", line 377, in prepare_metadata_for_build_wheel
+             self.run_setup()
+           File "/home/user/src/Zonos/.venv/lib/python3.12/site-packages/setuptools/build_meta.py", line 522, in run_setup
+             super().run_setup(setup_script=setup_script)
+           File "/home/user/src/Zonos/.venv/lib/python3.12/site-packages/setuptools/build_meta.py", line 320, in run_setup
+             exec(code, locals())
+           File "<string>", line 185, in <module>
+         NameError: name 'bare_metal_version' is not defined
+
+hint: `causal-conv1d` (v1.5.0.post8) was included because `zonos[compile]` (v0.1.0) depends on `causal-conv1d>=1.5.0.post8`
+
+hint: Build failures usually indicate a problem with the package or the build environment

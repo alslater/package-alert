@@ -1,0 +1,7 @@
+# uv 0.12.23 rc=0
+Using CPython 3.13.13
+Resolved 271 packages in 2.39s
+warning: `pypdfium2==5.12.0` is yanked (reason: "Setup blunder breaking some bindgen codepaths (system-search / fallback). Wheels are valid and effectively identical to 5.12.1")
+Update aiohttp v3.14.1 -> v3.14.1, v3.14.4
+Update litellm v1.88.1 -> v1.88.6
+Update yarl v1.22.0 -> v1.22.0, v1.25.1

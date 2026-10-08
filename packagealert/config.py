@@ -212,6 +212,19 @@ class CentralPluginConfig(BaseModel):
     allow_http: bool = False
 
 
+class FixConfig(BaseModel):
+    allow_major: list[str] = []
+    """Packages whose major upgrades ``pa fix`` may plan. ``all`` is a per-run CLI choice only."""
+
+    @field_validator("allow_major")
+    @classmethod
+    def _no_wildcard(cls, names: list[str]) -> list[str]:
+        if any(part.strip().lower() in ("all", "*") for n in names for part in n.split(",")):
+            raise ValueError("allow_major takes package names; allowing every package is a per-run "
+                             "choice (pa fix --allow-major all)")
+        return names
+
+
 class PluginsConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -229,6 +242,7 @@ class AppConfig(BaseModel):
     sandbox: SandboxConfig = SandboxConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    fix: FixConfig = Field(default_factory=FixConfig)
 
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "package-alert" / "config.toml"

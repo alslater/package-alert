@@ -193,6 +193,7 @@ flags = "python:ssh-keys"          # merged with any --flags passed on the CLI
 env   = ["MY_PRIVATE_TOKEN"]       # merged with --env
 no_network             = false     # set true to always run offline
 allow_external_lockfiles = false   # set true for monorepo symlinked lock files
+allow_major = ["cryptography"]     # pa fix only: packages whose major upgrades may be planned (trusted files only)
 ```
 
 **Discovery:** starting from the current working directory, package-alert walks up the directory tree looking for `.pa-run.toml`. The first (closest) file found wins, and its path is printed to the console so the source is always transparent. Two boundaries apply: the walk never goes above `$HOME`, and if the project is *outside* `$HOME` the walk stops at the first VCS root (`.git`/`.hg`) it encounters. For projects under `$HOME`, VCS roots are not stopping points — they only determine whether the file is *trusted* (see Security below). A `~/.pa-run.toml` acts as a user-wide default for projects under `$HOME`; a monorepo can carry a shared file at its repo root.
@@ -344,7 +345,10 @@ package-alert scan-project [PATH] [OPTIONS]
 | `--requirements` / `-r` | — | Explicit requirements file to scan instead of auto-detecting lock files (mutually exclusive with `--scan-installed`) |
 | `--details` / `-d` | off | Show full advisory details and URL; also reveals suppressed low-signal risk rows |
 | `--no-risk` | off | Skip heuristic risk scoring (typosquat, popularity). Scoring is **on by default** |
+| `--no-yank` | off | Skip checking locked versions for yanks |
 | `--format` / `-f` | `text` | Output format: `text`, `json`, `html`, `browser` |
+
+**Yanked versions.** `scan-project` asks the registry whether each locked version has been yanked (withdrawn by its maintainer; PyPI only for now) and lists those under `Yanked versions` with the maintainer's reason, in text, JSON (`yanked`, `yank_failures`) and HTML. A yank is a warning, not a finding: maintainers yank for broken packaging as well as for problems that never got an advisory, so it does not change the exit status. Answers are cached for 24 hours; a lookup that fails is counted as unchecked, never as "not yanked". Packages locked from a private index, git or a local path are not checked: a public package of the same name is a different package. `--scan-installed` skips the check, since installed packages do not record which index they came from. `--no-yank` skips the check.
 
 **Risk scoring.** In addition to OSV advisories, `scan-project` scores each queried package with the heuristic risk engine and prints a `Risk signals` section. Which signals can fire depends on the scan mode:
 
@@ -395,6 +399,67 @@ Each risk row carries a `level` of `info`, `warning`, or `critical`. These are c
 - `requirements.txt` / `requirements/base.txt` / `requirements/prod.txt` → PyPI (only when no uv/pipenv lock found)
 - `composer.lock` → Packagist
 - `composer.json` (fallback when no lock file) → Packagist
+
+### `fix`
+
+Plan the commands that upgrade a uv project's vulnerable packages. `pa fix`
+prints the commands and changes nothing in the project. To check them it runs
+read-only commands in the sandbox (`uv lock --dry-run` trial resolves, which use
+the network, and `uv export --frozen --offline`), and it queries OSV and the
+package registry.
+
+```bash
+package-alert fix [PATH] [--allow-major PKG|all] [--allow-cooldown] [--no-verify] [--allow-project-env] [--format text|json] [--config FILE]
+```
+
+While it works, `pa fix` shows a one-line progress indicator naming the current step (on stderr with `--format json`); nothing is shown when the output is not a terminal. Each vulnerable package gets one exact pin (`uv lock --upgrade-package name==version`). When `PATH` is not the current directory, both printed commands name it with uv's `--directory`, so they can be run from anywhere. The printed `uv sync` keeps what the project's `.venv` has installed: when its packages match the lock's default set plus some extras or groups, the matching `--extra`/`--group` flags are added. When they cannot be matched, `pa fix` warns that a plain `uv sync` would remove packages, and you add the flags you installed with.
+That pin is the lowest version that fixes all of its advisories, so the upgrade
+stays on the installed release line when that line has a fix. When no version
+fixes every advisory, the pin is the lowest version that leaves the fewest open,
+and the plan lists the rest under "still open after this" (`left_open` in JSON);
+such a plan exits 1, since applying it does not fully fix the package. Transitive packages
+show the chain that pulls them in. Major upgrades and versions still inside the
+cooldown period are held back unless `--allow-major` / `--allow-cooldown` is
+given. Malicious packages, packages with no known fix, unverified picks,
+non-registry sources and packages locked at several versions are always held back,
+with the reason. A package that is one of your own workspace members is held as
+`workspace member`, never upgraded. When the recommended version's age is unknown,
+the plan notes "age unknown — cooldown not checked".
+
+Before printing, `pa fix` checks each pin by resolving it with `uv lock --dry-run` in the sandbox, using the project's `.pa-run.toml` flags, so private-index credentials work. A pin that uv cannot satisfy is held as `blocked`, naming the package that blocks it. A pin that would downgrade another package or add a package with known advisories is held, with what it would change. A pin whose trial would install a yanked version is held as `would install a yanked version`. Locked versions their registry has yanked are listed after the commands (checked against the registry, so this works with no fixes planned); they do not affect the exit status. When a blocking parent can itself be upgraded safely, both are planned. `--no-verify` skips the check. The plan is then marked not verified and exits 1, as it does when the sandbox is unavailable (bwrap missing) or the project's run config cannot be used or disables the network.
+
+If a trial itself fails for a pin (for example the sandbox errors out), that pin is held as `could not verify` and the other pins are still checked. The hold names uv's error, such as a dependency that fails to build. When every trial fails with the same error, the plan says so once, since the cause is then the project or the machine (for example a package that only builds with a CUDA toolkit) rather than any one pin. `could not verify` also covers an inconclusive trial, an unavailable advisory lookup, and a trial that does not move the target to the planned version.
+
+When each pin passes alone but the pins together do not (the combined trial finds no resolution, is inconclusive or errors, or fails one of the same checks: a downgrade, new advisories, a yanked or too-new version, a major upgrade, or a package left at several versions), the plan is in separate mode and says why (`separate_reason` in JSON): `pa fix` prints the lock command for the first package only, then a `Next, after applying that…` line listing the remaining fixes. Apply the printed commands, re-run `pa fix`, and repeat. Separate mode always exits 1.
+
+Trials run with the sandbox's environment allowlist, so `UV_*` resolver settings in your shell (extra indexes, constraints, `UV_EXCLUDE_NEWER`, ...) are not applied during verification. Put them in the project config instead.
+
+`--allow-project-env` bypasses the `sandbox.project_env_allowlist` check for env vars requested by an untrusted `.pa-run.toml`, for this run only (the same option as `pa run`).
+
+Under the printed commands, an `Also changes:` line lists what those commands change beyond the fixes listed above (other packages upgraded, added or removed by the resolution), taken from the trial that matches the printed command: the combined trial, or the first package's own trial in separate mode.
+
+With `--format json`, each planned item carries `verified`, `changes` (other packages the trial changed), `parent` (a blocking parent that is upgraded with it, or null) and the plan carries `detail` on held items, `verified` and `unverified_reason` (why no trial ran, else null), `separate` and `deferred` (the packages left for later rounds in separate mode). The plan also carries `command_changes`: the `Also changes:` list as `{action, package, old, new}` objects.
+
+Exit status: 0 only for a verified, complete plan, with everything vulnerable planned and fully fixed; 1 when anything is held back, left open, unverified, in separate mode or could not be checked; 2 when there is no usable lock file (`uv.lock` is the only one supported so far), or the project holds lock files for more than one supported package manager.
+
+`--allow-major` takes a package name and can be repeated or comma-separated: `--allow-major cryptography --allow-major pip` and `--allow-major cryptography,pip` allow major upgrades of those two packages only. `--allow-major all` allows every package. A bare `--allow-major` with no value is a usage error. Names are matched case-insensitively, treating `-`, `_` and `.` as the same.
+
+Packages you always allow can be listed in the main config and in a trusted `.pa-run.toml`; these lists are unioned with the command-line value:
+
+```toml
+# config.toml
+[fix]
+allow_major = ["cryptography", "pip"]
+```
+
+```toml
+# .pa-run.toml (honoured only when the file is trusted)
+allow_major = ["cryptography"]
+```
+
+`all` is rejected in both files: allowing every package stays a per-run command-line choice. An untrusted `.pa-run.toml`'s `allow_major` is ignored, with a warning.
+
+For a held `major upgrade`, `pa fix` reads the package's release history from PyPI and labels packages for which a major bump is routine: ` — routine for cryptography (bumps its major version every release)` or ` — routine for pip (uses calendar versioning)`. The hint then names the package: `(use --allow-major cryptography)`. The label never changes whether a fix is held, and nothing is looked up when the project config disables the network; a failed lookup just leaves the label off. In JSON, each held item carries `cadence`: `"every-release"`, `"calendar"` or `null`.
 
 ### `scan-cache`
 

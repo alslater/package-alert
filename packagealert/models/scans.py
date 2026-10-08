@@ -28,3 +28,7 @@ class ScanResult:
     # `findings` cannot be told apart from a genuinely clean project, and a
     # consumer acting on "no findings" would treat an OSV outage as a pass.
     osv_failures: int = 0
+    # Locked versions their registry has yanked, and how many could not be checked
+    # (see packagealert.yanks). Not findings: finding_count is unchanged.
+    yanked: list[dict] = field(default_factory=list)
+    yank_failures: int = 0

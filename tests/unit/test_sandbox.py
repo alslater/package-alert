@@ -5,15 +5,19 @@ are pure functions (no I/O, no async, no OSV calls).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
+import subprocess
 import unittest.mock
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
+import packagealert.sandbox.runner as runner_mod
+from packagealert.config import AppConfig
 from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.languages.python import (
     _find_pipenv_venv,
@@ -34,6 +38,8 @@ from packagealert.sandbox.runner import (
     _SANDBOX_ENV_COMMON,
     _SHELL_NAMES,
     _SHELL_RC_FILES,
+    CapturedRun,
+    CapturedRunError,
     SandboxRunner,
     _assert_scannable_lock_files_contained,
     _build_sandbox_env,
@@ -7066,3 +7072,238 @@ def test_run_refuses_a_real_symlink_loop(tmp_path, monkeypatch, capsys):
     rc = asyncio.run(_make_runner().run(["uv", "--directory", loop, "sync"]))
     assert rc == 1
     assert "cannot be resolved" in capsys.readouterr().out
+
+
+_CAPTURED_EXPORT = ("uv", "export", "--frozen", "--offline", "--no-hashes", "--no-header", "--no-annotate",
+                    "--no-emit-project", "--format", "requirements.txt")
+
+
+class TestRunCaptured:
+    """run_captured(): read-only, non-interactive, output captured, never exec."""
+
+    def _setup(self, monkeypatch, tmp_path, *, rc=0, stderr="Resolved 1 package\n"):
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        seen: dict = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"], seen["kw"] = cmd, kw
+            return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(runner_mod.os, "execvp", lambda *a: (_ for _ in ()).throw(AssertionError("execvp")))
+        (tmp_path / "uv.lock").write_text("version = 1\n")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname="p"\nversion="0"\n')
+        return seen
+
+    def _binds(self, cmd, flag):
+        return [cmd[i + 1] for i, a in enumerate(cmd) if a == flag]
+
+    def test_project_is_bound_read_only_and_never_writable(self, monkeypatch, tmp_path):
+        seen = self._setup(monkeypatch, tmp_path)
+        runner = SandboxRunner(AppConfig())
+        out = asyncio.run(runner.run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+        assert out == CapturedRun(0, "", "Resolved 1 package\n", False)
+        cmd = seen["cmd"]
+        assert str(tmp_path) not in self._binds(cmd, "--bind")
+        assert str(tmp_path) in self._binds(cmd, "--ro-bind")
+        assert seen["kw"]["cwd"] == str(tmp_path)
+        assert seen["kw"]["capture_output"] is True and seen["kw"]["text"] is True
+
+    def test_no_gates_run(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        runner = SandboxRunner(AppConfig())
+
+        async def boom(*a, **k):
+            raise AssertionError("a gate ran")
+
+        monkeypatch.setattr(runner, "_preflight", boom)
+        monkeypatch.setattr(runner, "_risk_check", boom)
+        monkeypatch.setattr(runner, "_cooldown_check", boom)
+        asyncio.run(runner.run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+
+    def test_unrecognised_argv_raises_instead_of_exec(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        runner = SandboxRunner(AppConfig())
+        with pytest.raises(CapturedRunError):
+            asyncio.run(runner.run_captured(["uv", "--version"], cwd=tmp_path))
+
+    @pytest.mark.parametrize("argv", [
+        ["uv", "publish"],
+        ["uv", "run", "python", "-c", "print(1)"],
+        ["uv", "sync"],
+        ["uv", "lock"],
+        ["uv", "lock", "--upgrade-package", "x==1"],
+        ["uv", "lock", "--dry-run", "--script", "x.py"],
+        ["uv", "lock", "--dry-run", "--upgrade-package", "--frozen"],
+        ["uv", "add", "x"],
+        ["pip", "install", "x"],
+        ["uv", "export"],  # without --frozen it may re-resolve and rewrite uv.lock
+        [*_CAPTURED_EXPORT, "-o", "requirements.txt"],
+        [*_CAPTURED_EXPORT, "--output-file=requirements.txt"],
+        [*_CAPTURED_EXPORT, "--extra"],
+        [*_CAPTURED_EXPORT, "--extra", "--all-extras"],
+        ["uv", "--directory", "/tmp", "lock", "--dry-run"],
+    ])
+    def test_only_approved_read_only_shapes_run(self, monkeypatch, tmp_path, argv):
+        seen = self._setup(monkeypatch, tmp_path)
+        with pytest.raises(CapturedRunError, match="not an approved read-only command"):
+            asyncio.run(SandboxRunner(AppConfig()).run_captured(argv, cwd=tmp_path))
+        assert "cmd" not in seen  # refused before any process was started
+
+    @pytest.mark.parametrize("argv", [
+        ["uv", "lock", "--dry-run"],
+        ["uv", "lock", "--dry-run", "--upgrade-package", "pip==26.2.0", "--upgrade-package", "chalice"],
+        list(_CAPTURED_EXPORT),
+        ["uv", "export", "--frozen"],
+        [*_CAPTURED_EXPORT, "--extra", "dev"],
+        [*_CAPTURED_EXPORT, "--group", "docs"],
+    ])
+    def test_approved_shapes_still_run(self, monkeypatch, tmp_path, argv):
+        seen = self._setup(monkeypatch, tmp_path)
+        asyncio.run(SandboxRunner(AppConfig()).run_captured(argv, cwd=tmp_path))
+        assert "cmd" in seen
+
+    def test_the_owning_plugin_decides(self, monkeypatch, tmp_path):
+        from packagealert.languages.python import PythonLanguage
+
+        seen = self._setup(monkeypatch, tmp_path)
+        monkeypatch.setattr(PythonLanguage, "is_read_only_command", lambda self, argv: argv == ["uv", "sync"],
+                            raising=False)
+        asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "sync"], cwd=tmp_path))
+        assert "cmd" in seen
+        with pytest.raises(CapturedRunError, match="not an approved read-only command"):
+            asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+
+    @pytest.mark.parametrize("hook", [
+        None,                                              # the plugin has no hook
+        lambda self, argv: (_ for _ in ()).throw(RuntimeError("plugin bug")),
+        lambda self, argv: "yes",                          # truthy is not approval
+    ])
+    def test_owner_without_a_clear_yes_is_refused(self, monkeypatch, tmp_path, hook):
+        from packagealert.languages.python import PythonLanguage
+
+        seen = self._setup(monkeypatch, tmp_path)
+        if hook is None:
+            monkeypatch.delattr(PythonLanguage, "is_read_only_command", raising=False)
+        else:
+            monkeypatch.setattr(PythonLanguage, "is_read_only_command", hook, raising=False)
+        with pytest.raises(CapturedRunError, match="not an approved read-only command"):
+            asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+        assert "cmd" not in seen
+
+    def test_command_no_plugin_claims_is_refused(self, monkeypatch, tmp_path):
+        seen = self._setup(monkeypatch, tmp_path)
+        with pytest.raises(CapturedRunError, match="not an approved read-only command"):
+            asyncio.run(SandboxRunner(AppConfig()).run_captured(["nosuchpm", "lock"], cwd=tmp_path))
+        assert "cmd" not in seen
+
+    def test_flags_go_through_the_pre_run_checks_once(self, monkeypatch, tmp_path):
+        from packagealert.languages.base import PreRunResult
+        from packagealert.languages.python import PythonLanguage
+
+        seen = self._setup(monkeypatch, tmp_path)
+        calls = []
+
+        def check(self, parsed, cwd, flags=frozenset()):
+            calls.append(flags)
+            return PreRunResult(ok=True)
+
+        monkeypatch.setattr(PythonLanguage, "pre_run_check", check)
+        runner = SandboxRunner(AppConfig())
+        for _ in range(2):
+            asyncio.run(runner.run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path,
+                                            flags={"python": frozenset({"ssh-keys"})}))
+        assert calls == [frozenset({"ssh-keys"})]  # asked once per runner, not per trial
+        assert "cmd" in seen
+
+    def test_a_blocking_pre_run_check_stops_captured_runs(self, monkeypatch, tmp_path):
+        from packagealert.languages.base import PreRunResult
+        from packagealert.languages.python import PythonLanguage
+
+        seen = self._setup(monkeypatch, tmp_path)
+        calls = []
+
+        def declined(self, parsed, cwd, flags=frozenset()):
+            calls.append(flags)
+            return PreRunResult(ok=False, message="Aborted by user.")
+
+        monkeypatch.setattr(PythonLanguage, "pre_run_check", declined)
+        runner = SandboxRunner(AppConfig())
+        for _ in range(2):
+            with pytest.raises(CapturedRunError, match="pre-run check"):
+                asyncio.run(runner.run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path,
+                                                flags={"python": frozenset({"ssh-keys"})}))
+        assert "cmd" not in seen and len(calls) == 1  # declined once, not asked again
+
+    def test_captured_runs_get_no_stdin(self, monkeypatch, tmp_path):
+        seen = self._setup(monkeypatch, tmp_path)
+        asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+        assert seen["kw"]["stdin"] is subprocess.DEVNULL
+
+    def test_missing_bwrap_raises(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: False)
+        with pytest.raises(CapturedRunError):
+            asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path))
+
+    def test_timeout_is_reported_not_raised(self, monkeypatch, tmp_path):
+        self._setup(monkeypatch, tmp_path)
+
+        def slow(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+        monkeypatch.setattr(subprocess, "run", slow)
+        out = asyncio.run(SandboxRunner(AppConfig()).run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path, timeout=1))
+        assert out.timed_out
+
+    def test_credential_binds_from_flags_are_kept(self, monkeypatch, tmp_path):
+        seen = self._setup(monkeypatch, tmp_path)
+        runner = SandboxRunner(AppConfig())
+        dest = tmp_path / "credsdest"
+        dest.mkdir()
+        marker = (tmp_path / "credsrc", dest)
+        marker[0].mkdir()
+        monkeypatch.setattr(runner, "_collect_and_print_writable_binds", lambda *a, **k: [marker])
+        asyncio.run(runner.run_captured(["uv", "lock", "--dry-run"], cwd=tmp_path, flags={"python": frozenset({"uv-auth"})}))
+        cmd = seen["cmd"]
+        pairs = [(cmd[i + 1], cmd[i + 2]) for i, a in enumerate(cmd) if a == "--bind"]
+        assert (str(marker[0]), str(dest)) in pairs
+
+
+def test_sandbox_runner_uses_a_supplied_console():
+    from rich.console import Console
+
+    from packagealert.config import AppConfig
+    from packagealert.sandbox.runner import SandboxRunner
+
+    c = Console(stderr=True)
+    assert SandboxRunner(AppConfig(), console=c)._console is c
+
+
+def test_writable_bind_warnings_print_once_per_runner(monkeypatch):
+    """pa fix assembles one sandbox per trial on the same runner; each distinct
+    security warning must reach the console once, not once per trial."""
+    from unittest.mock import patch as _patch
+
+    import packagealert.sandbox.runner as runner_mod_inner
+
+    warnings = ["⚠  credential snapshot active"]
+    monkeypatch.setattr(
+        runner_mod_inner, "_collect_writable_binds",
+        lambda *a, **k: ([], list(warnings)),
+    )
+    runner = _make_runner()
+    printed: list[str] = []
+    with _patch.object(runner._console, "print", side_effect=lambda *a, **kw: printed.append(str(a[0]))):
+        for _ in range(3):
+            runner._collect_and_print_writable_binds({}, Path("/"), SandboxTargets(scan_targets=[], write_dirs=[]), {})
+        warnings.append("⚠  a different warning")
+        runner._collect_and_print_writable_binds({}, Path("/"), SandboxTargets(scan_targets=[], write_dirs=[]), {})
+    assert printed == ["⚠  credential snapshot active", "⚠  a different warning"]
+    # A fresh runner (pa run creates one per command) warns again.
+    other: list[str] = []
+    fresh = _make_runner()
+    with _patch.object(fresh._console, "print", side_effect=lambda *a, **kw: other.append(str(a[0]))):
+        fresh._collect_and_print_writable_binds({}, Path("/"), SandboxTargets(scan_targets=[], write_dirs=[]), {})
+    assert other == ["⚠  credential snapshot active", "⚠  a different warning"]

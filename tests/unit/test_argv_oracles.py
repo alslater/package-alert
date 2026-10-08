@@ -171,3 +171,26 @@ def test_composer_parser_matches_composer_itself():
         f"{len(mismatches)} of {len(_COMPOSER['cases'])} command lines parse differently from "
         f"composer {_COMPOSER['composer']}:\n" + "\n".join(mismatches[:20])
     )
+
+
+_PIP_REQ_FILE = json.loads((_FIXTURES / "pip_req_file.json").read_text())
+
+
+def test_requirements_option_table_is_pips():
+    """The option table the requirements-file parser resolves prefixes against
+    is pip's own; regenerate the fixture and the table together."""
+    from packagealert.parsers.lockfiles import _REQ_LONG_OPTIONS, _REQ_SHORT_OPTIONS
+
+    assert _REQ_LONG_OPTIONS == _PIP_REQ_FILE["long_options"]
+    assert _REQ_SHORT_OPTIONS == _PIP_REQ_FILE["short_options"]
+
+
+def test_requirements_source_options_match_pip_itself():
+    """Whether a requirements-file option line sends pip somewhere other than
+    public PyPI, as pip itself parses it. Saying "public" for a private source
+    would look an unrelated public package up for yanks."""
+    from packagealert.parsers.lockfiles import _requirements_option_is_private
+
+    wrong = [(line, private) for line, private in _PIP_REQ_FILE["cases"]
+             if _requirements_option_is_private(line) != private]
+    assert wrong == [], f"{len(wrong)} of {len(_PIP_REQ_FILE['cases'])} lines differ from pip {_PIP_REQ_FILE['pip']}"

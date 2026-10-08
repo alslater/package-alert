@@ -1,0 +1,3498 @@
+{
+ "pip": "26.1.2",
+ "long_options": {
+  "--index-url": true,
+  "--pypi-url": true,
+  "--extra-index-url": true,
+  "--no-index": false,
+  "--constraint": true,
+  "--requirement": true,
+  "--editable": true,
+  "--find-links": true,
+  "--no-binary": true,
+  "--only-binary": true,
+  "--prefer-binary": false,
+  "--require-hashes": false,
+  "--pre": false,
+  "--all-releases": true,
+  "--only-final": true,
+  "--trusted-host": true,
+  "--use-feature": true,
+  "--hash": true,
+  "--config-settings": true
+ },
+ "short_options": {
+  "-i": "--index-url",
+  "-c": "--constraint",
+  "-r": "--requirement",
+  "-e": "--editable",
+  "-f": "--find-links",
+  "-C": "--config-settings"
+ },
+ "cases": [
+  [
+   "-ihttps://pypi.org/simple",
+   false
+  ],
+  [
+   "-i https://pypi.org/simple",
+   false
+  ],
+  [
+   "-ihttps://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-i https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-ihttps://corp.example/simple",
+   true
+  ],
+  [
+   "-i https://corp.example/simple",
+   true
+  ],
+  [
+   "-i./wheels",
+   true
+  ],
+  [
+   "-i ./wheels",
+   true
+  ],
+  [
+   "--i=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--i https://pypi.org/simple",
+   false
+  ],
+  [
+   "--i=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--i https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--i=https://corp.example/simple",
+   true
+  ],
+  [
+   "--i https://corp.example/simple",
+   true
+  ],
+  [
+   "--i=./wheels",
+   true
+  ],
+  [
+   "--i ./wheels",
+   true
+  ],
+  [
+   "--in=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--in https://pypi.org/simple",
+   false
+  ],
+  [
+   "--in=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--in https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--in=https://corp.example/simple",
+   true
+  ],
+  [
+   "--in https://corp.example/simple",
+   true
+  ],
+  [
+   "--in=./wheels",
+   true
+  ],
+  [
+   "--in ./wheels",
+   true
+  ],
+  [
+   "--ind=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--ind https://pypi.org/simple",
+   false
+  ],
+  [
+   "--ind=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--ind https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--ind=https://corp.example/simple",
+   true
+  ],
+  [
+   "--ind https://corp.example/simple",
+   true
+  ],
+  [
+   "--ind=./wheels",
+   true
+  ],
+  [
+   "--ind ./wheels",
+   true
+  ],
+  [
+   "--inde=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--inde https://pypi.org/simple",
+   false
+  ],
+  [
+   "--inde=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--inde https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--inde=https://corp.example/simple",
+   true
+  ],
+  [
+   "--inde https://corp.example/simple",
+   true
+  ],
+  [
+   "--inde=./wheels",
+   true
+  ],
+  [
+   "--inde ./wheels",
+   true
+  ],
+  [
+   "--index=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index=https://corp.example/simple",
+   true
+  ],
+  [
+   "--index https://corp.example/simple",
+   true
+  ],
+  [
+   "--index=./wheels",
+   true
+  ],
+  [
+   "--index ./wheels",
+   true
+  ],
+  [
+   "--index-=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index- https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index- https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-=https://corp.example/simple",
+   true
+  ],
+  [
+   "--index- https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-=./wheels",
+   true
+  ],
+  [
+   "--index- ./wheels",
+   true
+  ],
+  [
+   "--index-u=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-u https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-u=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-u https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-u=https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-u https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-u=./wheels",
+   true
+  ],
+  [
+   "--index-u ./wheels",
+   true
+  ],
+  [
+   "--index-ur=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-ur https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-ur=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-ur https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-ur=https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-ur https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-ur=./wheels",
+   true
+  ],
+  [
+   "--index-ur ./wheels",
+   true
+  ],
+  [
+   "--index-url=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-url https://pypi.org/simple",
+   false
+  ],
+  [
+   "--index-url=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-url https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--index-url=https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-url https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-url=./wheels",
+   true
+  ],
+  [
+   "--index-url ./wheels",
+   true
+  ],
+  [
+   "--py=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--py https://pypi.org/simple",
+   false
+  ],
+  [
+   "--py=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--py https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--py=https://corp.example/simple",
+   true
+  ],
+  [
+   "--py https://corp.example/simple",
+   true
+  ],
+  [
+   "--py=./wheels",
+   true
+  ],
+  [
+   "--py ./wheels",
+   true
+  ],
+  [
+   "--pyp=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pyp https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pyp=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pyp https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pyp=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pyp https://corp.example/simple",
+   true
+  ],
+  [
+   "--pyp=./wheels",
+   true
+  ],
+  [
+   "--pyp ./wheels",
+   true
+  ],
+  [
+   "--pypi=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi=./wheels",
+   true
+  ],
+  [
+   "--pypi ./wheels",
+   true
+  ],
+  [
+   "--pypi-=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi- https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi- https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi- https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-=./wheels",
+   true
+  ],
+  [
+   "--pypi- ./wheels",
+   true
+  ],
+  [
+   "--pypi-u=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-u https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-u=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-u https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-u=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-u https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-u=./wheels",
+   true
+  ],
+  [
+   "--pypi-u ./wheels",
+   true
+  ],
+  [
+   "--pypi-ur=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-ur https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-ur=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-ur https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-ur=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-ur https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-ur=./wheels",
+   true
+  ],
+  [
+   "--pypi-ur ./wheels",
+   true
+  ],
+  [
+   "--pypi-url=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-url https://pypi.org/simple",
+   false
+  ],
+  [
+   "--pypi-url=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-url https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--pypi-url=https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-url https://corp.example/simple",
+   true
+  ],
+  [
+   "--pypi-url=./wheels",
+   true
+  ],
+  [
+   "--pypi-url ./wheels",
+   true
+  ],
+  [
+   "--ex=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--ex https://pypi.org/simple",
+   true
+  ],
+  [
+   "--ex=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--ex https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--ex=https://corp.example/simple",
+   true
+  ],
+  [
+   "--ex https://corp.example/simple",
+   true
+  ],
+  [
+   "--ex=./wheels",
+   true
+  ],
+  [
+   "--ex ./wheels",
+   true
+  ],
+  [
+   "--ext=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--ext https://pypi.org/simple",
+   true
+  ],
+  [
+   "--ext=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--ext https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--ext=https://corp.example/simple",
+   true
+  ],
+  [
+   "--ext https://corp.example/simple",
+   true
+  ],
+  [
+   "--ext=./wheels",
+   true
+  ],
+  [
+   "--ext ./wheels",
+   true
+  ],
+  [
+   "--extr=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extr https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extr=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extr https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extr=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extr https://corp.example/simple",
+   true
+  ],
+  [
+   "--extr=./wheels",
+   true
+  ],
+  [
+   "--extr ./wheels",
+   true
+  ],
+  [
+   "--extra=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra=./wheels",
+   true
+  ],
+  [
+   "--extra ./wheels",
+   true
+  ],
+  [
+   "--extra-=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra- https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra- https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra- https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-=./wheels",
+   true
+  ],
+  [
+   "--extra- ./wheels",
+   true
+  ],
+  [
+   "--extra-i=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-i https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-i=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-i https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-i=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-i https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-i=./wheels",
+   true
+  ],
+  [
+   "--extra-i ./wheels",
+   true
+  ],
+  [
+   "--extra-in=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-in https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-in=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-in https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-in=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-in https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-in=./wheels",
+   true
+  ],
+  [
+   "--extra-in ./wheels",
+   true
+  ],
+  [
+   "--extra-ind=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-ind https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-ind=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-ind https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-ind=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-ind https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-ind=./wheels",
+   true
+  ],
+  [
+   "--extra-ind ./wheels",
+   true
+  ],
+  [
+   "--extra-inde=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-inde https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-inde=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-inde https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-inde=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-inde https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-inde=./wheels",
+   true
+  ],
+  [
+   "--extra-inde ./wheels",
+   true
+  ],
+  [
+   "--extra-index=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index=./wheels",
+   true
+  ],
+  [
+   "--extra-index ./wheels",
+   true
+  ],
+  [
+   "--extra-index-=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index- https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index- https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index- https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-=./wheels",
+   true
+  ],
+  [
+   "--extra-index- ./wheels",
+   true
+  ],
+  [
+   "--extra-index-u=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-u https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-u=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-u https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-u=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-u https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-u=./wheels",
+   true
+  ],
+  [
+   "--extra-index-u ./wheels",
+   true
+  ],
+  [
+   "--extra-index-ur=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-ur https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-ur=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-ur https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-ur=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-ur https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-ur=./wheels",
+   true
+  ],
+  [
+   "--extra-index-ur ./wheels",
+   true
+  ],
+  [
+   "--extra-index-url=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-url https://pypi.org/simple",
+   true
+  ],
+  [
+   "--extra-index-url=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-url https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--extra-index-url=https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-url https://corp.example/simple",
+   true
+  ],
+  [
+   "--extra-index-url=./wheels",
+   true
+  ],
+  [
+   "--extra-index-url ./wheels",
+   true
+  ],
+  [
+   "--no-i",
+   true
+  ],
+  [
+   "--no-in",
+   true
+  ],
+  [
+   "--no-ind",
+   true
+  ],
+  [
+   "--no-inde",
+   true
+  ],
+  [
+   "--no-index",
+   true
+  ],
+  [
+   "-chttps://pypi.org/simple",
+   false
+  ],
+  [
+   "-c https://pypi.org/simple",
+   false
+  ],
+  [
+   "-chttps://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-c https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-chttps://corp.example/simple",
+   false
+  ],
+  [
+   "-c https://corp.example/simple",
+   false
+  ],
+  [
+   "-c./wheels",
+   false
+  ],
+  [
+   "-c ./wheels",
+   false
+  ],
+  [
+   "--cons=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--cons https://pypi.org/simple",
+   false
+  ],
+  [
+   "--cons=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--cons https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--cons=https://corp.example/simple",
+   false
+  ],
+  [
+   "--cons https://corp.example/simple",
+   false
+  ],
+  [
+   "--cons=./wheels",
+   false
+  ],
+  [
+   "--cons ./wheels",
+   false
+  ],
+  [
+   "--const=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--const https://pypi.org/simple",
+   false
+  ],
+  [
+   "--const=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--const https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--const=https://corp.example/simple",
+   false
+  ],
+  [
+   "--const https://corp.example/simple",
+   false
+  ],
+  [
+   "--const=./wheels",
+   false
+  ],
+  [
+   "--const ./wheels",
+   false
+  ],
+  [
+   "--constr=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constr https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constr=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constr https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constr=https://corp.example/simple",
+   false
+  ],
+  [
+   "--constr https://corp.example/simple",
+   false
+  ],
+  [
+   "--constr=./wheels",
+   false
+  ],
+  [
+   "--constr ./wheels",
+   false
+  ],
+  [
+   "--constra=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constra https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constra=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constra https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constra=https://corp.example/simple",
+   false
+  ],
+  [
+   "--constra https://corp.example/simple",
+   false
+  ],
+  [
+   "--constra=./wheels",
+   false
+  ],
+  [
+   "--constra ./wheels",
+   false
+  ],
+  [
+   "--constrai=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constrai https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constrai=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constrai https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constrai=https://corp.example/simple",
+   false
+  ],
+  [
+   "--constrai https://corp.example/simple",
+   false
+  ],
+  [
+   "--constrai=./wheels",
+   false
+  ],
+  [
+   "--constrai ./wheels",
+   false
+  ],
+  [
+   "--constrain=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constrain https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constrain=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constrain https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constrain=https://corp.example/simple",
+   false
+  ],
+  [
+   "--constrain https://corp.example/simple",
+   false
+  ],
+  [
+   "--constrain=./wheels",
+   false
+  ],
+  [
+   "--constrain ./wheels",
+   false
+  ],
+  [
+   "--constraint=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constraint https://pypi.org/simple",
+   false
+  ],
+  [
+   "--constraint=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constraint https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--constraint=https://corp.example/simple",
+   false
+  ],
+  [
+   "--constraint https://corp.example/simple",
+   false
+  ],
+  [
+   "--constraint=./wheels",
+   false
+  ],
+  [
+   "--constraint ./wheels",
+   false
+  ],
+  [
+   "-rhttps://pypi.org/simple",
+   false
+  ],
+  [
+   "-r https://pypi.org/simple",
+   false
+  ],
+  [
+   "-rhttps://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-r https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-rhttps://corp.example/simple",
+   false
+  ],
+  [
+   "-r https://corp.example/simple",
+   false
+  ],
+  [
+   "-r./wheels",
+   false
+  ],
+  [
+   "-r ./wheels",
+   false
+  ],
+  [
+   "--requirem=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requirem https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requirem=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requirem https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requirem=https://corp.example/simple",
+   false
+  ],
+  [
+   "--requirem https://corp.example/simple",
+   false
+  ],
+  [
+   "--requirem=./wheels",
+   false
+  ],
+  [
+   "--requirem ./wheels",
+   false
+  ],
+  [
+   "--requireme=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requireme https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requireme=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requireme https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requireme=https://corp.example/simple",
+   false
+  ],
+  [
+   "--requireme https://corp.example/simple",
+   false
+  ],
+  [
+   "--requireme=./wheels",
+   false
+  ],
+  [
+   "--requireme ./wheels",
+   false
+  ],
+  [
+   "--requiremen=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requiremen https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requiremen=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requiremen https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requiremen=https://corp.example/simple",
+   false
+  ],
+  [
+   "--requiremen https://corp.example/simple",
+   false
+  ],
+  [
+   "--requiremen=./wheels",
+   false
+  ],
+  [
+   "--requiremen ./wheels",
+   false
+  ],
+  [
+   "--requirement=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requirement https://pypi.org/simple",
+   false
+  ],
+  [
+   "--requirement=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requirement https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--requirement=https://corp.example/simple",
+   false
+  ],
+  [
+   "--requirement https://corp.example/simple",
+   false
+  ],
+  [
+   "--requirement=./wheels",
+   false
+  ],
+  [
+   "--requirement ./wheels",
+   false
+  ],
+  [
+   "-ehttps://pypi.org/simple",
+   false
+  ],
+  [
+   "-e https://pypi.org/simple",
+   false
+  ],
+  [
+   "-ehttps://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-e https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "-ehttps://corp.example/simple",
+   false
+  ],
+  [
+   "-e https://corp.example/simple",
+   false
+  ],
+  [
+   "-e./wheels",
+   false
+  ],
+  [
+   "-e ./wheels",
+   false
+  ],
+  [
+   "--ed=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--ed https://pypi.org/simple",
+   false
+  ],
+  [
+   "--ed=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--ed https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--ed=https://corp.example/simple",
+   false
+  ],
+  [
+   "--ed https://corp.example/simple",
+   false
+  ],
+  [
+   "--ed=./wheels",
+   false
+  ],
+  [
+   "--ed ./wheels",
+   false
+  ],
+  [
+   "--edi=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edi https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edi=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edi https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edi=https://corp.example/simple",
+   false
+  ],
+  [
+   "--edi https://corp.example/simple",
+   false
+  ],
+  [
+   "--edi=./wheels",
+   false
+  ],
+  [
+   "--edi ./wheels",
+   false
+  ],
+  [
+   "--edit=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edit https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edit=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edit https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edit=https://corp.example/simple",
+   false
+  ],
+  [
+   "--edit https://corp.example/simple",
+   false
+  ],
+  [
+   "--edit=./wheels",
+   false
+  ],
+  [
+   "--edit ./wheels",
+   false
+  ],
+  [
+   "--edita=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edita https://pypi.org/simple",
+   false
+  ],
+  [
+   "--edita=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edita https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--edita=https://corp.example/simple",
+   false
+  ],
+  [
+   "--edita https://corp.example/simple",
+   false
+  ],
+  [
+   "--edita=./wheels",
+   false
+  ],
+  [
+   "--edita ./wheels",
+   false
+  ],
+  [
+   "--editab=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editab https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editab=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editab https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editab=https://corp.example/simple",
+   false
+  ],
+  [
+   "--editab https://corp.example/simple",
+   false
+  ],
+  [
+   "--editab=./wheels",
+   false
+  ],
+  [
+   "--editab ./wheels",
+   false
+  ],
+  [
+   "--editabl=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editabl https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editabl=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editabl https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editabl=https://corp.example/simple",
+   false
+  ],
+  [
+   "--editabl https://corp.example/simple",
+   false
+  ],
+  [
+   "--editabl=./wheels",
+   false
+  ],
+  [
+   "--editabl ./wheels",
+   false
+  ],
+  [
+   "--editable=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editable https://pypi.org/simple",
+   false
+  ],
+  [
+   "--editable=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editable https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--editable=https://corp.example/simple",
+   false
+  ],
+  [
+   "--editable https://corp.example/simple",
+   false
+  ],
+  [
+   "--editable=./wheels",
+   false
+  ],
+  [
+   "--editable ./wheels",
+   false
+  ],
+  [
+   "-fhttps://pypi.org/simple",
+   true
+  ],
+  [
+   "-f https://pypi.org/simple",
+   true
+  ],
+  [
+   "-fhttps://PYPI.org/simple/",
+   true
+  ],
+  [
+   "-f https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "-fhttps://corp.example/simple",
+   true
+  ],
+  [
+   "-f https://corp.example/simple",
+   true
+  ],
+  [
+   "-f./wheels",
+   true
+  ],
+  [
+   "-f ./wheels",
+   true
+  ],
+  [
+   "--f=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--f https://pypi.org/simple",
+   true
+  ],
+  [
+   "--f=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--f https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--f=https://corp.example/simple",
+   true
+  ],
+  [
+   "--f https://corp.example/simple",
+   true
+  ],
+  [
+   "--f=./wheels",
+   true
+  ],
+  [
+   "--f ./wheels",
+   true
+  ],
+  [
+   "--fi=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--fi https://pypi.org/simple",
+   true
+  ],
+  [
+   "--fi=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--fi https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--fi=https://corp.example/simple",
+   true
+  ],
+  [
+   "--fi https://corp.example/simple",
+   true
+  ],
+  [
+   "--fi=./wheels",
+   true
+  ],
+  [
+   "--fi ./wheels",
+   true
+  ],
+  [
+   "--fin=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--fin https://pypi.org/simple",
+   true
+  ],
+  [
+   "--fin=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--fin https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--fin=https://corp.example/simple",
+   true
+  ],
+  [
+   "--fin https://corp.example/simple",
+   true
+  ],
+  [
+   "--fin=./wheels",
+   true
+  ],
+  [
+   "--fin ./wheels",
+   true
+  ],
+  [
+   "--find=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find https://corp.example/simple",
+   true
+  ],
+  [
+   "--find=./wheels",
+   true
+  ],
+  [
+   "--find ./wheels",
+   true
+  ],
+  [
+   "--find-=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find- https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find- https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find- https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-=./wheels",
+   true
+  ],
+  [
+   "--find- ./wheels",
+   true
+  ],
+  [
+   "--find-l=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-l https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-l=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-l https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-l=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-l https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-l=./wheels",
+   true
+  ],
+  [
+   "--find-l ./wheels",
+   true
+  ],
+  [
+   "--find-li=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-li https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-li=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-li https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-li=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-li https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-li=./wheels",
+   true
+  ],
+  [
+   "--find-li ./wheels",
+   true
+  ],
+  [
+   "--find-lin=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-lin https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-lin=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-lin https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-lin=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-lin https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-lin=./wheels",
+   true
+  ],
+  [
+   "--find-lin ./wheels",
+   true
+  ],
+  [
+   "--find-link=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-link https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-link=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-link https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-link=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-link https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-link=./wheels",
+   true
+  ],
+  [
+   "--find-link ./wheels",
+   true
+  ],
+  [
+   "--find-links=https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-links https://pypi.org/simple",
+   true
+  ],
+  [
+   "--find-links=https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-links https://PYPI.org/simple/",
+   true
+  ],
+  [
+   "--find-links=https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-links https://corp.example/simple",
+   true
+  ],
+  [
+   "--find-links=./wheels",
+   true
+  ],
+  [
+   "--find-links ./wheels",
+   true
+  ],
+  [
+   "--no-b=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-b https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-b=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-b https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-b=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-b https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-b=./wheels",
+   false
+  ],
+  [
+   "--no-b ./wheels",
+   false
+  ],
+  [
+   "--no-bi=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bi https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bi=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bi https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bi=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bi https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bi=./wheels",
+   false
+  ],
+  [
+   "--no-bi ./wheels",
+   false
+  ],
+  [
+   "--no-bin=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bin https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bin=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bin https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bin=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bin https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bin=./wheels",
+   false
+  ],
+  [
+   "--no-bin ./wheels",
+   false
+  ],
+  [
+   "--no-bina=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bina https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-bina=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bina https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-bina=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bina https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-bina=./wheels",
+   false
+  ],
+  [
+   "--no-bina ./wheels",
+   false
+  ],
+  [
+   "--no-binar=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-binar https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-binar=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-binar https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-binar=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-binar https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-binar=./wheels",
+   false
+  ],
+  [
+   "--no-binar ./wheels",
+   false
+  ],
+  [
+   "--no-binary=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-binary https://pypi.org/simple",
+   false
+  ],
+  [
+   "--no-binary=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-binary https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--no-binary=https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-binary https://corp.example/simple",
+   false
+  ],
+  [
+   "--no-binary=./wheels",
+   false
+  ],
+  [
+   "--no-binary ./wheels",
+   false
+  ],
+  [
+   "--only-b=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-b https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-b=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-b https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-b=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-b https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-b=./wheels",
+   false
+  ],
+  [
+   "--only-b ./wheels",
+   false
+  ],
+  [
+   "--only-bi=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bi https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bi=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bi https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bi=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bi https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bi=./wheels",
+   false
+  ],
+  [
+   "--only-bi ./wheels",
+   false
+  ],
+  [
+   "--only-bin=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bin https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bin=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bin https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bin=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bin https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bin=./wheels",
+   false
+  ],
+  [
+   "--only-bin ./wheels",
+   false
+  ],
+  [
+   "--only-bina=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bina https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-bina=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bina https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-bina=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bina https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-bina=./wheels",
+   false
+  ],
+  [
+   "--only-bina ./wheels",
+   false
+  ],
+  [
+   "--only-binar=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-binar https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-binar=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-binar https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-binar=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-binar https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-binar=./wheels",
+   false
+  ],
+  [
+   "--only-binar ./wheels",
+   false
+  ],
+  [
+   "--only-binary=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-binary https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-binary=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-binary https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-binary=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-binary https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-binary=./wheels",
+   false
+  ],
+  [
+   "--only-binary ./wheels",
+   false
+  ],
+  [
+   "--pre",
+   false
+  ],
+  [
+   "--pref",
+   false
+  ],
+  [
+   "--prefe",
+   false
+  ],
+  [
+   "--prefer",
+   false
+  ],
+  [
+   "--prefer-",
+   false
+  ],
+  [
+   "--prefer-b",
+   false
+  ],
+  [
+   "--prefer-bi",
+   false
+  ],
+  [
+   "--prefer-bin",
+   false
+  ],
+  [
+   "--prefer-bina",
+   false
+  ],
+  [
+   "--prefer-binar",
+   false
+  ],
+  [
+   "--prefer-binary",
+   false
+  ],
+  [
+   "--require-",
+   false
+  ],
+  [
+   "--require-h",
+   false
+  ],
+  [
+   "--require-ha",
+   false
+  ],
+  [
+   "--require-has",
+   false
+  ],
+  [
+   "--require-hash",
+   false
+  ],
+  [
+   "--require-hashe",
+   false
+  ],
+  [
+   "--require-hashes",
+   false
+  ],
+  [
+   "--pre",
+   false
+  ],
+  [
+   "--a=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--a https://pypi.org/simple",
+   false
+  ],
+  [
+   "--a=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--a https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--a=https://corp.example/simple",
+   false
+  ],
+  [
+   "--a https://corp.example/simple",
+   false
+  ],
+  [
+   "--a=./wheels",
+   false
+  ],
+  [
+   "--a ./wheels",
+   false
+  ],
+  [
+   "--al=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--al https://pypi.org/simple",
+   false
+  ],
+  [
+   "--al=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--al https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--al=https://corp.example/simple",
+   false
+  ],
+  [
+   "--al https://corp.example/simple",
+   false
+  ],
+  [
+   "--al=./wheels",
+   false
+  ],
+  [
+   "--al ./wheels",
+   false
+  ],
+  [
+   "--all=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all https://corp.example/simple",
+   false
+  ],
+  [
+   "--all=./wheels",
+   false
+  ],
+  [
+   "--all ./wheels",
+   false
+  ],
+  [
+   "--all-=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all- https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all- https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all- https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-=./wheels",
+   false
+  ],
+  [
+   "--all- ./wheels",
+   false
+  ],
+  [
+   "--all-r=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-r https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-r=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-r https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-r=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-r https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-r=./wheels",
+   false
+  ],
+  [
+   "--all-r ./wheels",
+   false
+  ],
+  [
+   "--all-re=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-re https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-re=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-re https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-re=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-re https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-re=./wheels",
+   false
+  ],
+  [
+   "--all-re ./wheels",
+   false
+  ],
+  [
+   "--all-rel=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-rel https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-rel=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-rel https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-rel=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-rel https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-rel=./wheels",
+   false
+  ],
+  [
+   "--all-rel ./wheels",
+   false
+  ],
+  [
+   "--all-rele=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-rele https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-rele=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-rele https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-rele=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-rele https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-rele=./wheels",
+   false
+  ],
+  [
+   "--all-rele ./wheels",
+   false
+  ],
+  [
+   "--all-relea=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-relea https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-relea=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-relea https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-relea=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-relea https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-relea=./wheels",
+   false
+  ],
+  [
+   "--all-relea ./wheels",
+   false
+  ],
+  [
+   "--all-releas=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-releas https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-releas=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-releas https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-releas=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-releas https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-releas=./wheels",
+   false
+  ],
+  [
+   "--all-releas ./wheels",
+   false
+  ],
+  [
+   "--all-release=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-release https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-release=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-release https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-release=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-release https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-release=./wheels",
+   false
+  ],
+  [
+   "--all-release ./wheels",
+   false
+  ],
+  [
+   "--all-releases=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-releases https://pypi.org/simple",
+   false
+  ],
+  [
+   "--all-releases=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-releases https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--all-releases=https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-releases https://corp.example/simple",
+   false
+  ],
+  [
+   "--all-releases=./wheels",
+   false
+  ],
+  [
+   "--all-releases ./wheels",
+   false
+  ],
+  [
+   "--only-f=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-f https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-f=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-f https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-f=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-f https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-f=./wheels",
+   false
+  ],
+  [
+   "--only-f ./wheels",
+   false
+  ],
+  [
+   "--only-fi=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fi https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fi=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fi https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fi=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fi https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fi=./wheels",
+   false
+  ],
+  [
+   "--only-fi ./wheels",
+   false
+  ],
+  [
+   "--only-fin=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fin https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fin=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fin https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fin=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fin https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fin=./wheels",
+   false
+  ],
+  [
+   "--only-fin ./wheels",
+   false
+  ],
+  [
+   "--only-fina=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fina https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-fina=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fina https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-fina=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fina https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-fina=./wheels",
+   false
+  ],
+  [
+   "--only-fina ./wheels",
+   false
+  ],
+  [
+   "--only-final=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-final https://pypi.org/simple",
+   false
+  ],
+  [
+   "--only-final=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-final https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--only-final=https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-final https://corp.example/simple",
+   false
+  ],
+  [
+   "--only-final=./wheels",
+   false
+  ],
+  [
+   "--only-final ./wheels",
+   false
+  ],
+  [
+   "--t=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--t https://pypi.org/simple",
+   false
+  ],
+  [
+   "--t=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--t https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--t=https://corp.example/simple",
+   false
+  ],
+  [
+   "--t https://corp.example/simple",
+   false
+  ],
+  [
+   "--t=./wheels",
+   false
+  ],
+  [
+   "--t ./wheels",
+   false
+  ],
+  [
+   "--tr=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--tr https://pypi.org/simple",
+   false
+  ],
+  [
+   "--tr=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--tr https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--tr=https://corp.example/simple",
+   false
+  ],
+  [
+   "--tr https://corp.example/simple",
+   false
+  ],
+  [
+   "--tr=./wheels",
+   false
+  ],
+  [
+   "--tr ./wheels",
+   false
+  ],
+  [
+   "--tru=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--tru https://pypi.org/simple",
+   false
+  ],
+  [
+   "--tru=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--tru https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--tru=https://corp.example/simple",
+   false
+  ],
+  [
+   "--tru https://corp.example/simple",
+   false
+  ],
+  [
+   "--tru=./wheels",
+   false
+  ],
+  [
+   "--tru ./wheels",
+   false
+  ],
+  [
+   "--trus=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trus https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trus=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trus https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trus=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trus https://corp.example/simple",
+   false
+  ],
+  [
+   "--trus=./wheels",
+   false
+  ],
+  [
+   "--trus ./wheels",
+   false
+  ],
+  [
+   "--trust=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trust https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trust=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trust https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trust=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trust https://corp.example/simple",
+   false
+  ],
+  [
+   "--trust=./wheels",
+   false
+  ],
+  [
+   "--trust ./wheels",
+   false
+  ],
+  [
+   "--truste=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--truste https://pypi.org/simple",
+   false
+  ],
+  [
+   "--truste=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--truste https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--truste=https://corp.example/simple",
+   false
+  ],
+  [
+   "--truste https://corp.example/simple",
+   false
+  ],
+  [
+   "--truste=./wheels",
+   false
+  ],
+  [
+   "--truste ./wheels",
+   false
+  ],
+  [
+   "--trusted=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted=./wheels",
+   false
+  ],
+  [
+   "--trusted ./wheels",
+   false
+  ],
+  [
+   "--trusted-=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted- https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted- https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted- https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-=./wheels",
+   false
+  ],
+  [
+   "--trusted- ./wheels",
+   false
+  ],
+  [
+   "--trusted-h=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-h https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-h=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-h https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-h=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-h https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-h=./wheels",
+   false
+  ],
+  [
+   "--trusted-h ./wheels",
+   false
+  ],
+  [
+   "--trusted-ho=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-ho https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-ho=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-ho https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-ho=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-ho https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-ho=./wheels",
+   false
+  ],
+  [
+   "--trusted-ho ./wheels",
+   false
+  ],
+  [
+   "--trusted-hos=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-hos https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-hos=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-hos https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-hos=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-hos https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-hos=./wheels",
+   false
+  ],
+  [
+   "--trusted-hos ./wheels",
+   false
+  ],
+  [
+   "--trusted-host=https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-host https://pypi.org/simple",
+   false
+  ],
+  [
+   "--trusted-host=https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-host https://PYPI.org/simple/",
+   false
+  ],
+  [
+   "--trusted-host=https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-host https://corp.example/simple",
+   false
+  ],
+  [
+   "--trusted-host=./wheels",
+   false
+  ],
+  [
+   "--trusted-host ./wheels",
+   false
+  ],
+  [
+   "--pre --extra-index-url https://corp.example/simple",
+   true
+  ],
+  [
+   "--trusted-host x -ihttps://corp.example/simple",
+   true
+  ],
+  [
+   "-i https://pypi.org/simple --no-index",
+   true
+  ],
+  [
+   "-i https://pypi.org/simple -f https://corp.example/links",
+   true
+  ],
+  [
+   "--hash=sha256:abc",
+   false
+  ],
+  [
+   "--require-hashes",
+   false
+  ],
+  [
+   "--prefer-binary --only-binary :all:",
+   false
+  ],
+  [
+   "-c constraints.txt",
+   false
+  ],
+  [
+   "-r other.txt -i https://corp.example/simple",
+   true
+  ],
+  [
+   "--index-url https://corp.example/simple -i https://pypi.org/simple",
+   false
+  ]
+ ]
+}

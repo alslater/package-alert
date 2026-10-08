@@ -7,6 +7,9 @@ for the following ``pa run`` options:
 - ``env`` — list of environment variable names to pass through (same syntax as ``--env``)
 - ``no_network`` — boolean, equivalent to ``--no-network``
 - ``allow_external_lockfiles`` — boolean, equivalent to ``--allow-external-lockfiles``
+- ``allow_major`` — package name or list of names whose major upgrades ``pa fix``
+  may plan (``pa fix --allow-major``); ``all`` is rejected, and only a trusted
+  file's value is honoured
 
 Options from the file are merged with ``PA_RUN_OPTS`` and explicit CLI flags
 using these rules: boolean options are OR-ed across all three sources — once
@@ -42,6 +45,7 @@ Standard TOML.  All keys are optional::
     env   = ["MY_TOKEN", "REGISTRY"]  # merged with --env
     no_network             = false
     allow_external_lockfiles = false
+    allow_major            = ["cryptography"]  # pa fix only
 
 Keys that are absent or ``false`` have no effect.  Boolean keys are only
 applied when set to ``true``.
@@ -131,6 +135,9 @@ class ProjectRunConfig:
     allow_external_lockfiles: bool = False
     """If ``true``, disable symlink containment checks (same as ``--allow-external-lockfiles``)."""
 
+    allow_major: list[str] = field(default_factory=list)
+    """Package names whose major upgrades ``pa fix`` may plan (honoured only when ``trusted``)."""
+
     trusted: bool = True
     """``True`` if the file is under ``$HOME``, not inside a VCS root, and no path component is world-writable."""
 
@@ -194,12 +201,12 @@ def _load(path: Path, *, trusted: bool = True) -> ProjectRunConfig:
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ProjectRunConfigError(path, str(exc)) from exc
 
-    unknown = set(data) - {"flags", "env", "no_network", "allow_external_lockfiles"}
+    unknown = set(data) - {"flags", "env", "no_network", "allow_external_lockfiles", "allow_major"}
     if unknown:
         raise ProjectRunConfigError(
             path,
             f"unknown key(s): {', '.join(sorted(unknown))}. "
-            f"Valid keys: flags, env, no_network, allow_external_lockfiles",
+            f"Valid keys: flags, env, no_network, allow_external_lockfiles, allow_major",
         )
 
     def _str(key: str) -> str:
@@ -222,12 +229,19 @@ def _load(path: Path, *, trusted: bool = True) -> ProjectRunConfig:
             raise ProjectRunConfigError(path, f"{key!r} must be a boolean (true/false)")
         return v
 
+    allow_major = _strlist("allow_major")
+    if any(part.strip().lower() in ("all", "*") for n in allow_major for part in n.split(",")):
+        raise ProjectRunConfigError(
+            path, "'allow_major' takes package names; allowing every package is a per-run "
+                  "choice (pa fix --allow-major all)")
+
     return ProjectRunConfig(
         source=path.resolve(),
         flags=_str("flags"),
         env=_strlist("env"),
         no_network=_bool("no_network"),
         allow_external_lockfiles=_bool("allow_external_lockfiles"),
+        allow_major=allow_major,
         trusted=trusted,
     )
 

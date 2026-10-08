@@ -56,6 +56,11 @@ class PackageSpec:
     version: str | None
     ecosystem: str
     is_dev: bool | None = None  # True/False = dev/prod known; None = unknown (format lacks the concept, or source data was unavailable)
+    # False when the lock file says it came from somewhere other than the
+    # ecosystem's public registry (a private index, git, a local path); True
+    # when it did or the format does not say. Yank lookups skip it: a public
+    # package of the same name is not this one.
+    from_public_registry: bool = True
 
 
 # Describes a package that has been observed (from a cache file or installed environment).
@@ -297,6 +302,23 @@ class LanguageBase(Protocol):
     # budget the same way cache_paths() itself is scoped to avoid.
     # classify_cache_file() and cache_file_globs() are reused for these
     # roots; only the detection mechanism differs.
+    #
+    # fix_adapters() -> list[FixAdapter] is another optional capability, not a
+    # Protocol member, for the same reasons as poll_only_cache_paths(). It
+    # supplies `pa fix`'s package-manager adapters (see
+    # packagealert/remediate/adapter.py) and is found with getattr + callable
+    # by remediate.adapter.discover(). It is provisional: it stays out of
+    # LANGUAGES.md until a second adapter confirms the interface.
+    #
+    # is_read_only_command(argv) -> bool is its companion: SandboxRunner.
+    # run_captured() runs a command only when the plugin that owns argv[0]
+    # answers True, so an adapter's trials and exports need it.
+    #
+    # yank_status_url(name, version) -> str | None and
+    # yank_status_parse(data, version) -> tuple[bool, str | None] | None are
+    # optional too: the registry document saying whether a version is yanked
+    # (withdrawn by its maintainer), and reading it. `pa scan-project` and `pa fix`
+    # report yanked locked versions through them; see packagealert/yanks.py.
     def classify_cache_file(self, path: Path) -> PackageMetadata | None:
         """Classify a file or directory created in a watched cache or site-packages dir. Return None if not a recognisable package artifact."""
         ...
