@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import re
+import shlex
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +19,7 @@ class LockedPackage:
     version: str | None  # None = unpinned
     ecosystem: str
     is_dev: bool | None = None  # True/False = dev/prod known; None = unknown (format lacks the concept, or source data was unavailable)
+    from_public_registry: bool = True  # see PackageSpec.from_public_registry
 
 
 @dataclass
@@ -64,7 +67,8 @@ def scan_lockfiles(paths: list[Path], *, prod_only: bool = False) -> ProjectScan
             specs = [s for s in specs if s.is_dev is not True]
         sources.append(f"{lang.name} ({path.name})")
         for spec in specs:
-            pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev)
+            pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev,
+                                    from_public_registry=spec.from_public_registry)
             if spec.version:
                 pinned.append(pkg)
             else:
@@ -119,7 +123,8 @@ def scan_project(root: Path, *, prod_only: bool = False) -> ProjectScan:
                     sources.append(f"{lang.name} ({pattern})")
                     break
             for spec in specs:
-                pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev)
+                pkg = LockedPackage(name=spec.name, version=spec.version, ecosystem=spec.ecosystem.lower(), is_dev=spec.is_dev,
+                                    from_public_registry=spec.from_public_registry)
                 if spec.version:
                     pinned.append(pkg)
                 else:
@@ -131,6 +136,86 @@ def scan_project(root: Path, *, prod_only: bool = False) -> ProjectScan:
 
 
 _PINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
+_PUBLIC_PYPI_INDEXES = frozenset({"https://pypi.org/simple", "https://pypi.python.org/simple"})
+# pip's requirements-file options (pip._internal.req.req_file.build_parser(),
+# pip 26.1.2): every long spelling, and the short ones, mapped to whether the
+# option takes a value. The source options (where pip finds packages) are
+# separate below. Generate this from pip when it changes.
+_REQ_LONG_OPTIONS = {
+    "--index-url": True, "--pypi-url": True, "--extra-index-url": True, "--no-index": False,
+    "--constraint": True, "--requirement": True, "--editable": True, "--find-links": True,
+    "--no-binary": True, "--only-binary": True, "--prefer-binary": False, "--require-hashes": False,
+    "--pre": False, "--all-releases": True, "--only-final": True, "--trusted-host": True,
+    "--use-feature": True, "--hash": True, "--config-settings": True,
+}
+_REQ_SHORT_OPTIONS = {"-i": "--index-url", "-c": "--constraint", "-r": "--requirement", "-e": "--editable",
+                      "-f": "--find-links", "-C": "--config-settings"}
+_REQ_INDEX_URL_OPTIONS = frozenset({"--index-url", "--pypi-url"})
+# Each of these sends pip somewhere other than, or as well as, public PyPI.
+_REQ_OTHER_SOURCE_OPTIONS = frozenset({"--extra-index-url", "--find-links", "--no-index"})
+
+
+def is_public_pypi_index(url: object) -> bool:
+    """Whether *url* is public PyPI's simple index (any case, with or without a trailing slash)."""
+    return isinstance(url, str) and url.strip().rstrip("/").lower() in _PUBLIC_PYPI_INDEXES
+
+
+def _requirements_option_is_private(line: str) -> bool:
+    """Whether a requirements-file option line points pip at a source other than public PyPI.
+
+    Parsed as pip does (its break_args_options(), shlex, then optparse): options
+    start at the first token beginning with "-", a long option may be any unique
+    prefix and take its value after "=" or as the next token, and a short option
+    takes the rest of its token or the next one. pip applies these options to
+    every requirement, whichever file they are in. A line pip could not parse
+    counts as private: its packages are then not looked up.
+    """
+    words = line.split(" ")
+    while words and not words[0].startswith("-"):
+        words.pop(0)
+    try:
+        tokens = shlex.split(" ".join(words))
+    except ValueError:
+        return True
+    index_url: str | None = None  # the last --index-url wins, as in optparse
+    i = 0
+    while i < len(tokens):
+        token, i = tokens[i], i + 1
+        value: str | None = None
+        if token.startswith("--"):
+            name, eq, attached = token.partition("=")
+            matches = [o for o in _REQ_LONG_OPTIONS if o == name] or [o for o in _REQ_LONG_OPTIONS if o.startswith(name)]
+            if len(matches) != 1:
+                return True  # pip rejects an unknown or ambiguous option
+            option = matches[0]
+            if _REQ_LONG_OPTIONS[option]:
+                if eq:
+                    value = attached
+                elif i < len(tokens):
+                    value, i = tokens[i], i + 1
+                else:
+                    return True
+        elif token.startswith("-") and len(token) > 1:
+            option = _REQ_SHORT_OPTIONS.get(token[:2], "")
+            if not option:
+                return True
+            if len(token) > 2:
+                value = token[2:]
+            elif i < len(tokens):
+                value, i = tokens[i], i + 1
+            else:
+                return True
+        else:
+            continue  # a positional argument, which pip ignores on an option line
+        if option in _REQ_OTHER_SOURCE_OPTIONS:
+            return True
+        if option in _REQ_INDEX_URL_OPTIONS:
+            index_url = value
+    return index_url is not None and not is_public_pypi_index(index_url)
+
+
+def _mark_private(packages: list[LockedPackage]) -> list[LockedPackage]:
+    return [dataclasses.replace(p, from_public_registry=False) for p in packages]
 _UNPINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)")
 # Scp-style VCS ref: git@host:path (colon not slash after hostname).
 _SCP_VCS_RE = re.compile(r"^git@[^/:]+:[^/]")
@@ -543,13 +628,16 @@ def _collect_pylock_packages(
                 except (InvalidMarker, UndefinedEnvironmentName, UndefinedComparison):
                     pass  # malformed/unresolvable marker: fail open, still scan the package
         version = entry.get("version")
+        index = entry.get("index")
+        public = (is_public_pypi_index(index) if index is not None
+                  else not any(k in entry for k in ("vcs", "directory", "archive")))
         if isinstance(version, str) and version:
-            pinned.append(LockedPackage(name=name, version=version, ecosystem="pypi"))
+            pinned.append(LockedPackage(name=name, version=version, ecosystem="pypi", from_public_registry=public))
         else:
             # A pylock.toml entry can be VCS/directory/archive-sourced with no
             # PyPI version string — same "no fixed version" concept as an
             # unpinned requirements.txt line.
-            unpinned.append(LockedPackage(name=name, version=None, ecosystem="pypi"))
+            unpinned.append(LockedPackage(name=name, version=None, ecosystem="pypi", from_public_registry=public))
     return pinned, unpinned
 
 
@@ -559,6 +647,7 @@ def collect_requirements_packages(
     allowed_root: Path | None = None,
     *,
     is_system_python_target: bool = False,
+    _private: list[bool] | None = None,
 ) -> tuple[list[LockedPackage], list[LockedPackage]]:
     """Parse *path* and all transitively included requirement files.
 
@@ -605,6 +694,8 @@ def collect_requirements_packages(
             path, cwd=allowed_root, is_system_python_target=is_system_python_target
         )
 
+    top = _private is None
+    private: list[bool] = [] if _private is None else _private
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     try:
@@ -624,12 +715,15 @@ def collect_requirements_packages(
             if not ref_path.is_relative_to(allowed_root):
                 continue
             p, u = collect_requirements_packages(
-                ref_path, visited, allowed_root, is_system_python_target=is_system_python_target
+                ref_path, visited, allowed_root, is_system_python_target=is_system_python_target,
+                _private=private,
             )
             pinned.extend(p)
             unpinned.extend(u)
             continue
         if line.startswith("-"):
+            if _requirements_option_is_private(line):
+                private.append(True)
             continue
         # Skip local paths (./pkg, ../pkg, /abs/path), VCS URLs — scheme-based
         # (git+https://, git+ssh://, etc.) and scp-style (git@host:path).
@@ -643,4 +737,7 @@ def collect_requirements_packages(
         m = _UNPINNED_RE.match(line)
         if m:
             unpinned.append(LockedPackage(name=m.group(1), version=None, ecosystem="pypi"))
+    if top and private:
+        # An index option anywhere in the tree applies to every requirement in it.
+        return _mark_private(pinned), _mark_private(unpinned)
     return pinned, unpinned

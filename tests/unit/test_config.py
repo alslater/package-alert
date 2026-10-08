@@ -1049,3 +1049,23 @@ def test_readme_action_table_matches_the_code():
     assert "declining rolls the install back" in readme, (
         "the README no longer states that prompt rolls back only on decline"
     )
+
+
+def test_fix_allow_major_defaults_to_empty():
+    assert AppConfig().fix.allow_major == []
+
+
+def test_fix_allow_major_loads_from_config(tmp_path):
+    from packagealert.config import load_config
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text('[fix]\nallow_major = ["cryptography", "pip"]\n')
+    assert load_config(cfg_file).fix.allow_major == ["cryptography", "pip"]
+
+
+@pytest.mark.parametrize("value", ['["all"]', '["pip", "ALL"]', '["*"]', '["*,pip"]', '["all , x"]'])
+def test_fix_allow_major_rejects_all(tmp_path, value):
+    from packagealert.config import load_config
+    cfg_file = tmp_path / "config.toml"
+    cfg_file.write_text(f"[fix]\nallow_major = {value}\n")
+    with pytest.raises(ValidationError, match="allow_major"):
+        load_config(cfg_file)

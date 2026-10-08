@@ -1,0 +1,21 @@
+# uv 0.12.23 rc=0
+Using CPython 3.13.13
+Resolved 10 packages in 194ms
+Remove ansicon v1.89.0
+Remove blessed v1.50.0
+Update chalice v1.33.0 -> v0.10.1
+Update click v8.5.0 -> v6.6
+Remove editor v2.0.1
+Remove inquirer v3.4.1
+Remove jinxed v2.1.0
+Remove packaging v26.3
+Remove pip v26.1.2
+Remove pyyaml v6.0.3
+Remove readchar v4.2.2
+Remove runs v1.3.0
+Remove setuptools v84.0.0
+Add typing v3.5.3.0
+Add virtualenv v15.2.0
+Remove wcwidth v0.9.2
+Remove wheel v0.48.0
+Remove xmod v1.10.0

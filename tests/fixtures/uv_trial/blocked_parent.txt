@@ -1,0 +1,12 @@
+# uv 0.12.23 rc=1
+Using CPython 3.13.13
+error: No solution found when resolving dependencies
+  cause: Because chalice==1.32.0 depends on pip>=9,<25.1 and chalice>=1.32.0 depends on pip==26.2.0, we can conclude that chalice==1.32.0 cannot be used.
+         And because only the following versions of chalice are available:
+             chalice<=1.32.0
+             chalice>=1.33.0
+         we can conclude that chalice>=1.32.0,<1.33.0 cannot be used. (1)
+
+         Because chalice>=1.33.0 depends on pip>=9,<26.2 and pip==26.2.0, we can conclude that chalice>=1.33.0 cannot be used.
+         And because we know from (1) that chalice>=1.32.0,<1.33.0 cannot be used, we can conclude that chalice>=1.32.0 cannot be used.
+         And because your project depends on chalice>=1.32, we can conclude that your project's requirements are unsatisfiable.

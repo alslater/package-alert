@@ -228,6 +228,48 @@ class TestLoad:
         assert result is not None
         assert result.allow_external_lockfiles is True
 
+    def test_allow_major_defaults_to_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", "")
+        result = find_project_run_config(tmp_path)
+        assert result is not None
+        assert result.allow_major == []
+
+    def test_allow_major_list(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", 'allow_major = ["cryptography", "pip"]\n')
+        result = find_project_run_config(tmp_path)
+        assert result is not None
+        assert result.allow_major == ["cryptography", "pip"]
+
+    def test_allow_major_string(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", 'allow_major = "cryptography"\n')
+        result = find_project_run_config(tmp_path)
+        assert result is not None
+        assert result.allow_major == ["cryptography"]
+
+    @pytest.mark.parametrize("value", ['"all"', '["pip", "ALL"]', '"*"', '["*"]', '"*,pip"', '["all , x"]'])
+    def test_allow_major_rejects_all(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", f"allow_major = {value}\n")
+        with pytest.raises(ProjectRunConfigError) as exc_info:
+            find_project_run_config(tmp_path)
+        assert "allow_major" in str(exc_info.value)
+
+    def test_allow_major_wrong_type_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", "allow_major = 3\n")
+        with pytest.raises(ProjectRunConfigError):
+            find_project_run_config(tmp_path)
+
+    def test_unknown_key_message_lists_allow_major(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("HOME", str(tmp_path))
+        write_toml(tmp_path / ".pa-run.toml", 'unknown_key = "oops"\n')
+        with pytest.raises(ProjectRunConfigError) as exc_info:
+            find_project_run_config(tmp_path)
+        assert "Valid keys: flags, env, no_network, allow_external_lockfiles, allow_major" in str(exc_info.value)
+
     def test_unknown_key_raises(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("HOME", str(tmp_path))
         write_toml(tmp_path / ".pa-run.toml", 'unknown_key = "oops"\n')

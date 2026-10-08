@@ -303,6 +303,22 @@ class LanguageBase(Protocol):
         blocks or prompts however recently the package was published.
         Default implementation returns None."""
 
+    # ── Yank status (pa scan-project, pa fix) ────────────────────────────
+    # Both optional, found with getattr; a plugin without them is not checked.
+    # Not called for a package whose PackageSpec.from_public_registry is False:
+    # set that in parse_lockfile() for anything locked from a private index, git
+    # or a local path, since a public package of the same name is a different one.
+    def yank_status_url(self, name: str, version: str) -> str | None:
+        """Registry URL that says whether this version is yanked (withdrawn by its
+        maintainer). Return None when the package cannot be checked; it is then not
+        counted as unchecked."""
+
+    def yank_status_parse(self, data: object, version: str | None) -> tuple[bool, str | None] | None:
+        """(yanked, reason) from the yank_status_url() reply, reason None if not given.
+
+        Return None when the reply does not say: the package is then reported as
+        unchecked, never as "not yanked". A 404 from the URL counts as not yanked."""
+
     def osv_ecosystem(self) -> str | None:
         """The ecosystem name OSV.dev uses, e.g. "PyPI", "npm", "Packagist".
 

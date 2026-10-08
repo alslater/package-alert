@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import logging
 import os
@@ -36,6 +37,8 @@ from packagealert.parsers.lockfiles import (
     _QUOTED_RE,
     _find_project_root,
     _marker_references_python_version,
+    _requirements_option_is_private,
+    is_public_pypi_index,
 )
 from packagealert.parsers.wheel import parse_wheel_filename
 
@@ -248,12 +251,17 @@ def _parse_requirements_txt(
     path: Path,
     visited: set[Path] | None = None,
     allowed_root: Path | None = None,
+    _private: list[bool] | None = None,
 ) -> list[PackageSpec]:
     """Parse a requirements.txt file recursively, returning PackageSpec objects.
 
     *allowed_root* constrains recursive includes: any -r path resolving outside
     this directory is silently skipped.  Defaults to the parent of the initial
     *path*; callers should pass the project root for broader monorepo support.
+
+    An index option anywhere in the tree (a non-PyPI ``--index-url``, or any
+    ``--extra-index-url``, ``--find-links`` or ``--no-index``) applies to every
+    requirement, so all of them are then marked not from the public registry.
     """
     if visited is None:
         visited = set()
@@ -263,6 +271,8 @@ def _parse_requirements_txt(
     if path in visited:
         return []
     visited.add(path)
+    top = _private is None
+    private: list[bool] = [] if _private is None else _private
 
     results: list[PackageSpec] = []
     try:
@@ -283,9 +293,11 @@ def _parse_requirements_txt(
             if not ref_path.is_relative_to(allowed_root):
                 log.debug("Skipping out-of-root requirements include: %s", ref_path)
                 continue
-            results.extend(_parse_requirements_txt(ref_path, visited, allowed_root))
+            results.extend(_parse_requirements_txt(ref_path, visited, allowed_root, private))
             continue
         if line.startswith("-"):
+            if _requirements_option_is_private(line):
+                private.append(True)
             continue
         # Skip local paths (./pkg, ../pkg, /abs/path) and VCS URLs
         if line.startswith((".", "/", "git+", "hg+", "svn+", "bzr+")) or "://" in line or _SCP_VCS_RE.match(line):
@@ -299,6 +311,8 @@ def _parse_requirements_txt(
         if m:
             name = _normalize_name(m.group(1))
             results.append(PackageSpec(name=name, version=None, ecosystem="PyPI"))
+    if top and private:
+        return [dataclasses.replace(r, from_public_registry=False) for r in results]
     return results
 
 
@@ -420,44 +434,51 @@ def _uv_lock_resolution_markers_apply(pkg: dict) -> bool:
     return any(_uv_lock_marker_applies(m) for m in valid_markers)
 
 
+def _uv_lock_adjacency(packages: list) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
+    """Build uv.lock's name -> dependency-names maps, keyed by PEP 503 name.
+
+    Returns (deps_of, deps_of_unfiltered). deps_of drops edges whose marker
+    does not apply here, and a record whose own resolution-markers do not apply
+    contributes no edges (uv would never install it). deps_of_unfiltered keeps
+    every edge; it distinguishes a package excluded only by a marker from one
+    unreachable for other reasons. A forked resolution emits several records
+    for one name, each with its own dependency list, so edges are unioned.
+    """
+    deps_of: dict[str, set[str]] = {}
+    deps_of_unfiltered: dict[str, set[str]] = {}
+    for pkg in packages:
+        norm = _normalize_name(pkg.get("name", "") or "")
+        if not norm:
+            continue
+        record_applies = _uv_lock_resolution_markers_apply(pkg)
+        raw_deps = pkg.get("dependencies", [])
+        deps_of.setdefault(norm, set()).update(
+            _normalize_name(d["name"])
+            for d in raw_deps
+            if d.get("name") and record_applies and _uv_lock_dep_applies(d)
+        )
+        deps_of_unfiltered.setdefault(norm, set()).update(
+            _normalize_name(d["name"]) for d in raw_deps if d.get("name")
+        )
+    return deps_of, deps_of_unfiltered
+
+
+def _is_uv_lock_root(src: object) -> bool:
+    """Whether a uv.lock entry's source is the project itself: editable "." for a
+    package, virtual "." for a project that is not one (`[tool.uv] package = false`
+    or no build system). Other workspace members live elsewhere and are not the root."""
+    return isinstance(src, dict) and (src.get("editable") == "." or src.get("virtual") == ".")
+
+
 def _parse_uv_lock(path: Path) -> list[PackageSpec]:
     """Parse a uv.lock TOML file into PackageSpec objects."""
     try:
         data = tomllib.loads(path.read_text())
         packages = data.get("package", [])
 
-        # Build a name -> dep-names adjacency map from the lock (all
-        # packages), both with marker-inapplicable edges dropped and with all
-        # edges kept. The unfiltered map distinguishes a package that's
-        # excluded because its only path from root requires a marker that
-        # doesn't apply here (e.g. httpx2-jsfetch, gated behind sys_platform
-        # == 'emscripten') from one that's unreachable from root for unrelated
-        # reasons (a workspace member, an unresolvable marker) — only the
-        # former should be dropped from the results entirely; the latter keeps
-        # today's is_dev=None. A forked resolution emits multiple [[package]]
-        # records for the same name (one per resolution-markers branch), each
-        # with its own dependency list — union rather than overwrite so edges
-        # from every record are captured. A record whose own resolution-
-        # markers don't apply here contributes no edges at all: uv would never
-        # install that record, so its listed dependencies aren't real either.
-        deps_of: dict[str, set[str]] = {}
-        deps_of_unfiltered: dict[str, set[str]] = {}
-        for pkg in packages:
-            norm = _normalize_name(pkg.get("name", "") or "")
-            if not norm:
-                continue
-            record_applies = _uv_lock_resolution_markers_apply(pkg)
-            raw_deps = pkg.get("dependencies", [])
-            deps_of.setdefault(norm, set()).update(
-                _normalize_name(d["name"])
-                for d in raw_deps
-                if d.get("name") and record_applies and _uv_lock_dep_applies(d)
-            )
-            deps_of_unfiltered.setdefault(norm, set()).update(
-                _normalize_name(d["name"]) for d in raw_deps if d.get("name")
-            )
+        deps_of, deps_of_unfiltered = _uv_lock_adjacency(packages)
 
-        # Find the root project entry (source.editable = ".") and collect its
+        # Find the root project entry (see _is_uv_lock_root) and collect its
         # direct prod and dev dep seeds.
         prod_seeds: set[str] = set()
         dev_seeds: set[str] = set()
@@ -466,7 +487,7 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
         found_root = False
         for pkg in packages:
             src = pkg.get("source", {})
-            if isinstance(src, dict) and src.get("editable") == ".":
+            if _is_uv_lock_root(src):
                 found_root = True
                 for dep in pkg.get("dependencies", []):
                     if dep_name := dep.get("name"):
@@ -514,7 +535,7 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
             # Skip the root project itself — it's the package being scanned,
             # not a dependency.
             src = pkg.get("source", {})
-            if isinstance(src, dict) and src.get("editable") == ".":
+            if _is_uv_lock_root(src):
                 continue
             if not _uv_lock_resolution_markers_apply(pkg):
                 # This record is one fork-specific variant (e.g. a Windows-
@@ -538,7 +559,9 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
                 is_dev = True
             else:
                 is_dev = None  # unreachable from root (workspace member, etc.)
-            results.append(PackageSpec(name=norm, version=version, ecosystem="PyPI", is_dev=is_dev))
+            public = not isinstance(src, dict) or not src or is_public_pypi_index(src.get("registry"))
+            results.append(PackageSpec(name=norm, version=version, ecosystem="PyPI", is_dev=is_dev,
+                                       from_public_registry=public))
         return results
     except Exception:
         log.debug("Failed to parse uv.lock at %s", path, exc_info=True)
@@ -546,9 +569,18 @@ def _parse_uv_lock(path: Path) -> list[PackageSpec]:
 
 
 def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
-    """Parse a Pipfile.lock JSON file into PackageSpec objects."""
+    """Parse a Pipfile.lock JSON file into PackageSpec objects.
+
+    A package is from the public registry only when the source it was locked
+    from (its ``index``, else pipenv's default, the first source) is public PyPI.
+    """
     try:
         data = json.loads(path.read_text())
+        meta = data.get("_meta")
+        sources = meta.get("sources") if isinstance(meta, dict) else None
+        sources = [s for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
+        url_of = {s.get("name"): s.get("url") for s in sources}
+        default_url = sources[0].get("url") if sources else "https://pypi.org/simple"
         results = []
         for section in ("default", "develop"):
             is_dev = section == "develop"
@@ -558,7 +590,11 @@ def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
                 if any(k in info for k in ("git", "hg", "svn", "bzr")):
                     continue
                 raw_version = info.get("version", "").lstrip("=") or None
-                results.append(PackageSpec(name=_normalize_name(name), version=raw_version, ecosystem="PyPI", is_dev=is_dev))
+                local = any(k in info for k in ("path", "file", "editable"))
+                index_url = url_of.get(info["index"]) if "index" in info else default_url
+                results.append(PackageSpec(name=_normalize_name(name), version=raw_version, ecosystem="PyPI",
+                                           is_dev=is_dev,
+                                           from_public_registry=not local and is_public_pypi_index(index_url)))
         return results
     except Exception:
         log.debug("Failed to parse Pipfile.lock at %s", path, exc_info=True)
@@ -2459,7 +2495,8 @@ class PythonLanguage:
                     "[dim]Install-time scripts will be able to read your private keys "
                     "and SSH config. Only proceed if you trust the packages being installed.[/dim]"
                 )
-                if not Confirm.ask("Continue with SSH keys exposed?", default=False):
+                # On stderr like the warning above: stdout may be a JSON plan (pa fix --format json).
+                if not Confirm.ask("Continue with SSH keys exposed?", default=False, console=_con):
                     return PreRunResult(ok=False, message="Aborted by user.", required_flag="")
             else:
                 _con.print(
@@ -2855,6 +2892,18 @@ class PythonLanguage:
     def publication_date_url(self, name: str, version: str) -> str | None:
         return f"https://pypi.org/pypi/{name}/{version}/json"
 
+    def yank_status_url(self, name: str, version: str) -> str | None:
+        """PyPI's per-version JSON, which records whether the version is yanked (PEP 592)."""
+        return f"https://pypi.org/pypi/{name}/{version}/json"
+
+    def yank_status_parse(self, data: object, version: str | None) -> tuple[bool, str | None] | None:
+        """(yanked, reason) from the per-version JSON; None when it does not say."""
+        info = data.get("info") if isinstance(data, dict) else None
+        if not isinstance(info, dict) or not isinstance(info.get("yanked"), bool):
+            return None
+        reason = info.get("yanked_reason")
+        return info["yanked"], reason if isinstance(reason, str) and reason else None
+
     def publication_date_parse(self, data: object, version: str | None) -> float | None:
         """Earliest upload_time across the version's distribution files.
 
@@ -2878,6 +2927,25 @@ class PythonLanguage:
     def normalise_name(self, name: str) -> str:
         """PEP 503: lowercase and collapse runs of [-_.] to a single hyphen."""
         return normalise_package_name(name)
+
+    def is_read_only_command(self, argv: list[str]) -> bool:
+        """Whether *argv* changes nothing, so the sandbox may run it captured (pa fix's uv trials).
+
+        Optional hook: see the comment beside fix_adapters() in base.py.
+        """
+        from packagealert.languages.python_fix.uv import is_read_only_command
+
+        return is_read_only_command(argv)
+
+    def fix_adapters(self) -> list:
+        """`pa fix` adapters for Python package managers (uv only so far).
+
+        Optional, provisional hook: see the fix_adapters() comment in base.py.
+        Imported here so loading the plugin does not load pa fix.
+        """
+        from packagealert.languages.python_fix.uv import UvFixAdapter
+
+        return [UvFixAdapter()]
 
     def popularity_ecosystem(self) -> str | None:
         return "PYPI"

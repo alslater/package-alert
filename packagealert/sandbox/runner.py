@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import enum
 import logging
@@ -10,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -126,6 +127,55 @@ class _Context:
         )
 
 
+@dataclass
+class _Assembly:
+    """The build_cmd() arguments assembled for one sandboxed run."""
+
+    argv: list[str]
+    write_dirs: list[Path]
+    env: dict[str, str]
+    home_ro: list[Path]
+    extra_tmpfs: list[Path]
+    writable_binds: list[tuple[Path, Path]]
+
+
+@dataclass(frozen=True)
+class CapturedRun:
+    """The outcome of SandboxRunner.run_captured()."""
+
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+class CapturedRunError(Exception):
+    """The command could not be run in the sandbox at all."""
+
+
+# run_captured() is for commands that change nothing, but the sandbox only
+# makes the filesystem read-only: the network stays open and credentials may be
+# bound in, so a recognised command such as `uv publish` or `uv run` could still
+# act on the outside world. The language plugin that owns the command decides
+# which of its commands are read-only (its optional is_read_only_command()
+# hook); a command no plugin claims, or whose plugin does not answer a clear
+# True, is refused.
+def _approved_by_owner(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    lang_registry.load()
+    lang = lang_registry.for_process(re.split(r"[/\\]", argv[0])[-1])
+    hook = getattr(lang, "is_read_only_command", None) if lang is not None else None
+    if not callable(hook):
+        return False
+    try:
+        return hook(list(argv)) is True
+    except Exception:
+        log.warning("is_read_only_command raised for lang=%s argv=%r",
+                    getattr(lang, "name", "?"), argv, exc_info=True)
+        return False
+
+
 class _GateResourcesUnavailable(enum.Enum):
     """Sentinel: gate resources could not be opened, so both gates must skip.
 
@@ -170,9 +220,14 @@ class _GateResources:
 
 
 class SandboxRunner:
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, console: Console | None = None) -> None:
         self._cfg = cfg
-        self._console = Console()
+        self._console = console or Console()
+        # Security warnings already shown by this runner. pa fix assembles a
+        # sandbox per trial on one runner, and repeating the same notice for
+        # every trial buries it; pa run uses a fresh runner per command.
+        self._shown_warnings: set[str] = set()
+        self._captured_authorized: dict[frozenset[tuple[str, frozenset[str]]], bool] = {}
         lang_registry.load()
         self._backend: SandboxBackend = build_backend(cfg.sandbox)
 
@@ -265,114 +320,8 @@ class SandboxRunner:
         elif not via_shim:
             self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
 
-        import inspect as _inspect
-
-        from packagealert.languages.base import PreRunResult as _PreRunResult
-
-        def _run_pre_check(lang, parsed_arg, lang_flags):
-            """Invoke pre_run_check on *lang*, handling legacy signatures.
-
-            *parsed_arg* is None when the language is not the primary ecosystem
-            (mirrors configure_sandbox behaviour for cross-namespace flags).
-            Returns 1 if the check blocked, 0 to continue.
-            """
-            _lang_name = getattr(lang, "name", "?")
-            try:
-                pre_check_fn = getattr(lang, "pre_run_check", None)
-                if not callable(pre_check_fn):
-                    return 0
-                try:
-                    _sig = _inspect.signature(pre_check_fn)
-                    _params = _sig.parameters
-                    _has_flags_param = "flags" in _params or any(
-                        p.kind == _inspect.Parameter.VAR_KEYWORD
-                        for p in _params.values()
-                    )
-                    # expose_ssh_keys was in the old LanguageBase signature, so any
-                    # plugin overriding pre_run_check before contract v3 will have it.
-                    # Only Python ever acted on it — and the built-in Python plugin is
-                    # already on v3, so this path is only hit by third-party legacy
-                    # plugins that never used the value. Always pass False.
-                    _has_legacy_expose = "expose_ssh_keys" in _params
-                except (ValueError, TypeError):
-                    _has_flags_param = True
-                    _has_legacy_expose = False
-                if _has_legacy_expose:
-                    # expose_ssh_keys is always False here. The parameter existed in the
-                    # old LanguageBase signature so every pre-v3 plugin declared it, but
-                    # only the built-in Python plugin ever read it — and that plugin is
-                    # already on contract v3 (no expose_ssh_keys in its signature), so
-                    # it will never reach this branch. No third-party plugin shipped that
-                    # acted on this value; passing False is safe and correct.
-                    if _has_flags_param:
-                        result = pre_check_fn(parsed_arg, cwd, False, flags=lang_flags)
-                    else:
-                        result = pre_check_fn(parsed_arg, cwd, False)
-                elif _has_flags_param:
-                    result = pre_check_fn(parsed_arg, cwd, flags=lang_flags)
-                else:
-                    result = pre_check_fn(parsed_arg, cwd)
-            except Exception:
-                log.warning("pre_run_check raised for lang=%s — skipping",
-                            _lang_name, exc_info=True)
-                result = None
-            if isinstance(result, str):
-                # Legacy v1/v2 contract: non-empty string = error message (block);
-                # empty string or None = allow. Truthy non-string = block (old sentinel).
-                if result:
-                    result = _PreRunResult(ok=False, message=result)
-                else:
-                    result = _PreRunResult(ok=True)
-            elif result is None:
-                result = _PreRunResult(ok=True)
-            elif not isinstance(result, _PreRunResult):
-                # Any other truthy value was a legacy block sentinel; falsy = allow.
-                if result:
-                    log.warning(
-                        "pre_run_check for lang=%s returned unexpected truthy type %s — blocking",
-                        _lang_name, type(result).__name__,
-                    )
-                    result = _PreRunResult(ok=False, message="Run blocked by language plugin.")
-                else:
-                    log.warning(
-                        "pre_run_check for lang=%s returned unexpected falsy type %s — allowing",
-                        _lang_name, type(result).__name__,
-                    )
-                    result = _PreRunResult(ok=True)
-            if not result.ok:
-                self._console.print(result.message, style="bold red", markup=False)
-                if result.required_flag:
-                    self._console.print(
-                        f"Re-run with --flags {result.required_flag} to grant this capability.",
-                        style="dim",
-                        markup=False,
-                    )
-                return 1
-            return 0
-
-        # Run pre_run_check for the primary ecosystem language.
-        _primary_lang_name: str | None = None
-        if parsed is not None:
-            lang = lang_registry.for_ecosystem(parsed.ecosystem)
-            if lang is not None:
-                _primary_lang_name = getattr(lang, "name", None)
-                lang_flags = flags.get(_primary_lang_name or "", frozenset())
-                if _run_pre_check(lang, parsed, lang_flags):
-                    return 1
-
-        # Also run pre_run_check for any other flagged namespace so that e.g.
-        # --flags python:ssh-keys during `npm install` still triggers the Python
-        # confirmation prompt before configure_sandbox mounts ~/.ssh.
-        for _ns, _ns_flags in flags.items():
-            if not _ns_flags:
-                continue
-            _lang = lang_registry.get(_ns)
-            if _lang is None:
-                continue
-            if getattr(_lang, "name", _ns) == _primary_lang_name:
-                continue  # already handled above
-            if _run_pre_check(_lang, None, _ns_flags):
-                return 1
+        if not self._pre_run_checks(parsed, cwd, flags):
+            return 1
 
         # Both gates iterate the same package list and need the same DB, corpus,
         # engine and detector, so construct that state once and share it — but only
@@ -460,192 +409,42 @@ class SandboxRunner:
                     return 1
         lock_snapshots = _snapshot_lock_files(ctx.lockfile_root, allow_external_lockfiles=allow_external_lockfiles)
 
-        combined_extra = list(self._cfg.sandbox.extra_env)
-        if extra_env:
-            combined_extra.extend(extra_env)
-        sandbox_env = _build_sandbox_env(combined_extra)
-
-        if parsed is not None:
-            lang = lang_registry.for_ecosystem(parsed.ecosystem)
-            if lang is not None:
-                try:
-                    prepare_env_fn = getattr(lang, "prepare_sandbox_env", None)
-                except Exception:
-                    log.warning("prepare_sandbox_env lookup raised for lang=%s — skipping",
-                                getattr(lang, "name", "?"), exc_info=True)
-                    prepare_env_fn = None
-                if callable(prepare_env_fn):
-                    try:
-                        # The project's own environment: with no virtualenv
-                        # active this hook DETECTS `<dir>/.venv` and injects it
-                        # as VIRTUAL_ENV, so passing cwd under uv's
-                        # `--directory d` pointed `uv pip` at cwd's venv — the
-                        # install landed in a different environment from the
-                        # one the command targets.
-                        raw_extra_write = prepare_env_fn(parsed, ctx.project_dir, sandbox_env)
-                    except SandboxEnvError as exc:
-                        self._console.print(str(exc), style="bold red", markup=False)
-                        return 1
-                    except Exception:
-                        log.warning("prepare_sandbox_env raised for lang=%s — skipping",
-                                    getattr(lang, "name", "?"), exc_info=True)
-                        raw_extra_write = []
-                    else:
-                        extra_write: list[Path] = (
-                            [p for p in raw_extra_write if isinstance(p, Path)]
-                            if isinstance(raw_extra_write, list)
-                            else []
-                        )
-                        # Never let the directory move widen what is writable:
-                        # a path the hook found only because it was pointed at
-                        # a project outside cwd stays read-only, so such an
-                        # install still fails closed (see _resolve_targets()).
-                        extra_write = [
-                            p for p in extra_write if not _introduced_by_move(ctx, p)
-                        ]
-                        for p in extra_write:
-                            if p not in ctx.write_dirs:
-                                ctx.write_dirs.append(p)
-                            # Snapshot extra writable paths so rollback covers them.
-                            # These may be modified by the sandbox (e.g. venv/bin/)
-                            # but are not in ctx.scan_targets, so without a snapshot
-                            # they would not be restored on rollback.
-                            if p not in snapshots:
-                                try:
-                                    snapshots[p] = self._backend.snapshot_install_target(
-                                        p, self._console, cwd
-                                    )
-                                except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
-                                    self._console.print(
-                                        f"✗ Cannot snapshot extra write target {p}: {exc}",
-                                        style="bold red", markup=False,
-                                    )
-                                    self._console.print(
-                                        "Aborting — rollback cannot be guaranteed without a snapshot.",
-                                        style="dim",
-                                    )
-                                    return 1
-
-        # home_ro: paths under cwd are already covered by the cwd write bind —
-        # a more-specific ro-bind on any of them would silently shadow it.
-        home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
-
-        _cs_targets = SandboxTargets(
-            scan_targets=list(ctx.scan_targets),
-            write_dirs=list(ctx.write_dirs),
-        )
-        _primary_lang_name: str | None = None
-        if ctx.parsed is not None:
-            lang_for_cs = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
-            if lang_for_cs is not None:
-                _primary_lang_name = getattr(lang_for_cs, "name", None)
-                try:
-                    configure_fn = getattr(lang_for_cs, "configure_sandbox", None)
-                    if callable(configure_fn):
-                        lang_flags_cs = flags.get(_primary_lang_name or "", frozenset())
-                        configure_fn(ctx.parsed, cwd, lang_flags_cs, _cs_targets, home_ro, sandbox_env)
-                except Exception:
-                    log.warning("configure_sandbox raised for lang=%s — skipping",
-                                _primary_lang_name, exc_info=True)
-
-        # Also invoke configure_sandbox for any other language namespace that has
-        # active flags — so e.g. --flags python:ssh-keys mounts ~/.ssh even when
-        # running npm install (node ecosystem, not python).
-        for _ns, _ns_flags in flags.items():
-            if not _ns_flags:
-                continue
-            _lang = lang_registry.get(_ns)
-            if _lang is None:
-                continue
-            _ns_name = getattr(_lang, "name", _ns)
-            if _ns_name == _primary_lang_name:
-                continue  # already handled above
+        def _snapshot_extra(p: Path) -> bool:
+            # Snapshot extra writable paths so rollback covers them.
+            if p in snapshots:
+                return True
             try:
-                _configure_fn = getattr(_lang, "configure_sandbox", None)
-                if callable(_configure_fn):
-                    _configure_fn(None, cwd, _ns_flags, _cs_targets, home_ro, sandbox_env)
-            except Exception:
-                log.warning("configure_sandbox raised for lang=%s — skipping",
-                            _ns_name, exc_info=True)
+                snapshots[p] = self._backend.snapshot_install_target(p, self._console, cwd)
+            except Exception as exc:  # noqa: BLE001 — filesystem snapshot failure, abort with clear message
+                self._console.print(
+                    f"✗ Cannot snapshot extra write target {p}: {exc}",
+                    style="bold red", markup=False,
+                )
+                self._console.print(
+                    "Aborting — rollback cannot be guaranteed without a snapshot.",
+                    style="dim",
+                )
+                return False
+            return True
 
-        # Collect writable bind pairs from configure_sandbox_writable.
-        _parsed_by_lang = {_primary_lang_name: ctx.parsed} if _primary_lang_name and ctx.parsed else {}
-        _writable_binds = self._collect_and_print_writable_binds(
-            flags, cwd, _cs_targets, _parsed_by_lang,
+        asm = self._assemble_sandbox(
+            ctx, argv, flags, extra_env,
+            on_extra_write=_snapshot_extra, read_only=False,
         )
-
+        if asm is None:
+            return 1
         try:
-            extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
-            if not self._check_extra_tmpfs(extra_tmpfs):
-                return 1
-
-            home_ro.extend(self._cfg.sandbox.extra_ro_paths)
-
-            argv = _resolve_real_binary(argv)
-            if ctx.parsed is not None:
-                lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
-                if lang is not None:
-                    lang_name = getattr(lang, "name", "?")
-                    try:
-                        prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
-                        if callable(prepare_fn):
-                            # Relative paths in argv (`-e ./pkg`) are made
-                            # absolute against where the COMMAND resolves them
-                            # — uv's `--directory` moves that off cwd, and
-                            # rewriting against cwd made the sandbox install a
-                            # different path from the one requested. The
-                            # extra-path hooks below keep cwd: they receive
-                            # this already-absolute argv, and their "outside
-                            # cwd" test is about the writable cwd bind.
-                            raw_argv = prepare_fn(argv, ctx.work_dir)
-                            if isinstance(raw_argv, list) and all(isinstance(a, str) for a in raw_argv):
-                                argv = raw_argv
-                    except Exception:
-                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
-                    editable_roots = self._cfg.sandbox.editable_roots
-                    try:
-                        extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
-                        if callable(extra_ro_fn):
-                            extra_ro_paths = extra_ro_fn(argv, cwd)
-                            for p in (
-                                [q for q in extra_ro_paths if isinstance(q, Path)]
-                                if isinstance(extra_ro_paths, list)
-                                else []
-                            ):
-                                if _is_safe_sandbox_path(p, editable_roots):
-                                    home_ro.append(p.resolve())
-                                else:
-                                    log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
-                                    self._print_editable_rejection(p, editable_roots)
-                    except Exception:
-                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
-                    try:
-                        extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
-                        if callable(extra_write_fn):
-                            extra_write_paths = extra_write_fn(argv, cwd)
-                            for p in (
-                                [q for q in extra_write_paths if isinstance(q, Path)]
-                                if isinstance(extra_write_paths, list)
-                                else []
-                            ):
-                                if _is_safe_sandbox_path(p, editable_roots):
-                                    ctx.write_dirs.append(p.resolve())
-                                else:
-                                    log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
-                                    self._print_editable_rejection(p, editable_roots)
-                    except Exception:
-                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
             result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
-                argv, ctx.write_dirs,
+                asm.argv, asm.write_dirs,
                 allow_network=allow_network,
-                env=sandbox_env,
-                home_ro_dirs=home_ro,
-                extra_tmpfs=extra_tmpfs,
-                post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
-                writable_binds=_writable_binds,
+                env=asm.env,
+                home_ro_dirs=asm.home_ro,
+                extra_tmpfs=asm.extra_tmpfs,
+                post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
+                writable_binds=asm.writable_binds,
             ), check=False)
         finally:
-            _cleanup_writable_binds(_writable_binds)
+            _cleanup_writable_binds(asm.writable_binds)
         print()
 
         if result.returncode != 0:
@@ -747,6 +546,414 @@ class SandboxRunner:
 
         return 0
 
+    def _pre_run_checks(self, parsed: ParsedInstall | None, cwd: Path, flags: dict[str, frozenset[str]]) -> bool:
+        """Run every flagged language's pre_run_check (warnings, confirmations); False if one blocks.
+
+        Shared by run() and run_captured(): a flag such as python:ssh-keys
+        mounts secrets into the sandbox, and the same confirmation must come
+        first whichever way the sandbox is entered.
+        """
+        import inspect as _inspect
+
+        from packagealert.languages.base import PreRunResult as _PreRunResult
+
+        def _run_pre_check(lang, parsed_arg, lang_flags):
+            """Invoke pre_run_check on *lang*, handling legacy signatures.
+
+            *parsed_arg* is None when the language is not the primary ecosystem
+            (mirrors configure_sandbox behaviour for cross-namespace flags).
+            Returns 1 if the check blocked, 0 to continue.
+            """
+            _lang_name = getattr(lang, "name", "?")
+            try:
+                pre_check_fn = getattr(lang, "pre_run_check", None)
+                if not callable(pre_check_fn):
+                    return 0
+                try:
+                    _sig = _inspect.signature(pre_check_fn)
+                    _params = _sig.parameters
+                    _has_flags_param = "flags" in _params or any(
+                        p.kind == _inspect.Parameter.VAR_KEYWORD
+                        for p in _params.values()
+                    )
+                    # expose_ssh_keys was in the old LanguageBase signature, so any
+                    # plugin overriding pre_run_check before contract v3 will have it.
+                    # Only Python ever acted on it — and the built-in Python plugin is
+                    # already on v3, so this path is only hit by third-party legacy
+                    # plugins that never used the value. Always pass False.
+                    _has_legacy_expose = "expose_ssh_keys" in _params
+                except (ValueError, TypeError):
+                    _has_flags_param = True
+                    _has_legacy_expose = False
+                if _has_legacy_expose:
+                    # expose_ssh_keys is always False here. The parameter existed in the
+                    # old LanguageBase signature so every pre-v3 plugin declared it, but
+                    # only the built-in Python plugin ever read it — and that plugin is
+                    # already on contract v3 (no expose_ssh_keys in its signature), so
+                    # it will never reach this branch. No third-party plugin shipped that
+                    # acted on this value; passing False is safe and correct.
+                    if _has_flags_param:
+                        result = pre_check_fn(parsed_arg, cwd, False, flags=lang_flags)
+                    else:
+                        result = pre_check_fn(parsed_arg, cwd, False)
+                elif _has_flags_param:
+                    result = pre_check_fn(parsed_arg, cwd, flags=lang_flags)
+                else:
+                    result = pre_check_fn(parsed_arg, cwd)
+            except Exception:
+                log.warning("pre_run_check raised for lang=%s — skipping",
+                            _lang_name, exc_info=True)
+                result = None
+            if isinstance(result, str):
+                # Legacy v1/v2 contract: non-empty string = error message (block);
+                # empty string or None = allow. Truthy non-string = block (old sentinel).
+                if result:
+                    result = _PreRunResult(ok=False, message=result)
+                else:
+                    result = _PreRunResult(ok=True)
+            elif result is None:
+                result = _PreRunResult(ok=True)
+            elif not isinstance(result, _PreRunResult):
+                # Any other truthy value was a legacy block sentinel; falsy = allow.
+                if result:
+                    log.warning(
+                        "pre_run_check for lang=%s returned unexpected truthy type %s — blocking",
+                        _lang_name, type(result).__name__,
+                    )
+                    result = _PreRunResult(ok=False, message="Run blocked by language plugin.")
+                else:
+                    log.warning(
+                        "pre_run_check for lang=%s returned unexpected falsy type %s — allowing",
+                        _lang_name, type(result).__name__,
+                    )
+                    result = _PreRunResult(ok=True)
+            if not result.ok:
+                self._console.print(result.message, style="bold red", markup=False)
+                if result.required_flag:
+                    self._console.print(
+                        f"Re-run with --flags {result.required_flag} to grant this capability.",
+                        style="dim",
+                        markup=False,
+                    )
+                return 1
+            return 0
+
+        # Run pre_run_check for the primary ecosystem language.
+        _primary_lang_name: str | None = None
+        if parsed is not None:
+            lang = lang_registry.for_ecosystem(parsed.ecosystem)
+            if lang is not None:
+                _primary_lang_name = getattr(lang, "name", None)
+                lang_flags = flags.get(_primary_lang_name or "", frozenset())
+                if _run_pre_check(lang, parsed, lang_flags):
+                    return False
+
+        # Also run pre_run_check for any other flagged namespace so that e.g.
+        # --flags python:ssh-keys during `npm install` still triggers the Python
+        # confirmation prompt before configure_sandbox mounts ~/.ssh.
+        for _ns, _ns_flags in flags.items():
+            if not _ns_flags:
+                continue
+            _lang = lang_registry.get(_ns)
+            if _lang is None:
+                continue
+            if getattr(_lang, "name", _ns) == _primary_lang_name:
+                continue  # already handled above
+            if _run_pre_check(_lang, None, _ns_flags):
+                return False
+        return True
+
+    def authorize_captured(self, argv: list[str], *, cwd: Path, flags: dict[str, frozenset[str]] | None) -> bool:
+        """Run the pre-run checks for captured runs with *flags*, once per runner and flag set.
+
+        The same warnings and confirmations run() gives (python:ssh-keys asks
+        before mounting ~/.ssh) apply, because a captured run can execute
+        package build code with network access. The answer is remembered, so a
+        caller making many captured runs asks once. Call it up front to choose
+        when any prompt appears; run_captured() calls it otherwise.
+        """
+        flags = flags or {}
+        key = frozenset((ns, caps) for ns, caps in flags.items() if caps)
+        if key not in self._captured_authorized:
+            self._captured_authorized[key] = self._pre_run_checks(_try_parse(argv), cwd, flags)
+        return self._captured_authorized[key]
+
+    async def run_captured(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        flags: dict[str, frozenset[str]] | None = None,
+        extra_env: list[str] | None = None,
+        allow_network: bool = True,
+        timeout: float = 120.0,
+    ) -> CapturedRun:
+        """Run a read-only command in the sandbox and capture its output.
+
+        Only for commands the owning language plugin declares read-only
+        (`_approved_by_owner()`), such as pa fix's `uv lock --dry-run` trials: no risk,
+        cooldown or OSV gates, no snapshot or restore, the project bound
+        read-only, and never an exec of the real binary — an argv this module
+        does not recognise raises CapturedRunError instead. A timeout is
+        reported as CapturedRun(timed_out=True), not raised.
+        """
+        if not _approved_by_owner(argv):
+            raise CapturedRunError(f"not an approved read-only command: {' '.join(argv)}")
+        if not bwrap_available():
+            raise CapturedRunError("bwrap (bubblewrap) is not installed")
+        cwd = cwd.absolute()
+        parsed = _try_parse(argv)
+        if parsed is None or parsed.global_install:
+            raise CapturedRunError(f"not a recognised project command: {' '.join(argv)}")
+        if not self.authorize_captured(argv, cwd=cwd, flags=flags):
+            raise CapturedRunError("a pre-run check did not allow these sandbox flags")
+        try:
+            ctx = _Context(argv=argv, parsed=parsed, cwd=cwd)
+        except InvalidInvocationDirectory as exc:
+            raise CapturedRunError(str(exc)) from exc
+        _resolve_targets(ctx, None)
+        asm = self._assemble_sandbox(
+            ctx, list(argv), flags or {}, extra_env,
+            on_extra_write=None, read_only=True,
+        )
+        if asm is None:
+            raise CapturedRunError("sandbox setup was aborted")
+        try:
+            try:
+                cmd = build_cmd(
+                    asm.argv, asm.write_dirs,
+                    allow_network=allow_network,
+                    env=asm.env,
+                    home_ro_dirs=asm.home_ro,
+                    extra_tmpfs=asm.extra_tmpfs,
+                    post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
+                    writable_binds=asm.writable_binds,
+                )
+            except ValueError as exc:
+                raise CapturedRunError(str(exc)) from exc
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.run, cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
+                    timeout=timeout, cwd=str(cwd), check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return CapturedRun(-1, "", "", timed_out=True)
+            except OSError as exc:
+                raise CapturedRunError(f"could not start the sandbox: {exc}") from exc
+            return CapturedRun(proc.returncode, proc.stdout or "", proc.stderr or "")
+        finally:
+            _cleanup_writable_binds(asm.writable_binds)
+
+    def _assemble_sandbox(
+        self,
+        ctx: _Context,
+        argv: list[str],
+        flags: dict[str, frozenset[str]],
+        extra_env: list[str] | None,
+        *,
+        on_extra_write: Callable[[Path], bool] | None,
+        read_only: bool,
+    ) -> _Assembly | None:
+        """Turn a resolved context into build_cmd()'s arguments; None = abort (already reported).
+
+        Shared by run() and run_captured() so isolation and credential rules
+        cannot drift between them. With read_only the project, cwd and
+        lock-file root are bound read-only instead of writable, and no path a
+        hook returns is made writable. $HOME is a tmpfs inside the sandbox, so
+        a project under it would otherwise be invisible.
+
+        *on_extra_write* is called for each extra writable path
+        prepare_sandbox_env() adds; returning False aborts the assembly.
+
+        On success the caller owns the returned writable binds and must pass
+        them to _cleanup_writable_binds(). On abort, or if this method raises,
+        any writable binds already collected have been cleaned up.
+        """
+        combined_extra = list(self._cfg.sandbox.extra_env)
+        if extra_env:
+            combined_extra.extend(extra_env)
+        sandbox_env = _build_sandbox_env(combined_extra)
+
+        if ctx.parsed is not None:
+            lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+            if lang is not None:
+                try:
+                    prepare_env_fn = getattr(lang, "prepare_sandbox_env", None)
+                except Exception:
+                    log.warning("prepare_sandbox_env lookup raised for lang=%s — skipping",
+                                getattr(lang, "name", "?"), exc_info=True)
+                    prepare_env_fn = None
+                if callable(prepare_env_fn):
+                    try:
+                        # The project's own environment: with no virtualenv
+                        # active this hook DETECTS `<dir>/.venv` and injects it
+                        # as VIRTUAL_ENV, so passing cwd under uv's
+                        # `--directory d` pointed `uv pip` at cwd's venv — the
+                        # install landed in a different environment from the
+                        # one the command targets.
+                        raw_extra_write = prepare_env_fn(ctx.parsed, ctx.project_dir, sandbox_env)
+                    except SandboxEnvError as exc:
+                        self._console.print(str(exc), style="bold red", markup=False)
+                        return None
+                    except Exception:
+                        log.warning("prepare_sandbox_env raised for lang=%s — skipping",
+                                    getattr(lang, "name", "?"), exc_info=True)
+                        raw_extra_write = []
+                    else:
+                        extra_write: list[Path] = (
+                            [p for p in raw_extra_write if isinstance(p, Path)]
+                            if isinstance(raw_extra_write, list)
+                            else []
+                        )
+                        # Never let the directory move widen what is writable:
+                        # a path the hook found only because it was pointed at
+                        # a project outside cwd stays read-only, so such an
+                        # install still fails closed (see _resolve_targets()).
+                        extra_write = [
+                            p for p in extra_write if not _introduced_by_move(ctx, p)
+                        ]
+                        for p in extra_write:
+                            if read_only:
+                                continue
+                            if p not in ctx.write_dirs:
+                                ctx.write_dirs.append(p)
+                            # Snapshot extra writable paths so rollback covers them.
+                            # These may be modified by the sandbox (e.g. venv/bin/)
+                            # but are not in ctx.scan_targets, so without a snapshot
+                            # they would not be restored on rollback.
+                            if on_extra_write is not None and not on_extra_write(p):
+                                return None
+
+        # home_ro: paths under cwd are already covered by the cwd write bind —
+        # a more-specific ro-bind on any of them would silently shadow it.
+        # In read-only mode nothing is bound writable, so the project, cwd and
+        # lock-file root are bound read-only instead: $HOME is a tmpfs inside
+        # the sandbox, so a project under it would otherwise be invisible.
+        if read_only:
+            home_ro = list(_home_ro_dirs())
+            for p in (ctx.cwd, ctx.project_dir, ctx.lockfile_root):
+                if p not in home_ro:
+                    home_ro.append(p)
+        else:
+            home_ro = [p for p in _home_ro_dirs() if not p.is_relative_to(ctx.cwd)]
+
+        _cs_targets = SandboxTargets(
+            scan_targets=list(ctx.scan_targets),
+            write_dirs=list(ctx.write_dirs),
+        )
+        _primary_lang_name: str | None = None
+        if ctx.parsed is not None:
+            lang_for_cs = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+            if lang_for_cs is not None:
+                _primary_lang_name = getattr(lang_for_cs, "name", None)
+                try:
+                    configure_fn = getattr(lang_for_cs, "configure_sandbox", None)
+                    if callable(configure_fn):
+                        lang_flags_cs = flags.get(_primary_lang_name or "", frozenset())
+                        configure_fn(ctx.parsed, ctx.cwd, lang_flags_cs, _cs_targets, home_ro, sandbox_env)
+                except Exception:
+                    log.warning("configure_sandbox raised for lang=%s — skipping",
+                                _primary_lang_name, exc_info=True)
+
+        # Also invoke configure_sandbox for any other language namespace that has
+        # active flags — so e.g. --flags python:ssh-keys mounts ~/.ssh even when
+        # running npm install (node ecosystem, not python).
+        for _ns, _ns_flags in flags.items():
+            if not _ns_flags:
+                continue
+            _lang = lang_registry.get(_ns)
+            if _lang is None:
+                continue
+            _ns_name = getattr(_lang, "name", _ns)
+            if _ns_name == _primary_lang_name:
+                continue  # already handled above
+            try:
+                _configure_fn = getattr(_lang, "configure_sandbox", None)
+                if callable(_configure_fn):
+                    _configure_fn(None, ctx.cwd, _ns_flags, _cs_targets, home_ro, sandbox_env)
+            except Exception:
+                log.warning("configure_sandbox raised for lang=%s — skipping",
+                            _ns_name, exc_info=True)
+
+        # Collect writable bind pairs from configure_sandbox_writable.
+        _parsed_by_lang = {_primary_lang_name: ctx.parsed} if _primary_lang_name and ctx.parsed else {}
+        _writable_binds = self._collect_and_print_writable_binds(
+            flags, ctx.cwd, _cs_targets, _parsed_by_lang,
+        )
+
+        try:
+            extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
+            if not self._check_extra_tmpfs(extra_tmpfs):
+                _cleanup_writable_binds(_writable_binds)
+                return None
+
+            home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+
+            argv = _resolve_real_binary(argv)
+            if ctx.parsed is not None:
+                lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
+                if lang is not None:
+                    lang_name = getattr(lang, "name", "?")
+                    try:
+                        prepare_fn = getattr(lang, "prepare_sandbox_argv", None)
+                        if callable(prepare_fn):
+                            # Relative paths in argv (`-e ./pkg`) are made
+                            # absolute against where the COMMAND resolves them
+                            # — uv's `--directory` moves that off cwd, and
+                            # rewriting against cwd made the sandbox install a
+                            # different path from the one requested. The
+                            # extra-path hooks below keep cwd: they receive
+                            # this already-absolute argv, and their "outside
+                            # cwd" test is about the writable cwd bind.
+                            raw_argv = prepare_fn(argv, ctx.work_dir)
+                            if isinstance(raw_argv, list) and all(isinstance(a, str) for a in raw_argv):
+                                argv = raw_argv
+                    except Exception:
+                        log.warning("prepare_sandbox_argv raised for lang=%s — using original argv", lang_name, exc_info=True)
+                    editable_roots = self._cfg.sandbox.editable_roots
+                    try:
+                        extra_ro_fn = getattr(lang, "sandbox_extra_ro_paths", None)
+                        if callable(extra_ro_fn):
+                            extra_ro_paths = extra_ro_fn(argv, ctx.cwd)
+                            for p in (
+                                [q for q in extra_ro_paths if isinstance(q, Path)]
+                                if isinstance(extra_ro_paths, list)
+                                else []
+                            ):
+                                if _is_safe_sandbox_path(p, editable_roots):
+                                    home_ro.append(p.resolve())
+                                else:
+                                    log.warning("sandbox_extra_ro_paths: rejecting path %s from lang=%s", p, lang_name)
+                                    self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_ro_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+                    try:
+                        extra_write_fn = getattr(lang, "sandbox_extra_write_paths", None)
+                        if callable(extra_write_fn):
+                            extra_write_paths = extra_write_fn(argv, ctx.cwd)
+                            for p in (
+                                [q for q in extra_write_paths if isinstance(q, Path)]
+                                if isinstance(extra_write_paths, list)
+                                else []
+                            ):
+                                if _is_safe_sandbox_path(p, editable_roots):
+                                    if not read_only:
+                                        ctx.write_dirs.append(p.resolve())
+                                else:
+                                    log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
+                                    self._print_editable_rejection(p, editable_roots)
+                    except Exception:
+                        log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
+        except BaseException:
+            _cleanup_writable_binds(_writable_binds)
+            raise
+
+        write_dirs = [] if read_only else list(ctx.write_dirs)
+        return _Assembly(
+            argv=argv, write_dirs=write_dirs, env=sandbox_env, home_ro=home_ro,
+            extra_tmpfs=extra_tmpfs, writable_binds=_writable_binds,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -793,12 +1000,16 @@ class SandboxRunner:
         """Collect writable-bind pairs and print any security warnings via the runner console.
 
         Thin wrapper around :func:`_collect_writable_binds` that handles the
-        warning-printing step so callers don't duplicate it.
+        warning-printing step so callers don't duplicate it. Each distinct
+        warning is printed once per runner.
         """
         pairs, warnings = _collect_writable_binds(
             lang_registry, flags_by_lang, cwd, targets, parsed_by_lang,
         )
         for msg in warnings:
+            if msg in self._shown_warnings:
+                continue
+            self._shown_warnings.add(msg)
             self._console.print(msg)
         return pairs
 

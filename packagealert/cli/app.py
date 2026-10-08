@@ -118,6 +118,10 @@ from packagealert.cli.plugins import central_app
 
 app.add_typer(central_app, name="central")
 
+from packagealert.cli.fix_cmd import fix as _fix_command
+
+app.command("fix")(_fix_command)
+
 _cfg_option = typer.Option(None, "--config", "-c", help="Path to config TOML file.")
 
 _verbose: bool = False
@@ -759,14 +763,10 @@ _SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 _RECOMMENDATION_AGE_CONCURRENCY = 10
 
 
-async def _recommendation_ages(db, groups) -> dict[tuple[str, str, str], float]:
-    """Age in days of each package's recommended version, keyed (ecosystem, package, version).
+async def _publication_age(db, ecosystem: str, name: str, version: str) -> float | None:
+    """Age in days of one package version, or None when its publication date is unknown.
 
-    Best effort: a version whose publication date cannot be found is simply
-    absent, so it is shown without a cooldown mark rather than failing the scan.
     Reads and fills the same publication cache the `pa run` cooldown gate uses.
-    Lookups run at most _RECOMMENDATION_AGE_CONCURRENCY at a time, cache reads
-    and writes included.
     """
     import time as _time
 
@@ -775,30 +775,37 @@ async def _recommendation_ages(db, groups) -> dict[tuple[str, str, str], float]:
     from packagealert.storage.db import get_publication_date, store_publication_date
 
     lang_registry.load()
+    lang = lang_registry.for_ecosystem(ecosystem)
+    if lang is None:
+        return None
+    try:
+        url = lang.publication_date_url(name, version)
+    except Exception:
+        log.warning("publication_date_url raised for lang=%s pkg=%s", getattr(lang, "name", "?"), name, exc_info=True)
+        return None
+    if not isinstance(url, str):
+        return None
+    cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
+    if cached == "miss":
+        fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
+        if isinstance(fetched, float):
+            await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
+        elif fetched == "not_found":
+            await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=None)
+        cached = fetched
+    if not isinstance(cached, float):
+        return None
+    return (_time.time() - cached) / 86400
 
-    async def _age(ecosystem: str, name: str, version: str) -> float | None:
-        lang = lang_registry.for_ecosystem(ecosystem)
-        if lang is None:
-            return None
-        try:
-            url = lang.publication_date_url(name, version)
-        except Exception:
-            log.warning("publication_date_url raised for lang=%s pkg=%s", getattr(lang, "name", "?"), name, exc_info=True)
-            return None
-        if not isinstance(url, str):
-            return None
-        cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
-        if cached == "miss":
-            fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
-            if isinstance(fetched, float):
-                await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
-            elif fetched == "not_found":
-                await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=None)
-            cached = fetched
-        if not isinstance(cached, float):
-            return None
-        return (_time.time() - cached) / 86400
 
+async def _recommendation_ages(db, groups) -> dict[tuple[str, str, str], float]:
+    """Age in days of each package's recommended version, keyed (ecosystem, package, version).
+
+    Best effort: a version whose publication date cannot be found is simply
+    absent, so it is shown without a cooldown mark rather than failing the scan.
+    Lookups run at most _RECOMMENDATION_AGE_CONCURRENCY at a time, cache reads
+    and writes included.
+    """
     wanted = [
         (g.ecosystem, g.package, g.recommendation.version)
         for g in groups
@@ -808,7 +815,7 @@ async def _recommendation_ages(db, groups) -> dict[tuple[str, str, str], float]:
 
     async def _bounded(ecosystem: str, name: str, version: str) -> float | None:
         async with sem:
-            return await _age(ecosystem, name, version)
+            return await _publication_age(db, ecosystem, name, version)
 
     ages = await asyncio.gather(*(_bounded(*w) for w in wanted), return_exceptions=True)
     return {w: a for w, a in zip(wanted, ages) if isinstance(a, float)}
@@ -1267,6 +1274,7 @@ def scan_project(
     requirements: Path | None = typer.Option(None, "--requirements", "-r", help="Explicit requirements file to scan (overrides auto-detection)."),
     details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
     no_risk: bool = typer.Option(False, "--no-risk", help="Skip heuristic risk scoring (typosquat, popularity). Scoring is on by default."),
+    no_yank: bool = typer.Option(False, "--no-yank", help="Skip checking locked versions for yanks (releases withdrawn by their maintainer). Not checked with --scan-installed."),
     fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html."),
     config: Path | None = _cfg_option,
 ):
@@ -1292,7 +1300,72 @@ def scan_project(
             console.print(f"[red]--requirements must be a file, not a directory: {requirements}[/red]")
             raise typer.Exit(1)
     cfg, _ = _load(config)
-    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only, no_risk=no_risk))
+    asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only, no_risk=no_risk, no_yank=no_yank))
+
+
+async def _query_osv_findings(cfg, db, packages: list) -> tuple[list[dict], int]:
+    """Look *packages* up in OSV and return (findings, osv_failures).
+
+    One finding dict per advisory. A degraded (failed or partial) lookup is
+    counted in osv_failures but NOT skipped: a partial result's advisories
+    that did parse are real findings. Degraded results are never cached — see
+    OsvResult.degraded: that would record an OSV outage as a clean verdict for
+    the whole osv_cache TTL.
+    """
+    from packagealert.osv.cache import OsvCache
+    from packagealert.osv.client import OsvClient
+
+    osv_client = OsvClient(cfg.osv)
+    osv_cache = OsvCache(db, cfg.osv)
+    findings: list[dict] = []
+    osv_failures = 0
+    try:
+        batch_size = 50
+        for i in range(0, len(packages), batch_size):
+            batch = packages[i:i + batch_size]
+            queries = [(p.ecosystem, p.name, p.version) for p in batch]
+
+            cached = []
+            uncached_queries = []
+            for q in queries:
+                osv_result = await osv_cache.get(*q)
+                if osv_result is not None:
+                    cached.append(osv_result)
+                else:
+                    uncached_queries.append(q)
+
+            fresh = []
+            if uncached_queries:
+                fresh = await osv_client.batch_query(uncached_queries)
+                for q, r in zip(uncached_queries, fresh):
+                    if r and not r.degraded:
+                        ecosystem, name, version = q
+                        await osv_cache.set(ecosystem, name, version, r)
+
+            for osv_result in cached + fresh:
+                if osv_result is not None and osv_result.degraded:
+                    osv_failures += 1
+                if not osv_result or not osv_result.advisories:
+                    continue
+                for adv in osv_result.advisories:
+                    findings.append({
+                        "package": osv_result.package_name,
+                        "ecosystem": osv_result.ecosystem,
+                        "version": osv_result.version,
+                        "advisory_id": adv.id,
+                        "is_malicious": adv.is_malicious,
+                        "severity": adv.severity,
+                        "summary": adv.summary,
+                        "details": adv.details,
+                        "fixed_versions": adv.fixed_versions,
+                        "affected_ranges": adv.affected_ranges,
+                        "affected_versions": adv.affected_versions,
+                        "aliases": adv.aliases,
+                        "url": f"https://osv.dev/vulnerability/{adv.id}",
+                    })
+    finally:
+        await osv_client.aclose()
+    return findings, osv_failures
 
 
 async def _run_scan_project(
@@ -1300,11 +1373,10 @@ async def _run_scan_project(
     requirements: Path | None = None,
     prod_only: bool = False,
     no_risk: bool = False,
+    no_yank: bool = False,
 ):
     import json as jsonlib
 
-    from packagealert.osv.cache import OsvCache
-    from packagealert.osv.client import OsvClient
     from packagealert.parsers.lockfiles import (
         ProjectScan,
         collect_requirements_packages,
@@ -1348,69 +1420,24 @@ async def _run_scan_project(
         to_query.extend(result.unpinned)
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
-    osv_client = OsvClient(cfg.osv)
-    osv_cache = OsvCache(db, cfg.osv)
-
-    findings = []  # list of dicts for structured output
-    # Packages whose OSV lookup could not be completed. Counted separately so an
-    # empty `findings` is never mistaken for a clean result — see
-    # OsvResult.degraded and ScanResult.osv_failures.
-    osv_failures = 0
-
-    batch_size = 50
-    for i in range(0, len(to_query), batch_size):
-        batch = to_query[i:i + batch_size]
-        queries = [(p.ecosystem, p.name, p.version) for p in batch]
-
-        cached = []
-        uncached_queries = []
-        for pkg, q in zip(batch, queries):
-            osv_result = await osv_cache.get(*q)
-            if osv_result is not None:
-                cached.append(osv_result)
-            else:
-                uncached_queries.append(q)
-
-        fresh = []
-        if uncached_queries:
-            fresh = await osv_client.batch_query(uncached_queries)
-            for q, r in zip(uncached_queries, fresh):
-                # Never cache a degraded (failed-lookup) result — see
-                # OsvResult.degraded: it would record an OSV outage as a clean
-                # verdict for the whole osv_cache TTL.
-                if r and not r.degraded:
-                    ecosystem, name, version = q
-                    await osv_cache.set(ecosystem, name, version, r)
-
-        for osv_result in cached + fresh:
-            if osv_result is not None and osv_result.degraded:
-                # Counted as unchecked, but NOT skipped: a partial result's
-                # advisories that did parse are real findings.
-                osv_failures += 1
-            if not osv_result or not osv_result.advisories:
-                continue
-            for adv in osv_result.advisories:
-                findings.append({
-                    "package": osv_result.package_name,
-                    "ecosystem": osv_result.ecosystem,
-                    "version": osv_result.version,
-                    "advisory_id": adv.id,
-                    "is_malicious": adv.is_malicious,
-                    "severity": adv.severity,
-                    "summary": adv.summary,
-                    "details": adv.details,
-                    "fixed_versions": adv.fixed_versions,
-                    "affected_ranges": adv.affected_ranges,
-                    "affected_versions": adv.affected_versions,
-                    "aliases": adv.aliases,
-                    "url": f"https://osv.dev/vulnerability/{adv.id}",
-                })
-
-    await osv_client.aclose()
+    findings, osv_failures = await _query_osv_findings(cfg, db, to_query)
 
     risks, risk_failures = await _risk_pass(
         cfg, db, to_query, skip=no_risk, root=root, installed=installed
     )
+
+    yanked: list = []
+    yank_failures = 0
+    # Locked versions only: an installed package records no index, so a private
+    # one could be matched to an unrelated public project of the same name.
+    if not no_yank and not installed:
+        from packagealert.yanks import check_yanks
+        try:
+            found, yank_failures = await check_yanks(db, to_query)
+            yanked = [y.as_dict() for y in found]
+        except Exception:
+            log.warning("Yank check failed", exc_info=True)
+            yank_failures = len(to_query)
 
     from packagealert.osv.remediation import group_findings
     cooldown_days = cfg.sandbox.cooldown.period_days
@@ -1437,6 +1464,8 @@ async def _run_scan_project(
         risks=risks,
         risk_failures=risk_failures,
         osv_failures=osv_failures,
+        yanked=yanked,
+        yank_failures=yank_failures,
     )
     await plugin_registry.fire_on_scan_complete(scan)
 
@@ -1461,6 +1490,10 @@ async def _run_scan_project(
             # advisories, so "findings": [] alone cannot be told apart from a
             # genuinely clean project. See OsvResult.degraded.
             "osv_failures": osv_failures,
+            # Locked versions their registry has yanked (a warning, not a finding),
+            # and how many could not be checked. See packagealert.yanks.
+            "yanked": yanked,
+            "yank_failures": yank_failures,
         }, indent=2))
         return
 
@@ -1476,6 +1509,8 @@ async def _run_scan_project(
             osv_failures=osv_failures,
             ages=ages,
             cooldown_days=cooldown_days,
+            yanked=yanked,
+            yank_failures=yank_failures,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -1543,6 +1578,14 @@ async def _run_scan_project(
             f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
         )
 
+    if yanked:
+        console.print(f"\n[bold]Yanked versions ({len(yanked)}):[/bold]")
+        for y in yanked:
+            reason = f" — {y['reason']}" if y["reason"] else ""
+            console.print(f"  {y['package']} {y['version']}{reason}", style="yellow", markup=False, highlight=False)
+    if yank_failures:
+        console.print(f"[yellow]⚠ Yank status unavailable for {yank_failures} package(s)[/yellow]")
+
     if osv_failures:
         console.print(
             f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
@@ -1577,8 +1620,11 @@ def open_html_in_browser(html: str) -> None:
     Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None) -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0) -> str:
     """Render a self-contained HTML report.
+
+    *yanked* lists locked versions their registry has yanked (a warning, not a
+    finding), and *yank_failures* how many could not be checked.
 
     *risks* is the already-filtered set of rows to table (low-signal rows are
     suppressed unless --details). *risk_total* is the unfiltered count for the
@@ -1663,6 +1709,18 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   <tbody>{risk_rows}</tbody>
 </table>"""
 
+    yank_rows = "".join(
+        f"<tr><td><strong>{escape(y['package'])}</strong></td><td>{escape(y['ecosystem'])}</td>"
+        f"<td>{escape(y['version'])}</td><td>{escape(y['reason'] or '')}</td></tr>"
+        for y in yanked or []
+    )
+    yank_section = f"""
+<h2>Yanked versions</h2>
+<table>
+  <thead><tr><th>Package</th><th>Ecosystem</th><th>Version</th><th>Reason</th></tr></thead>
+  <tbody>{yank_rows}</tbody>
+</table>""" if yank_rows else ""
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1702,6 +1760,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   <span>{risk_total if risk_total is not None else len(risks or [])} at risk</span>
   {f'<span class="malicious">{risk_failures} unscored</span>' if risk_failures else ""}
   {f'<span class="malicious">{osv_failures} unchecked</span>' if osv_failures else ""}
+  {f'<span class="malicious">{yank_failures} yank-unchecked</span>' if yank_failures else ""}
 </div>
 {f'<div class="warn">&#9888; OSV lookup unavailable for {osv_failures} package(s) &mdash; these were NOT checked for advisories, so this report is not a clean result.</div>' if osv_failures else ""}
 {"<h2>Unpinned dependencies</h2><ul>" + unpinned_rows + "</ul>" if unpinned else ""}
@@ -1710,6 +1769,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   <tbody>{rows}</tbody>
 </table>
 {risk_section}
+{yank_section}
 </body>
 </html>"""
 
@@ -2178,111 +2238,27 @@ def run_cmd(
         raise typer.Exit(1)
 
     cfg, _ = _load(config)
-    # Apply .pa-run.toml project defaults (lowest precedence — CLI and PA_RUN_OPTS win).
-    from packagealert.project_config import (
-        ProjectRunConfigError,
-        find_project_run_config,
+    from packagealert.cli.run_settings import (
+        RunSettingsError,
+        resolve_project_run_settings,
+        warn_invalid_flag_tokens,
     )
-    _project_flags_list: list[str] = []
+    from packagealert.sandbox.runner import _parse_flags
+
     try:
-        _proj_cfg = find_project_run_config(Path.cwd())
-    except ProjectRunConfigError as _e:
-        console.print(f"Error in {_e.path}: {_e.detail}", style="red", markup=False)
-        raise typer.Exit(1)
-    except OSError:
-        _proj_cfg = None
-    _project_env_list: list[str] = []
-    if _proj_cfg is not None:
-        console.print(f"Using project run config: {_proj_cfg.source}", style="dim", markup=False)
-        if _proj_cfg.no_network:
-            no_network = True
-        if _proj_cfg.allow_external_lockfiles:
-            allow_external_lockfiles = True
-        _project_env_list.extend(_proj_cfg.env)
-        if _proj_cfg.flags:
-            _project_flags_list.append(_proj_cfg.flags)
-
-    if _proj_cfg is not None and not _proj_cfg.trusted and _proj_cfg.env:
-        _allowlist = set(cfg.sandbox.project_env_allowlist)
-        _blocked = list(dict.fromkeys(v for v in _proj_cfg.env if v not in _allowlist))
-        if _blocked:
-            if allow_project_env:
-                console.print(
-                    "Skipping project_env_allowlist check (--allow-project-env).",
-                    style="dim", markup=False,
-                )
-            else:
-                console.print(
-                    f"{_proj_cfg.source}: requests env vars not in sandbox.project_env_allowlist: "
-                    f"{', '.join(sorted(_blocked))}",
-                    style="red", markup=False,
-                )
-                console.print(
-                    "To allow permanently: add them to sandbox.project_env_allowlist in your config file.",
-                    style="red", markup=False,
-                )
-                console.print(
-                    "To allow this run only: re-run with --allow-project-env.",
-                    style="red", markup=False,
-                )
-                raise typer.Exit(1)
-
-    # Apply PA_RUN_OPTS environment variable — allows shell hook users to pass
-    # package-alert run options without modifying the hook itself, e.g.:
-    #   PA_RUN_OPTS="--no-change" pip install requests
-    #   export PA_RUN_OPTS="--no-network"
-    pa_opts_env = os.environ.get("PA_RUN_OPTS", "")
-    _env_flags_list: list[str] = []
-    if pa_opts_env.strip():
-        import shlex as _shlex
-        _tokens = _shlex.split(pa_opts_env)
-        _i = 0
-        while _i < len(_tokens):
-            token = _tokens[_i]
-            if token in ("--no-change", "-n"):
-                no_change = True
-            elif token == "--no-network":
-                no_network = True
-            elif token == "--expose-ssh-keys":
-                expose_ssh_keys = True
-            elif token == "--allow-external-lockfiles":
-                allow_external_lockfiles = True
-            elif token == "--flags" and _i + 1 < len(_tokens):
-                _i += 1
-                _env_flags_list.append(_tokens[_i])
-            elif token == "--flags":
-                console.print("[yellow]PA_RUN_OPTS: --flags requires a value (e.g. --flags python:ssh-keys) — ignored[/yellow]")
-            elif token.startswith("--flags="):
-                _env_flags_list.append(token[len("--flags="):])
-            else:
-                console.print(f"[yellow]PA_RUN_OPTS: unrecognised option {token!r} — ignored[/yellow]")
-            _i += 1
-
-    from packagealert.sandbox.runner import _FLAG_TOKEN_RE, _parse_flags
-
-    def _warn_invalid_flag_tokens(flags_str: str, source: str) -> None:
-        for _token in flags_str.split(","):
-            _token = _token.strip()
-            if ":" not in _token:
-                continue
-            _ns, _, _cap = _token.partition(":")
-            if not _FLAG_TOKEN_RE.match(_ns.strip()) or not _FLAG_TOKEN_RE.match(_cap.strip()):
-                console.print(
-                    f"[yellow]⚠ {source}: {_token!r} ignored — namespace and capability must be "
-                    f"lowercase letters, digits, hyphens, or underscores (e.g. python:ssh-keys)[/yellow]"
-                )
-
-    parsed_flags: dict[str, frozenset[str]] = {}
-    for _proj_flags in _project_flags_list:
-        _warn_invalid_flag_tokens(_proj_flags, ".pa-run.toml flags")
-        for ns, caps in _parse_flags(_proj_flags).items():
-            parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
-    for _env_flags in _env_flags_list:
-        _warn_invalid_flag_tokens(_env_flags, "PA_RUN_OPTS --flags")
-        for ns, caps in _parse_flags(_env_flags).items():
-            parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
+        _settings = resolve_project_run_settings(
+            Path.cwd(), cfg, allow_project_env=allow_project_env, out=console,
+        )
+    except RunSettingsError:
+        raise typer.Exit(1) from None
+    no_network = no_network or _settings.no_network
+    allow_external_lockfiles = allow_external_lockfiles or _settings.allow_external_lockfiles
+    no_change = no_change or _settings.no_change
+    expose_ssh_keys = expose_ssh_keys or _settings.expose_ssh_keys
+    _project_env_list = list(_settings.env)
+    parsed_flags: dict[str, frozenset[str]] = dict(_settings.flags)
     if flags:
-        _warn_invalid_flag_tokens(flags, "--flags")
+        warn_invalid_flag_tokens(flags, "--flags", console)
     for ns, caps in _parse_flags(flags).items():
         parsed_flags[ns] = parsed_flags.get(ns, frozenset()) | caps
 

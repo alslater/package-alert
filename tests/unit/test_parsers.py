@@ -3498,3 +3498,33 @@ def test_yarn_workspace_without_a_command_is_not_an_install():
 
     assert parse_yarn_args(["yarn", "workspace", "web"]) is None
     assert parse_yarn_args(["yarn", "workspace", "web", "run", "build"]) is None
+
+
+def test_collected_requirements_behind_a_private_index_are_not_public(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("--extra-index-url https://corp.example/simple\nrequests==2.31.0\nloose\n")
+    pinned, unpinned = collect_requirements_packages(req)
+    assert [p.from_public_registry for p in pinned + unpinned] == [False, False]
+
+
+def test_collected_requirements_on_pypi_are_public(tmp_path):
+    req = tmp_path / "requirements.txt"
+    req.write_text("requests==2.31.0\n")
+    pinned, _ = collect_requirements_packages(req)
+    assert [p.from_public_registry for p in pinned] == [True]
+
+
+def test_pylock_records_which_packages_come_from_the_public_registry(tmp_path):
+    lock = tmp_path / "pylock.toml"
+    lock.write_text(
+        'lock-version = "1.0"\ncreated-by = "t"\n'
+        '[[packages]]\nname = "requests"\nversion = "2.31.0"\nindex = "https://pypi.org/simple"\n'
+        '[[packages]]\nname = "corp-utils"\nversion = "1.2.0"\nindex = "https://corp.example/simple"\n'
+        '[[packages]]\nname = "noindex"\nversion = "1.0"\n'
+        '[[packages]]\nname = "vcsdep"\nversion = "1.0"\nvcs = { type = "git", url = "https://e/g.git", commit-id = "abc" }\n'
+        '[[packages]]\nname = "dirdep"\nversion = "1.0"\ndirectory = { path = "./d" }\n'
+        '[[packages]]\nname = "archdep"\nversion = "1.0"\narchive = { url = "https://e/a.tar.gz" }\n'
+    )
+    pinned, _ = collect_requirements_packages(lock)
+    assert {p.name: p.from_public_registry for p in pinned} == {
+        "requests": True, "corp-utils": False, "noindex": True, "vcsdep": False, "dirdep": False, "archdep": False}

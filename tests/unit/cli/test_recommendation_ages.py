@@ -185,3 +185,14 @@ async def test_lookups_are_bounded(db):
         ages = await _recommendation_ages(db, groups)
     assert len(ages) == 30
     assert peak == app_module._RECOMMENDATION_AGE_CONCURRENCY
+
+
+async def test_publication_age_reads_a_stored_date_without_fetching(db):
+    from packagealert.cli.app import _publication_age
+
+    await store_publication_date(
+        db, ecosystem="pypi", package="django", version="5.2.17", published_at=time.time() - 3 * 86400,
+    )
+    with patch(_FETCH, AsyncMock(side_effect=AssertionError("must not fetch on a cache hit"))):
+        age = await _publication_age(db, "pypi", "django", "5.2.17")
+    assert age == pytest.approx(3.0, abs=0.01)

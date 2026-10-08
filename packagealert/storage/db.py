@@ -92,6 +92,16 @@ CREATE TABLE IF NOT EXISTS publication_cache (
 CREATE INDEX IF NOT EXISTS idx_pub_cache_lookup
     ON publication_cache(ecosystem, package);
 
+CREATE TABLE IF NOT EXISTS yank_cache (
+    ecosystem  TEXT NOT NULL,
+    package    TEXT NOT NULL,
+    version    TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    yanked     INTEGER NOT NULL,
+    reason     TEXT,
+    PRIMARY KEY (ecosystem, package, version)
+);
+
 CREATE TABLE IF NOT EXISTS cooldown_cleared (
     ecosystem  TEXT NOT NULL,
     package    TEXT NOT NULL,
@@ -104,7 +114,7 @@ CREATE TABLE IF NOT EXISTS cooldown_cleared (
 _CORE_TABLE_NAMES = frozenset({
     "osv_cache", "alerts", "popularity_cache", "scheduled_projects",
     "scan_results", "top_packages_cache", "publication_cache",
-    "cooldown_cleared",
+    "cooldown_cleared", "yank_cache",
 })
 
 _GUARDED_ACTIONS = frozenset({
@@ -446,6 +456,36 @@ def _row_key_ecosystem(ecosystem: str) -> str:
     from packagealert.models.events import cache_key_ecosystem
 
     return cache_key_ecosystem(ecosystem)
+
+
+_YANK_CACHE_TTL = 24 * 3600  # a version can be yanked, or un-yanked, at any time
+
+
+async def store_yank_status(
+    db: aiosqlite.Connection, *, ecosystem: str, package: str, version: str, yanked: bool, reason: str | None,
+) -> None:
+    ecosystem = _row_key_ecosystem(ecosystem)
+    await db.execute(
+        "INSERT OR REPLACE INTO yank_cache (ecosystem, package, version, fetched_at, yanked, reason) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (ecosystem, package, version, time.time(), int(yanked), reason),
+    )
+    await db.commit()
+
+
+async def get_yank_status(
+    db: aiosqlite.Connection, *, ecosystem: str, package: str, version: str,
+) -> tuple[bool, str | None] | None:
+    """(yanked, reason) if cached within the TTL, else None."""
+    ecosystem = _row_key_ecosystem(ecosystem)
+    async with db.execute(
+        "SELECT fetched_at, yanked, reason FROM yank_cache WHERE ecosystem=? AND package=? AND version=?",
+        (ecosystem, package, version),
+    ) as cur:
+        row = await cur.fetchone()
+    if row is None or time.time() - row["fetched_at"] > _YANK_CACHE_TTL:
+        return None
+    return bool(row["yanked"]), row["reason"]
 
 
 async def store_publication_date(
