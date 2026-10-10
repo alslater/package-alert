@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -28,6 +28,8 @@ from packagealert.languages.base import (
     ShellEnvironment,
 )
 from packagealert.parsers.process_args import (
+    COMMAND_LINE_REGISTRIES,
+    SANDBOX_ENV,
     InvalidInvocationDirectory,
     ParsedInstall,
     parse_package_spec,
@@ -139,6 +141,11 @@ class _Assembly:
     writable_binds: list[tuple[Path, Path]]
 
 
+# The one directory under which run_captured(scratch=True) accepts a cwd: each
+# scratch run gets its own fresh directory inside it (pa fix's trial copies).
+SCRATCH_ROOT = Path.home() / ".cache" / "package-alert" / "fix-scratch"
+
+
 @dataclass(frozen=True)
 class CapturedRun:
     """The outcome of SandboxRunner.run_captured()."""
@@ -158,21 +165,27 @@ class CapturedRunError(Exception):
 # bound in, so a recognised command such as `uv publish` or `uv run` could still
 # act on the outside world. The language plugin that owns the command decides
 # which of its commands are read-only (its optional is_read_only_command()
-# hook); a command no plugin claims, or whose plugin does not answer a clear
-# True, is refused.
-def _approved_by_owner(argv: list[str]) -> bool:
+# hook), or, for a scratch run, which are safe to run in a disposable copy of
+# the project's files (its optional is_scratch_command() hook); a command no
+# plugin claims, or whose plugin does not answer a clear True, is refused.
+def _approved_by_owner(argv: list[str], hook: str = "is_read_only_command") -> bool:
     if not argv:
         return False
     lang_registry.load()
     lang = lang_registry.for_process(re.split(r"[/\\]", argv[0])[-1])
-    hook = getattr(lang, "is_read_only_command", None) if lang is not None else None
-    if not callable(hook):
+    if lang is None:
         return False
+    # The lookup is guarded too: a hook exposed through a descriptor or a
+    # custom __getattribute__ can raise something other than AttributeError.
     try:
-        return hook(list(argv)) is True
+        fn = getattr(lang, hook, None)
+        return callable(fn) and fn(list(argv)) is True
     except Exception:
-        log.warning("is_read_only_command raised for lang=%s argv=%r",
-                    getattr(lang, "name", "?"), argv, exc_info=True)
+        try:
+            lang_name = getattr(lang, "name", "?")
+        except Exception:  # noqa: BLE001 — logging path only, must not itself raise
+            lang_name = "?"
+        log.warning("%s raised for lang=%s argv=%r", hook, lang_name, argv, exc_info=True)
         return False
 
 
@@ -244,10 +257,16 @@ class SandboxRunner:
 
         cwd = Path.cwd()
 
+        # A project config's ${VAR}s (npm's .npmrc) are judged as the sandbox will expand them.
+        SANDBOX_ENV.set(_build_sandbox_env([*self._cfg.sandbox.extra_env, *(extra_env or [])]))
         if argv and Path(argv[0]).name in _SHELL_NAMES:
+            COMMAND_LINE_REGISTRIES.set({})
             return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, flags=flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
 
         parsed = _try_parse(argv)
+        # Every lock-file scan for this command (before and after it runs) judges an
+        # entry without a resolved URL by the registry this command was given.
+        COMMAND_LINE_REGISTRIES.set(dict(parsed.registries) if parsed is not None else {})
 
         # Apply any environment variables suggested by the language module (e.g.
         # VIRTUAL_ENV derived from a venv shim path in python.py).
@@ -408,6 +427,7 @@ class SandboxRunner:
                     self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                     return 1
         lock_snapshots = _snapshot_lock_files(ctx.lockfile_root, allow_external_lockfiles=allow_external_lockfiles)
+        npmrc_snapshot = _snapshot_npmrc(ctx.lockfile_root)
 
         def _snapshot_extra(p: Path) -> bool:
             # Snapshot extra writable paths so rollback covers them.
@@ -453,6 +473,10 @@ class SandboxRunner:
             # lock-file scan and restore unconditionally — exiting non-zero must
             # not be a way to evade the check.
             scan_ok = await self._scan_updated_lock_files(ctx.lockfile_root, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+            # A failed run records no clearances: those accepted here are discarded.
+            scan_ok = scan_ok and await self._post_run_cooldown(
+                ctx.lockfile_root, lock_snapshots, [], npmrc_snapshot=npmrc_snapshot,
+                allow_external_lockfiles=allow_external_lockfiles)
             if no_change:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
@@ -464,6 +488,10 @@ class SandboxRunner:
             return result.returncode if scan_ok else 1
 
         scan_ok = await self._scan_updated_lock_files(ctx.lockfile_root, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+        # Versions the command chose while it ran get the cooldown check the pre-run gate could not give them.
+        scan_ok = scan_ok and await self._post_run_cooldown(
+            ctx.lockfile_root, lock_snapshots, pending_clears, npmrc_snapshot=npmrc_snapshot,
+            allow_external_lockfiles=allow_external_lockfiles)
         if not no_change and not scan_ok:
             _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
             _restore_install_targets(self._backend, snapshots, self._console)
@@ -507,11 +535,13 @@ class SandboxRunner:
                         snapshots[rollback_root] = self._backend.absent_snapshot()
 
         ecosystem = parsed.ecosystem if parsed else None
+        non_public: set[tuple[str, str, str | None, Path]] = set()
         try:
             new_pkgs = _collect_new_packages(
                 ctx.scan_targets,
                 snapshots,
                 ecosystem,
+                non_public=non_public,
             )
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
@@ -521,7 +551,7 @@ class SandboxRunner:
 
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
-            post_ok = await self._post_scan(new_pkgs)
+            post_ok = await self._post_scan(new_pkgs, non_public)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
@@ -536,14 +566,7 @@ class SandboxRunner:
             if not restore_ok:
                 return 1
 
-        if pending_clears:
-            db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
-            try:
-                for eco, pkg_name, ver in pending_clears:
-                    await store_cooldown_cleared(db, ecosystem=eco, package=pkg_name, version=ver)
-            finally:
-                await db.close()
-
+        await self._store_cooldown_clears(pending_clears)
         return 0
 
     def _pre_run_checks(self, parsed: ParsedInstall | None, cwd: Path, flags: dict[str, frozenset[str]]) -> bool:
@@ -687,6 +710,7 @@ class SandboxRunner:
         extra_env: list[str] | None = None,
         allow_network: bool = True,
         timeout: float = 120.0,
+        scratch: bool = False,
     ) -> CapturedRun:
         """Run a read-only command in the sandbox and capture its output.
 
@@ -696,11 +720,36 @@ class SandboxRunner:
         read-only, and never an exec of the real binary — an argv this module
         does not recognise raises CapturedRunError instead. A timeout is
         reported as CapturedRun(timed_out=True), not raised.
+
+        With scratch, *cwd* is a disposable copy: it must lie strictly inside
+        SCRATCH_ROOT (after resolving symlinks), it is bound writable, and the
+        owning plugin must approve the argv through is_scratch_command().
+        Every other path stays exactly as in a read-only run, so the copy is
+        the one writable directory the command gains.
         """
-        if not _approved_by_owner(argv):
-            raise CapturedRunError(f"not an approved read-only command: {' '.join(argv)}")
+        hook = "is_scratch_command" if scratch else "is_read_only_command"
+        if not _approved_by_owner(argv, hook):
+            kind = "scratch" if scratch else "read-only"
+            raise CapturedRunError(f"not an approved {kind} command: {' '.join(argv)}")
         if not bwrap_available():
             raise CapturedRunError("bwrap (bubblewrap) is not installed")
+        if scratch:
+            # Canonical, so the writable bind, the read-only binds it is
+            # compared with and the directory bwrap starts in are one path.
+            try:
+                cwd = cwd.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise CapturedRunError(f"scratch directory unusable: {exc}") from exc
+            if not cwd.is_dir():
+                raise CapturedRunError(f"scratch directory is not a directory: {cwd}")
+            # Only a directory strictly inside the scratch root may be made
+            # writable, so no caller can turn a scratch run on a real project.
+            try:
+                root = SCRATCH_ROOT.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise CapturedRunError(f"scratch root unusable: {exc}") from exc
+            if cwd == root or not cwd.is_relative_to(root):
+                raise CapturedRunError(f"not a scratch directory under {root}: {cwd}")
         cwd = cwd.absolute()
         parsed = _try_parse(argv)
         if parsed is None or parsed.global_install:
@@ -719,6 +768,17 @@ class SandboxRunner:
         if asm is None:
             raise CapturedRunError("sandbox setup was aborted")
         try:
+            if scratch:
+                # The scratch copy is the one writable path; everything else
+                # stays read-only. build_cmd() applies write_dirs after every
+                # read-only bind, so an ancestor bound read-only (~/.cache)
+                # cannot shadow it; a writable bind is applied later still, so
+                # one at, above or inside the copy is refused.
+                for _src, dest in asm.writable_binds:
+                    if dest == cwd or dest.is_relative_to(cwd) or cwd.is_relative_to(dest):
+                        raise CapturedRunError(f"a sandbox flag's writable bind overlaps the scratch directory: {dest}")
+                asm.home_ro[:] = [p for p in asm.home_ro if not p.is_relative_to(cwd)]
+                asm.write_dirs.append(cwd)
             try:
                 cmd = build_cmd(
                     asm.argv, asm.write_dirs,
@@ -1442,7 +1502,11 @@ class SandboxRunner:
         except Exception:
             log.warning("Lock-file scan failed for risk check — skipping", exc_info=True)
             return True
-        if not result.pinned:
+        # Only packages locked from the public registry are scored, as for a direct command:
+        # a private package is not the public one of that name, and nothing is installed yet
+        # for a source-only score.
+        pinned = [p for p in result.pinned if getattr(p, "from_public_registry", True) is not False]
+        if not pinned:
             return True
 
         is_tty = sys.stdin.isatty()
@@ -1454,7 +1518,7 @@ class SandboxRunner:
 
         decisions: list = []
         try:
-            keys = [(p.ecosystem.lower(), p.name, p.version) for p in result.pinned]
+            keys = [(p.ecosystem.lower(), p.name, p.version) for p in pinned]
             outcome = await score_packages(res.engine, keys)
 
             for (ecosystem, name, version), report in outcome.reports.items():
@@ -1542,14 +1606,6 @@ class SandboxRunner:
         *res* carries state shared with the risk gate — including memoised
         typosquat results, so the corpus scan is not repeated. When omitted the
         method opens and closes its own, so it remains independently callable."""
-        import time as _time
-
-        from packagealert.sandbox.cooldown import (
-            decide_with_cleared,
-            fetch_latest_version,
-            fetch_publication_date,
-        )
-
         if ctx.parsed is None:
             return []
         queries, blocked_reason, _source = self._resolve_query_packages(
@@ -1565,6 +1621,27 @@ class SandboxRunner:
             return False
         if not queries:
             return []
+        return await self._cooldown_decide(queries, risk_scores=risk_scores, res=res)
+
+    async def _cooldown_decide(
+        self,
+        queries: list[tuple[str, str, str | None]],
+        *,
+        risk_scores: dict[tuple[str, str], int] | None = None,
+        res: _GateResources | _GateResourcesUnavailable | None = None,
+    ) -> list[tuple[str, str, str]] | bool:
+        """Apply the cooldown policy to (ecosystem, name, version) *queries*; see ``_cooldown_check``.
+
+        Returns False if blocked, else the packages the user confirmed at the
+        prompt (for cooldown_cleared). *res* as in ``_cooldown_check``.
+        """
+        import time as _time
+
+        from packagealert.sandbox.cooldown import (
+            decide_with_cleared,
+            fetch_latest_version,
+            fetch_publication_date,
+        )
 
         cfg = self._cfg.sandbox.cooldown
         is_tty = sys.stdin.isatty()
@@ -1586,6 +1663,7 @@ class SandboxRunner:
         blocked: list = []
         pending_clears: list[tuple[str, str, str]] = []
         warned: list = []
+        prompted: list = []
         # Once any package is blocked, the whole check returns False regardless
         # of what happens to any later "prompt" decision — its answer can never
         # change the outcome. Publication-date/typosquat lookups still run for
@@ -1630,7 +1708,10 @@ class SandboxRunner:
                     continue
 
                 cached = await get_publication_date(db, ecosystem=ecosystem, package=name, version=version)
-                if cached == "miss":
+                # A cached fetch failure (risk scoring's short-lived marker) is
+                # fetched again: an age gate must not inherit another lookup's
+                # transient failure and fail open on it.
+                if cached in ("miss", "fetch_failed"):
                     fetched = await fetch_publication_date(url, ecosystem=ecosystem, version=version)
                     if isinstance(fetched, float):
                         await store_publication_date(db, ecosystem=ecosystem, package=name, version=version, published_at=fetched)
@@ -1686,21 +1767,26 @@ class SandboxRunner:
                 elif decision.action == "warn":
                     warned.append(decision)
                 elif decision.action == "prompt":
-                    if already_blocked:
-                        # Nothing this prompt could answer would change the
-                        # outcome — an earlier package already forces a block.
-                        blocked.append(decision)
-                        continue
-                    from rich.prompt import Confirm
-                    self._console.print(f"[yellow]  {pkg.name}=={pkg.version}: {decision.reason}[/yellow]")
-                    if not Confirm.ask("Install anyway?", default=False):
-                        blocked.append(decision)
-                        already_blocked = True
-                    else:
-                        pending_clears.append((ecosystem, name, version))
+                    # Asked about together, once every version has been looked up.
+                    prompted.append((decision, (ecosystem, name, version)))
         finally:
             if owned:
                 await self._close_gate_resources(res)
+
+        if prompted:
+            if already_blocked:
+                # Nothing an answer could change: another package already forces a block.
+                blocked.extend(d for d, _clear in prompted)
+            else:
+                from rich.prompt import Confirm
+                for d, _clear in prompted:
+                    self._console.print(f"  {d.package.name}=={d.package.version}: {d.reason}",
+                                        style="yellow", markup=False)
+                question = "Install anyway?" if len(prompted) == 1 else f"Install these {len(prompted)} anyway?"
+                if Confirm.ask(question, default=False):
+                    pending_clears.extend(clear for _d, clear in prompted)
+                else:
+                    blocked.extend(d for d, _clear in prompted)
 
         for d in warned:
             self._console.print(f"[yellow]  {d.package.name}=={d.package.version}: {d.reason}[/yellow]")
@@ -1827,6 +1913,7 @@ class SandboxRunner:
                 self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                 return 1
         lock_snapshots = _snapshot_lock_files(cwd, allow_external_lockfiles=allow_external_lockfiles)
+        npmrc_snapshot = _snapshot_npmrc(cwd)
 
         network_label = "allowed" if allow_network else "blocked"
         if no_change:
@@ -1900,6 +1987,10 @@ class SandboxRunner:
         # In --no-change mode, defer restore until after post-shell scanning so
         # new-package detection sees the actual installed state.
         scan_ok = await self._scan_updated_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+        shell_clears: list[tuple[str, str, str]] = []
+        scan_ok = scan_ok and await self._post_run_cooldown(
+            cwd, lock_snapshots, shell_clears, npmrc_snapshot=npmrc_snapshot,
+            allow_external_lockfiles=allow_external_lockfiles)
         if not no_change and not scan_ok:
             _restore_lock_files(lock_snapshots, cwd, self._console)
             _restore_install_targets(self._backend, snapshots, self._console)
@@ -1910,11 +2001,13 @@ class SandboxRunner:
             _restore_install_targets(self._backend, snapshots, self._console)
             return 1
 
+        non_public: set[tuple[str, str, str | None, Path]] = set()
         try:
             new_pkgs = _collect_new_packages(
                 scan_targets,
                 snapshots,
                 None,
+                non_public=non_public,
             )
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
@@ -1924,7 +2017,7 @@ class SandboxRunner:
 
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
-            post_ok = await self._post_scan(new_pkgs)
+            post_ok = await self._post_scan(new_pkgs, non_public)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
@@ -1939,6 +2032,8 @@ class SandboxRunner:
             if not restore_ok:
                 return 1
 
+        if result.returncode == 0:
+            await self._store_cooldown_clears(shell_clears)
         return result.returncode
 
     async def _preflight_shell(self, cwd: Path, *, allow_external_lockfiles: bool = False) -> bool:
@@ -1962,7 +2057,8 @@ class SandboxRunner:
                 return False
 
         scan = scan_project(cwd)
-        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned]
+        # Only packages locked from the public registry are looked up there.
+        queries = [(p.ecosystem, p.name, p.version) for p in scan.pinned if p.from_public_registry]
 
         if not queries:
             self._console.print("[dim]Pre-flight: no lock files found[/dim]")
@@ -2075,8 +2171,12 @@ class SandboxRunner:
         source_parts: list[str] = []
 
         if parsed.packages:
-            # Explicit packages on the command line — normalise specs first
+            # Explicit packages on the command line — normalise specs first. One
+            # fetched from elsewhere than the public registry (a private registry,
+            # git, a local path) is not looked up there, as for lock-file entries.
             for raw in parsed.packages:
+                if not _explicit_package_public(parsed, raw, ctx.project_dir):
+                    continue
                 name, version = parse_package_spec(raw, parsed.ecosystem)
                 if name:
                     queries.append((parsed.ecosystem, name, version))
@@ -2098,8 +2198,11 @@ class SandboxRunner:
                         req_path, visited, ctx.work_dir,
                         is_system_python_target=parsed.is_system_python_target,
                     )
-                    queries.extend((p.ecosystem, p.name, p.version) for p in pinned)
-                    queries.extend((p.ecosystem, p.name, None) for p in unpinned)
+                    # A private index, VCS or local path is not the public package of
+                    # that name: it is not looked up publicly (it would leak the
+                    # name, and judge it by an unrelated package).
+                    queries.extend((p.ecosystem, p.name, p.version) for p in pinned if p.from_public_registry)
+                    queries.extend((p.ecosystem, p.name, None) for p in unpinned if p.from_public_registry)
                     file_sources.append(rf)
             added = len(queries) - before
             source_parts.append(
@@ -2145,9 +2248,12 @@ class SandboxRunner:
                     scan = scan_project(ctx.lockfile_root)
             else:
                 scan = scan_project(ctx.lockfile_root)
+            # Only packages locked from the public registry are looked up there.
             queries = (
-                [(p.ecosystem, p.name, p.version) for p in scan.pinned if p.ecosystem == parsed.ecosystem]
-                + [(p.ecosystem, p.name, None) for p in scan.unpinned if p.ecosystem == parsed.ecosystem]
+                [(p.ecosystem, p.name, p.version) for p in scan.pinned
+                 if p.ecosystem == parsed.ecosystem and p.from_public_registry]
+                + [(p.ecosystem, p.name, None) for p in scan.unpinned
+                   if p.ecosystem == parsed.ecosystem and p.from_public_registry]
             )
             lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
             source_parts.append(f"{len(queries)} packages ({lock_sources})")
@@ -2255,6 +2361,78 @@ class SandboxRunner:
             self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
         return True
 
+    async def _post_run_cooldown(
+        self,
+        cwd: Path,
+        lock_snapshots: dict[Path, bytes | None | _LockUnreadable],
+        pending_clears: list[tuple[str, str, str]],
+        *,
+        npmrc_snapshot: bytes | None,
+        allow_external_lockfiles: bool = False,
+    ) -> bool:
+        """Apply the cooldown policy to the versions the command itself wrote to its lock files.
+
+        The pre-run check covers what the command names and what was locked
+        before it ran; a command that re-resolves (``npm update``, an install of
+        an out-of-date lock, ``uv lock --upgrade``) chooses further versions
+        while it runs. Those are the pinned (ecosystem, name, version) entries of
+        each changed lock file that its pre-run copy did not have. Returns False
+        when one is refused (the caller restores); a version the user confirms
+        at the prompt is appended to *pending_clears*, which the caller records
+        only once the whole run has succeeded. *npmrc_snapshot* is the
+        project's .npmrc taken with the lock files before the run (None when
+        there was none): the pre-run lock is read with the registry it named,
+        which the command may since have changed. Call after
+        ``_scan_updated_lock_files`` has accepted the changed files.
+        """
+        import tempfile
+
+        from packagealert.parsers.lockfiles import scan_lockfiles
+
+        changed = _changed_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
+        chosen: list[tuple[str, str, str | None]] = []
+        for path in changed:
+            # Only versions from the public registry: a private package of the same
+            # name must not be looked up there (or judged by the public one's age).
+            after = {(p.ecosystem, p.name, p.version) for p in scan_lockfiles([path]).pinned
+                     if p.from_public_registry}
+            before_bytes = lock_snapshots.get(path)
+            before: set[tuple[str, str, str | None]] = set()
+            if isinstance(before_bytes, bytes):
+                with tempfile.TemporaryDirectory() as tmp:
+                    copy = Path(tmp) / path.name
+                    copy.write_bytes(before_bytes)
+                    # Provenance of an entry without a resolved URL comes from the project's .npmrc,
+                    # so the snapshot is read beside the .npmrc as it was before the run.
+                    if npmrc_snapshot is not None:
+                        (Path(tmp) / ".npmrc").write_bytes(npmrc_snapshot)
+                    before = {(p.ecosystem, p.name, p.version) for p in scan_lockfiles([copy]).pinned
+                              if p.from_public_registry}
+            # An unreadable or absent pre-run lock: everything in it is the run's choice.
+            chosen += sorted(after - before, key=lambda q: (q[0], q[1], q[2] or ""))
+        chosen = list(dict.fromkeys(chosen))
+        if not chosen:
+            return True
+        self._console.print(
+            f"[dim]Cooldown check: {len(chosen)} version(s) the command chose while it ran...[/dim]")
+        result = await self._cooldown_decide(chosen)
+        if result is False:
+            return False
+        if isinstance(result, list):
+            pending_clears.extend(result)
+        return True
+
+    async def _store_cooldown_clears(self, clears: list[tuple[str, str, str]]) -> None:
+        """Record versions the user cleared at a cooldown prompt (only after a successful run)."""
+        if not clears:
+            return
+        db = await open_db(enabled_plugins=set(self._cfg.plugins.enabled))
+        try:
+            for eco, pkg_name, ver in clears:
+                await store_cooldown_cleared(db, ecosystem=eco, package=pkg_name, version=ver)
+        finally:
+            await db.close()
+
     async def _scan_updated_lock_files(
         self,
         cwd: Path,
@@ -2268,43 +2446,7 @@ class SandboxRunner:
         fresh for anything new, so this is cheap when only a few packages were added.
         Returns False if a malicious package is found.
         """
-        scannable = {cwd / name for name in _scannable_lock_files()}
-        changed = []
-        for p, before in lock_snapshots.items():
-            if p not in scannable:
-                continue
-            if isinstance(before, _LockUnreadable):
-                # Pre-run state was unknown; treat as changed — err on the side of caution.
-                changed.append(p)
-            elif before is None:
-                # File was absent before the run; if any directory entry exists now
-                # (including broken symlinks) it was created during the run.
-                if p.exists() or p.is_symlink():
-                    changed.append(p)
-            else:
-                # Before reading, verify the path hasn't been replaced by an
-                # external symlink during the sandbox run.  p.read_bytes() follows
-                # symlinks, so an attacker-placed symlink would otherwise let the
-                # sandbox read arbitrary files outside the project.
-                if not allow_external_lockfiles and p.is_symlink():
-                    try:
-                        resolved = p.resolve()
-                    except OSError:
-                        resolved = None
-                    if resolved is None or not resolved.is_relative_to(cwd.resolve()):
-                        log.warning(
-                            "Lock file replaced by external symlink during sandbox run, "
-                            "treating as changed without reading: %s",
-                            p,
-                        )
-                        changed.append(p)
-                        continue
-                try:
-                    if p.read_bytes() != before:
-                        changed.append(p)
-                except OSError:
-                    log.warning("Could not read lock file after sandbox run: %s", p)
-                    changed.append(p)  # treat as changed — err on the side of caution
+        changed = _changed_lock_files(cwd, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
         if not changed:
             return True
 
@@ -2342,9 +2484,11 @@ class SandboxRunner:
                 changed_names,
             )
             return False
+        # Only packages locked from the public registry are looked up there: a private
+        # package must not be judged by OSV's verdict on a public one of the same name.
         queries = (
-            [(p.ecosystem, p.name, p.version) for p in scan.pinned]
-            + [(p.ecosystem, p.name, None) for p in scan.unpinned]
+            [(p.ecosystem, p.name, p.version) for p in scan.pinned if p.from_public_registry]
+            + [(p.ecosystem, p.name, None) for p in scan.unpinned if p.from_public_registry]
         )
 
         changed_names = ", ".join(p.name for p in changed)
@@ -2415,11 +2559,16 @@ class SandboxRunner:
             self._console.print("[green]✓ Lock file scan: clean[/green]")
         return True
 
-    async def _post_scan(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:
+    async def _post_scan(
+        self, packages: list[tuple[str, str, str | None, Path]],
+        non_public: Collection[tuple[str, str, str | None, Path]] = frozenset(),
+    ) -> bool:
         """OSV-check newly installed packages, then risk-score them.
 
         *packages* carries a fourth element — the scan root the package was
         detected under — which OSV does not need but the risk pass does.
+        Entries in *non_public* (from a private registry, git or a local path)
+        are not sent to OSV and are risk-scored on their source alone.
         """
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
@@ -2432,7 +2581,8 @@ class SandboxRunner:
         unchecked: list[str] = []
 
         # OSV queries are (ecosystem, name, version) only.
-        osv_queries = [(eco, name, ver) for eco, name, ver, _root in packages]
+        osv_queries = list(dict.fromkeys((eco, name, ver) for eco, name, ver, root in packages
+                                         if (eco, name, ver, root) not in non_public))
 
         try:
             for i in range(0, len(osv_queries), 50):
@@ -2475,9 +2625,12 @@ class SandboxRunner:
                 self._console.print(f"  [yellow]• {name}[/yellow]")
         else:
             self._console.print("[green]✓ Post-install: no known advisories[/green]")
-        return await self._post_scan_risk(packages)
+        return await self._post_scan_risk(packages, non_public)
 
-    async def _post_scan_risk(self, packages: list[tuple[str, str, str | None, Path]]) -> bool:
+    async def _post_scan_risk(
+        self, packages: list[tuple[str, str, str | None, Path]],
+        non_public: Collection[tuple[str, str, str | None, Path]] = frozenset(),
+    ) -> bool:
         """Score newly installed packages with full source-code signals.
 
         This is the only point in the run flow where an extracted package tree
@@ -2538,76 +2691,93 @@ class SandboxRunner:
             # a mixed-case plugin ecosystem went silently missing. Normalising
             # here, once, keeps this dict's keys identical to what score_packages
             # will actually look up with.
-            roots_by_key: dict[tuple[str, str, str | None], list[Path]] = {}
+            # Provenance is per installed copy: a private copy and a public copy of
+            # the same name and version are scored in separate passes, the private
+            # one on its source alone, and the higher report for each key is kept.
+            roots_by_kind: dict[bool, dict[tuple[str, str, str | None], list[Path]]] = {True: {}, False: {}}
             for raw_ecosystem, name, version, scan_root in packages:
                 try:
                     ecosystem = normalise_ecosystem(raw_ecosystem)
                 except ValueError:
                     ecosystem = raw_ecosystem.lower()
-                roots_by_key.setdefault((ecosystem, name, version), []).append(scan_root)
+                local = (raw_ecosystem, name, version, scan_root) in non_public
+                roots_by_kind[local].setdefault((ecosystem, name, version), []).append(scan_root)
 
-            manifest_warnings: dict[tuple[str, str, str | None], str | None] = {}
+            async def score_copies(roots_by_key: dict[tuple[str, str, str | None], list[Path]],
+                                   local: bool) -> dict[tuple[str, str, str | None], Any]:
+                manifest_warnings: dict[tuple[str, str, str | None], str | None] = {}
 
-            def resolve_dirs(
-                ecosystem: str, name: str, version: str | None
-            ) -> list[list[Path]]:
-                groups: list[list[Path]] = []
-                warning: str | None = None
-                for scan_root in roots_by_key[(ecosystem, name, version)]:
-                    # project_path is deliberately left to the scan_root.parent
-                    # fallback: a post-install scan target may be a venv elsewhere
-                    # or a monorepo subdirectory, so there is no single project
-                    # root to pass. The fallback is correct for the Node targets
-                    # that need it.
-                    resolved, env_warning = _resolve_installed_dir(
-                        ecosystem, name, Path.cwd(), scan_root, version=version
-                    )
-                    if not resolved:
-                        log.debug(
-                            "No package directory resolved for %s/%s under %s — "
-                            "source-code signals unavailable",
-                            ecosystem, name, scan_root,
+                def resolve_dirs(
+                    ecosystem: str, name: str, version: str | None
+                ) -> list[list[Path]]:
+                    groups: list[list[Path]] = []
+                    warning: str | None = None
+                    for scan_root in roots_by_key[(ecosystem, name, version)]:
+                        # project_path is deliberately left to the scan_root.parent
+                        # fallback: a post-install scan target may be a venv elsewhere
+                        # or a monorepo subdirectory, so there is no single project
+                        # root to pass. The fallback is correct for the Node targets
+                        # that need it.
+                        resolved, env_warning = _resolve_installed_dir(
+                            ecosystem, name, Path.cwd(), scan_root, version=version
                         )
-                    if resolved:
-                        groups.append(resolved)
-                    # First non-None warning across scan_roots wins — a corrupt
-                    # manifest anywhere is worth surfacing, and nothing
-                    # distinguishes which scan_root's warning matters more.
-                    if warning is None and env_warning:
-                        warning = env_warning
-                manifest_warnings[(ecosystem, name, version)] = warning
-                return groups
+                        if not resolved:
+                            log.debug(
+                                "No package directory resolved for %s/%s under %s — "
+                                "source-code signals unavailable",
+                                ecosystem, name, scan_root,
+                            )
+                        if resolved:
+                            groups.append(resolved)
+                        # First non-None warning across scan_roots wins — a corrupt
+                        # manifest anywhere is worth surfacing, and nothing
+                        # distinguishes which scan_root's warning matters more.
+                        if warning is None and env_warning:
+                            warning = env_warning
+                    manifest_warnings[(ecosystem, name, version)] = warning
+                    return groups
 
-            def resolve_manifest_warning(
-                ecosystem: str, name: str, version: str | None
-            ) -> str | None:
-                return manifest_warnings.get((ecosystem, name, version))
+                def resolve_manifest_warning(
+                    ecosystem: str, name: str, version: str | None
+                ) -> str | None:
+                    return manifest_warnings.get((ecosystem, name, version))
 
-            keys = list(roots_by_key.keys())
-            outcome = await score_packages(
-                engine, keys,
-                package_dir_resolver=resolve_dirs,
-                manifest_warning_resolver=resolve_manifest_warning,
-            )
-
-            for (ecosystem, name, version), report in outcome.reports.items():
-                # unverifiable_manifest fires independently of the aggregate
-                # threshold: it typically arrives alone at score 20 (a corrupt
-                # manifest means no directories were resolved, so no other
-                # source-code heuristic ran), which never reaches
-                # post_install_threshold's default of 30 on its own — silently
-                # keeping an install whose own manifest could not be verified,
-                # despite it being exactly the kind of signal that should never
-                # go unreported. Mirrors preflight_risk.decide_risk's
-                # independent typosquat/high-risk gating rather than folding
-                # every signal into one combined score.
-                has_manifest_warning = any(
-                    s.name == UNVERIFIABLE_MANIFEST_SIGNAL for s in report.signals
+                keys = list(roots_by_key.keys())
+                if not keys:
+                    return {}
+                outcome = await score_packages(
+                    engine, keys,
+                    package_dir_resolver=resolve_dirs,
+                    manifest_warning_resolver=resolve_manifest_warning,
+                    local_only=frozenset(keys) if local else frozenset(),
                 )
-                if report.score >= cfg.post_install_threshold or has_manifest_warning:
-                    flagged.append(
-                        (name, version, report.score, [s.name for s in report.signals])
+                return outcome.reports
+
+            # Each pass's report is judged on its own before anything is combined:
+            # a copy's independent signal must not be lost to another copy that
+            # merely scores higher.
+            by_key: dict[tuple[str, str, str | None], tuple[int, list[str]]] = {}
+            for local in (False, True):
+                for key, report in (await score_copies(roots_by_kind[local], local=local)).items():
+                    # unverifiable_manifest fires independently of the aggregate
+                    # threshold: it typically arrives alone at score 20 (a corrupt
+                    # manifest means no directories were resolved, so no other
+                    # source-code heuristic ran), which never reaches
+                    # post_install_threshold's default of 30 on its own — silently
+                    # keeping an install whose own manifest could not be verified,
+                    # despite it being exactly the kind of signal that should never
+                    # go unreported. Mirrors preflight_risk.decide_risk's
+                    # independent typosquat/high-risk gating rather than folding
+                    # every signal into one combined score.
+                    has_manifest_warning = any(
+                        s.name == UNVERIFIABLE_MANIFEST_SIGNAL for s in report.signals
                     )
+                    if report.score >= cfg.post_install_threshold or has_manifest_warning:
+                        score, names = by_key.get(key, (0, []))
+                        by_key[key] = (max(score, report.score),
+                                       list(dict.fromkeys([*names, *(s.name for s in report.signals)])))
+            for (_ecosystem, name, version), (score, names) in by_key.items():
+                flagged.append((name, version, score, names))
         finally:
             await self._close_gate_resources(res)
 
@@ -2993,6 +3163,21 @@ def _serialise_package_spec(p: PackageSpec) -> str:
 
 
 
+def _explicit_package_public(parsed: ParsedInstall, raw: str, project_dir: Path) -> bool:
+    """Whether the package *raw*, named on the command line, comes from the public registry.
+
+    The owning language's optional ``explicit_package_public()`` hook decides;
+    without one, or when it fails, the package is looked up (the checked side).
+    """
+    lang = lang_registry.for_ecosystem(parsed.ecosystem)
+    try:
+        hook = getattr(lang, "explicit_package_public", None) if lang is not None else None
+        return not callable(hook) or hook(raw, parsed, project_dir) is not False
+    except Exception:
+        log.warning("explicit_package_public raised for %r — looking it up", raw, exc_info=True)
+        return True
+
+
 def _try_parse(argv: list[str]) -> ParsedInstall | None:
     """Return a ParsedInstall for *argv*, or None if the command is unrecognised.
 
@@ -3033,7 +3218,10 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
     )
     return ParsedInstall(
         manager=pi.manager,
-        packages=[_serialise_package_spec(p) for p in pi.packages],
+        # A package the plugin marks as not from the public registry (an npm git or
+        # local-path spec) is not looked up there, so it is not among the packages checked.
+        packages=[_serialise_package_spec(p) for p in pi.packages
+                  if getattr(p, "from_public_registry", True) is not False],
         ecosystem=ecosystem,
         venv_exe=pi.venv_exe,
         req_files=pi.req_files,
@@ -3060,6 +3248,8 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         working_dir=getattr(pi, "working_dir", None),
         project_dir=getattr(pi, "project_dir", None),
         lockfile_dir=getattr(pi, "lockfile_dir", None),
+        # getattr default {}: a plugin predating this field sets no registry on the command line.
+        registries=dict(getattr(pi, "registries", None) or {}),
     )
 
 
@@ -3573,6 +3763,14 @@ def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
     return None
 
 
+def _snapshot_npmrc(root: Path) -> bytes | None:
+    """The project's .npmrc as it is now (None when absent or unreadable), for reading pre-run lock snapshots."""
+    try:
+        return (root / ".npmrc").read_bytes()
+    except OSError:
+        return None
+
+
 def _snapshot_lock_files(
     cwd: Path, *, allow_external_lockfiles: bool = False
 ) -> dict[Path, bytes | None | _LockUnreadable]:
@@ -3652,6 +3850,50 @@ def _restore_install_targets(
             console.print("  The install target may be partially modified — inspect and clean up manually.", style="yellow")
             ok = False
     return ok
+
+
+def _changed_lock_files(
+    cwd: Path, lock_snapshots: dict[Path, bytes | None | _LockUnreadable], *, allow_external_lockfiles: bool = False,
+) -> list[Path]:
+    """The scannable lock files a sandbox run changed (or may have: unreadable states count as changed)."""
+    scannable = {cwd / name for name in _scannable_lock_files()}
+    changed = []
+    for p, before in lock_snapshots.items():
+        if p not in scannable:
+            continue
+        if isinstance(before, _LockUnreadable):
+            # Pre-run state was unknown; treat as changed — err on the side of caution.
+            changed.append(p)
+        elif before is None:
+            # File was absent before the run; if any directory entry exists now
+            # (including broken symlinks) it was created during the run.
+            if p.exists() or p.is_symlink():
+                changed.append(p)
+        else:
+            # Before reading, verify the path hasn't been replaced by an
+            # external symlink during the sandbox run.  p.read_bytes() follows
+            # symlinks, so an attacker-placed symlink would otherwise let the
+            # sandbox read arbitrary files outside the project.
+            if not allow_external_lockfiles and p.is_symlink():
+                try:
+                    resolved = p.resolve()
+                except OSError:
+                    resolved = None
+                if resolved is None or not resolved.is_relative_to(cwd.resolve()):
+                    log.warning(
+                        "Lock file replaced by external symlink during sandbox run, "
+                        "treating as changed without reading: %s",
+                        p,
+                    )
+                    changed.append(p)
+                    continue
+            try:
+                if p.read_bytes() != before:
+                    changed.append(p)
+            except OSError:
+                log.warning("Could not read lock file after sandbox run: %s", p)
+                changed.append(p)  # treat as changed — err on the side of caution
+    return changed
 
 
 def _restore_lock_files(
@@ -3741,9 +3983,15 @@ def _collect_new_packages(
     scan_targets: list[Path],
     snapshots: dict[Path, InstallSnapshot],
     ecosystem: str | None,
+    *,
+    non_public: set[tuple[str, str, str | None, Path]] | None = None,
 ) -> list[tuple[str, str, str | None, Path]]:
     """Return (ecosystem, name, version, scan_root) for packages that appeared
     since the snapshot.
+
+    Those the language marks as not from the public registry
+    (``PackageSpec.from_public_registry``) are also added to *non_public*:
+    their source is still scanned, but nothing is looked up by their name.
 
     *scan_root* is the directory whose walk detected the package — site-packages
     for Python, node_modules for Node. It is retained because post-install source
@@ -3825,7 +4073,12 @@ def _collect_new_packages(
                         if isinstance(pkg_specs, list)
                         else []
                     ):
-                        new.append((ps.ecosystem, ps.name, ps.version, walk_root))
+                        entry = (ps.ecosystem, ps.name, ps.version, walk_root)
+                        # One from a private registry, git or a local path is not the public
+                        # package of that name: its source is scanned, its name not looked up.
+                        if getattr(ps, "from_public_registry", True) is False and non_public is not None:
+                            non_public.add(entry)
+                        new.append(entry)
             except Exception:
                 log.warning("detect_new_packages raised for lang=%s — skipping",
                             getattr(lang, "name", "?"), exc_info=True)

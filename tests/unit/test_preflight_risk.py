@@ -771,3 +771,55 @@ def test_an_interactive_run_still_prompts():
         is_tty=True,
     )
     assert d.action == "prompt"
+
+
+# --- a typosquat match that does not gate says why ---
+
+def test_a_reduced_match_says_its_score_why_it_was_reduced_and_that_it_does_not_gate():
+    from packagealert.models.risk import RiskSignal
+    from packagealert.sandbox.preflight_risk import decide_risk
+
+    signal = RiskSignal(name="typosquat", score=3, reason="Package name resembles 'events' (distance=2); "
+                                                         "reduced for established adoption (67 versions, 222601 dependents)")
+    d = decide_risk(_pkg("fsevents", "2.3.3", "npm"), report=_report(3, [signal]),
+                    typo=_typo(True, "events", 2, 3), cfg=_cfg(), is_tty=True)
+    assert d.action == "warn"
+    assert d.reason == ("possible typosquat of 'events' (distance 2) — score 3, reduced for established "
+                        "adoption (67 versions, 222601 dependents); below the gating score (15), not gating")
+
+
+def test_an_unreduced_match_below_the_score_says_so_without_a_reduction():
+    from packagealert.sandbox.preflight_risk import decide_risk
+
+    d = decide_risk(_pkg("abc", "1.0.0", "npm"), report=_report(9), typo=_typo(True, "abd", 1, 9), cfg=_cfg(),
+                    is_tty=True)
+    assert d.reason == "possible typosquat of 'abd' (distance 1) — score 9; below the gating score (15), not gating"
+
+
+def test_a_match_beyond_the_gating_distance_says_so():
+    from packagealert.sandbox.preflight_risk import decide_risk
+
+    d = decide_risk(_pkg("abcde", "1.0.0", "npm"), report=_report(30), typo=_typo(True, "vwxyz", 3, 30),
+                    cfg=_cfg(risk_threshold=99), is_tty=True)
+    assert d.reason == ("possible typosquat of 'vwxyz' (distance 3) — score 30; beyond the gating distance (2), "
+                        "not gating")
+
+
+def test_a_gating_match_shows_its_score():
+    from packagealert.sandbox.preflight_risk import decide_risk
+
+    d = decide_risk(_pkg("reqeusts"), report=_report(30), typo=_typo(True, "requests", 1, 30),
+                    cfg=_cfg(risk_threshold=99), is_tty=True)
+    assert d.reason == "possible typosquat of 'requests' (distance 1) — score 30"
+
+
+def test_a_gating_match_shows_its_reduction_too():
+    from packagealert.models.risk import RiskSignal
+    from packagealert.sandbox.preflight_risk import decide_risk
+
+    signal = RiskSignal(name="typosquat", score=19, reason="Package name resembles 'camelcase' (distance=1); "
+                                                          "reduced for established adoption (21 versions, 38 dependents)")
+    d = decide_risk(_pkg("camel-case", "4.1.2", "npm"), report=_report(19, [signal]),
+                    typo=_typo(True, "camelcase", 1, 19), cfg=_cfg(risk_threshold=99), is_tty=True)
+    assert d.reason == ("possible typosquat of 'camelcase' (distance 1) — score 19, reduced for established "
+                        "adoption (21 versions, 38 dependents)")

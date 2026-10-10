@@ -120,7 +120,17 @@ class RiskEngine:
         event: PackageEvent,
         package_dirs: list[Path],
         manifest_warning: str | None = None,
+        *,
+        local_only: bool = False,
     ) -> RiskReport:
+        """Score *event*'s package from its source in *package_dirs* and what is known of its name.
+
+        With *local_only* (a package from a private registry, git or a local
+        path) only the source heuristics and the manifest warning count: the
+        typosquat, popularity and age signals describe the public package of
+        that name, which this is not, so they are neither looked up nor used to
+        damp the score.
+        """
         signals: list[RiskSignal] = []
 
         signals.extend(await self._run_heuristics(event, package_dirs))
@@ -137,6 +147,10 @@ class RiskEngine:
             signals.append(
                 RiskSignal(name=UNVERIFIABLE_MANIFEST_SIGNAL, score=20, reason=manifest_warning)
             )
+
+        if local_only:
+            return RiskReport(package_name=event.package_name, ecosystem=event.ecosystem,
+                              score=min(100, math.floor(sum(s.score for s in signals))), signals=signals)
 
         typo_result = await self._typosquat.analyze(event.package_name, event.ecosystem)
 
@@ -247,19 +261,22 @@ class RiskEngine:
         if not self._pop_client.supports_ecosystem(event.ecosystem):
             return PopularityFetchResult.FETCH_FAILED
 
-        cached = await self._pop_cache.get(event.ecosystem, event.package_name)
+        # Per version: a release's own dependents count towards its adoption
+        # (see PopularityClient.fetch).
+        version = event.version
+        cached = await self._pop_cache.get(event.ecosystem, event.package_name, version=version)
         if cached is PopularityFetchResult.FETCH_FAILED:
             # Transient failure still within sentinel TTL — treat as unavailable, not absent.
             return PopularityFetchResult.FETCH_FAILED
         if cached is PopularityFetchResult.MISS:
-            fetched = await self._pop_client.fetch(event.ecosystem, event.package_name)
+            fetched = await self._pop_client.fetch(event.ecosystem, event.package_name, version)
             if isinstance(fetched, PackagePopularity):
-                await self._pop_cache.set(event.ecosystem, event.package_name, fetched)
+                await self._pop_cache.set(event.ecosystem, event.package_name, fetched, version=version)
                 return fetched
             if fetched is PopularityFetchResult.FETCH_FAILED:
                 await self._pop_cache.store_failure_sentinel(
                     event.ecosystem, event.package_name,
-                    ttl_minutes=self._cfg.popularity_failure_ttl_minutes,
+                    ttl_minutes=self._cfg.popularity_failure_ttl_minutes, version=version,
                 )
                 log.warning(
                     "Could not fetch popularity data for %s/%s — low_popularity signal suppressed",

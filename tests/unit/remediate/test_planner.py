@@ -164,3 +164,225 @@ def test_separate_plan_is_never_complete():
     p = PlannedFix(package="a", version="1", target="2", direct=True, path=["a"], advisories=["X"],
                    left_open=[], cooldown_checked=True, verified=True)
     assert not FixPlan(planned=[p], separate=True).complete
+
+
+def test_pins_every_copy_merges_a_packages_versions_into_one_item():
+    # qs locked at 6.7.0 and 6.10.0, both vulnerable: one item from the lowest version.
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-b", ["6.14.1"], _R("6.14.1"), ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "6.10.0", "6.15.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    [item] = plan.planned
+    assert (item.version, item.target) == ("6.7.0", "6.14.1")
+    assert set(item.advisories) == {"GHSA-a", "GHSA-b"}
+    assert plan.held == []
+    held = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0).held
+    assert [h.reason for h in held] == [planner.MULTIPLE_VERSIONS] * 2
+
+
+_SEMVER_RANGES = [[{"introduced": "0"}, {"fixed": "5.7.2"}],
+                  [{"introduced": "6.0.0"}, {"fixed": "6.3.1"}],
+                  [{"introduced": "7.0.0"}, {"fixed": "7.5.2"}]]
+
+
+def _semver(ver):
+    return _f("semver", ver, "GHSA-c2qf", ["5.7.2", "6.3.1", "7.5.2"], _SEMVER_RANGES, ecosystem="npm")
+
+
+def test_merged_copies_target_the_version_that_fixes_every_copy():
+    # A direct dependency is installed once (npm install semver@X), so its copies stay one item.
+    groups = group_findings([_semver("5.7.1"), _semver("7.5.0")])
+    graph = _graph(versions={"semver": frozenset({"5.7.1", "7.5.0"})}, direct=frozenset({"semver"}))
+    # 5.7.1 → 7.5.2 crosses majors, so it needs --allow-major.
+    held = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).held
+    assert [(h.reason, h.version, h.target) for h in held] == [(planner.MAJOR, "5.7.1", "7.5.2")]
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True,
+                              allow_major=frozenset({"*"}))
+    [item] = plan.planned
+    assert (item.version, item.target, item.advisories, item.left_open) == ("5.7.1", "7.5.2", ["GHSA-c2qf"], [])
+
+
+def test_a_transitive_package_on_several_major_lines_is_planned_once_per_line():
+    # Each line gets its own target and its own override window, so neither needs a major upgrade.
+    groups = group_findings([_semver("5.7.1"), _semver("7.5.0"), _semver("7.4.0")])
+    graph = _graph(versions={"semver": frozenset({"5.7.1", "7.4.0", "7.5.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    assert plan.held == []
+    assert sorted((p.package, p.version, p.target) for p in plan.planned) == [
+        ("semver", "5.7.1", "5.7.2"), ("semver", "7.4.0", "7.5.2")]
+
+
+def test_a_line_without_a_fix_on_it_is_held_as_a_major_upgrade_on_its_own():
+    ranges = [[{"introduced": "0"}, {"fixed": "7.5.2"}]]
+    groups = group_findings([_f("semver", v, "GHSA-c2qf", ["7.5.2"], ranges, ecosystem="npm")
+                             for v in ("5.7.1", "7.5.0")])
+    graph = _graph(versions={"semver": frozenset({"5.7.1", "7.5.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    assert [(p.version, p.target) for p in plan.planned] == [("7.5.0", "7.5.2")]
+    assert [(h.reason, h.version, h.target) for h in plan.held] == [(planner.MAJOR, "5.7.1", "7.5.2")]
+
+
+def test_merged_copies_with_a_range_not_covering_the_lowest_copy_are_verified():
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-b", ["6.14.1"], [[{"introduced": "6.10.0"}, {"fixed": "6.14.1"}]],
+           ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "6.10.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    assert plan.held == []
+    [item] = plan.planned
+    assert (item.version, item.target, item.left_open) == ("6.7.0", "6.14.1", [])
+    assert set(item.advisories) == {"GHSA-a", "GHSA-b"}
+
+
+def test_merged_copies_report_what_the_target_leaves_open():
+    # The 6.10.0 copy's GHSA-c has no fixed version; the target fixes the rest.
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-c", [], [[{"introduced": "6.10.0"}]], ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "6.10.0"})})
+    [item] = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).planned
+    assert (item.target, item.left_open) == ("6.14.0", ["GHSA-c"])
+
+
+def test_merged_copies_held_when_a_copy_has_no_fix():
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-c", [], [[{"introduced": "6.10.0"}]], ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "6.10.0"})})
+    held = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).held
+    assert [(h.reason, h.version) for h in held] == [(planner.NO_FIX, "6.7.0")]
+
+
+def test_merged_copies_held_when_a_copy_cannot_be_ordered():
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+        _f("qs", "not!a!version", "GHSA-a", ["6.14.0"], _R("6.14.0"), ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "not!a!version"})})
+    held = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).held
+    assert [h.reason for h in held] == [planner.NOT_COMPARABLE]
+
+
+def test_merged_copies_left_open_uses_the_ranges_of_every_copy():
+    # GHSA-d: 6.10.0's copy is fixed at 6.14.1, but the range reopens at 6.14.1
+    # for the other line, so the target (6.14.1) still has it.
+    groups = group_findings([
+        _f("qs", "6.7.0", "GHSA-a", ["6.14.1"], _R("6.14.1"), ecosystem="npm"),
+        _f("qs", "6.10.0", "GHSA-d", ["6.11.0"],
+           [[{"introduced": "6.10.0"}, {"fixed": "6.11.0"}], [{"introduced": "6.14.0"}]], ecosystem="npm"),
+    ])
+    graph = _graph(versions={"qs": frozenset({"6.7.0", "6.10.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    [item] = plan.planned
+    assert (item.target, item.left_open) == ("6.14.1", ["GHSA-d"])
+
+
+def test_lines_converging_on_one_allowed_target_are_one_item():
+    # 5.x has no fix of its own; with the major upgrade allowed both lines target 7.5.2, which must be one
+    # item (one override window), not two items whose pins collide.
+    ranges = [[{"introduced": "0"}, {"fixed": "7.5.2"}]]
+    groups = group_findings([_f("semver", v, "GHSA-c2qf", ["7.5.2"], ranges, ecosystem="npm")
+                             for v in ("5.7.1", "7.5.0")])
+    graph = _graph(versions={"semver": frozenset({"5.7.1", "7.5.0"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True,
+                              allow_major=frozenset({"semver"}))
+    assert [(p.package, p.version, p.target) for p in plan.planned] == [("semver", "5.7.1", "7.5.2")]
+    assert plan.held == []
+
+
+def _psp_groups(version="6.1.2"):
+    def f(adv, fixed):
+        return _f("postcss-selector-parser", version, adv, [fixed], [[{"introduced": "0"}, {"fixed": fixed}]],
+                  ecosystem="npm")
+    return group_findings([f("GHSA-rj75", "7.1.6"), f("GHSA-w9m9", "6.1.4")])
+
+
+def test_a_held_major_falls_back_to_the_best_fix_on_the_installed_line():
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2"})})
+    plan = planner.plan_fixes(_psp_groups(), graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    [p] = plan.planned
+    assert (p.version, p.target, p.left_open, p.fixes_all) == ("6.1.2", "6.1.4", ["GHSA-rj75"], "7.1.6")
+    assert plan.held == []
+
+
+def test_a_same_line_fallback_is_not_marked_cooldown_checked_by_the_major_targets_age():
+    """The ages looked up are for the recommendation the fallback replaces, so verification must check it."""
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2"})})
+    plan = planner.plan_fixes(_psp_groups(), graph, ages={("npm", "postcss-selector-parser", "7.1.6"): 400.0},
+                              cooldown_days=7, pins_every_copy=True)
+    [p] = plan.planned
+    assert p.target == "6.1.4" and p.cooldown_checked is False
+
+
+def test_an_allowed_major_is_planned_whole():
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2"})})
+    plan = planner.plan_fixes(_psp_groups(), graph, ages={}, cooldown_days=0, pins_every_copy=True,
+                              allow_major=frozenset({"postcss-selector-parser"}))
+    [p] = plan.planned
+    assert (p.target, p.left_open, p.fixes_all) == ("7.1.6", [], None)
+
+
+def test_copies_on_one_line_fall_back_to_their_highest_same_line_fix():
+    def f(version, adv, fixed):
+        return _f("postcss-selector-parser", version, adv, [fixed], [[{"introduced": "0"}, {"fixed": fixed}]],
+                  ecosystem="npm")
+    groups = group_findings([f(v, a, x) for v in ("6.1.2", "6.1.3")
+                             for a, x in (("GHSA-rj75", "7.1.6"), ("GHSA-w9m9", "6.1.4"))])
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2", "6.1.3"})})
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    [p] = plan.planned
+    assert (p.version, p.target, p.left_open, p.fixes_all) == ("6.1.2", "6.1.4", ["GHSA-rj75"], "7.1.6")
+
+
+def test_a_package_installed_under_an_alias_is_held():
+    """A command for it would name the alias's real package and add it as a new dependency."""
+    groups = group_findings([_f("bar", "1.2.0", "GHSA-bar", ["1.2.1"], [[{"introduced": "0"}, {"fixed": "1.2.1"}]],
+                                ecosystem="npm")])
+    graph = _graph(direct=frozenset({"bar"}), versions={"bar": frozenset({"1.2.0"})}, aliased=frozenset({"bar"}))
+    plan = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True)
+    assert plan.planned == [] and [h.reason for h in plan.held] == [planner.ALIASED]
+
+
+def test_a_planned_fix_shows_the_path_to_its_own_copy():
+    groups = group_findings([_f("b", "5.0.9", "GHSA-b", ["5.0.12"], [[{"introduced": "5.0.0"}, {"fixed": "5.0.12"}]],
+                                ecosystem="npm")])
+    graph = _graph(direct=frozenset({"x", "y"}), deps={"proj": frozenset({"x", "y"}), "x": frozenset({"b"})},
+                   versions={"b": frozenset({"5.0.9", "1.1.18"})},
+                   copy_paths={("b", "5.0.9"): ("proj", "y", "z", "b"), ("b", "1.1.18"): ("proj", "x", "b")})
+    [p] = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).planned
+    assert p.path == ["proj", "y", "z", "b"]
+
+
+@pytest.mark.parametrize("pins_every_copy", [True, False])
+def test_planning_leaves_the_findings_it_was_given_unchanged(pins_every_copy):
+    """A same-line fallback must not overwrite the group's recommendation: planning again with the major allowed
+    still finds the full fix."""
+    groups = _psp_groups()
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2"})})
+    first = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=pins_every_copy)
+    assert [p.target for p in first.planned] == ["6.1.4"]
+    second = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=pins_every_copy,
+                                allow_major=frozenset({"postcss-selector-parser"}))
+    assert [p.target for p in second.planned] == ["7.1.6"]
+    assert groups[0].recommendation is not None and groups[0].recommendation.version == "7.1.6"
+
+
+def test_the_major_version_is_credited_only_with_the_advisories_it_fixes():
+    """6.1.4 fixes GHSA-a; 7.1.6 also fixes GHSA-b; nothing fixes GHSA-c. The plan must not claim 7.1.6 fixes all
+    that is left open."""
+    def f(adv, fixed):
+        events = [{"introduced": "0"}, *([{"fixed": fixed}] if fixed else [])]
+        return _f("postcss-selector-parser", "6.1.2", adv, [fixed] if fixed else [], [events], ecosystem="npm")
+
+    groups = group_findings([f("GHSA-a", "6.1.4"), f("GHSA-b", "7.1.6"), f("GHSA-c", None)])
+    graph = _graph(versions={"postcss-selector-parser": frozenset({"6.1.2"})})
+    [p] = planner.plan_fixes(groups, graph, ages={}, cooldown_days=0, pins_every_copy=True).planned
+    assert (p.target, sorted(p.left_open)) == ("6.1.4", ["GHSA-b", "GHSA-c"])
+    assert (p.fixes_all, p.fixes_all_advisories) == ("7.1.6", ("GHSA-b",))

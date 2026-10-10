@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,13 @@ class DependencyGraph:
     """name -> every version locked for it, across all marker forks."""
     non_registry: frozenset[str]
     """Names locked from a git, URL or path source: no registry version to pin."""
+    aliased: frozenset[str] = frozenset()
+    """Names installed under another name (npm's "alias": "npm:name@range"): a pin
+    by the real name would add a new dependency rather than move the alias."""
+    copy_paths: Mapping[tuple[str, str], tuple[str, ...]] = field(default_factory=dict)
+    """(name, version) -> the shortest chain from a member to that locked copy, for
+    a manager that locks several copies of one package (npm). ``path_to`` is by
+    name, so it shows one copy's chain for all of them."""
 
     def path_to(self, name: str) -> list[str]:
         """The shortest chain from a member to *name*, both ends included.

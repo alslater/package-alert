@@ -190,6 +190,20 @@ def _occurrence_key(event: PackageEvent) -> object:
     return _UNDEDUPABLE
 
 
+def _dedup_occurrence(event: PackageEvent) -> object:
+    """The occurrence component of *event*'s dedup keys: ``_occurrence_key()``, kept apart by provenance.
+
+    A copy from a private registry, git or a local path is evaluated on its
+    source alone, so its completed evaluation must never stand in for a public
+    copy of the same name and version (which also needs the advisory and
+    name-based checks), nor the reverse. A public event's key is unchanged.
+    """
+    occurrence = _occurrence_key(event)
+    if occurrence is _UNDEDUPABLE or event.from_public_registry:
+        return occurrence
+    return ("not-public", occurrence)
+
+
 def _resolve_package_dir(event: PackageEvent) -> tuple[list[Path], str | None]:
     """Return the on-disk directories for an installed package, or [] if unresolvable,
     alongside any manifest-integrity warning for it (see
@@ -478,7 +492,7 @@ class Daemon:
             seen: set[tuple[str, str, str | None, Path | None, object]] = set()
             deduped = []
             for e in batch:
-                occurrence = _occurrence_key(e)
+                occurrence = _dedup_occurrence(e)
                 if occurrence is _UNDEDUPABLE:
                     deduped.append(e)
                     continue
@@ -578,7 +592,7 @@ class Daemon:
         does, produces a real cross-task deadlock once a batch has more
         than one key in it.
         """
-        occurrence = _occurrence_key(e)
+        occurrence = _dedup_occurrence(e)
         if occurrence is _UNDEDUPABLE:
             return True
         key = (e.ecosystem, e.package_name, e.version, e.project_path, occurrence)
@@ -769,7 +783,7 @@ class Daemon:
         place. Always sets the released Event too, so a waiter in
         _claim_for_processing() is never left blocked.
         """
-        occurrence = _occurrence_key(e)
+        occurrence = _dedup_occurrence(e)
         if occurrence is _UNDEDUPABLE:
             return
         key = (e.ecosystem, e.package_name, e.version, e.project_path, occurrence)
@@ -808,7 +822,7 @@ class Daemon:
         that raised. A no-op for an _UNDEDUPABLE event, which was never
         added to self._in_flight in the first place.
         """
-        occurrence = _occurrence_key(e)
+        occurrence = _dedup_occurrence(e)
         if occurrence is _UNDEDUPABLE:
             try:
                 await self._process_event(
@@ -914,6 +928,8 @@ class Daemon:
         """
         uncached = []
         for e in events:
+            if not e.from_public_registry:
+                continue            # not looked up publicly; see _process_event()
             if await osv_cache.get(e.ecosystem, e.package_name, e.version) is None:
                 uncached.append((e.ecosystem, e.package_name, e.version))
         if not uncached:
@@ -951,6 +967,15 @@ class Daemon:
             "Processing: %s/%s %s (source=%s)",
             event.ecosystem, event.package_name, event.version, event.source,
         )
+
+        if not event.from_public_registry:
+            # A package from a private registry, git or a local path: public advisories
+            # are about another package of that name. Its source is still scored.
+            if self._cfg.heuristics.enabled:
+                package_dirs, manifest_warning = _resolve_package_dir(event)
+                report = await risk_engine.analyze(event, package_dirs, manifest_warning, local_only=True)
+                await self._alert_risk(event, report, db)
+            return True
 
         # OSV check (cache-first)
         query = (event.ecosystem, event.package_name, event.version)
@@ -1018,20 +1043,25 @@ class Daemon:
         if self._cfg.heuristics.enabled:
             package_dirs, manifest_warning = _resolve_package_dir(event)
             report = await risk_engine.analyze(event, package_dirs, manifest_warning)
-            if report.score >= self._cfg.heuristics.warning_threshold:
-                await store_alert(
-                    db,
-                    package_name=event.package_name,
-                    ecosystem=event.ecosystem,
-                    version=event.version,
-                    advisory_id=None,
-                    risk_score=report.score,
-                    project_path=event.project_path,
-                )
-                plugin_registry.schedule_alert(event, report)
-                if self._cfg.alerts.terminal_notifications:
-                    alert_risk(event, report)
-                if self._cfg.alerts.desktop_notifications:
-                    await notify_risk(event, report)
+            await self._alert_risk(event, report, db)
 
         return authoritative
+
+    async def _alert_risk(self, event: PackageEvent, report, db) -> None:
+        """Record and announce *report* when it reaches the warning threshold."""
+        if report.score < self._cfg.heuristics.warning_threshold:
+            return
+        await store_alert(
+            db,
+            package_name=event.package_name,
+            ecosystem=event.ecosystem,
+            version=event.version,
+            advisory_id=None,
+            risk_score=report.score,
+            project_path=event.project_path,
+        )
+        plugin_registry.schedule_alert(event, report)
+        if self._cfg.alerts.terminal_notifications:
+            alert_risk(event, report)
+        if self._cfg.alerts.desktop_notifications:
+            await notify_risk(event, report)

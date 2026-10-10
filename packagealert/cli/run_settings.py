@@ -6,7 +6,6 @@ Resolves ``.pa-run.toml`` and ``PA_RUN_OPTS`` into one settings object.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -29,9 +28,13 @@ class ProjectRunSettings:
     allow_major: frozenset[str] = frozenset()
 
 
-def normalise_package_names(values: Iterable[str]) -> frozenset[str]:
-    """PEP 503 names from values that may each hold a comma-separated list."""
-    names = (re.sub(r"[-_.]+", "-", part.strip()).lower() for v in values for part in v.split(","))
+def split_package_names(values: Iterable[str]) -> frozenset[str]:
+    """Lower-cased names from values that may each hold a comma-separated list.
+
+    Each ecosystem's own spelling rules are applied later, once the package
+    manager is known (pa fix normalises them with the adapter's ecosystem).
+    """
+    names = (part.strip().lower() for v in values for part in v.split(","))
     return frozenset(n for n in names if n)
 
 
@@ -56,9 +59,13 @@ def warn_invalid_flag_tokens(flags_str: str, source: str, out: Console) -> None:
 
 
 def resolve_project_run_settings(
-    cwd: Path, cfg, *, allow_project_env: bool, out: Console,
+    cwd: Path, cfg, *, allow_project_env: bool, out: Console, announce: bool = True,
 ) -> ProjectRunSettings:
     """Resolve ``.pa-run.toml`` (lowest precedence) and ``PA_RUN_OPTS``.
+
+    With *announce*, the ``.pa-run.toml`` in use is named; a caller whose
+    command the settings do not apply to (one run without the sandbox) passes
+    False. Problems with the file are reported either way.
 
     Raises RunSettingsError, after printing why, for an unreadable
     ``.pa-run.toml``, env vars blocked by ``sandbox.project_env_allowlist``,
@@ -81,7 +88,8 @@ def resolve_project_run_settings(
     _project_env_list: list[str] = []
     allow_major: frozenset[str] = frozenset()
     if _proj_cfg is not None:
-        out.print(f"Using project run config: {_proj_cfg.source}", style="dim", markup=False)
+        if announce:
+            out.print(f"Using run config: {_proj_cfg.source}", style="dim", markup=False)
         if _proj_cfg.no_network:
             no_network = True
         if _proj_cfg.allow_external_lockfiles:
@@ -92,7 +100,7 @@ def resolve_project_run_settings(
         _proj_allow_major = getattr(_proj_cfg, "allow_major", [])
         if _proj_allow_major:
             if _proj_cfg.trusted:
-                allow_major = normalise_package_names(_proj_allow_major)
+                allow_major = split_package_names(_proj_allow_major)
             else:
                 out.print(
                     f"{_proj_cfg.source}: allow_major ignored — this .pa-run.toml is not trusted "

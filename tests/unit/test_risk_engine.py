@@ -1488,3 +1488,19 @@ async def test_damping_still_reports_an_unsupported_ecosystem(event, cfg):
     assert report.damping is not None
     assert "unsupported ecosystem" in " ".join(report.damping.notes)
     assert client.fetch.await_count == 0
+
+
+# --- a package not from the public registry is scored on its source alone ---
+
+async def test_local_only_scoring_runs_source_heuristics_and_nothing_that_looks_the_name_up(tmp_path):
+
+    engine = RiskEngine.__new__(RiskEngine)
+    engine._run_heuristics = AsyncMock(return_value=[RiskSignal(name="install_script", score=25, reason="postinstall")])
+    engine._typosquat = AsyncMock()
+    engine._typosquat.analyze = AsyncMock(side_effect=AssertionError("no name comparison for a private package"))
+    engine._resolve_popularity = AsyncMock(side_effect=AssertionError("no popularity lookup"))
+    engine._compute_damping = AsyncMock(side_effect=AssertionError("no age or popularity damping"))
+    event = PackageEvent(ecosystem="npm", package_name="priv", version="1.0.0", source="process", manager="npm",
+                         project_path=None, timestamp=datetime.now(UTC))
+    report = await engine.analyze(event, [tmp_path], local_only=True)
+    assert report.score == 25 and [s.name for s in report.signals] == ["install_script"]

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -102,8 +102,12 @@ async def score_packages(
     # the distribution, not about whichever candidate group happens to win the
     # score competition, so it does not need to travel with one specific group.
     manifest_warning_resolver: Callable[[str, str, str | None], str | None] | None = None,
+    local_only: Collection[PackageKey] = frozenset(),
 ) -> ScoreOutcome:
     """Score *packages* with at most *concurrency* concurrent engine calls.
+
+    Packages in *local_only* (from a private registry, git or a local path)
+    are scored on their source alone: ``RiskEngine.analyze(local_only=True)``.
 
     Without *package_dir_resolver*, `package_dirs` is `[]`: the pre-flight call
     sites run before installation, so no extracted source tree exists and only
@@ -343,7 +347,8 @@ async def score_packages(
                 errors = 0
                 for group in candidates:
                     try:
-                        current = await engine.analyze(event, group, manifest_warning)
+                        current = (await engine.analyze(event, group, manifest_warning, local_only=True)
+                                   if key in local_only else await engine.analyze(event, group, manifest_warning))
                     except Exception:
                         # One unreadable tree must not discard a sibling's finding.
                         errors += 1

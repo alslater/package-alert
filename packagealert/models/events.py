@@ -275,6 +275,10 @@ class PackageEvent(BaseModel):
     # observed `pid`, not re-sampled by a later consumer — see CacheMonitor's
     # _resolve_owning_pid() for why a fresh sample at consume time is PID-reuse-unsafe.
     pid_create_time: float | None = None
+    # False for a package from a private registry, git or a local path: the public
+    # package of that name is another, so the daemon looks nothing up publicly for it
+    # (no OSV query, no name-based risk signals) and scores its source alone.
+    from_public_registry: bool = True
 
     @field_validator("ecosystem", mode="before")
     @classmethod

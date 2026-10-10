@@ -209,7 +209,10 @@ class ScheduledScanner:
         result = detect_project(project_path)
         if not result.sources:
             return [], [], 0
-        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
+        # Only packages from the public registry are looked up there (a private one is not
+        # the public package of that name).
+        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned
+                   if p.version and getattr(p, "from_public_registry", True) is not False]
         findings, osv_failures = await self._run_osv_queries(queries)
         return findings, result.sources, osv_failures
 
@@ -224,6 +227,9 @@ class ScheduledScanner:
         result = scan_installed(project_path)
         if not result.sources:
             return [], [], 0
-        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned if p.version]
+        # Only packages from the public registry are looked up there (a private one is not
+        # the public package of that name).
+        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned
+                   if p.version and getattr(p, "from_public_registry", True) is not False]
         findings, osv_failures = await self._run_osv_queries(queries)
         return findings, result.sources, osv_failures
