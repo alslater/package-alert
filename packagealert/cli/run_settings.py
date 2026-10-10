@@ -6,7 +6,6 @@ Resolves ``.pa-run.toml`` and ``PA_RUN_OPTS`` into one settings object.
 from __future__ import annotations
 
 import os
-import re
 import shlex
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -29,9 +28,13 @@ class ProjectRunSettings:
     allow_major: frozenset[str] = frozenset()
 
 
-def normalise_package_names(values: Iterable[str]) -> frozenset[str]:
-    """PEP 503 names from values that may each hold a comma-separated list."""
-    names = (re.sub(r"[-_.]+", "-", part.strip()).lower() for v in values for part in v.split(","))
+def split_package_names(values: Iterable[str]) -> frozenset[str]:
+    """Lower-cased names from values that may each hold a comma-separated list.
+
+    Each ecosystem's own spelling rules are applied later, once the package
+    manager is known (pa fix normalises them with the adapter's ecosystem).
+    """
+    names = (part.strip().lower() for v in values for part in v.split(","))
     return frozenset(n for n in names if n)
 
 
@@ -92,7 +95,7 @@ def resolve_project_run_settings(
         _proj_allow_major = getattr(_proj_cfg, "allow_major", [])
         if _proj_allow_major:
             if _proj_cfg.trusted:
-                allow_major = normalise_package_names(_proj_allow_major)
+                allow_major = split_package_names(_proj_allow_major)
             else:
                 out.print(
                     f"{_proj_cfg.source}: allow_major ignored — this .pa-run.toml is not trusted "

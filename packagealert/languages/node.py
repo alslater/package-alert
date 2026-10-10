@@ -7,7 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -143,6 +143,283 @@ class _NpmHeuristic(AbstractHeuristic):
 # NodeLanguage
 # ---------------------------------------------------------------------------
 
+# Hosts serving the public npm registry (registry.yarnpkg.com is yarn's proxy of it).
+_PUBLIC_NPM_HOSTS = frozenset({"registry.npmjs.org", "registry.yarnpkg.com"})
+_YARN_RESOLVED_RE = re.compile(r'^\s+resolved\s+"([^"]+)"', re.MULTILINE)
+
+
+def quote_npm_name(name: str) -> str:
+    """*name* as a registry URL path segment: a scoped name keeps its @ and encodes its /."""
+    return quote(name, safe="@")
+
+
+def from_public_npm_registry(resolved: object) -> bool:
+    """Whether a lock entry's ``resolved`` URL is a tarball on the public npm registry.
+
+    Anything else (a private registry, git, a file or link, or no URL at all)
+    is not: a lookup on registry.npmjs.org would describe a different package
+    of the same name, or none.
+    """
+    if not isinstance(resolved, str):
+        return False
+    try:
+        url = urlsplit(resolved)
+    except ValueError:
+        return False
+    return url.scheme in ("https", "http") and url.hostname in _PUBLIC_NPM_HOSTS
+
+
+def _npm_config_env() -> dict[str, str]:
+    """npm configuration set in the environment: ``npm_config_<key>``, matched case-insensitively."""
+    import os
+
+    prefix = "npm_config_"
+    return {k[len(prefix):].lower(): v for k, v in os.environ.items() if k.lower().startswith(prefix) and v}
+
+
+def _npm_registry_env_names() -> list[str]:
+    """The environment variables (as spelled) that npm's registry settings come from.
+
+    That is ``npm_config_registry``, ``npm_config_@scope:registry`` and
+    ``npm_config_userconfig`` in any letter case, and every variable an
+    .npmrc registry line refers to. These are what ``_npm_registries()``
+    reads, so the sandbox passes them on
+    and npm there fetches from the registry the provenance check assumed.
+    Credentials (``npm_config_//host/:_authToken``) are not among them.
+    """
+    import os
+
+    prefix = "npm_config_"
+    names = []
+    for name, value in os.environ.items():
+        key = name[len(prefix):].lower() if name.lower().startswith(prefix) else None
+        if value and key is not None and (
+                key in ("registry", "userconfig") or (key.startswith("@") and key.endswith(":registry"))):
+            names.append(name)
+    # Variables the registry lines of the user's .npmrc and the current directory's refer to;
+    # a project elsewhere adds its own through prepare_sandbox_env().
+    for rc in (_user_npmrc(), Path.cwd() / ".npmrc"):
+        names.extend(_npmrc_registry_refs(rc))
+    return names
+
+
+_NPMRC_ENV_RE = re.compile(r"\$\{([^}?]+)(\?)?\}")
+
+
+def _expand_npmrc_env(value: str) -> str:
+    """*value* with npm's ``${VAR}`` references expanded from the environment.
+
+    ``${VAR?}`` becomes empty when VAR is unset; a plain ``${VAR}`` that is
+    unset stays as written (npm itself refuses such a config), so it is not
+    mistaken for any real registry.
+    """
+    import os
+
+    def sub(m: re.Match[str]) -> str:
+        found = os.environ.get(m.group(1))
+        if found is not None:
+            return found
+        return "" if m.group(2) else m.group(0)
+    return _NPMRC_ENV_RE.sub(sub, value)
+
+
+def _user_npmrc() -> Path:
+    """The user's npm configuration file (``npm_config_userconfig`` moves it), as an absolute path.
+
+    npm resolves a relative userconfig against its working directory, which
+    for the host's command is this process's.
+    """
+    moved = _npm_config_env().get("userconfig")
+    return Path(moved).expanduser().absolute() if moved else Path.home() / ".npmrc"
+
+
+def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, dict[str, str]]:
+    """(default registry, {"@scope": registry}) as npm resolves them.
+
+    npm's precedence: the command line (the running command's, from
+    ``COMMAND_LINE_REGISTRIES``), the environment (``npm_config_registry``,
+    ``npm_config_@scope:registry``), then the project's .npmrc, then the
+    user's. Without *project* the project's file is skipped, as npm does in
+    global mode. Unreadable files are skipped. This reads the environment of the
+    process parsing the lock file, which is the user's for ``package-alert``
+    commands.
+    """
+    default: str | None = None
+    scopes: dict[str, str] = {}
+    from packagealert.parsers.process_args import COMMAND_LINE_REGISTRIES
+
+    # The environment, then the running command's own --registry/--@scope:registry over it.
+    for key, value in (*_npm_config_env().items(), *COMMAND_LINE_REGISTRIES.get().items()):
+        if key == "registry":
+            default = value
+        elif key.startswith("@") and key.endswith(":registry"):
+            scopes[key[: -len(":registry")]] = value
+    for rc in ((root / ".npmrc", _user_npmrc()) if project else (_user_npmrc(),)):
+        # Within one file the last assignment of a key wins, as in npm's INI parser;
+        # between sources the earlier (higher-precedence) one does.
+        file_default, file_scopes = _npmrc_registries(rc)
+        if default is None:
+            default = file_default
+        for scope, value in file_scopes.items():
+            scopes.setdefault(scope, value)
+    return default, scopes
+
+
+def _npmrc_registry_lines(rc: Path) -> list[tuple[str, str]]:
+    """(key, value as written) for each ``registry`` / ``@scope:registry`` line of *rc*, in order.
+
+    An unreadable file has none.
+    """
+    try:
+        lines = rc.read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    found = []
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        key, value = key.strip(), value.strip().strip('"')
+        if not sep or key.startswith(("#", ";")):
+            continue
+        if key == "registry" or (key.startswith("@") and key.endswith(":registry")):
+            found.append((key, value))
+    return found
+
+
+def _npmrc_registries(rc: Path) -> tuple[str | None, dict[str, str]]:
+    """The registry settings one .npmrc file makes; an unreadable file makes none."""
+    default: str | None = None
+    scopes: dict[str, str] = {}
+    for key, raw in _npmrc_registry_lines(rc):
+        value = _expand_npmrc_env(raw)
+        if not value:
+            continue
+        if key == "registry":
+            default = value
+        else:
+            scopes[key[: -len(":registry")]] = value
+    return default, scopes
+
+
+def _npmrc_registry_refs(rc: Path) -> list[str]:
+    """The environment variables *rc*'s registry lines refer to (``${VAR}``), as named there.
+
+    Only registry lines: the same syntax supplies credentials
+    (``_authToken=${NPM_TOKEN}``), which stay out of the sandbox.
+    """
+    return list(dict.fromkeys(m.group(1) for _key, raw in _npmrc_registry_lines(rc)
+                              for m in _NPMRC_ENV_RE.finditer(raw)))
+
+
+def _from_configured_registry(name: str, registries: tuple[str | None, dict[str, str]]) -> bool:
+    """Whether *name* is fetched from the public registry by this configuration (the default when unset)."""
+    default, scopes = registries
+    scope = name.split("/", 1)[0] if name.startswith("@") else None
+    url = scopes.get(scope) if scope in scopes else default
+    return url is None or from_public_npm_registry(url)
+
+
+def _non_registry_version(version: object) -> bool:
+    """Whether a locked version names a non-registry source (a file, link, git repository or URL)."""
+    return isinstance(version, str) and (
+        version.startswith(("file:", "link:", "git", "github:", "http:", "https:")) or "://" in version)
+
+
+def _yarn_block_non_registry(block: str) -> bool:
+    """Whether a yarn.lock block's selectors name a non-registry source (``x@file:../x``, ``x@github:o/r``).
+
+    A local or git dependency records its source only in the selector line,
+    not in a ``resolved`` field.
+    """
+    header = block.lstrip().split("\n", 1)[0].rstrip().rstrip(":")
+    for selector in header.split(","):
+        selector = selector.strip().strip('"')
+        at = selector.find("@", 1)          # past a scope's leading @
+        if npm_spec_non_registry(selector[at + 1:] if at > 0 else ""):
+            return True
+    return False
+
+
+def _npm_alias_target(raw: str) -> str:
+    """The package an ``x@npm:y@1`` argument installs (``y@1``); any other argument unchanged."""
+    at = raw.find("@", 1)
+    return raw[at + len("@npm:"):] if at > 0 and raw[at + 1:].startswith("npm:") else raw
+
+
+def _npm_explicit_spec_non_registry(raw: str) -> bool:
+    """Whether a package argument (``name@spec``, a bare spec or a path) names a non-registry source."""
+    if raw.startswith((".", "/", "~")) or raw.endswith((".tgz", ".tar.gz", ".tar")):
+        return True
+    at = raw.find("@", 1)                # past a scope's leading @
+    spec = raw[at + 1:] if at > 0 else ""
+    return npm_spec_non_registry(spec) or (at <= 0 and npm_spec_non_registry(raw))
+
+
+def npm_spec_non_registry(spec: object) -> bool:
+    """Whether a declared dependency spec names a non-registry source.
+
+    A file, link, git repository, URL or ``user/repo`` shorthand is; a range,
+    version, tag or ``npm:`` alias of a registry package is not, whichever
+    registry serves it.
+    """
+    if not isinstance(spec, str) or spec.startswith("npm:"):
+        return False
+    return _non_registry_version(spec) or spec.startswith(("github:", "gitlab:", "bitbucket:", "gist:")) or (
+        "/" in spec and not spec.startswith("@"))
+
+
+def _lock_entry_public(name: str, resolved: object, registries: tuple[str | None, dict[str, str]]) -> bool:
+    """Provenance of a lock entry: its own resolved URL when it records one, else the configured registry."""
+    if isinstance(resolved, str) and resolved:
+        return from_public_npm_registry(resolved)
+    return _from_configured_registry(name, registries)
+
+
+def npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, dict[str, str]]:
+    """The registries npm uses for a project at *root* (see ``_npm_registries``)."""
+    return _npm_registries(root, project=project)
+
+
+def package_lock_entry_public(key: str, info: dict, registries: tuple[str | None, dict[str, str]]) -> bool:
+    """Whether a package-lock.json ``packages`` entry comes from the public registry.
+
+    A link, a local directory (a workspace member or file: target, whose key
+    is not under node_modules/) or a non-registry version is local; otherwise
+    the entry's resolved URL decides, else the configured registry
+    (*registries*, from ``npm_registries()``).
+    """
+    if info.get("link") or "node_modules/" not in key or _non_registry_version(info.get("version")):
+        return False
+    name = info.get("name") or key.rsplit("node_modules/", 1)[-1]
+    return _lock_entry_public(name, info.get("resolved"), registries)
+
+
+def package_lock_provenance(packages: dict, registries: tuple[str | None, dict[str, str]]) -> dict[str, bool]:
+    """Whether each entry of a package-lock.json ``packages`` map comes from the public registry, by path.
+
+    Each entry is judged by ``package_lock_entry_public()``, and the copy a
+    dependent declares from a file, git or URL (``npm_spec_non_registry()``)
+    is never public: its resolved URL can look exactly like a registry
+    tarball. That copy is found by npm's nested lookup, so a registry copy of
+    the same name elsewhere in the tree is unaffected.
+    """
+    from packagealert.languages.node_fix.npm_lock import resolve
+
+    lock = {"packages": packages}
+    declared: set[str] = set()
+    for path, info in packages.items():
+        if not isinstance(path, str) or not isinstance(info, dict):
+            continue
+        for section in ("dependencies", "optionalDependencies", "peerDependencies", "devDependencies"):
+            deps = info.get(section)
+            if not isinstance(deps, dict):
+                continue
+            for dep, spec in deps.items():
+                if isinstance(dep, str) and npm_spec_non_registry(spec) and (found := resolve(lock, path, dep)):
+                    declared.add(found)
+    return {path: path not in declared and package_lock_entry_public(path, info, registries)
+            for path, info in packages.items() if path and isinstance(path, str) and isinstance(info, dict)}
+
+
 class NodeLanguage:
     """Language module for Node.js / npm / yarn / pnpm."""
 
@@ -182,9 +459,13 @@ class NodeLanguage:
             return None
         specs: list[PackageSpec] = []
         for raw in result.packages or []:
+            # An alias (x@npm:y@1) installs the package it names; git, URL, file and
+            # local-path specs are not the registry package of that name.
+            raw = _npm_alias_target(raw)
             name, version = self.parse_package_spec(raw)
             if name:
-                specs.append(PackageSpec(name=name.lower(), version=version, ecosystem="npm"))
+                specs.append(PackageSpec(name=name.lower(), version=version, ecosystem="npm",
+                                         from_public_registry=not _npm_explicit_spec_non_registry(raw)))
 
         _LOCKFILE_HINTS: dict[str, str] = {
             "npm": "package-lock.json",
@@ -212,6 +493,8 @@ class NodeLanguage:
             project_dir=result.project_dir,
             # pnpm's `--lockfile-dir`: the lock file lives apart from the project.
             lockfile_dir=result.lockfile_dir,
+            # npm's `--registry`/`--@scope:registry`: where the named packages come from.
+            registries=result.registries,
         )
 
     # ------------------------------------------------------------------
@@ -228,16 +511,20 @@ class NodeLanguage:
         return []
 
     def _parse_package_lock(self, path: Path) -> list[PackageSpec]:
+        registries = _npm_registries(path.parent)
         try:
             data = json.loads(path.read_text())
             result = []
             # v2/v3 format uses "packages"
             if "packages" in data:
+                provenance = package_lock_provenance(data["packages"], registries)
                 for key, info in data["packages"].items():
                     if not key:  # root entry
                         continue
                     name = info.get("name") or key.rsplit("node_modules/", 1)[-1]
-                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=bool(info.get("dev"))))
+                    public = provenance.get(key, False)
+                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm",
+                                              is_dev=bool(info.get("dev")), from_public_registry=public))
             elif "dependencies" in data:
                 # v1 format — prefer per-entry "dev" flag; fall back to root devDependencies list.
                 # A package present in both prod and dev contexts is conservative: prod (False).
@@ -247,13 +534,16 @@ class NodeLanguage:
                         is_dev = bool(info["dev"])
                     else:
                         is_dev = name in dev_names
-                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=is_dev))
+                    result.append(PackageSpec(name=name, version=info.get("version"), ecosystem="npm", is_dev=is_dev,
+                                              from_public_registry=not _non_registry_version(info.get("version"))
+                                              and _lock_entry_public(name, info.get("resolved"), registries)))
             return result
         except Exception:  # noqa: BLE001 — malformed lockfile, best-effort parse
             log.debug("Failed to parse package-lock.json at %s", path)
             return []
 
     def _parse_yarn_lock(self, path: Path) -> list[PackageSpec]:
+        registries = _npm_registries(path.parent)
         # yarn.lock custom format: header line(s) of comma-separated selectors
         # like `name@range:` or `"@scope/name@range":`, followed by indented fields.
         # Each block resolves to one version; we extract the name from the first selector.
@@ -340,7 +630,11 @@ class NodeLanguage:
                 version_match = _VERSION_RE.search(block)
                 if header and version_match:
                     name = header.group(1).lstrip('"')
-                    result.append(PackageSpec(name=name, version=version_match.group(1), ecosystem="npm", is_dev=None))
+                    resolved = _YARN_RESOLVED_RE.search(block)
+                    result.append(PackageSpec(name=name, version=version_match.group(1), ecosystem="npm", is_dev=None,
+                                              from_public_registry=not _yarn_block_non_registry(block)
+                                              and _lock_entry_public(
+                                                  name, resolved.group(1) if resolved else None, registries)))
             return result
 
         # BFS reachability from prod and dev seeds.
@@ -388,10 +682,22 @@ class NodeLanguage:
                 is_dev = True
             else:
                 is_dev = None  # unreachable from either seed (workspace members, etc.)
-            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev))
+            resolved = _YARN_RESOLVED_RE.search(block)
+            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev,
+                                      from_public_registry=not _yarn_block_non_registry(block)
+                                      and _lock_entry_public(
+                                          name, resolved.group(1) if resolved else None, registries)))
         return result
 
     def _parse_pnpm_lock(self, path: Path) -> list[PackageSpec]:
+        registries = _npm_registries(path.parent)
+
+        def public(name: str, version: str) -> bool:
+            # pnpm-lock.yaml records no registry URL; a non-registry source shows in the version.
+            if _non_registry_version(version):
+                return False
+            return _from_configured_registry(name, registries)
+
         # Parse pnpm-lock.yaml without PyYAML using line scanning.
         # pnpm v9+ lockfile keys:   `  name@version:` or `  '@scope/name@version':`
         # pnpm v6 lockfile keys:    `  /name@version:` or `  /@scope/name@1.2.3:`
@@ -497,7 +803,8 @@ class NodeLanguage:
 
         if dev_seeds is None or prod_seeds is None:
             # No importers: section — cannot classify anything.
-            return [PackageSpec(name=n, version=v, ecosystem="npm", is_dev=None) for n, v in packages]
+            return [PackageSpec(name=n, version=v, ecosystem="npm", is_dev=None, from_public_registry=public(n, v))
+                    for n, v in packages]
 
         # ------------------------------------------------------------------
         # Pass 3: parse snapshots: section to build adjacency map.
@@ -592,7 +899,8 @@ class NodeLanguage:
                 is_dev = True
             else:
                 is_dev = None  # unreachable from either seed (peer-only, etc.)
-            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev))
+            result.append(PackageSpec(name=name, version=version, ecosystem="npm", is_dev=is_dev,
+                                      from_public_registry=public(name, version)))
         return result
 
     # ------------------------------------------------------------------
@@ -796,6 +1104,8 @@ class NodeLanguage:
             "NPM_CONFIG_REGISTRY", "NPM_CONFIG_CACHE",
             "NODE_PATH", "NODE_ENV",
             "NVM_DIR", "NVM_BIN",
+            # In any spelling npm accepts, as the provenance check reads them.
+            *_npm_registry_env_names(),
         ]
 
     # ------------------------------------------------------------------
@@ -860,7 +1170,44 @@ class NodeLanguage:
         cwd: Path,
         env: dict[str, str],
     ) -> list[Path]:
+        """Pass on the variables the project's .npmrc registry lines refer to, and an absolute userconfig.
+
+        *cwd* is the command's project (``--prefix``, a trial's scratch copy),
+        which may not be the directory ``sandbox_env()`` looked in. npm in the
+        sandbox may run elsewhere too (a trial's scratch copy), so a relative
+        ``npm_config_userconfig`` is replaced by the file it names here.
+        """
+        import os
+
+        for name in _npmrc_registry_refs(cwd / ".npmrc"):
+            if (value := os.environ.get(name)) is not None:
+                env[name] = value
+        for name in [n for n, v in env.items() if n.lower() == "npm_config_userconfig" and v]:
+            env[name] = str(_user_npmrc())
         return []
+
+    def explicit_package_public(self, raw: str, parsed: Any, project_dir: Path) -> bool:
+        """Whether a package named on the command line (``@scope/x@^1``) comes from the public registry.
+
+        A git, URL, file or local-path spec does not. Otherwise the registry
+        npm would use decides: the command line's ``--registry`` and
+        ``--@scope:registry`` (``parsed.registries``), then the environment,
+        the project's .npmrc (*project_dir*; not for a global install, as
+        npm itself ignores it then) and the user's.
+        """
+        raw = _npm_alias_target(raw)
+        if _npm_explicit_spec_non_registry(raw):
+            return False
+        at = raw.find("@", 1)            # past a scope's leading @
+        name = raw[:at] if at > 0 else raw
+        # npm ignores the project's .npmrc in global mode.
+        default, scopes = npm_registries(project_dir, project=not getattr(parsed, "global_install", False))
+        given = getattr(parsed, "registries", None) or {}
+        if isinstance(given.get("registry"), str):
+            default = given["registry"]
+        scopes = {**scopes, **{k[: -len(":registry")]: v for k, v in given.items()
+                               if k.startswith("@") and k.endswith(":registry") and isinstance(v, str)}}
+        return _from_configured_registry(name, (default, scopes))
 
     def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
         return None
@@ -912,7 +1259,8 @@ class NodeLanguage:
         return results
 
     def home_ro_paths(self) -> list[Path]:
-        candidates = [Path.home() / ".npmrc"]
+        # The user's config wherever npm_config_userconfig moves it, which the sandbox passes on.
+        candidates = list(dict.fromkeys([Path.home() / ".npmrc", _user_npmrc()]))
         return [p for p in candidates if p.exists()]
 
     def top_packages_url(self) -> str | None:
@@ -999,12 +1347,71 @@ class NodeLanguage:
                 pass
         return None
 
+    def yank_status_url(self, name: str, version: str) -> str | None:
+        """The package document: npm has no yank, but a maintainer can deprecate a single release."""
+        return f"https://registry.npmjs.org/{quote(name, safe='@')}"
+
+    def yank_status_parse(self, data: object, version: str | None) -> tuple[bool, str | None] | None:
+        """(withdrawn, message) for *version*; None when the document does not list it.
+
+        npm has no yank, and ``deprecated`` is used far more loosely: whole
+        major lines are deprecated when they reach end of life ("eslint 8 is no
+        longer supported"), and whole packages when they are abandoned. A
+        deprecated release counts as withdrawn only when the newest release on
+        its own major line (npm's caret rule; prereleases aside) is not
+        deprecated, as with lodash 4.18.0 ("Bad release") beside 4.18.1.
+        """
+        from packagealert.languages.node_fix.npm_trial import _key, major_floor
+
+        if not isinstance(data, dict) or not isinstance(data.get("versions"), dict) or version is None:
+            return None
+        versions = data["versions"]
+        info = versions.get(version)
+        if not isinstance(info, dict):
+            return None
+        message = info.get("deprecated")
+        if not (isinstance(message, str) and message):
+            return False, None
+        def on_line(v: object, line: object) -> bool:
+            try:
+                return isinstance(v, str) and "-" not in v and isinstance(versions[v], dict) and major_floor(v) == line
+            except ValueError:  # an unreadable version elsewhere in the document is skipped
+                return False
+
+        try:
+            line = major_floor(version)
+            newest = max((v for v in versions if on_line(v, line)), key=_key, default=version)
+        except ValueError:
+            return None
+        if versions[newest].get("deprecated"):
+            return False, None  # the whole line (or package) is end of life, not one withdrawn release
+        return True, message
+
     def osv_ecosystem(self) -> str | None:
         return "npm"
 
     def normalise_name(self, name: str) -> str:
         """Lowercase only — this registry does not collapse separators."""
         return name.lower()
+
+    def is_scratch_command(self, argv: list[str]) -> bool:
+        """Whether *argv* is pa fix's npm trial, which the sandbox runs only in a scratch copy.
+
+        Optional hook: see the comment beside fix_adapters() in base.py.
+        """
+        from packagealert.languages.node_fix.npm_trial import is_scratch_command
+
+        return is_scratch_command(argv)
+
+    def fix_adapters(self) -> list:
+        """`pa fix` adapters for Node package managers (npm only so far).
+
+        Optional hook: see the fix_adapters() comment in base.py. Imported here
+        so loading the plugin does not load pa fix.
+        """
+        from packagealert.languages.node_fix.npm import NpmFixAdapter
+
+        return [NpmFixAdapter()]
 
     def popularity_ecosystem(self) -> str | None:
         return "NPM"

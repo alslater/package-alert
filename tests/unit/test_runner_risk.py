@@ -3330,3 +3330,27 @@ def test_abbreviated_pipenv_option_value_does_not_switch_off_the_lockfile_scan(t
     queries, blocked, _ = _runner()._resolve_query_packages(ctx)
     assert blocked is None
     assert _names(queries) == ["evilpkg"]
+
+
+def test_a_privately_resolved_lock_entry_is_not_looked_up_publicly(tmp_path):
+    """A lock entry from a private registry, git or a file is not the public package of that name:
+    neither the risk nor the cooldown gate may look it up on the public registry."""
+    import json
+
+    from packagealert.parsers.process_args import parse_npm_args
+
+    lock = {"name": "app", "lockfileVersion": 3, "packages": {
+        "": {"name": "app", "dependencies": {"public-pkg": "^1.0.0", "@corp/internal": "^1.0.0"}},
+        "node_modules/public-pkg": {"version": "1.0.0",
+                                    "resolved": "https://registry.npmjs.org/public-pkg/-/public-pkg-1.0.0.tgz"},
+        "node_modules/@corp/internal": {"version": "1.0.0",
+                                        "resolved": "https://npm.corp.example/@corp/internal/-/internal-1.0.0.tgz"},
+    }}
+    (tmp_path / "package.json").write_text('{"name": "app"}')
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock))
+    parsed = parse_npm_args(["npm", "install"])
+    assert parsed is not None
+    ctx = _Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
+    queries, blocked_reason, _source = _runner()._resolve_query_packages(ctx)
+    assert blocked_reason is None
+    assert [(n, v) for _e, n, v in queries] == [("public-pkg", "1.0.0")]

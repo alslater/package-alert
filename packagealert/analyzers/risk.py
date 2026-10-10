@@ -247,19 +247,22 @@ class RiskEngine:
         if not self._pop_client.supports_ecosystem(event.ecosystem):
             return PopularityFetchResult.FETCH_FAILED
 
-        cached = await self._pop_cache.get(event.ecosystem, event.package_name)
+        # Per version: a release's own dependents count towards its adoption
+        # (see PopularityClient.fetch).
+        version = event.version
+        cached = await self._pop_cache.get(event.ecosystem, event.package_name, version=version)
         if cached is PopularityFetchResult.FETCH_FAILED:
             # Transient failure still within sentinel TTL — treat as unavailable, not absent.
             return PopularityFetchResult.FETCH_FAILED
         if cached is PopularityFetchResult.MISS:
-            fetched = await self._pop_client.fetch(event.ecosystem, event.package_name)
+            fetched = await self._pop_client.fetch(event.ecosystem, event.package_name, version)
             if isinstance(fetched, PackagePopularity):
-                await self._pop_cache.set(event.ecosystem, event.package_name, fetched)
+                await self._pop_cache.set(event.ecosystem, event.package_name, fetched, version=version)
                 return fetched
             if fetched is PopularityFetchResult.FETCH_FAILED:
                 await self._pop_cache.store_failure_sentinel(
                     event.ecosystem, event.package_name,
-                    ttl_minutes=self._cfg.popularity_failure_ttl_minutes,
+                    ttl_minutes=self._cfg.popularity_failure_ttl_minutes, version=version,
                 )
                 log.warning(
                     "Could not fetch popularity data for %s/%s — low_popularity signal suppressed",

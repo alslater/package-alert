@@ -3528,3 +3528,16 @@ def test_pylock_records_which_packages_come_from_the_public_registry(tmp_path):
     pinned, _ = collect_requirements_packages(lock)
     assert {p.name: p.from_public_registry for p in pinned} == {
         "requests": True, "corp-utils": False, "noindex": True, "vcsdep": False, "dirdep": False, "archdep": False}
+
+
+@pytest.mark.parametrize(("argv", "registries"), [
+    (["npm", "install", "x", "--registry", "https://npm.corp.example/"], {"registry": "https://npm.corp.example/"}),
+    (["npm", "install", "@corp/x", "--@corp:registry=https://npm.corp.example/"],
+     {"@corp:registry": "https://npm.corp.example/"}),
+    (["npm", "install", "x"], {}),
+])
+def test_npm_registry_options_are_recorded(argv, registries):
+    from packagealert.parsers.process_args import parse_npm_args
+
+    parsed = parse_npm_args(argv)
+    assert parsed is not None and parsed.registries == registries

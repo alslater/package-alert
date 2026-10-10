@@ -1568,3 +1568,416 @@ def test_pnpm_lock_no_snapshots_same_name_prod_and_dev_different_versions(lang: 
     by_version = {(p.name, p.version): p for p in result}
     assert by_version[("debug", "3.2.7")].is_dev is False
     assert by_version[("debug", "4.3.4")].is_dev is True
+
+
+# --- yank status: a deprecated release, unless the whole package is deprecated ---
+
+def _packument(latest: str, deprecated: dict[str, str]) -> dict:
+    versions = {v: ({"deprecated": deprecated[v]} if v in deprecated else {})
+                for v in ["4.17.21", "4.17.23", "4.18.0", "4.18.1", latest]}
+    return {"dist-tags": {"latest": latest}, "versions": versions}
+
+
+def test_yank_status_url_encodes_scoped_names():
+    from packagealert.languages.node import NodeLanguage
+
+    assert NodeLanguage().yank_status_url("@babel/core", "7.0.0") == "https://registry.npmjs.org/@babel%2Fcore"
+    assert NodeLanguage().yank_status_url("lodash", "4.18.0") == "https://registry.npmjs.org/lodash"
+
+
+def test_deprecated_release_is_yanked_with_its_message():
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _packument("4.18.1", {"4.18.0": "Bad release. Please use lodash@4.17.21 instead."})
+    lang = NodeLanguage()
+    assert lang.yank_status_parse(doc, "4.18.0") == (True, "Bad release. Please use lodash@4.17.21 instead.")
+    assert lang.yank_status_parse(doc, "4.18.1") == (False, None)
+
+
+def test_wholly_deprecated_package_is_not_yanked():
+    """A package deprecated as a whole (its latest release too) is not a withdrawn release."""
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _packument("4.18.1", {v: "no longer supported" for v in ["4.17.21", "4.17.23", "4.18.0", "4.18.1"]})
+    assert NodeLanguage().yank_status_parse(doc, "4.18.0") == (False, None)
+
+
+def test_yank_status_unknown_version_or_bad_document_is_unchecked():
+    from packagealert.languages.node import NodeLanguage
+
+    lang = NodeLanguage()
+    assert lang.yank_status_parse(_packument("4.18.1", {}), "9.9.9") is None
+    assert lang.yank_status_parse([], "4.18.0") is None
+    assert lang.yank_status_parse({"versions": "x"}, "4.18.0") is None
+
+
+# --- provenance: only the public npm registry's packages are looked up there ---
+
+_PUBLIC = "https://registry.npmjs.org/a/-/a-1.0.0.tgz"
+_PROVENANCE = {
+    "node_modules/a": {"version": "1.0.0", "resolved": _PUBLIC},
+    "node_modules/b": {"version": "1.0.0", "resolved": "https://registry.yarnpkg.com/b/-/b-1.0.0.tgz"},
+    "node_modules/c": {"version": "1.0.0", "resolved": "https://npm.corp.example/c/-/c-1.0.0.tgz"},
+    "node_modules/d": {"version": "1.0.0", "resolved": "git+ssh://git@github.com/o/d.git#abc"},
+    "node_modules/e": {"version": "1.0.0", "resolved": "file:../e"},
+    "node_modules/f": {"resolved": "../f", "link": True},
+}
+
+
+def test_package_lock_records_which_entries_come_from_the_public_registry(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {"": {"name": "app"}, **_PROVENANCE}}))
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+    assert found == {"a": True, "b": True, "c": False, "d": False, "e": False, "f": False}
+
+
+def test_package_lock_v1_records_provenance(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 1, "dependencies": {
+        "a": {"version": "1.0.0", "resolved": _PUBLIC},
+        "c": {"version": "1.0.0", "resolved": "https://npm.corp.example/c/-/c-1.0.0.tgz"}}}))
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+    assert found == {"a": True, "c": False}
+
+
+@pytest.mark.parametrize("with_package_json", [True, False])
+def test_yarn_lock_records_provenance(tmp_path, with_package_json):
+    if with_package_json:
+        (tmp_path / "package.json").write_text(json.dumps({"dependencies": {"a": "^1.0.0", "c": "^1.0.0"}}))
+    (tmp_path / "yarn.lock").write_text(
+        'a@^1.0.0:\n  version "1.0.0"\n  resolved "https://registry.yarnpkg.com/a/-/a-1.0.0.tgz#abc"\n\n'
+        'c@^1.0.0:\n  version "1.0.0"\n  resolved "https://npm.corp.example/c/-/c-1.0.0.tgz#abc"\n')
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_yarn_lock(tmp_path / "yarn.lock")}
+    assert found == {"a": True, "c": False}
+
+
+_PNPM = ("lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      a:\n        specifier: ^1.0.0\n"
+         "        version: 1.0.0\n      '@corp/b':\n        specifier: ^1.0.0\n        version: 1.0.0\n"
+         "\npackages:\n\n  a@1.0.0:\n    resolution: {integrity: sha512-x}\n\n"
+         "  '@corp/b@1.0.0':\n    resolution: {integrity: sha512-y}\n\n"
+         "snapshots:\n\n  a@1.0.0: {}\n\n  '@corp/b@1.0.0': {}\n")
+
+
+def _pnpm_public(tmp_path, npmrc=None):
+    (tmp_path / "pnpm-lock.yaml").write_text(_PNPM)
+    if npmrc is not None:
+        (tmp_path / ".npmrc").write_text(npmrc)
+    return {p.name: p.from_public_registry for p in NodeLanguage()._parse_pnpm_lock(tmp_path / "pnpm-lock.yaml")}
+
+
+def test_pnpm_lock_entries_follow_the_configured_registry(tmp_path):
+    # pnpm-lock.yaml records no registry: it is the one .npmrc configures (the public one by default).
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": True}
+    assert _pnpm_public(tmp_path, "@corp:registry=https://npm.corp.example/\n") == \
+        {"a": True, "@corp/b": False}
+    assert _pnpm_public(tmp_path, "registry=https://npm.corp.example/\n") == \
+        {"a": False, "@corp/b": False}
+
+
+def test_a_package_lock_entry_without_a_resolved_url_follows_the_configured_registry(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {"": {"name": "app"},
+                                                                   "node_modules/g": {"version": "1.0.0"}}}))
+    assert [p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)] == [True]
+    (tmp_path / ".npmrc").write_text("registry=https://npm.corp.example/\n")
+    assert [p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)] == [False]
+
+
+def _lines(deprecated: dict[str, str], versions: list[str], latest: str) -> dict:
+    return {"dist-tags": {"latest": latest},
+            "versions": {v: ({"deprecated": deprecated[v]} if v in deprecated else {}) for v in versions}}
+
+
+def test_an_end_of_life_major_line_is_not_yanked():
+    """eslint 8.x: every 8.x release is deprecated ("no longer supported") while 9.x is current."""
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _lines({"8.50.0": "no longer supported", "8.57.1": "no longer supported"},
+                 ["8.50.0", "8.57.1", "9.0.0"], "9.0.0")
+    assert NodeLanguage().yank_status_parse(doc, "8.50.0") == (False, None)
+
+
+def test_the_newest_release_of_its_line_deprecated_is_end_of_life():
+    """rimraf 3.0.2 is both deprecated and the last 3.x release."""
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _lines({"3.0.2": "versions prior to v4 are no longer supported"}, ["3.0.1", "3.0.2", "4.0.0"], "4.0.0")
+    assert NodeLanguage().yank_status_parse(doc, "3.0.2") == (False, None)
+
+
+def test_a_deprecated_prerelease_superseded_by_a_release_on_its_line_is_yanked():
+    """source-map 0.8.0-beta.0 is deprecated; 0.8.0, on the same (0.8) line, is not."""
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _lines({"0.8.0-beta.0": "won't be included in future versions"}, ["0.8.0-beta.0", "0.8.0"], "0.8.0")
+    assert NodeLanguage().yank_status_parse(doc, "0.8.0-beta.0") == (True, "won't be included in future versions")
+
+
+def test_a_bad_release_on_an_older_line_is_still_yanked():
+    """A withdrawn release on a line whose own newest release is fine, even when latest is a later major."""
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _lines({"2.1.0": "Bad release."}, ["2.0.0", "2.1.0", "2.1.1", "3.0.0"], "3.0.0")
+    assert NodeLanguage().yank_status_parse(doc, "2.1.0") == (True, "Bad release.")
+
+
+def test_an_unreadable_version_elsewhere_in_the_document_is_skipped():
+    from packagealert.languages.node import NodeLanguage
+
+    doc = _lines({"4.18.0": "Bad release."}, ["4.18.0", "4.18.1", "not-a-version"], "4.18.1")
+    assert NodeLanguage().yank_status_parse(doc, "4.18.0") == (True, "Bad release.")
+
+
+def test_the_users_npmrc_applies_when_the_project_sets_no_registry(tmp_path, monkeypatch):
+    from packagealert.languages import node
+
+    user_rc = tmp_path / "user-npmrc"
+    user_rc.write_text("@corp:registry=https://npm.corp.example/\n")
+    monkeypatch.setattr(node, "_user_npmrc", lambda: user_rc)
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": False}
+    (tmp_path / ".npmrc").write_text("@corp:registry=https://registry.npmjs.org/\n")   # the project's wins
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": True}
+
+
+@pytest.mark.parametrize(("lines", "expected"), [
+    # npm's INI parser keeps the last assignment of a key within one file
+    ("registry=https://registry.npmjs.org/\nregistry=https://npm.corp.example/\n", {"a": False, "@corp/b": False}),
+    ("registry=https://npm.corp.example/\nregistry=https://registry.npmjs.org/\n", {"a": True, "@corp/b": True}),
+    ("@corp:registry=https://registry.npmjs.org/\n@corp:registry=https://npm.corp.example/\n",
+     {"a": True, "@corp/b": False}),
+])
+def test_the_last_assignment_in_an_npmrc_wins(tmp_path, lines, expected):
+    (tmp_path / ".npmrc").write_text(lines)
+    assert _pnpm_public(tmp_path) == expected
+
+
+def test_the_last_assignment_in_the_users_npmrc_wins_when_the_project_sets_none(tmp_path, monkeypatch):
+    from packagealert.languages import node
+
+    user_rc = tmp_path / "user-npmrc"
+    user_rc.write_text("registry=https://registry.npmjs.org/\nregistry=https://npm.corp.example/\n")
+    monkeypatch.setattr(node, "_user_npmrc", lambda: user_rc)
+    assert _pnpm_public(tmp_path) == {"a": False, "@corp/b": False}
+
+
+@pytest.mark.parametrize("var", ["npm_config_registry", "NPM_CONFIG_REGISTRY"])
+def test_a_registry_set_in_the_environment_wins_over_npmrc(tmp_path, monkeypatch, var):
+    monkeypatch.setenv(var, "https://npm.corp.example/")
+    (tmp_path / ".npmrc").write_text("registry=https://registry.npmjs.org/\n")
+    assert _pnpm_public(tmp_path) == {"a": False, "@corp/b": False}
+
+
+def test_a_scoped_registry_set_in_the_environment_applies_to_that_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("npm_config_@corp:registry", "https://npm.corp.example/")
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": False}
+
+
+def test_npm_config_userconfig_moves_the_users_npmrc(tmp_path, monkeypatch):
+    from packagealert.languages import node
+
+    monkeypatch.undo()   # the real _user_npmrc, which reads the variable
+    rc = tmp_path / "elsewhere.npmrc"
+    rc.write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.setenv("npm_config_userconfig", str(rc))
+    assert node._user_npmrc() == rc
+    assert _pnpm_public(tmp_path) == {"a": False, "@corp/b": False}
+
+
+def test_workspace_and_local_package_entries_are_never_public(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app", "workspaces": ["packages/*"]},
+        "node_modules/internal": {"resolved": "packages/internal", "link": True},
+        "packages/internal": {"name": "internal", "version": "1.0.0"},
+        "packages/internal/node_modules/dep": {
+            "version": "2.0.0", "resolved": "https://registry.npmjs.org/dep/-/dep-2.0.0.tgz"},
+        "node_modules/registry-dep": {"version": "3.0.0"},
+    }}))
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+    # The workspace member (and its link) is local; its own registry dependency, and an entry the
+    # configured (public) registry supplies, are public.
+    assert found == {"internal": False, "dep": True, "registry-dep": True}
+
+
+def test_a_package_declared_by_url_is_not_public_however_its_resolved_url_looks(tmp_path):
+    """A URL dependency can be locked with a plain version and a registry-shaped resolved URL."""
+    tarball = "https://registry.npmjs.org/b/-/b-9.0.0.tgz"
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app", "dependencies": {"a": "https://example.com/a/-/a-1.0.0.tgz", "b": "^1.0.0", "p": "^1.0.0"}},
+        "node_modules/a": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/a/-/a-1.0.0.tgz"},
+        "node_modules/b": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/b/-/b-1.0.0.tgz"},
+        "node_modules/p": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/p/-/p-1.0.0.tgz",
+                           "dependencies": {"b": tarball}},
+        "node_modules/p/node_modules/b": {"version": "9.0.0", "resolved": tarball},
+    }}))
+    found = {(p.name, p.version): p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+    # Only the copy the URL declaration resolves to: the registry copy of b at the top stays public.
+    assert found == {("a", "1.0.0"): False, ("b", "1.0.0"): True, ("p", "1.0.0"): True, ("b", "9.0.0"): False}
+
+
+def test_a_package_lock_v1_file_dependency_is_not_public(tmp_path):
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 1, "dependencies": {
+        "local": {"version": "file:../local"}, "reg": {"version": "1.0.0"}}}))
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+    assert found == {"local": False, "reg": True}
+
+
+@pytest.mark.parametrize("with_package_json", [True, False])
+def test_a_yarn_local_dependency_without_resolved_is_not_public(tmp_path, with_package_json):
+    if with_package_json:
+        (tmp_path / "package.json").write_text(json.dumps(
+            {"dependencies": {"internal-local": "file:../local", "reg": "^1.0.0"}}))
+    (tmp_path / "yarn.lock").write_text(
+        '"internal-local@file:../local":\n  version "1.0.0"\n\n'
+        'reg@^1.0.0:\n  version "1.0.0"\n  resolved "https://registry.yarnpkg.com/reg/-/reg-1.0.0.tgz#abc"\n\n'
+        '"gitdep@github:o/gitdep":\n  version "2.0.0"\n')
+    found = {p.name: p.from_public_registry for p in NodeLanguage()._parse_yarn_lock(tmp_path / "yarn.lock")}
+    assert found == {"internal-local": False, "reg": True, "gitdep": False}
+
+
+def test_npmrc_environment_references_are_expanded(tmp_path, monkeypatch):
+    (tmp_path / ".npmrc").write_text("registry=${NPM_REGISTRY}\n@corp:registry=${CORP_REGISTRY}\n")
+    monkeypatch.setenv("NPM_REGISTRY", "https://registry.npmjs.org/")
+    monkeypatch.setenv("CORP_REGISTRY", "https://npm.corp.example/")
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": False}
+
+
+def test_an_unset_npmrc_reference_is_not_taken_as_public(tmp_path, monkeypatch):
+    monkeypatch.delenv("NPM_REGISTRY", raising=False)
+    (tmp_path / ".npmrc").write_text("registry=${NPM_REGISTRY}\n")
+    assert _pnpm_public(tmp_path) == {"a": False, "@corp/b": False}
+
+
+def test_an_optional_npmrc_reference_that_is_unset_leaves_the_default(tmp_path, monkeypatch):
+    monkeypatch.delenv("NPM_REGISTRY", raising=False)
+    (tmp_path / ".npmrc").write_text("registry=${NPM_REGISTRY?}\n")
+    assert _pnpm_public(tmp_path) == {"a": True, "@corp/b": True}
+
+
+def test_the_sandbox_gets_the_registry_settings_provenance_reads(tmp_path, monkeypatch):
+    """npm in the sandbox must fetch from the registry the provenance check assumed, so the same variables pass."""
+    from packagealert.sandbox.runner import _build_sandbox_env
+
+    rc = tmp_path / "corp.npmrc"
+    rc.write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.setenv("npm_config_registry", "https://npm.corp.example/")
+    monkeypatch.setenv("NPM_CONFIG_@corp:registry", "https://npm.corp.example/")
+    monkeypatch.setenv("npm_config_userconfig", str(rc))
+    monkeypatch.setenv("npm_config_//npm.corp.example/:_authToken", "secret")
+    monkeypatch.setenv("npm_config_loglevel", "silly")
+    env = _build_sandbox_env([])
+    assert env["npm_config_registry"] == "https://npm.corp.example/"
+    assert env["NPM_CONFIG_@corp:registry"] == "https://npm.corp.example/"
+    assert env["npm_config_userconfig"] == str(rc)
+    assert "npm_config_//npm.corp.example/:_authToken" not in env      # credentials stay out
+    assert "npm_config_loglevel" not in env
+
+
+def test_a_moved_userconfig_is_bound_into_the_sandbox(tmp_path, monkeypatch):
+    from packagealert.languages import node
+    from packagealert.languages.node import NodeLanguage
+
+    monkeypatch.undo()   # the real _user_npmrc, which reads npm_config_userconfig
+    rc = tmp_path / "corp.npmrc"
+    rc.write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.setenv("npm_config_userconfig", str(rc))
+    assert node._user_npmrc() == rc
+    assert rc in NodeLanguage().home_ro_paths()
+
+
+_RC_WITH_REFS = ("registry=${CORP_REGISTRY}\n"
+                 "@corp:registry=${CORP_SCOPE_REGISTRY?}\n"
+                 "//npm.corp.example/:_authToken=${NPM_TOKEN}\n")
+
+
+def _set_refs(monkeypatch):
+    monkeypatch.setenv("CORP_REGISTRY", "https://npm.corp.example/")
+    monkeypatch.setenv("CORP_SCOPE_REGISTRY", "https://npm.corp.example/scoped/")
+    monkeypatch.setenv("NPM_TOKEN", "secret")
+
+
+@pytest.mark.parametrize("where", ["user", "cwd"])
+def test_variables_a_registry_line_refers_to_reach_the_sandbox(tmp_path, monkeypatch, where):
+    """An .npmrc registry of ${VAR} must expand inside the sandbox as it did for the provenance check."""
+    from packagealert.languages import node
+    from packagealert.sandbox.runner import _build_sandbox_env
+
+    _set_refs(monkeypatch)
+    rc = tmp_path / "user-npmrc" if where == "user" else tmp_path / ".npmrc"
+    rc.write_text(_RC_WITH_REFS)
+    if where == "user":
+        monkeypatch.setattr(node, "_user_npmrc", lambda: rc)
+    monkeypatch.chdir(tmp_path)
+    env = _build_sandbox_env([])
+    assert env["CORP_REGISTRY"] == "https://npm.corp.example/"
+    assert env["CORP_SCOPE_REGISTRY"] == "https://npm.corp.example/scoped/"
+    assert "NPM_TOKEN" not in env                      # a credential line's reference is not passed
+
+
+def test_variables_the_projects_registry_line_refers_to_are_added_for_a_moved_project(tmp_path, monkeypatch):
+    from packagealert.languages.node import NodeLanguage
+
+    _set_refs(monkeypatch)
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".npmrc").write_text(_RC_WITH_REFS)
+    env: dict[str, str] = {}
+    assert NodeLanguage().prepare_sandbox_env(None, project, env) == []
+    assert env == {"CORP_REGISTRY": "https://npm.corp.example/",
+                   "CORP_SCOPE_REGISTRY": "https://npm.corp.example/scoped/"}
+
+
+def test_a_relative_userconfig_is_taken_from_the_invocation_directory(tmp_path, monkeypatch):
+    """npm resolves a relative userconfig against its working directory; the sandbox needs an absolute bind."""
+    from packagealert.languages import node
+    from packagealert.languages.node import NodeLanguage
+
+    monkeypatch.undo()   # the real _user_npmrc
+    (tmp_path / "cfg").mkdir()
+    rc = tmp_path / "cfg" / "corp.npmrc"
+    rc.write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("npm_config_userconfig", "cfg/corp.npmrc")
+    assert node._user_npmrc() == rc
+    assert rc in NodeLanguage().home_ro_paths()
+
+
+def test_the_sandbox_is_given_the_userconfig_as_an_absolute_path(tmp_path, monkeypatch):
+    """A trial runs npm in its scratch copy, where a relative userconfig would name another file."""
+    from packagealert.languages.node import NodeLanguage
+
+    monkeypatch.undo()
+    (tmp_path / "cfg").mkdir()
+    (tmp_path / "cfg" / "corp.npmrc").write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("NPM_CONFIG_USERCONFIG", "cfg/corp.npmrc")
+    env = {"NPM_CONFIG_USERCONFIG": "cfg/corp.npmrc"}
+    NodeLanguage().prepare_sandbox_env(None, tmp_path / "scratch", env)
+    assert env["NPM_CONFIG_USERCONFIG"] == str(tmp_path / "cfg" / "corp.npmrc")
+
+
+def test_the_running_commands_registry_decides_url_less_lock_entries(tmp_path):
+    """npm install --registry <private> writes URL-less entries (omit-lockfile-registry-resolved) from that registry."""
+    from packagealert.parsers.process_args import COMMAND_LINE_REGISTRIES
+
+    lock = tmp_path / "package-lock.json"
+    lock.write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app", "dependencies": {"a": "^1.0.0", "@corp/b": "^1.0.0"}},
+        "node_modules/a": {"version": "1.0.0"},
+        "node_modules/@corp/b": {"version": "1.0.0"},
+    }}))
+
+    def public():
+        return {p.name: p.from_public_registry for p in NodeLanguage()._parse_package_lock(lock)}
+
+    assert public() == {"a": True, "@corp/b": True}
+    for given, expected in [({"registry": "https://npm.corp.example/"}, {"a": False, "@corp/b": False}),
+                            ({"@corp:registry": "https://npm.corp.example/"}, {"a": True, "@corp/b": False})]:
+        token = COMMAND_LINE_REGISTRIES.set(given)
+        try:
+            assert public() == expected
+        finally:
+            COMMAND_LINE_REGISTRIES.reset(token)
+    assert public() == {"a": True, "@corp/b": True}

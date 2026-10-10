@@ -21,6 +21,9 @@ class DependencyGraph:
     """name -> every version locked for it, across all marker forks."""
     non_registry: frozenset[str]
     """Names locked from a git, URL or path source: no registry version to pin."""
+    aliased: frozenset[str] = frozenset()
+    """Names installed under another name (npm's "alias": "npm:name@range"): a pin
+    by the real name would add a new dependency rather than move the alias."""
 
     def path_to(self, name: str) -> list[str]:
         """The shortest chain from a member to *name*, both ends included.

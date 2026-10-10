@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import tomllib
-from collections.abc import Iterable
 from pathlib import Path
 
 from packagealert.languages.base import PackageSpec
@@ -247,13 +246,18 @@ class UvFixAdapter:
     ) -> list[list[str]]:
         return commands(plan, project_dir, sync_flags)
 
-    def trial_argv(self, pins: list[tuple[str, str]], float_packages: Iterable[str] = ()) -> list[str]:
-        return uv_trial.trial_argv(pins, float_packages)
+    can_force = False
+    pins_every_copy = False
 
-    def parse_trial(
-        self, returncode: int, stderr: str, *, timed_out: bool = False, pinned: dict[str, str] | None = None,
-    ) -> TrialResult:
-        return uv_trial.parse_trial(returncode, stderr, timed_out=timed_out, pinned=pinned)
+    def probe_argv(self) -> list[str]:
+        return uv_trial.trial_argv([], [])
+
+    async def trial(self, pins, floats, run, *, force=(), lowest=None) -> TrialResult:
+        """uv.lock holds one copy per package, so *lowest* says nothing a pin does not."""
+        if force:
+            raise ValueError("the uv adapter cannot force a version")
+        out = await run.read_only(uv_trial.trial_argv(pins, floats))
+        return uv_trial.parse_trial(out.returncode, out.stderr, timed_out=out.timed_out, pinned=dict(pins))
 
     async def cadences(self, names: list[str]) -> dict[str, str | None]:
         return await release_cadence.cadences(names)

@@ -8,7 +8,7 @@ planning, verification, output — is shared by every manager.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -52,6 +52,59 @@ class TrialResult:
     detail: str = ""
     yanked: tuple[Yank, ...] = ()
     """Yanked versions in the trial's resolution, whether or not it changed them."""
+    declined: tuple[Change, ...] = ()
+    """Upgrades the adapter's baseline makes that this trial does not take,
+    as ``update`` changes from the baseline's version to the one the trial
+    leaves, which is not below the project's own. Not a downgrade of the
+    project; checked for an advisory the baseline's version would have fixed.
+    A left version above the project's own is newly installed, so it is also
+    in ``changes``, as an update from the project's version."""
+    drift_problem: tuple[str, str] | None = None
+    """Set by verification, not by an adapter: the (reason, detail) hold for
+    lock drift this trial leaves in place (a yanked, downgraded or newly
+    vulnerable version a plain re-lock installs and the trial does not move off)."""
+    non_public: frozenset[tuple[str, str]] = frozenset()
+    """(package, version) pairs the changes install of which no copy comes from
+    the public registry (a private registry, git, a file): a registry lookup by
+    name would describe a different package, so none is made for them. One
+    public copy is enough for the lookup, as in ``check_yanks``."""
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+@dataclass(frozen=True)
+class CopyResult:
+    results: tuple[CommandResult, ...]
+    """One per command run, in order; stops after the first that fails or times out."""
+    files: Mapping[str, bytes | None]
+    """Each copied file's content afterwards (None if it no longer exists)."""
+
+
+class TrialRunner(Protocol):
+    project_dir: Path
+    """The project the trial is for; read it, never write it."""
+
+    async def read_only(self, argv: list[str]) -> CommandResult:
+        """Run *argv* in the sandbox in the project directory."""
+        ...
+
+    async def in_copy(
+        self, files: list[str], argvs: list[list[str] | Callable[[Path], None]],
+        edit: Callable[[Path], None] | None = None,
+    ) -> CopyResult:
+        """Run *argvs* in a scratch copy holding *files*, after *edit(copy_dir)* if given.
+
+        An entry of *argvs* that is a callable is an edit made between commands
+        (``step(copy_dir)``), in Python rather than in the sandbox; it has no
+        result in ``CopyResult.results``, which holds one per command run.
+        """
+        ...
 
 
 RunFn = Callable[[list[str]], Awaitable[tuple[int, str]]]
@@ -77,6 +130,12 @@ class FixAdapter(Protocol):
     release cadence (``"every-release"``, ``"calendar"`` or None) to label
     held major upgrades. Without it no label is shown.
 
+    ``baseline(run)`` is also optional: an async method returning the changes
+    re-locking the project makes with nothing pinned (``None`` when it cannot
+    tell). A lock that is out of date is re-resolved by every command, so an
+    adapter that provides it judges its trials against that baseline, and
+    verification checks the drift once instead of blaming it on each pin.
+
     ``sync_selection(project_dir, run)`` is also optional: an async method
     returning a ``SyncSelection`` for the printed sync command, so that it keeps
     what the project's environment has installed.
@@ -86,6 +145,9 @@ class FixAdapter(Protocol):
     language plugin that owns it answers True from its optional
     ``is_read_only_command(argv)`` hook; a plugin supplying an adapter declares
     its read-only commands there.
+
+    Optional attributes: ``can_force: bool = False`` (the adapter's ``trial`` accepts
+    ``force`` versions) and ``pins_every_copy: bool = False``.
     """
 
     name: str
@@ -100,14 +162,28 @@ class FixAdapter(Protocol):
     ) -> list[list[str]]:
         """The commands that apply *plan*; with *project_dir*, they run there from any directory."""
         ...
-    def trial_argv(self, pins: list[tuple[str, str]], float_packages: Iterable[str] = ()) -> list[str]: ...
-    def parse_trial(
-        self, returncode: int, stderr: str, *, timed_out: bool = False, pinned: dict[str, str] | None = None,
-    ) -> TrialResult: ...
+    def probe_argv(self) -> list[str]:
+        """The command a trial runs, used to authorise the sandbox up front."""
+        ...
+    async def trial(
+        self, pins: list[tuple[str, str]], floats: list[str], run: TrialRunner, *,
+        force: Sequence[tuple[str, str]] = (),
+        lowest: Mapping[tuple[str, str], str] | None = None,
+    ) -> TrialResult:
+        """Resolve with *pins* held exactly and *floats* free to move, using *run*.
+
+        *force* holds the pins, (package, target), to pin past their parents'
+        declared ranges (only when ``can_force``); a package may be pinned once
+        per major line, and only the pins named are forced. *lowest* maps a pin
+        to the lowest vulnerable locked version it is meant to move; an adapter
+        whose pin can move several copies uses it to leave copies on older
+        major lines alone, others ignore it.
+        """
+        ...
 
 
 _ATTRIBUTES = ("name", "ecosystem", "lockfile_name")
-_OPERATIONS = ("find_lockfile", "load_graph", "locked_packages", "commands", "trial_argv", "parse_trial")
+_OPERATIONS = ("find_lockfile", "load_graph", "locked_packages", "commands", "probe_argv", "trial")
 
 
 @dataclass(frozen=True)

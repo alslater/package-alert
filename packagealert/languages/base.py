@@ -226,6 +226,9 @@ class ProcessInstall:
     # NOT to `working_dir` — and None means the project directory. See
     # parsers.process_args.resolve_lockfile_dir().
     lockfile_dir: str | None = None
+    # Registry settings given on the command line, keyed as the manager names
+    # them (npm: "registry", "@scope:registry"); see ParsedInstall.registries.
+    registries: dict[str, str] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -307,12 +310,17 @@ class LanguageBase(Protocol):
     # Protocol member, for the same reasons as poll_only_cache_paths(). It
     # supplies `pa fix`'s package-manager adapters (see
     # packagealert/remediate/adapter.py) and is found with getattr + callable
-    # by remediate.adapter.discover(). It is provisional: it stays out of
-    # LANGUAGES.md until a second adapter confirms the interface.
+    # by remediate.adapter.discover(). LANGUAGES.md documents it, the adapter
+    # interface and the two command hooks below.
     #
     # is_read_only_command(argv) -> bool is its companion: SandboxRunner.
     # run_captured() runs a command only when the plugin that owns argv[0]
     # answers True, so an adapter's trials and exports need it.
+    #
+    # is_scratch_command(argv) -> bool is the companion for trials that must
+    # write: commands safe only in a disposable copy of project files. `pa fix`
+    # runs them (run_captured(scratch=True)) with the copy as the only writable
+    # path, and only when the plugin that owns argv[0] answers True.
     #
     # yank_status_url(name, version) -> str | None and
     # yank_status_parse(data, version) -> tuple[bool, str | None] | None are

@@ -642,9 +642,22 @@ real bypass in a built-in parser:
    resolves `--lockfile-dir` against the process cwd even under `-C`.
 5. **Mark global installs** (`global_install=True`, and `defer_to_lockfile`
    False): their lock file is not the current project's.
+6. **Mark a named package that does not come from the public registry**
+   (`PackageSpec.from_public_registry=False`): a git, URL or local-path spec
+   is not the registry package of that name, and is not looked up there.
+   Registry settings given on the command line (npm's `--registry`) go in
+   `ProcessInstall.registries`.
 
-See the example plugin's `parse_process_install()` for all five applied to
-cargo.
+See the example plugin's `parse_process_install()` for the first five applied
+to cargo.
+
+**Optional `explicit_package_public(raw, parsed, project_dir) -> bool`.** Whether
+a package named on the command line comes from the public registry, judged
+from the registry the tool is configured with (its config files under
+*project_dir*, the environment and `parsed.registries`). A package it answers
+False for is not sent to the public advisory lookups or risk checks, as for a
+lock-file entry with `from_public_registry=False`. Without the hook, or if it
+raises, every named package is looked up.
 
 #### Which directory each hook receives
 
@@ -697,6 +710,130 @@ def configure_sandbox_writable(self, parsed, cwd, flags, targets):
     shutil.copytree(creds_dir, tmp, dirs_exist_ok=True)
     return [(tmp, creds_dir)]
 ```
+
+#### `pa fix` adapters (optional): `fix_adapters`, `is_read_only_command`, `is_scratch_command`
+
+`pa fix` plans upgrades through package-manager **adapters** that a plugin
+supplies. Three optional hooks, all found with `getattr` + `callable` (they are
+not `LanguageBase` members and need no contract-version bump):
+
+```python
+def fix_adapters(self) -> list[FixAdapter]:
+    """The plugin's pa fix adapters (one per package manager). Import them
+    inside the method, so loading the plugin does not load pa fix."""
+
+def is_read_only_command(self, argv: list[str]) -> bool:
+    """True only for commands that change nothing (trial resolves, exports).
+    SandboxRunner.run_captured() runs a command in the project directory only
+    when the plugin that owns argv[0] (via process_names()) answers True."""
+
+def is_scratch_command(self, argv: list[str]) -> bool:
+    """True only for trial commands that write, and are therefore safe only in
+    a disposable copy of the project's files. run_captured(scratch=True) runs
+    them with the copy as the only writable path, and only on True."""
+```
+
+Both command hooks must accept an exact, closed form (subcommand, every
+option, every argument's shape) and reject everything else — including options
+the tool adds later. A hook that raises is treated as False. The uv adapter
+uses only `is_read_only_command` (`uv lock --dry-run …`, `uv export --frozen …`);
+the npm adapter uses only `is_scratch_command` (`npm install [name@x.y.z …]` or
+`npm update <name …>`, each with exactly `--package-lock-only --ignore-scripts
+--no-audit --no-fund`).
+
+An adapter (`packagealert/remediate/adapter.py`, `FixAdapter`) holds no
+policy: planning, verification and output are shared. It provides:
+
+| Member | Purpose |
+|--------|---------|
+| `name`, `ecosystem`, `lockfile_name` | non-empty strings; `ecosystem` is the OSV/registry ecosystem (`"PyPI"`, `"npm"`) and selects the name normalisation for `--allow-major` |
+| `find_lockfile(root) -> Path \| None` | the lock file this manager uses in *root*, or None |
+| `load_graph(lockfile) -> DependencyGraph` | members, direct dependencies, edges, every locked version, non-registry names; raise `LockfileError` (with the reason) for an unusable lock — `pa fix` exits 2 |
+| `locked_packages(lockfile) -> list[PackageSpec]` | the versioned packages to check against OSV, **named exactly as the graph names them** (the planner compares the two directly) |
+| `commands(plan, project_dir=None, sync_flags=()) -> list[list[str]]` | the printed commands; with *project_dir* they must work from any directory; with `plan.separate`, only the first item's |
+| `probe_argv() -> list[str]` | the command a trial runs, used to authorise the sandbox before any trial |
+| `async trial(pins, floats, run, *, force=(), lowest=None) -> TrialResult` | resolve with *pins* (`(name, version)`) held exactly, *floats* free to move and *force* the pins (`(name, target)`, not names: a package may be pinned once per major line) to pin past their parents; *lowest* maps a pin, `(name, target)`, to the lowest vulnerable locked version it is meant to move (accept it; an adapter whose pins move one copy can ignore it); status `resolved` (with `changes`), `blocked` (with a `Blocker(parent, constraint)` when known) or `inconclusive` — anything unreadable must be `inconclusive`, never `resolved` |
+
+Optional members:
+
+- `can_force: bool = False` — `trial()` honours `force`. When a transitive pin
+  is blocked and no parent upgrade passes, verification tries one forced trial
+  and plans it labelled `overrides <pkg> to <version> under <parent>` only if
+  it passes every check.
+- `pins_every_copy: bool = False` — a pin moves every locked copy of the
+  package, so a package locked at several versions is planned as one item
+  (otherwise it is held as `multiple versions`). `trial()` must then report a
+  copy left below the target as `blocked` by the parent holding it (or
+  `inconclusive` for a forced pin). Verification passes such an adapter
+  `lowest` (each planned item's `(package, target)` mapped to its lowest
+  vulnerable copy, parents not included); only copies from that copy's major
+  line up to the target are the pin's to move, and a forced pin that moves a
+  copy from a major line no pin of that package covers must be `inconclusive`.
+  A transitive package locked on several major lines is planned once per
+  line, so a trial can pin one package at several targets. A transitive pin
+  with no `lowest` entry is a parent upgrade. `force` and `lowest` are passed only when
+  non-empty, and `lowest` only to a `pins_every_copy` adapter.
+- `transitive_majors_ok: bool = False` — the manager moves a transitive
+  package only within its dependents' declared ranges, so a major bump of one
+  is what the upgraded package asks for: only a major bump of a direct
+  dependency holds a fix.
+- `yanks_from_registry: bool = False` — the manager reports no yanks, so
+  `pa fix` looks up each version a resolved trial installs through the
+  plugin's yank hooks. The trial must then list in `TrialResult.non_public`
+  every `(name, version)` it installs of which no copy comes from the public
+  registry; those are not looked up (one public copy is enough for the lookup).
+- `async baseline(run) -> TrialResult | None` — what re-locking the
+  project changes with nothing pinned (an out-of-date lock file: an unmet
+  peer dependency, say), as a `resolved` result (with `yanked` and
+  `non_public` as for a trial; a `yanks_from_registry` adapter's drift gets
+  the same registry lookup), or None when that cannot be checked. Every printed
+  command makes these changes too, so trials are judged against this
+  baseline rather than the lock as committed; the plan reports them as lock
+  drift, and one that downgrades, adds an advisory or installs a yanked
+  version holds every item whose trial leaves it in place (a fix that moves
+  the package off that version is not held for it). A trial judged against the baseline may leave a
+  dependent on the version the project already has instead of the
+  baseline's upgrade: that is not a downgrade, so it goes in
+  `TrialResult.declined` rather than `changes`, and holds the item only when
+  the kept version has an advisory the baseline's version does not. Only an
+  unchanged version is exempt: one between the project's version and the
+  baseline's is newly installed, so it is also an `update` in `changes`
+  (from the project's version), where the cooldown and yank checks see it.
+- `async parent_upgrade(parent, package, target, run) -> tuple[str, str] | None` —
+  the lowest release of *parent* above its locked one whose declared range
+  for *package* admits *target*, with that range; None when there is none or
+  it cannot be found out. When a blocked item's parent cannot move within its
+  own declared range and no forced pin passes, verification pins the parent
+  at that release (forcing the item too when the parent alone leaves it
+  behind). A new major release of the parent is held unless allowed, naming
+  the parent for `--allow-major`.
+- `parallel_trials: int = 1` — how many items `pa fix` may verify at once
+  (capped at 8). Set it above 1 only when concurrent `trial()` calls cannot
+  interfere: each must resolve in its own scratch copy, and the manager's
+  cache must be safe for concurrent processes. An item's own trials still
+  run in sequence, and the plan keeps its order.
+- `async cadences(names) -> dict[str, str | None]` — label held major upgrades
+  (`"every-release"`, `"calendar"`).
+- `async sync_selection(project_dir, run) -> SyncSelection` — flags for the
+  printed sync command, so it keeps what the environment has installed.
+
+`trial()` runs commands only through its `TrialRunner`:
+
+- `run.project_dir` — the project; read it, never write it.
+- `await run.read_only(argv) -> CommandResult` — a read-only command in the
+  project directory (approved by `is_read_only_command`).
+- `await run.in_copy(files, argvs, edit=None) -> CopyResult` — copies the named
+  project-relative *files* (missing ones and symlinks are skipped) into a fresh
+  directory under `~/.cache/package-alert/fix-scratch/`, calls `edit(copy_dir)`
+  in Python, runs each argv there (approved by `is_scratch_command`), stopping
+  after the first that fails or times out, and returns each result plus every
+  copied file's content afterwards (None if gone). The copy is always removed.
+
+Both run in the sandbox with the project's `.pa-run.toml` flags and
+environment allowlist. Read the outcome from files, not from the tool's
+printed summary, unless that summary is a documented interface: re-record the
+adapter's fixtures on every tool upgrade (see `tests/fixtures/uv_trial/` and
+`tests/fixtures/npm_trial/`).
 
 ---
 
