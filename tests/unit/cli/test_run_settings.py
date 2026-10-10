@@ -76,11 +76,11 @@ def test_allow_major_defaults_to_empty(tmp_path, monkeypatch):
     assert s.allow_major == frozenset()
 
 
-def test_trusted_project_file_allow_major_is_normalised(tmp_path, monkeypatch):
+def test_trusted_project_file_allow_major_is_split_and_lowercased(tmp_path, monkeypatch):
     _fake_project_config(monkeypatch, tmp_path, allow_major=["Cryptography", "zope_interface", "My.Pkg"],
                          trusted=True)
     s = resolve_project_run_settings(tmp_path, AppConfig(), allow_project_env=False, out=_out())
-    assert s.allow_major == frozenset({"cryptography", "zope-interface", "my-pkg"})
+    assert s.allow_major == frozenset({"cryptography", "zope_interface", "my.pkg"})
 
 
 def test_untrusted_project_file_allow_major_is_ignored_with_a_warning(tmp_path, monkeypatch):
@@ -127,3 +127,8 @@ def test_quoted_protective_options_in_well_formed_pa_run_opts_apply(tmp_path, mo
     monkeypatch.setenv("PA_RUN_OPTS", "'--no-network' \"--no-change\" --flags 'python:uv-auth'")
     s = resolve_project_run_settings(tmp_path, AppConfig(), allow_project_env=False, out=_out())
     assert s.no_network and s.no_change and s.flags == {"python": frozenset({"uv-auth"})}
+
+
+def test_split_package_names_keeps_each_ecosystems_spelling():
+    from packagealert.cli.run_settings import split_package_names
+    assert split_package_names([" Foo_Bar , @scope/pkg", ""]) == frozenset({"foo_bar", "@scope/pkg"})

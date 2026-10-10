@@ -2432,6 +2432,54 @@ class TestShellNames:
 
 
 class TestRunShell:
+    @pytest.mark.parametrize(("returncode", "post_ok", "stored"),
+                             [(0, True, True), (0, False, False), (1, True, False)])
+    def test_post_run_cooldown_clearance_is_stored_only_after_success(
+            self, tmp_path, monkeypatch, returncode, post_ok, stored):
+        """In a shell session too, a version cleared after the run is recorded only if the session succeeds."""
+        import asyncio
+        import subprocess
+
+        import packagealert.sandbox.runner as runner_mod
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+        (tmp_path / "package.json").write_text('{"name":"app"}')
+        (tmp_path / "package-lock.json").write_bytes(_npm_lock_bytes({"young": "1.0.0"}))
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()
+
+        def fake_run(cmd, **kw):
+            (tmp_path / "package-lock.json").write_bytes(_npm_lock_bytes({"young": "1.1.0"}))
+            (node_modules / "young").mkdir()
+            (node_modules / "young" / "package.json").write_bytes(b'{"name":"young","version":"1.1.0"}')
+            return type("R", (), {"returncode": returncode})()
+
+        async def _true(*a, **kw):
+            return True
+
+        async def _accept(chosen, *a, **kw):
+            return list(chosen)
+
+        async def _post(*a, **kw):
+            return post_ok
+
+        cleared: list = []
+
+        async def _store(db, **kw):
+            cleared.append(kw["package"])
+
+        runner = _make_runner()
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(runner, "_preflight_shell", _true)
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _true)
+        monkeypatch.setattr(runner, "_cooldown_decide", _accept)
+        monkeypatch.setattr(runner, "_post_scan", _post)
+        monkeypatch.setattr(runner_mod, "store_cooldown_cleared", _store)
+        monkeypatch.setattr(runner_mod, "open_db", lambda **kw: _async_value(make_mock_db()))
+
+        asyncio.run(runner.run(["bash"]))
+        assert cleared == (["young"] if stored else [])
+
     def test_shell_bypasses_parser_returns_quickly(self, tmp_path, monkeypatch):
         """_run_shell is called (not _try_parse) for shell commands."""
         import subprocess
@@ -3606,6 +3654,171 @@ class TestInstallTargetRestoreIntegration:
         assert not (node_modules / "evil").exists()
         assert (node_modules / "existing.js").read_bytes() == b"pre-existing"
 
+    @pytest.mark.parametrize("returncode", [0, 1])
+    def test_post_run_cooldown_refusal_restores_install_target(self, tmp_path, monkeypatch, returncode):
+        """A version the command chose that is still in its cooldown: restored as for a malicious one."""
+        import asyncio
+        node_modules = self._setup(monkeypatch, returncode=returncode, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+
+        async def _clean_lock_scan(*a, **kw):
+            (node_modules / "young").mkdir()
+            (node_modules / "young" / "package.json").write_bytes(b'{"name":"young","version":"1.1.0"}')
+            return True
+
+        async def _refuse(*a, **kw):
+            return False
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _clean_lock_scan)
+        monkeypatch.setattr(runner, "_post_run_cooldown", _refuse)
+
+        rc = asyncio.run(runner.run(["npm", "install"]))
+        assert rc == 1
+        assert not (node_modules / "young").exists()
+        assert (node_modules / "existing.js").read_bytes() == b"pre-existing"
+
+    @pytest.mark.parametrize(("returncode", "post_ok", "stored"),
+                             [(0, True, True), (0, False, False), (1, True, False)])
+    def test_post_run_cooldown_clearance_is_stored_only_after_success(
+            self, tmp_path, monkeypatch, returncode, post_ok, stored):
+        """A version accepted at the post-run cooldown prompt is cleared only if the whole run then succeeds."""
+        import asyncio
+
+        import packagealert.sandbox.runner as runner_mod
+        node_modules = self._setup(monkeypatch, returncode=returncode, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "package-lock.json").write_bytes(_npm_lock_bytes({"young": "1.0.0"}))
+        runner = _make_runner()
+        cleared: list = []
+
+        async def _lock_scan_moves_young(*a, **kw):
+            (tmp_path / "package-lock.json").write_bytes(_npm_lock_bytes({"young": "1.1.0"}))
+            (node_modules / "young").mkdir()
+            (node_modules / "young" / "package.json").write_bytes(b'{"name":"young","version":"1.1.0"}')
+            return True
+
+        async def _accept(chosen, *a, **kw):
+            return list(chosen)
+
+        async def _no_pre_run_clears(*a, **kw):
+            return []
+
+        async def _post(*a, **kw):
+            return post_ok
+
+        async def _store(db, **kw):
+            cleared.append(kw["package"])
+
+        monkeypatch.setattr(runner, "_cooldown_check", _no_pre_run_clears)
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _lock_scan_moves_young)
+        monkeypatch.setattr(runner, "_cooldown_decide", _accept)
+        monkeypatch.setattr(runner, "_post_scan", _post)
+        monkeypatch.setattr(runner_mod, "store_cooldown_cleared", _store)
+        monkeypatch.setattr(runner_mod, "open_db", lambda **kw: _async_value(make_mock_db()))
+
+        rc = asyncio.run(runner.run(["npm", "install"]))
+        assert (rc == 0) is stored
+        assert cleared == (["young"] if stored else [])
+
+    @pytest.mark.parametrize(("argv", "expected"), [
+        (["npm", "install", "--registry", "https://npm.corp.example/"], {"registry": "https://npm.corp.example/"}),
+        (["npm", "install"], {}),
+    ])
+    def test_the_lock_scans_see_the_commands_registry(self, tmp_path, monkeypatch, argv, expected):
+        """The post-run lock scans classify URL-less entries with the registry the command itself was given."""
+        import asyncio
+
+        from packagealert.parsers.process_args import COMMAND_LINE_REGISTRIES
+        self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        seen: list = []
+
+        async def _record(*a, **kw):
+            seen.append(dict(COMMAND_LINE_REGISTRIES.get()))
+            return True
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _record)
+        monkeypatch.setattr(runner, "_post_run_cooldown", _record)
+        asyncio.run(runner.run(argv))
+        assert seen == [expected, expected]
+
+    @pytest.mark.parametrize(("argv", "rolled_back"), [
+        (["npm", "install", "--registry", "https://npm.corp.example/"], False),
+        (["npm", "install"], True),
+    ])
+    def test_the_updated_lock_osv_scan_honours_the_commands_registry(self, tmp_path, monkeypatch, argv, rolled_back):
+        """A URL-less entry the command fetched from its private --registry is not judged by the public package."""
+        import asyncio
+        import json as _json
+        import subprocess
+
+        self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        lock = tmp_path / "package-lock.json"
+        lock.write_bytes(_npm_lock_bytes({}))
+
+        def install(*a, **kw):
+            after = _json.loads(_npm_lock_bytes({"evil": "1.0.0"}))
+            del after["packages"]["node_modules/evil"]["resolved"]       # omit-lockfile-registry-resolved
+            lock.write_text(_json.dumps(after))
+            return type("R", (), {"returncode": 0})()
+
+        monkeypatch.setattr(subprocess, "run", install)
+        runner = _make_runner()
+
+        async def _ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner, "_post_run_cooldown", _ok)
+        monkeypatch.setattr(runner, "_post_scan", _ok)
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"evil"})
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            rc = asyncio.run(runner.run(argv))
+        assert (rc == 1) is rolled_back
+        assert ("evil" in lock.read_text()) is not rolled_back
+
+    @pytest.mark.parametrize(("argv", "queried"), [
+        (["npm", "install", "--registry", "https://npm.corp.example/"], []),
+        (["npm", "install"], [("npm", "evil", "1.0.0")]),
+    ])
+    def test_the_pre_run_lock_gates_honour_the_commands_registry(self, tmp_path, monkeypatch, argv, queried):
+        """A bare install from a private --registry: the lock's URL-less entries are not looked up publicly."""
+        import asyncio
+        import json as _json
+
+        import packagealert.sandbox.runner as runner_mod
+        self._setup(monkeypatch, returncode=0, tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        lock = _json.loads(_npm_lock_bytes({"evil": "1.0.0"}))
+        del lock["packages"]["node_modules/evil"]["resolved"]
+        (tmp_path / "package-lock.json").write_text(_json.dumps(lock))
+        runner = _make_runner()
+        seen: list = []
+        real = runner_mod.SandboxRunner._resolve_query_packages
+
+        def spy(self, ctx, **kw):
+            out = real(self, ctx, **kw)
+            seen.append(out[0])
+            return out
+
+        async def _ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_resolve_query_packages", spy)
+        monkeypatch.setattr(runner, "_open_gate_resources", lambda: _async_value(runner_mod.GATE_RESOURCES_UNAVAILABLE))
+        monkeypatch.setattr(runner, "_risk_check", lambda ctx, **kw: _async_value({}))
+        monkeypatch.setattr(runner, "_cooldown_check", lambda ctx, **kw: _async_value([]))
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _ok)
+        monkeypatch.setattr(runner, "_post_run_cooldown", _ok)
+        asyncio.run(runner.run(argv))
+        assert seen and all(q == queried for q in seen)
+
     def test_post_scan_failure_restores_install_target(self, tmp_path, monkeypatch):
         """Post-install malicious package: install target is restored."""
         import asyncio
@@ -4078,7 +4291,9 @@ def _fake_osv_context(malicious_names: set[str], *, partial: bool = False):
 def _fake_scan_result(packages: list[tuple[str, str, str]]):
     """Return a fake scan_project result with the given (ecosystem, name, version) tuples."""
     from types import SimpleNamespace
-    pkgs = [SimpleNamespace(ecosystem=eco, name=name, version=ver) for eco, name, ver in packages]
+    # Locked from the public registry, as LockedPackage records it.
+    pkgs = [SimpleNamespace(ecosystem=eco, name=name, version=ver, from_public_registry=True)
+            for eco, name, ver in packages]
     return SimpleNamespace(pinned=pkgs, unpinned=[], sources=["Pipfile.lock"])
 
 
@@ -4533,6 +4748,46 @@ class TestScanUpdatedLockFiles:
 
         assert result is False
 
+    @pytest.mark.parametrize(("resolved", "blocked"), [
+        ("https://npm.corp.example/evilpkg/-/evilpkg-1.0.0.tgz", False),
+        ("https://registry.npmjs.org/evilpkg/-/evilpkg-1.0.0.tgz", True),
+    ])
+    def test_a_privately_resolved_entry_is_not_looked_up_after_the_run(self, tmp_path, resolved, blocked):
+        """A private package sharing a public malicious name is not judged by OSV's verdict on that one."""
+        import asyncio
+        import json as _json
+
+        lock = tmp_path / "package-lock.json"
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: _npm_lock_bytes({"requests": "1.0.0"})}
+        after = _json.loads(_npm_lock_bytes({"requests": "1.0.0", "evilpkg": "1.0.0"}))
+        after["packages"]["node_modules/evilpkg"]["resolved"] = resolved
+        lock.write_text(_json.dumps(after))
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"evilpkg"})
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            result = asyncio.run(_make_runner()._scan_updated_lock_files(tmp_path, snapshots))
+        assert result is (not blocked)
+
+    def test_a_changed_lock_with_only_private_entries_passes(self, tmp_path):
+        import asyncio
+        import json as _json
+
+        lock = tmp_path / "package-lock.json"
+        snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: None}
+        after = _json.loads(_npm_lock_bytes({"evilpkg": "1.0.0"}))
+        after["packages"]["node_modules/evilpkg"]["resolved"] = "https://npm.corp.example/evilpkg/-/evilpkg-1.0.0.tgz"
+        lock.write_text(_json.dumps(after))
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names={"evilpkg"})
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        ):
+            assert asyncio.run(_make_runner()._scan_updated_lock_files(tmp_path, snapshots)) is True
+
     def test_newly_created_lock_file_is_detected_and_scanned(self, tmp_path):
         """Lock file that did not exist at snapshot time but appeared after the run."""
         import asyncio
@@ -4625,7 +4880,7 @@ class TestScanUpdatedLockFiles:
         lock.write_bytes(b"flask\nrequests\n")
         snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original"}
 
-        unpinned_pkg = SimpleNamespace(ecosystem="pypi", name="flask", version=None)
+        unpinned_pkg = SimpleNamespace(ecosystem="pypi", name="flask", version=None, from_public_registry=True)
         unpinned_scan = SimpleNamespace(
             pinned=[], unpinned=[unpinned_pkg], sources=["requirements.txt"]
         )
@@ -7307,3 +7562,347 @@ def test_writable_bind_warnings_print_once_per_runner(monkeypatch):
     with _patch.object(fresh._console, "print", side_effect=lambda *a, **kw: other.append(str(a[0]))):
         fresh._collect_and_print_writable_binds({}, Path("/"), SandboxTargets(scan_targets=[], write_dirs=[]), {})
     assert other == ["⚠  credential snapshot active", "⚠  a different warning"]
+
+
+async def test_scratch_run_needs_the_owners_scratch_approval(tmp_path, monkeypatch):
+    class Lang:
+        name = "node"
+
+        def is_read_only_command(self, argv):
+            return False
+
+        def is_scratch_command(self, argv):
+            return argv[:2] == ["npm", "install"]
+
+    monkeypatch.setattr("packagealert.sandbox.runner.lang_registry.for_process", lambda _n: Lang())
+    runner = SandboxRunner(AppConfig())
+    with pytest.raises(CapturedRunError, match="not an approved"):
+        await runner.run_captured(["npm", "install"], cwd=tmp_path)  # not scratch: read-only hook says no
+    with pytest.raises(CapturedRunError, match="not an approved"):
+        await runner.run_captured(["npm", "ci"], cwd=tmp_path, scratch=True)  # scratch hook says no
+
+
+async def test_scratch_run_binds_only_the_scratch_dir_writable(tmp_path, monkeypatch):
+    # The scratch cwd is writable and absent from the read-only binds.
+    seen = {}
+
+    def fake_build_cmd(argv, write_dirs, **kw):
+        seen["write"], seen["ro"] = list(write_dirs), list(kw["home_ro_dirs"])
+        return ["true"]
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path.parent)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("packagealert.sandbox.runner.build_cmd", fake_build_cmd)
+    monkeypatch.setattr("packagealert.sandbox.runner.bwrap_available", lambda: True)
+    monkeypatch.setattr("packagealert.sandbox.runner._approved_by_owner",
+                        lambda argv, hook="is_read_only_command": True)
+    runner = SandboxRunner(AppConfig())
+    await runner.run_captured(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+                              cwd=tmp_path, scratch=True)
+    assert tmp_path in seen["write"] and tmp_path not in seen["ro"]
+
+
+async def test_scratch_run_refuses_a_writable_bind_over_the_scratch_dir(tmp_path, monkeypatch):
+    from packagealert.sandbox.runner import _Assembly
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path.parent)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("packagealert.sandbox.runner.bwrap_available", lambda: True)
+    monkeypatch.setattr("packagealert.sandbox.runner._approved_by_owner",
+                        lambda argv, hook="is_read_only_command": True)
+    monkeypatch.setattr("packagealert.sandbox.runner.build_cmd",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("build_cmd ran")))
+    runner = SandboxRunner(AppConfig())
+    monkeypatch.setattr(runner, "_assemble_sandbox", lambda *a, **k: _Assembly(
+        argv=["npm", "install"], write_dirs=[], env={}, home_ro=[], extra_tmpfs=[],
+        writable_binds=[(tmp_path, tmp_path.parent)]))
+    with pytest.raises(CapturedRunError, match="overlaps the scratch"):
+        await runner.run_captured(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit",
+                                   "--no-fund"], cwd=tmp_path, scratch=True)
+
+
+async def test_read_only_run_never_binds_cwd_writable_even_with_a_scratch_hook(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_build_cmd(argv, write_dirs, **kw):
+        seen["write"], seen["ro"] = list(write_dirs), list(kw["home_ro_dirs"])
+        return ["true"]
+
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("packagealert.sandbox.runner.build_cmd", fake_build_cmd)
+    monkeypatch.setattr("packagealert.sandbox.runner.bwrap_available", lambda: True)
+    monkeypatch.setattr("packagealert.sandbox.runner._approved_by_owner",
+                        lambda argv, hook="is_read_only_command": hook == "is_read_only_command")
+    await SandboxRunner(AppConfig()).run_captured(["npm", "install"], cwd=tmp_path)
+    assert seen["write"] == [] and tmp_path in seen["ro"]
+
+
+@pytest.mark.parametrize("where", ["project", "root", "sibling", "symlink_out"])
+async def test_scratch_run_refuses_a_cwd_that_is_not_inside_the_scratch_root(tmp_path, monkeypatch, where):
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("packagealert.sandbox.runner.bwrap_available", lambda: True)
+    monkeypatch.setattr("packagealert.sandbox.runner._approved_by_owner",
+                        lambda argv, hook="is_read_only_command": True)
+    monkeypatch.setattr("packagealert.sandbox.runner.build_cmd",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("build_cmd ran")))
+    root = tmp_path / "scratch"
+    root.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", root)
+    (tmp_path / "scratch-x").mkdir()
+    (root / "trial-link").symlink_to(project)
+    cwd = {"project": project, "root": root, "sibling": tmp_path / "scratch-x",
+           "symlink_out": root / "trial-link"}[where]
+    with pytest.raises(CapturedRunError, match="not a scratch directory"):
+        await SandboxRunner(AppConfig()).run_captured(
+            ["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"],
+            cwd=cwd, scratch=True)
+
+
+# --- the cooldown policy also covers versions the command chose itself ---
+
+async def _async_value(value):
+    return value
+
+
+def _npm_lock_bytes(versions: dict[str, str]) -> bytes:
+    import json as _json
+
+    packages = {"": {"name": "app", "dependencies": {n: "^1.0.0" for n in versions}}}
+    for n, v in versions.items():
+        packages[f"node_modules/{n}"] = {"version": v, "resolved": f"https://registry.npmjs.org/{n}/-/{n}-{v}.tgz"}
+    return _json.dumps({"name": "app", "lockfileVersion": 3, "packages": packages}).encode()
+
+
+def _post_run_cooldown(tmp_path, before: dict[str, str], after: dict[str, str], *, age_days: float,
+                       cached: str = "miss", answer: bool | None = None, asked: list | None = None,
+                       cleared: list | None = None, after_lock: bytes | None = None,
+                       before_lock: bytes | None = None, before_npmrc: bytes | None = None):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock, patch
+
+    from packagealert.config import AppConfig, CooldownConfig, SandboxConfig
+    from packagealert.heuristics.typosquat import TyposquatResult
+
+    cfg = AppConfig()
+    cfg.sandbox = SandboxConfig(cooldown=CooldownConfig(on_new_medium_risk="prompt", on_new_low_risk="prompt",
+                                                        non_interactive_escalation="block"))
+    runner = SandboxRunner(cfg)
+    (tmp_path / "package-lock.json").write_bytes(after_lock or _npm_lock_bytes(after))
+    snapshots: dict = {tmp_path / "package-lock.json": before_lock or _npm_lock_bytes(before)}
+    fetched = AsyncMock(return_value=time.time() - age_days * 86400)
+    with (
+        patch("packagealert.sandbox.runner.get_publication_date", new_callable=AsyncMock, return_value=cached),
+        patch("packagealert.sandbox.runner.store_publication_date", new_callable=AsyncMock),
+        patch("packagealert.sandbox.runner.get_cooldown_cleared_at", new_callable=AsyncMock, return_value=None),
+        patch("packagealert.sandbox.cooldown.fetch_publication_date", fetched),
+        patch("packagealert.sandbox.runner.open_db", new_callable=AsyncMock, return_value=make_mock_db()),
+        patch("packagealert.heuristics.typosquat.TyposquatDetector.analyze", new_callable=AsyncMock,
+              return_value=TyposquatResult(is_typosquat=False, closest_match=None, distance=None, score=0)),
+        patch("sys.stdin") as stdin,
+        patch("rich.prompt.Confirm.ask", side_effect=lambda *a, **k: (asked.append(a) if asked is not None
+                                                                       else None) or bool(answer)),
+        patch("packagealert.sandbox.runner.store_cooldown_cleared", new_callable=AsyncMock,
+              side_effect=lambda db, **kw: cleared.append(kw["package"]) if cleared is not None else None),
+    ):
+        stdin.isatty.return_value = answer is not None
+        pending: list = []
+        # The project's .npmrc as it was before the run (by default, as it is now).
+        npmrc = tmp_path / ".npmrc"
+        pre_npmrc = before_npmrc if before_npmrc is not None else (npmrc.read_bytes() if npmrc.exists() else None)
+        ok = asyncio.run(runner._post_run_cooldown(tmp_path, snapshots, pending, npmrc_snapshot=pre_npmrc))
+        if ok:                                          # as the caller does once the whole run succeeded
+            asyncio.run(runner._store_cooldown_clears(pending))
+    return ok, [c.kwargs.get("version") or c.args[-1] for c in fetched.call_args_list]
+
+
+def test_a_young_version_the_command_chose_is_refused_after_the_run(tmp_path):
+    # npm update moved pkg 1.0.0 -> 1.1.0, two days old; other's version did not change.
+    ok, looked_up = _post_run_cooldown(tmp_path, {"pkg": "1.0.0", "other": "2.0.0"},
+                                       {"pkg": "1.1.0", "other": "2.0.0"}, age_days=2)
+    assert ok is False
+    assert looked_up == ["1.1.0"]                       # only what the run chose, not what was locked before
+
+
+def test_an_old_version_the_command_chose_passes(tmp_path):
+    ok, _ = _post_run_cooldown(tmp_path, {"pkg": "1.0.0"}, {"pkg": "1.1.0"}, age_days=30)
+    assert ok is True
+
+
+def test_an_unchanged_lock_needs_no_post_run_cooldown(tmp_path):
+    ok, looked_up = _post_run_cooldown(tmp_path, {"pkg": "1.0.0"}, {"pkg": "1.0.0"}, age_days=2)
+    assert ok is True and looked_up == []
+
+
+def test_a_cached_fetch_failure_is_fetched_again_rather_than_failing_open(tmp_path):
+    # Risk scoring caches a failed lookup briefly; the cooldown gate must not treat that as "age unknown".
+    ok, looked_up = _post_run_cooldown(tmp_path, {"pkg": "1.0.0"}, {"pkg": "1.1.0"}, age_days=2,
+                                       cached="fetch_failed")
+    assert ok is False and looked_up == ["1.1.0"]
+
+
+@pytest.mark.parametrize("answer", [False, True])
+def test_several_young_versions_get_one_prompt(tmp_path, answer):
+    asked: list = []
+    cleared: list = []
+    ok, _ = _post_run_cooldown(tmp_path, {"a": "1.0.0", "b": "1.0.0", "c": "1.0.0"},
+                               {"a": "1.1.0", "b": "1.1.0", "c": "1.1.0"}, age_days=2,
+                               answer=answer, asked=asked, cleared=cleared)
+    assert len(asked) == 1 and "3" in str(asked[0])
+    assert ok is answer
+    assert sorted(cleared) == (["a", "b", "c"] if answer else [])
+
+
+def test_a_privately_resolved_version_the_command_chose_is_not_looked_up(tmp_path):
+    import json as _json
+
+    after = _json.loads(_npm_lock_bytes({"pkg": "1.1.0"}))
+    after["packages"]["node_modules/pkg"]["resolved"] = "https://npm.corp.example/pkg/-/pkg-1.1.0.tgz"
+    ok, looked_up = _post_run_cooldown(tmp_path, {"pkg": "1.0.0"}, {"pkg": "1.1.0"}, age_days=2,
+                                       after_lock=_json.dumps(after).encode())
+    assert ok is True and looked_up == []
+
+
+def _without_resolved(versions: dict[str, str]) -> bytes:
+    import json as _json
+
+    lock = _json.loads(_npm_lock_bytes(versions))
+    for key, entry in lock["packages"].items():
+        if key:
+            entry.pop("resolved")
+    return _json.dumps(lock).encode()
+
+
+def test_unchanged_entries_keep_their_provenance_in_the_pre_run_snapshot(tmp_path, monkeypatch):
+    # The project's .npmrc names the public registry over a private user registry, so URL-less entries are
+    # public; the pre-run snapshot must be read with the same configuration or every one looks newly chosen.
+    from packagealert.languages import node
+
+    user_rc = tmp_path / "user-npmrc"
+    user_rc.write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.setattr(node, "_user_npmrc", lambda: user_rc)
+    (tmp_path / ".npmrc").write_text("registry=https://registry.npmjs.org/\n")
+    ok, looked_up = _post_run_cooldown(tmp_path, {}, {}, age_days=30,
+                                       before_lock=_without_resolved({"pkg": "1.0.0", "other": "2.0.0"}),
+                                       after_lock=_without_resolved({"pkg": "1.1.0", "other": "2.0.0"}))
+    assert ok is True and looked_up == ["1.1.0"]        # only the changed entry, not the unchanged "other"
+
+
+def test_the_pre_run_lock_is_read_with_the_npmrc_from_before_the_run(tmp_path):
+    # The run rewrote .npmrc from a private registry to the public one: a URL-less pkg 1.0.0 that came
+    # from the private registry before is a new, public copy afterwards, and gets the cooldown check.
+    (tmp_path / ".npmrc").write_text("registry=https://registry.npmjs.org/\n")
+    ok, looked_up = _post_run_cooldown(tmp_path, {}, {}, age_days=2,
+                                       before_npmrc=b"registry=https://npm.corp.example/\n",
+                                       before_lock=_without_resolved({"pkg": "1.0.0"}),
+                                       after_lock=_without_resolved({"pkg": "1.0.0", "new": "2.0.0"}))
+    assert ok is False and sorted(looked_up) == ["1.0.0", "2.0.0"]   # pkg as well as new
+
+
+def test_a_version_moved_from_a_private_to_the_public_registry_is_looked_up(tmp_path):
+    # Same version, but the run now fetches it from the public registry: that copy is the run's choice.
+    import json as _json
+
+    before = _json.loads(_npm_lock_bytes({"pkg": "1.0.0"}))
+    before["packages"]["node_modules/pkg"]["resolved"] = "https://npm.corp.example/pkg/-/pkg-1.0.0.tgz"
+    ok, looked_up = _post_run_cooldown(tmp_path, {}, {"pkg": "1.0.0"}, age_days=2,
+                                       before_lock=_json.dumps(before).encode())
+    assert ok is False and looked_up == ["1.0.0"]
+
+
+@pytest.mark.parametrize("hook", ["is_read_only_command", "is_scratch_command"])
+def test_an_owner_hook_whose_lookup_raises_refuses_the_command(monkeypatch, hook):
+    # A hook exposed through a raising descriptor is as unavailable as a missing one: refused, not a crash,
+    # and the warning must not fail on a name that raises too.
+    from packagealert.sandbox.runner import _approved_by_owner
+
+    class Broken:
+        def __getattribute__(self, item):
+            raise RuntimeError(item)
+
+    monkeypatch.setattr("packagealert.sandbox.runner.lang_registry.for_process", lambda _name: Broken())
+    assert _approved_by_owner(["npm", "install"], hook) is False
+
+
+def test_an_owner_hook_still_approves_when_it_answers_true(monkeypatch):
+    from types import SimpleNamespace
+
+    from packagealert.sandbox.runner import _approved_by_owner
+
+    lang = SimpleNamespace(name="node", is_scratch_command=lambda argv: True)
+    monkeypatch.setattr("packagealert.sandbox.runner.lang_registry.for_process", lambda _name: lang)
+    assert _approved_by_owner(["npm", "install"], "is_scratch_command") is True
+
+
+# --- the pre-run OSV check looks up only packages from the public registry ---
+
+def _preflight_blocks(tmp_path, argv, malicious, *, npmrc=None, shell=False):
+    import asyncio
+
+    import packagealert.sandbox.runner as runner_mod
+
+    if npmrc is not None:
+        (tmp_path / ".npmrc").write_text(npmrc)
+    fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=malicious)
+    runner = _make_runner()
+    with (
+        unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+        unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+        unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+    ):
+        if shell:
+            ok = asyncio.run(runner._preflight_shell(tmp_path))
+        else:
+            ctx = runner_mod._Context(argv=argv, parsed=runner_mod._try_parse(argv), cwd=tmp_path)
+            ok = asyncio.run(runner._preflight(ctx))
+    return not ok
+
+
+@pytest.mark.parametrize(("argv", "npmrc", "blocked"), [
+    (["npm", "install", "@corp/evil"], None, True),                                       # public by default
+    (["npm", "install", "@corp/evil"], "@corp:registry=https://npm.corp.example/\n", False),
+    (["npm", "install", "@corp/evil@1.0.0"], "@corp:registry=https://npm.corp.example/\n", False),
+    (["npm", "install", "@corp/evil", "--@corp:registry=https://npm.corp.example/"], None, False),
+    (["npm", "install", "evil", "--registry", "https://npm.corp.example/"], None, False),
+    (["npm", "install", "evil"], "registry=https://npm.corp.example/\n", False),
+    (["npm", "install", "evil"], None, True),
+    (["npm", "install", "evil@github:o/evil"], None, False),
+    (["npm", "install", "./evil"], None, False),
+    (["yarn", "add", "@corp/evil"], "@corp:registry=https://npm.corp.example/\n", False),
+    (["npm", "install", "x@npm:evil@1.0.0"], None, True),                                  # the aliased package
+    (["npm", "install", "x@npm:@corp/evil@1.0.0"], "@corp:registry=https://npm.corp.example/\n", False),
+    (["pip", "install", "evil"], None, True),                                              # no hook: unchanged
+    # npm ignores the project's .npmrc in global mode: a global install comes from the public registry.
+    (["npm", "install", "-g", "@corp/evil"], "@corp:registry=https://npm.corp.example/\n", True),
+    (["npm", "install", "-g", "evil"], "registry=https://npm.corp.example/\n", True),
+    (["npm", "install", "-g", "evil", "--registry", "https://npm.corp.example/"], None, False),
+])
+def test_an_explicit_package_is_looked_up_only_when_it_comes_from_the_public_registry(tmp_path, argv, npmrc, blocked):
+    (tmp_path / "package.json").write_text('{"name": "app"}')
+    assert _preflight_blocks(tmp_path, argv, {"evil", "@corp/evil"}, npmrc=npmrc) is blocked
+
+
+@pytest.mark.parametrize(("resolved", "blocked"), [
+    ("https://npm.corp.example/evil/-/evil-1.0.0.tgz", False),
+    ("https://registry.npmjs.org/evil/-/evil-1.0.0.tgz", True),
+])
+def test_the_shell_preflight_looks_up_only_public_lock_entries(tmp_path, resolved, blocked):
+    import json as _json
+
+    lock = _json.loads(_npm_lock_bytes({"evil": "1.0.0"}))
+    lock["packages"]["node_modules/evil"]["resolved"] = resolved
+    (tmp_path / "package.json").write_text('{"name": "app"}')
+    (tmp_path / "package-lock.json").write_text(_json.dumps(lock))
+    assert _preflight_blocks(tmp_path, [], {"evil"}, shell=True) is blocked
+
+
+def test_a_global_install_still_follows_the_users_npmrc(tmp_path, monkeypatch):
+    from packagealert.languages import node
+
+    user_rc = tmp_path / "user-npmrc"
+    user_rc.write_text("@corp:registry=https://npm.corp.example/\n")
+    monkeypatch.setattr(node, "_user_npmrc", lambda: user_rc)
+    (tmp_path / "package.json").write_text('{"name": "app"}')
+    assert _preflight_blocks(tmp_path, ["npm", "install", "-g", "@corp/evil"], {"@corp/evil"}) is False

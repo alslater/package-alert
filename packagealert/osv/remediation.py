@@ -34,6 +34,11 @@ class FixRecommendation:
     """`version` is on a different major version from the installed one."""
     verified: bool
     """Every advisory was checked against its OSV ranges, not just its fix list."""
+    same_line_version: str | None = None
+    """When ``version`` is a major upgrade: the best version on the installed
+    major line, if it fixes at least one vulnerability (None otherwise)."""
+    same_line_unfixed: tuple[str, ...] = ()
+    """Advisory ids ``same_line_version`` does not fix."""
 
 
 _SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
@@ -179,11 +184,24 @@ def _key_for(ecosystem: str) -> _VersionKey:
     return _pypi_key if ecosystem.lower() == "pypi" else _generic_key
 
 
-def _major(key: Any) -> int | None:
+def _major_for(ecosystem: str, key: Any) -> object | None:
+    """What must stay equal for an upgrade to be on the same major line; None if unreadable.
+
+    PyPI: the first release number. npm follows SemVer's caret rule: the first
+    non-zero component is the breaking one, so 0.3 -> 0.4 and 0.0.3 -> 0.0.4
+    are major upgrades.
+    """
     release = getattr(key, "release", None)
     if release is None and isinstance(key, tuple):
         release = key[0]
-    return release[0] if release else None
+    if not release:
+        return None
+    if ecosystem.lower() != "npm":
+        return release[0]
+    for i, part in enumerate(release):
+        if part:
+            return (i, part)
+    return (len(release), 0)
 
 
 def _in_range(events: Iterable[Mapping[str, str]], v: Any, key: _VersionKey) -> bool | None:
@@ -252,13 +270,15 @@ def _well_formed_ranges(raw: object) -> list[list[dict]]:
     return raw
 
 
-def recommend_fix(installed: str, findings: list[dict], ecosystem: str) -> FixRecommendation | None:
-    """Pick the single version to upgrade *installed* to; see the module docstring."""
-    key = _key_for(ecosystem)
-    installed_key = key(installed)
-    if installed_key is None:
-        return None
+def _advisory_checks(
+    installed_key: Any, findings: list[dict], key: _VersionKey,
+) -> tuple[dict[str, Any], list[tuple[str, Callable[[Any], bool]]], bool]:
+    """(fixed versions above *installed_key*, per-advisory "still affected" predicates, verified).
 
+    *verified* is False when some advisory could not be checked against its
+    OSV ranges; its predicate then treats only the nearest listed fix above
+    the installed version (or nothing) as fixing it.
+    """
     candidates: dict[str, Any] = {}
     # Per advisory: a predicate saying whether a candidate key still has it.
     checks: list[tuple[str, Callable[[Any], bool]]] = []
@@ -292,6 +312,26 @@ def recommend_fix(installed: str, findings: list[dict], ecosystem: str) -> FixRe
             checks.append((adv_id, lambda _c: True))
         else:
             checks.append((adv_id, lambda c, n=nearest: c < n))
+    return candidates, checks, verified
+
+
+def open_advisories(installed: str, findings: list[dict], ecosystem: str, target: str) -> tuple[str, ...] | None:
+    """The advisory ids of *installed*'s *findings* that *target* still has; None if either cannot be ordered."""
+    key = _key_for(ecosystem)
+    installed_key, target_key = key(installed), key(target)
+    if installed_key is None or target_key is None:
+        return None
+    _, checks, _ = _advisory_checks(installed_key, findings, key)
+    return tuple(adv_id for adv_id, affected in checks if affected(target_key))
+
+
+def recommend_fix(installed: str, findings: list[dict], ecosystem: str) -> FixRecommendation | None:
+    """Pick the single version to upgrade *installed* to; see the module docstring."""
+    key = _key_for(ecosystem)
+    installed_key = key(installed)
+    if installed_key is None:
+        return None
+    candidates, checks, verified = _advisory_checks(installed_key, findings, key)
 
     # Candidates are scored by how many VULNERABILITIES they leave open, not
     # how many ids: aliases of one flaw (a GHSA and its PYSEC twin) count once,
@@ -301,16 +341,22 @@ def recommend_fix(installed: str, findings: list[dict], ecosystem: str) -> FixRe
     }
     clusters = [cluster_of[id(f)] for f in findings]
 
-    best: tuple[str, Any, tuple[str, ...], int] | None = None
-    for v, k in sorted(candidates.items(), key=lambda item: item[1]):
-        open_checks = [affected(k) for _, affected in checks]
-        unfixed = tuple(adv_id for (adv_id, _), is_open in zip(checks, open_checks) if is_open)
-        open_count = len({c for c, is_open in zip(clusters, open_checks) if is_open})
-        # Strictly fewer only, so a tie keeps the lower version.
-        if best is None or open_count < best[3]:
-            best = (v, k, unfixed, open_count)
-        if not open_count:
-            break
+    installed_major = _major_for(ecosystem, installed_key)
+
+    def pick(pool: list[tuple[str, Any]]) -> tuple[str, Any, tuple[str, ...], int] | None:
+        best: tuple[str, Any, tuple[str, ...], int] | None = None
+        for v, k in sorted(pool, key=lambda item: item[1]):
+            open_checks = [affected(k) for _, affected in checks]
+            unfixed = tuple(adv_id for (adv_id, _), is_open in zip(checks, open_checks) if is_open)
+            open_count = len({c for c, is_open in zip(clusters, open_checks) if is_open})
+            # Strictly fewer only, so a tie keeps the lower version.
+            if best is None or open_count < best[3]:
+                best = (v, k, unfixed, open_count)
+            if not open_count:
+                break
+        return best
+
+    best = pick(list(candidates.items()))
 
     if best is None:
         return FixRecommendation(
@@ -320,11 +366,22 @@ def recommend_fix(installed: str, findings: list[dict], ecosystem: str) -> FixRe
             verified=verified,
         )
     version, best_key, unfixed, _ = best
+    major_upgrade = _major_for(ecosystem, best_key) != installed_major
+    same_line: tuple[str, Any, tuple[str, ...], int] | None = None
+    if major_upgrade:
+        # The best the installed major line offers, for when the major upgrade is
+        # not allowed: worth planning only if it fixes something.
+        all_open = len(set(clusters))
+        same_line = pick([(v, k) for v, k in candidates.items() if _major_for(ecosystem, k) == installed_major])
+        if same_line is not None and same_line[3] >= all_open:
+            same_line = None
     return FixRecommendation(
         version=version,
         unfixed=unfixed,
-        major_upgrade=_major(best_key) != _major(installed_key),
+        major_upgrade=major_upgrade,
         verified=verified,
+        same_line_version=same_line[0] if same_line else None,
+        same_line_unfixed=same_line[2] if same_line else (),
     )
 
 

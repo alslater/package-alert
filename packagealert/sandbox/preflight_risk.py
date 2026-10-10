@@ -88,16 +88,29 @@ def decide_risk(
         # warning while a stronger match is allowed is not a stricter outcome
         # for a weaker signal, just a visibility notice that survives even when
         # gating itself is switched off.
-        actions.append(cfg.on_typosquat if (strong_enough and within_distance) else "warn")
+        qualifies = strong_enough and within_distance
+        actions.append(cfg.on_typosquat if qualifies else "warn")
         if typo.closest_match:
             # Omit the distance clause when it is unknown rather than rendering
             # "distance None". The gating check above already tolerates a missing
             # distance, so the message has to as well; the impersonated package
             # name is the actionable part and is kept either way.
             detail = f" (distance {typo.distance})" if typo.distance is not None else ""
-            reasons.append(f"possible typosquat of '{typo.closest_match}'{detail}")
+            reason = f"possible typosquat of '{typo.closest_match}'{detail}"
         else:
-            reasons.append("possible typosquat of a popular package")
+            reason = "possible typosquat of a popular package"
+        # The (reduced) score and the engine's own reason for any reduction; a
+        # match that only informs also says which gating condition it misses.
+        signal = next((sig for sig in report.signals if sig.name == "typosquat"), None)
+        reduced = next((part.strip() for part in (signal.reason.split(";") if signal else [])
+                        if part.strip().startswith("reduced for")), None)
+        reason += f" — score {typo.score}{', ' + reduced if reduced else ''}"
+        if not qualifies:
+            why = (f"below the gating score ({cfg.typosquat_min_score})" if not strong_enough
+                   else f"beyond the gating distance ({cfg.typosquat_max_distance})" if typo.distance is not None
+                   else "distance unknown")
+            reason += f"; {why}, not gating"
+        reasons.append(reason)
 
     if report.score >= cfg.risk_threshold:
         actions.append(cfg.on_high_risk)

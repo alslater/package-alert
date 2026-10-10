@@ -36,7 +36,17 @@ class PopularityClient:
     def supports_ecosystem(self, ecosystem: str) -> bool:
         return ecosystem.lower() in self._ecosystem_map
 
-    async def fetch(self, ecosystem: str, name: str) -> PackagePopularity | PopularityFetchResult | None:
+    async def fetch(
+        self, ecosystem: str, name: str, version: str | None = None,
+    ) -> PackagePopularity | PopularityFetchResult | None:
+        """Version count, and dependents: the larger of the default version's and *version*'s.
+
+        deps.dev counts dependents per version, so a package whose newest release
+        is fresh (preact 11.0.1: 72) can look unadopted while the release being
+        installed is widely used (preact 10.29.8: 31775). A failed lookup of
+        *version*'s dependents keeps the default version's count: less evidence
+        of adoption, never more.
+        """
         system = self._ecosystem_map.get(ecosystem.lower())
         if not system:
             return None
@@ -73,24 +83,51 @@ class PopularityClient:
                     )
                     return PopularityFetchResult.FETCH_FAILED
 
+            if version and version != default_version:
+                dependent_count = max(dependent_count, await self._version_dependents(
+                    system, encoded_name, ecosystem, name, version))
+
             return PackagePopularity(version_count=version_count, dependent_count=dependent_count)
         except Exception as exc:  # noqa: BLE001 — network/parsing failure, degrade to FETCH_FAILED
             log.debug("deps.dev lookup failed for %s/%s: %s", ecosystem, name, exc)
             return PopularityFetchResult.FETCH_FAILED
 
+    async def _version_dependents(self, system: str, encoded_name: str, ecosystem: str, name: str,
+                                  version: str) -> int:
+        """*version*'s own dependents, or 0 when they cannot be read (any failure: the count is optional)."""
+        try:
+            resp = await self._client.get(
+                f"/systems/{system}/packages/{encoded_name}/versions/{_quote(version, safe='')}:dependents")
+            if resp.status_code != 200:
+                log.debug("deps.dev dependents lookup for %s/%s@%s returned HTTP %d; using the default "
+                          "version's count", ecosystem, name, version, resp.status_code)
+                return 0
+            count = resp.json().get("dependentCount", 0)
+            return count if isinstance(count, int) and not isinstance(count, bool) else 0
+        except Exception as exc:  # noqa: BLE001 — optional evidence: a timeout or bad body keeps the default count
+            log.debug("deps.dev dependents lookup for %s/%s@%s failed: %s; using the default version's count",
+                      ecosystem, name, version, exc)
+            return 0
+
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+def _cache_key(package: str, version: str | None) -> str:
+    """The cache row for *package*, per *version* when given (its dependents depend on it)."""
+    return f"{package}@{version}" if version else package
 
 
 class PopularityCache:
     def __init__(self, db: aiosqlite.Connection) -> None:
         self._db = db
 
-    async def get(self, ecosystem: str, package: str) -> PackagePopularity | PopularityFetchResult:
+    async def get(self, ecosystem: str, package: str, *,
+                  version: str | None = None) -> PackagePopularity | PopularityFetchResult:
         now = time.time()
         async with self._db.execute(
             "SELECT queried_at, payload FROM popularity_cache WHERE ecosystem=? AND package=?",
-            (ecosystem, package),
+            (ecosystem, _cache_key(package, version)),
         ) as cur:
             row = await cur.fetchone()
         if row is None:
@@ -106,7 +143,8 @@ class PopularityCache:
         data = json.loads(payload)
         return PackagePopularity(**data)
 
-    async def set(self, ecosystem: str, package: str, result: PackagePopularity) -> None:
+    async def set(self, ecosystem: str, package: str, result: PackagePopularity, *,
+                  version: str | None = None) -> None:
         payload = json.dumps({"version_count": result.version_count, "dependent_count": result.dependent_count})
         now = time.time()
         await self._db.execute(
@@ -114,11 +152,12 @@ class PopularityCache:
                VALUES(?,?,?,?,?)
                ON CONFLICT(ecosystem, package)
                DO UPDATE SET queried_at=excluded.queried_at, downloads=excluded.downloads, payload=excluded.payload""",
-            (ecosystem, package, now, result.dependent_count, payload),
+            (ecosystem, _cache_key(package, version), now, result.dependent_count, payload),
         )
         await self._db.commit()
 
-    async def store_failure_sentinel(self, ecosystem: str, package: str, *, ttl_minutes: int) -> None:
+    async def store_failure_sentinel(self, ecosystem: str, package: str, *, ttl_minutes: int,
+                                     version: str | None = None) -> None:
         ttl_seconds = min(ttl_minutes * 60, _TTL)
         effective_queried_at = time.time() - (_TTL - ttl_seconds)
         await self._db.execute(
@@ -126,6 +165,6 @@ class PopularityCache:
                VALUES(?,?,?,?,?)
                ON CONFLICT(ecosystem, package)
                DO UPDATE SET queried_at=excluded.queried_at, downloads=excluded.downloads, payload=excluded.payload""",
-            (ecosystem, package, effective_queried_at, 0, _FAILURE_PAYLOAD),
+            (ecosystem, _cache_key(package, version), effective_queried_at, 0, _FAILURE_PAYLOAD),
         )
         await self._db.commit()

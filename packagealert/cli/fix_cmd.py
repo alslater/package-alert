@@ -60,7 +60,7 @@ def fix(
     raise typer.Exit(code)
 
 
-_PACKAGE_NAME_RE = re.compile(r"[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
+_PACKAGE_NAME_RE = re.compile(r"(@[A-Za-z0-9][A-Za-z0-9._-]*/)?[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?")
 
 
 def _parse_allow_major(values: list[str]) -> frozenset[str]:
@@ -69,7 +69,7 @@ def _parse_allow_major(values: list[str]) -> frozenset[str]:
     Raises ValueError (with the message to show) for a value that names nothing
     or is not a package name, such as a path.
     """
-    from packagealert.cli.run_settings import normalise_package_names
+    from packagealert.cli.run_settings import split_package_names
 
     names: set[str] = set()
     for value in values:
@@ -81,7 +81,7 @@ def _parse_allow_major(values: list[str]) -> frozenset[str]:
                 raise ValueError(
                     f"--allow-major needs a package name or 'all' (got {part!r} — a path goes before "
                     f"or after the options, not as this option's value)")
-        names |= {"*" if n == "all" else n for n in normalise_package_names(parts)}
+        names |= {"*" if n == "all" else n for n in split_package_names(parts)}
     return frozenset(names)
 
 
@@ -148,8 +148,8 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     from packagealert.cli.run_settings import (
         ProjectRunSettings,
         RunSettingsError,
-        normalise_package_names,
         resolve_project_run_settings,
+        split_package_names,
     )
     from packagealert.models.events import normalise_package_name_for
     from packagealert.osv.remediation import group_findings
@@ -202,10 +202,12 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     except RunSettingsError as exc:
         settings_error = f"project run config unusable ({exc})"
     # Only the command line can allow every package; a stored list never can.
-    standing = normalise_package_names(cfg.fix.allow_major)
+    standing = split_package_names(cfg.fix.allow_major)
     if settings is not None:
         standing |= settings.allow_major
-    allowed_major = (standing - {"*"}) | allow_major
+    raw = (standing - {"*"}) | allow_major
+    allowed_major = frozenset(
+        "*" if n == "*" else normalise_package_name_for(adapter.ecosystem, n) for n in raw)
 
     yank_failures = 0
     locked_yanks: tuple[Yank, ...] = ()
@@ -234,6 +236,7 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     plan = planner.plan_fixes(
         groups, graph, ages=ages, cooldown_days=cfg.sandbox.cooldown.period_days,
         allow_major=allowed_major, allow_cooldown=allow_cooldown,
+        pins_every_copy=getattr(adapter, "pins_every_copy", False),
     )
     unverified_reason: str | None = None
     verified = False
@@ -243,7 +246,8 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
         if verify:
             plan, unverified_reason = await _verify(cfg, adapter, lockfile, plan, allow_cooldown, allowed_major, console,
                                                     settings, settings_error, say=say, runner=runner,
-                                                    blocked=blocked, locked_yanks=locked_yanks)
+                                                    blocked=blocked, locked_yanks=locked_yanks,
+                                                    direct=graph.direct)
             verified = unverified_reason is None
         else:
             unverified_reason = "--no-verify"
@@ -287,6 +291,115 @@ SYNC_UNCHECKED = ("Could not check which extras or groups the project's environm
                   "a plain sync may remove packages installed from them.")
 
 
+# The most items verified at once, whatever an adapter asks for: each trial
+# is a resolver process, and a large project's lock costs hundreds of MB.
+_MAX_PARALLEL_TRIALS = 8
+
+
+def _parallel_trials(adapter) -> int:
+    """How many items to verify at once: the adapter's ``parallel_trials`` (1 when absent or malformed), at most 8."""
+    value = getattr(adapter, "parallel_trials", 1)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 1
+    return min(value, _MAX_PARALLEL_TRIALS)
+
+
+class _FixTrialRunner:
+    """The TrialRunner pa fix hands an adapter: sandboxed commands for one project."""
+
+    def __init__(self, runner, project_dir: Path, settings) -> None:
+        self._runner, self._dir, self._settings = runner, project_dir, settings
+
+    @property
+    def project_dir(self) -> Path:
+        return self._dir
+
+    async def read_only(self, argv: list[str]):
+        from packagealert.remediate.adapter import CommandResult
+
+        out = await self._runner.run_captured(argv, cwd=self._dir, flags=self._settings.flags,
+                                              extra_env=self._settings.env,
+                                              allow_network=not self._settings.no_network)
+        return CommandResult(out.returncode, out.stdout, out.stderr, out.timed_out)
+
+    async def in_copy(self, files, argvs, edit=None):
+        """Run *argvs* in a fresh scratch copy of *files*, read them back, remove the copy.
+
+        A callable in *argvs* is an edit made on the copy at that point, between commands.
+
+        Only regular files are copied and read back (a symlink in the project,
+        or one the command leaves in the copy, reads as absent), so nothing
+        outside the copy is followed. The commands run in order and stop at the
+        first that fails or times out; the copy is removed whatever happens.
+        """
+        import shutil
+        import tempfile
+
+        from packagealert.remediate.adapter import CommandResult, CopyResult
+        from packagealert.sandbox import runner as sandbox_runner
+
+        for name in files:
+            rel = Path(name)
+            if not name or rel.is_absolute() or ".." in rel.parts:
+                raise ValueError(f"not a project-relative file name: {name!r}")
+        # The sandbox accepts a scratch run only inside its SCRATCH_ROOT.
+        root = sandbox_runner.SCRATCH_ROOT
+        root.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix="trial-", dir=root)).resolve()
+        try:
+            for name in files:
+                src = self._dir / name
+                if src.is_file() and not src.is_symlink():
+                    (scratch / name).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(src, scratch / name)
+            if edit is not None:
+                edit(scratch)
+            results = []
+            for argv in argvs:
+                if callable(argv):
+                    # An edit between commands, made in Python on the copy.
+                    argv(scratch)
+                    continue
+                out = await self._runner.run_captured(
+                    argv, cwd=scratch, scratch=True, flags=self._settings.flags,
+                    extra_env=self._settings.env, allow_network=not self._settings.no_network)
+                results.append(CommandResult(out.returncode, out.stdout, out.stderr, out.timed_out))
+                if out.returncode != 0 or out.timed_out:
+                    break
+            after = {name: _read_regular_file(scratch / name) for name in files}
+            return CopyResult(tuple(results), after)
+        finally:
+            shutil.rmtree(scratch, onexc=_make_removable)
+
+
+def _read_regular_file(path: Path) -> bytes | None:
+    """*path*'s bytes when it is a regular file (never followed through a symlink), else None."""
+    import os
+    import stat
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            return None
+        return fh.read()
+
+
+def _make_removable(func, path, _exc) -> None:
+    """shutil.rmtree onexc: make *path*'s directory writable and retry once; give up quietly."""
+    import os
+
+    try:
+        os.chmod(os.path.dirname(path), 0o700)
+        if os.path.isdir(path) and not os.path.islink(path):
+            os.chmod(path, 0o700)
+        func(path)
+    except OSError:
+        pass
+
+
 def _captured_runner(cfg, adapter, project_dir: Path, settings, console, pause):
     """The one sandbox runner for pa fix's trials and checks, authorised up front.
 
@@ -301,7 +414,7 @@ def _captured_runner(cfg, adapter, project_dir: Path, settings, console, pause):
         return None, None
     runner = SandboxRunner(cfg, console=console)
     try:
-        argv = adapter.trial_argv([], [])
+        argv = adapter.probe_argv()
     except Exception:  # noqa: BLE001 - the trials will report the adapter's failure
         return runner, None
     with pause():
@@ -396,12 +509,14 @@ async def _verify(cfg, adapter, lockfile: Path, plan: FixPlan, allow_cooldown: b
                   settings, settings_error: str | None,
                   say: Callable[[str], object] = lambda _message: None,
                   runner=None, blocked: str | None = None,
-                  locked_yanks: tuple[Yank, ...] = ()) -> tuple[FixPlan, str | None]:
+                  locked_yanks: tuple[Yank, ...] = (),
+                  direct: frozenset[str] = frozenset()) -> tuple[FixPlan, str | None]:
     """Trial-resolve each planned pin. Returns (plan, None), or (original plan, reason) when trials cannot run.
 
     A trial that fails for one pin holds that pin; it does not discard the rest.
     """
     from packagealert.cli import app as app_module
+    from packagealert.remediate.adapter import Change, TrialResult, Yank
     from packagealert.remediate.verify import verify_plan
     from packagealert.sandbox.runner import SandboxRunner, bwrap_available
     from packagealert.storage.db import open_db
@@ -419,11 +534,48 @@ async def _verify(cfg, adapter, lockfile: Path, plan: FixPlan, allow_cooldown: b
         runner = SandboxRunner(cfg, console=console)
     project_dir = lockfile.parent
 
-    async def trial(pins, floats):
-        pinned = dict(pins)
-        out = await runner.run_captured(adapter.trial_argv(pins, floats), cwd=project_dir,
-                                        flags=settings.flags, extra_env=settings.env)
-        return adapter.parse_trial(out.returncode, out.stderr, timed_out=out.timed_out, pinned=pinned)
+    run = _FixTrialRunner(runner, project_dir, settings)
+
+    registry_yanks = getattr(adapter, "yanks_from_registry", False) is True
+
+    async def with_registry_yanks(result):
+        """*result* with the yanked versions its changes install, looked up in the registry.
+
+        For an adapter whose tool does not report yanks itself. A version the
+        trial installs from outside the public registry (``non_public``) is not
+        looked up, and a failed lookup adds nothing, as for the locked packages' yank check.
+        """
+        from packagealert.languages.base import PackageSpec
+        from packagealert.yanks import check_yanks
+
+        new = sorted({(c.package, c.new) for c in result.changes if c.action in ("update", "add") and c.new})
+        if not new:
+            return result
+        try:
+            db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
+            try:
+                found, _failures = await check_yanks(
+                    db, [PackageSpec(name=n, version=v, ecosystem=adapter.ecosystem,
+                                     from_public_registry=(n, v) not in result.non_public) for n, v in new])
+            finally:
+                await db.close()
+        except Exception:  # noqa: BLE001 - yank status is advisory; the trial stands without it
+            app_module.log.warning("Yank check of a %s trial failed", adapter.name, exc_info=True)
+            return result
+        extra = tuple(Yank(y.package, y.version, y.reason) for y in found)
+        return dataclasses.replace(result, yanked=(*result.yanked, *extra)) if extra else result
+
+    async def trial(pins, floats, *, force=(), lowest=None):
+        # Keywords only when given, so an adapter without them still works.
+        extra: dict = {}
+        if force:
+            extra["force"] = force
+        if lowest:
+            extra["lowest"] = lowest
+        result = await adapter.trial(pins, floats, run, **extra)
+        if registry_yanks and isinstance(result, TrialResult) and result.status == "resolved":
+            result = await with_registry_yanks(result)
+        return result
 
     async def advisories(pkgs):
         from packagealert.languages.base import PackageSpec
@@ -449,9 +601,42 @@ async def _verify(cfg, adapter, lockfile: Path, plan: FixPlan, allow_cooldown: b
         finally:
             await db.close()
 
+    parent_upgrade_hook = getattr(adapter, "parent_upgrade", None)
+
+    async def parent_upgrade(parent, package, target):
+        found = await cast("Callable[..., Awaitable[object]]", parent_upgrade_hook)(parent, package, target, run)
+        # A malformed answer is treated as none.
+        if isinstance(found, tuple) and len(found) == 2 and all(isinstance(x, str) for x in found):
+            return found
+        return None
+
+    drift: tuple = ()
+    drift_yanked: tuple = ()
+    baseline = getattr(adapter, "baseline", None)
+    if callable(baseline):
+        say("checking what re-locking the project changes with nothing pinned")
+        try:
+            found = await cast("Callable[[object], Awaitable[object]]", baseline)(run)
+            # None means the adapter could not tell; a malformed return is treated the same way.
+            if (isinstance(found, TrialResult) and found.status == "resolved"
+                    and all(isinstance(c, Change) for c in found.changes)):
+                # Drift installs versions like any trial, so they get the same yank lookup.
+                if registry_yanks:
+                    found = await with_registry_yanks(found)
+                drift, drift_yanked = found.changes, found.yanked
+        except Exception:  # noqa: BLE001 - without a baseline, trials are judged against the project lock
+            app_module.log.warning("The %s adapter's baseline failed", adapter.name, exc_info=True)
     verified = await verify_plan(plan, ecosystem=adapter.ecosystem, trial=trial, advisories=advisories, age=age,
                                  cooldown_days=cfg.sandbox.cooldown.period_days, allow_cooldown=allow_cooldown,
-                                 allow_major=allow_major, progress=say, locked_yanks=locked_yanks)
+                                 allow_major=allow_major, progress=say, locked_yanks=locked_yanks,
+                                 can_force=getattr(adapter, "can_force", False),
+                                 pins_every_copy=getattr(adapter, "pins_every_copy", False), drift=drift,
+                                 drift_yanked=drift_yanked,
+                                 # An adapter whose resolver only moves a transitive package inside its
+                                 # dependents' declared ranges holds only for majors of direct dependencies.
+                                 major_only=direct if getattr(adapter, "transitive_majors_ok", False) is True else None,
+                                 parallel=_parallel_trials(adapter),
+                                 parent_upgrade=parent_upgrade if callable(parent_upgrade_hook) else None)
     return verified, None
 
 
@@ -468,10 +653,13 @@ def _plan_json(lockfile: Path, plan: FixPlan, cmds: list[list[str]], osv_failure
         "planned": [{
             "package": p.package, "version": p.version, "target": p.target,
             "direct": p.direct, "path": p.path, "advisories": p.advisories,
-            "left_open": p.left_open, "cooldown_checked": p.cooldown_checked,
+            "left_open": p.left_open, "fixes_all": p.fixes_all, "cooldown_checked": p.cooldown_checked,
             "verified": p.verified,
             "changes": [dataclasses.asdict(c) for c in p.changes],
             "parent": {"package": p.parent[0], "version": p.parent[1]} if p.parent else None,
+            "more_parents": [{"package": n, "version": v} for n, v in p.more_parents],
+            "forced": {"under": p.forced[0], "declares": p.forced[1]} if p.forced else None,
+            "by_relock": p.by_relock,
         } for p in plan.planned],
         "held": [{
             "package": h.package, "version": h.version, "target": h.target,
@@ -483,6 +671,7 @@ def _plan_json(lockfile: Path, plan: FixPlan, cmds: list[list[str]], osv_failure
         "command_changes": [dataclasses.asdict(c) for c in plan.command_changes],
         "yanked_locked": [dataclasses.asdict(y) for y in plan.yanked_locked],
         "trial_failure": plan.trial_failure,
+        "lock_drift": [dataclasses.asdict(c) for c in plan.drift],
         "sync": {"flags": list(sync.flags), "warning": sync.warning},
         "separate": plan.separate,
         "separate_reason": plan.separate_reason,
@@ -553,14 +742,23 @@ def _print_plan(out, lockfile: Path, plan: FixPlan, cmds: list[list[str]],
             note = " (not verified)" if unverified_reason is not None else ""
             out.print(f"  {p.package} {p.version} → {p.target}  fixes {', '.join(fixed)}{note}",
                       style="green", markup=False, highlight=False)
-            if p.parent:
-                out.print(f"    with {p.parent[0]} {p.parent[1]}", markup=False, highlight=False)
+            if p.all_parents:
+                out.print("    with " + ", ".join(f"{n} {v}" for n, v in p.all_parents), markup=False, highlight=False)
+            if p.forced:
+                out.print(f"    pins {p.package} to {p.target} with a temporary override under {p.forced[0]} "
+                          f"(it declares {p.forced[1]})",
+                          style="yellow", markup=False, highlight=False)
+            if p.by_relock:
+                out.print("    re-locking the project moves it there (the lock is out of date)",
+                          style="dim", markup=False, highlight=False)
             if not p.cooldown_checked:
                 out.print("    (age unknown — cooldown not checked)", style="yellow", markup=False)
             if not p.direct and len(p.path) > 1:
                 out.print(f"    via {' ← '.join(reversed(p.path))}", style="dim", markup=False, highlight=False)
             if p.left_open:
-                out.print(f"    still open after this: {', '.join(p.left_open)}",
+                rest = (f" (fixed in {p.fixes_all}, a new major version: use --allow-major {p.package})"
+                        if p.fixes_all else "")
+                out.print(f"    still open after this: {', '.join(p.left_open)}{rest}",
                           style="yellow", markup=False, highlight=False)
         if plan.separate:
             why = f": {plan.separate_reason}" if plan.separate_reason else ""
@@ -579,6 +777,15 @@ def _print_plan(out, lockfile: Path, plan: FixPlan, cmds: list[list[str]],
         if deferred := _deferred(plan):
             out.print(f"\nNext, after applying that and re-running pa fix: {', '.join(deferred)}",
                       style="yellow", markup=False, highlight=False)
+    if plan.drift:
+        out.print(f"\n⚠ {lockfile.name} is out of date: re-locking it changes {len(plan.drift)} package(s) "
+                  f"with nothing pinned, and every command below makes these changes too:",
+                  style="yellow", markup=False, highlight=False)
+        for c in plan.drift[:10]:
+            move = f"{c.old} → {c.new}" if c.old and c.new else (f"+{c.new}" if c.new else f"-{c.old}")
+            out.print(f"  {c.package} {move}", style="yellow", markup=False, highlight=False)
+        if len(plan.drift) > 10:
+            out.print(f"  … and {len(plan.drift) - 10} more (see --format json)", style="yellow", markup=False)
     if plan.yanked_locked:
         unchanged = " (these commands do not change them)" if plan.planned else ""
         out.print(f"\nAlready locked and yanked{unchanged}:", style="yellow", markup=False)

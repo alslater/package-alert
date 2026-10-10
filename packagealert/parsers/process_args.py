@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 from packagealert.managers import manager_registry_name
 
@@ -512,6 +514,11 @@ class ParsedInstall:
     # to working_dir: measured, `pnpm -C sub install --lockfile-dir locks`
     # writes ./locks/pnpm-lock.yaml. None means the project directory.
     lockfile_dir: str | None = None
+    # Registry settings given on the command line, keyed as the manager names
+    # them (npm: "registry", "@scope:registry"). They take precedence over the
+    # environment and config files when deciding which registry a named
+    # package comes from.
+    registries: dict[str, str] = field(default_factory=dict)
 
     @property
     def registry_name(self) -> str:
@@ -535,6 +542,15 @@ def derive_site_packages(exe_path: str) -> Path | None:
     venv_root = p.parent.parent
     candidates = sorted(venv_root.glob("lib/python*/site-packages"))
     return candidates[0] if candidates else None
+
+
+# The running command's own registry settings (``ParsedInstall.registries``),
+# set by the sandbox runner for the command it runs. Lock-file parsers that
+# resolve an entry without a resolved URL from the configured registry give it
+# precedence over the environment and config files, as the tool itself does.
+# Empty everywhere else (scans, the daemon).
+COMMAND_LINE_REGISTRIES: ContextVar[Mapping[str, str]] = ContextVar(
+    "COMMAND_LINE_REGISTRIES", default=MappingProxyType({}))
 
 
 def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
@@ -1954,6 +1970,9 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     # `--prefix`/`-C` sets the directory npm installs into and reads
     # package.json / package-lock.json from.
     working_dir = prefix if isinstance(prefix, str) and prefix else None
+    # `--registry` and `--@scope:registry` choose where the named packages come from.
+    registries = {k: v for k, v in config.items() if isinstance(v, str) and v
+                  and (k == "registry" or (k.startswith("@") and k.endswith(":registry")))}
 
     def result(packages: list[str], lockfile: bool) -> ParsedInstall:
         return ParsedInstall(
@@ -1961,7 +1980,7 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
             global_install=is_global,
             # A global install's lock file is not the project's.
             is_lockfile_install=lockfile and not is_global,
-            should_gate=should_gate, working_dir=working_dir,
+            should_gate=should_gate, working_dir=working_dir, registries=registries,
         )
 
     if command == "install":

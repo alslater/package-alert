@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -581,13 +582,13 @@ def _invoke(args, monkeypatch=None):
 def test_repeated_allow_major_values_are_collected(tmp_path):
     res, seen = _invoke([str(tmp_path), "--allow-major", "Cryptography", "--allow-major", "zope_interface"])
     assert res.exit_code == 0, res.output
-    assert seen["allow_major"] == frozenset({"cryptography", "zope-interface"})
+    assert seen["allow_major"] == frozenset({"cryptography", "zope_interface"})
 
 
 def test_comma_separated_allow_major_values_are_split(tmp_path):
     res, seen = _invoke([str(tmp_path), "--allow-major", "cryptography,pip", "--allow-major", "a.b"])
     assert res.exit_code == 0, res.output
-    assert seen["allow_major"] == frozenset({"cryptography", "pip", "a-b"})
+    assert seen["allow_major"] == frozenset({"cryptography", "pip", "a.b"})
 
 
 def test_allow_major_all_is_the_wildcard(tmp_path):
@@ -758,8 +759,13 @@ async def test_trials_go_through_the_discovered_adapter(tmp_path):
     adapter = UvFixAdapter()
     (tmp_path / "uv.lock").write_text(LOCK)
     seen = []
-    real = adapter.trial_argv
-    adapter.trial_argv = lambda pins, floats=(): seen.append(pins) or real(pins, floats)  # type: ignore[method-assign]
+    real = adapter.trial
+
+    async def spy(pins, floats, run, *, force=()):
+        seen.append(pins)
+        return await real(pins, floats, run, force=force)
+
+    adapter.trial = spy  # type: ignore[method-assign]
     with patch("packagealert.remediate.adapter.discover",
                return_value=Discovery(matches=[(adapter, tmp_path / "uv.lock")], supported=["uv.lock"])):
         await _run(tmp_path, None)
@@ -1016,7 +1022,7 @@ async def test_progress_shows_each_phase_then_stops(tmp_path, monkeypatch):
     assert shown[0] == "Finding the lock file…"
     assert "Checking 3 locked packages against OSV…" in shown
     assert any(m.startswith("Checking the ages of") for m in shown)
-    assert "Verifying fixes: 1/2 — trial-resolving django 5.2.17" in shown
+    assert "Verifying fixes: 0 of 2 done — trial-resolving django 5.2.17" in shown
     assert "Trying all 2 verified fixes together" in shown
     assert shown[-1] == "<stopped>"
 
@@ -1064,7 +1070,8 @@ async def test_separate_mode_says_why(tmp_path, capsys):
 
 async def test_separate_reason_is_in_the_json(tmp_path, capsys):
     assert await _run(tmp_path, LOCK, multi_fail=True) == 1
-    assert json.loads(capsys.readouterr().out)["separate_reason"] == "no resolution exists with all of them pinned"
+    assert json.loads(capsys.readouterr().out)["separate_reason"] == (
+        "no resolution exists with all of them pinned (error: No solution found when resolving dependencies)")
 
 
 def test_already_locked_yank_is_listed_when_everything_is_held():
@@ -1211,3 +1218,320 @@ async def test_sync_selection_commands_follow_the_no_network_setting(tmp_path, n
     settings = ProjectRunSettings(None, {}, [], no_network, False, False, False)
     await _sync_selection(Adapter(), tmp_path, settings, Runner())
     assert [kw.get("allow_network", True) for kw in calls] == [not no_network]
+
+
+def test_allow_major_accepts_scoped_npm_names():
+    from packagealert.cli.fix_cmd import _parse_allow_major
+    assert _parse_allow_major(["@babel/core,lodash.merge", "Django_Rest"]) == frozenset(
+        {"@babel/core", "lodash.merge", "django_rest"})
+
+
+async def test_in_copy_runs_in_a_scratch_copy_and_cleans_up(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    project = tmp_path / "p"
+    project.mkdir()
+    (project / "package.json").write_text('{"name": "p"}')
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+    cwds = []
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            assert scratch is True and cwd != project
+            cwds.append(cwd)
+            (cwd / "package-lock.json").write_text("{}")
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy(["package.json", "package-lock.json"], [["npm", "install"]],
+                            edit=lambda d: (d / "package.json").write_text('{"name": "p", "x": 1}'))
+    assert out.files == {"package.json": b'{"name": "p", "x": 1}', "package-lock.json": b"{}"}
+    assert (project / "package.json").read_text() == '{"name": "p"}'          # project untouched
+    assert not cwds[0].exists()                                              # scratch removed
+
+
+async def test_in_copy_stops_after_a_failing_command_and_still_cleans_up(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+    calls = []
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            calls.append(argv)
+            return CapturedRun(1, "", "npm error code ETARGET")
+
+    run = fix_cmd._FixTrialRunner(Runner(), tmp_path, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy([], [["npm", "install"], ["npm", "update", "x"]])
+    assert len(calls) == 1 and out.results[0].returncode == 1
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
+async def test_in_copy_never_follows_a_symlink_in_or_out(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    project = tmp_path / "p"
+    project.mkdir()
+    secret = tmp_path / "secret"
+    secret.write_text("s3cret")
+    (project / "package.json").symlink_to(secret)
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            assert not (cwd / "package.json").exists()                     # not copied in
+            (cwd / "package-lock.json").symlink_to(secret)                 # the command plants one
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy(["package.json", "package-lock.json"], [["npm", "install"]])
+    assert out.files == {"package.json": None, "package-lock.json": None}
+
+
+@pytest.mark.parametrize("name", ["../x", "/etc/passwd", "a/../../x", ""])
+async def test_in_copy_refuses_names_outside_the_project(tmp_path, monkeypatch, name):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+    run = fix_cmd._FixTrialRunner(object(), tmp_path, ProjectRunSettings(None, {}, [], False, False, False, False))
+    with pytest.raises(ValueError, match="project-relative"):
+        await run.in_copy([name], [["npm", "install"]])
+
+
+def test_forced_fix_is_labelled_in_text_and_json():
+    import io
+
+    from rich.console import Console
+
+    from packagealert.cli.fix_cmd import _plan_json, _print_plan
+    from packagealert.remediate.planner import FixPlan, PlannedFix
+
+    fix = PlannedFix(package="qs", version="6.7.0", target="6.14.0", direct=False, path=["p", "express", "qs"],
+                     advisories=["GHSA-q"], left_open=[], cooldown_checked=True, verified=True,
+                     forced=("express", "qs@6.7.0"))
+    plan = FixPlan(planned=[fix])
+    data = _plan_json(Path("/p/package-lock.json"), plan, [], 0, None, {})
+    assert data["planned"][0]["forced"] == {"under": "express", "declares": "qs@6.7.0"}
+    buf = io.StringIO()
+    _print_plan(Console(file=buf, width=200), Path("/p/package-lock.json"), plan, [], 0, checked=1)
+    assert "pins qs to 6.14.0 with a temporary override under express (it declares qs@6.7.0)" in buf.getvalue()
+    assert "forces" not in buf.getvalue()
+    unforced = _plan_json(Path("/p/package-lock.json"), FixPlan(planned=[dataclasses.replace(fix, forced=None)]),
+                          [], 0, None, {})
+    assert unforced["planned"][0]["forced"] is None
+
+
+async def _npm_fix_run(tmp_path, capsys, monkeypatch, *, widen_qs, deprecated=frozenset(), qs_resolved=None,
+                       drift_resolved=None):
+    """pa fix over the npm fixture project; with *widen_qs* every declaration of qs admits 6.14.0.
+
+    *deprecated* is the (name, version) pairs the public registry reports as
+    deprecated releases; *qs_resolved* replaces the URL the override trial's
+    qs copies resolve from. With *drift_resolved*, a plain re-lock moves
+    @babel/parser 7.29.9 to 7.29.10, resolved from that URL.
+    """
+    import shutil
+
+    from packagealert.cli.fix_cmd import _run_fix
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    fx = Path(__file__).resolve().parents[2] / "fixtures" / "npm_trial"
+    project = tmp_path / "project"
+    project.mkdir()
+    shutil.copy(fx / "package.json", project / "package.json")
+    lock = json.loads((fx / "before.json").read_text())
+    if widen_qs:
+        for info in lock["packages"].values():
+            if "qs" in (info.get("dependencies") or {}):
+                info["dependencies"]["qs"] = "^6.7.0"
+    (project / "package-lock.json").write_text(json.dumps(lock))
+    before_bytes = (project / "package-lock.json").read_bytes()
+    monkeypatch.setitem(_VULNS, "qs", [_adv("GHSA-q", "6.14.0")])
+    scratch_cwds = []
+    written = []
+
+    async def run_captured(_self, argv, *, cwd, scratch=False, **_kw):
+        if scratch:
+            scratch_cwds.append(cwd)
+            overrides = json.loads((cwd / "package.json").read_text()).get("overrides")
+            if overrides:
+                written.append(overrides)
+                after = json.loads((fx / "override_after.json").read_text())
+                for path, info in after["packages"].items():
+                    if widen_qs and "qs" in (info.get("dependencies") or {}):
+                        info["dependencies"]["qs"] = "^6.7.0"
+                    if qs_resolved is not None and path.endswith("node_modules/qs"):
+                        info["resolved"] = qs_resolved
+                (cwd / "package-lock.json").write_text(json.dumps(after))
+            if drift_resolved is not None:
+                # npm re-locks @babel/parser in every run, the override trial's included.
+                relocked = json.loads((cwd / "package-lock.json").read_text())
+                parser = relocked["packages"]["node_modules/@babel/parser"]
+                parser.update(version="7.29.10", resolved=drift_resolved)
+                (cwd / "package-lock.json").write_text(json.dumps(relocked))
+        return CapturedRun(0, "", "")
+
+    async def check_yanks(_db, packages):
+        from packagealert.yanks import YankedVersion
+
+        # As check_yanks does, a package not from the public registry is not looked up.
+        return [YankedVersion("npm", p.name, p.version, "Bad release.") for p in packages
+                if p.from_public_registry and (p.name, p.version) in deprecated], 0
+
+    a, b, c, d = _patches()
+    settings = ProjectRunSettings(None, {}, [], False, False, False, False)
+    with contextlib.chdir(project), a, b, c, d, \
+            patch("packagealert.sandbox.runner.SandboxRunner.run_captured", run_captured), \
+            patch("packagealert.sandbox.runner.bwrap_available", return_value=True), \
+            patch("packagealert.cli.run_settings.resolve_project_run_settings", return_value=settings), \
+            patch("packagealert.cli.app._publication_age", AsyncMock(return_value=None)), \
+            patch("packagealert.yanks.check_yanks", AsyncMock(side_effect=check_yanks)), \
+            patch("packagealert.languages.node_fix.npm_trial.fetch_package_document",
+                  AsyncMock(return_value=None)), \
+            patch("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch"):
+        await _run_fix(load_config(None), project, allow_major=frozenset(), allow_cooldown=False, fmt="json")
+    assert (project / "package-lock.json").read_bytes() == before_bytes  # project untouched
+    assert (project / "package.json").read_bytes() == (fx / "package.json").read_bytes()
+    assert scratch_cwds and not any(cwd.exists() for cwd in scratch_cwds)  # copies removed
+    return json.loads(capsys.readouterr().out), written
+
+
+async def test_npm_project_plans_a_forced_override_inside_the_parents_ranges(tmp_path, capsys, monkeypatch):
+    out, written = await _npm_fix_run(tmp_path, capsys, monkeypatch, widen_qs=True)
+    qs = next(p for p in out["planned"] if p["package"] == "qs")
+    assert qs["forced"]["under"] == "express" and qs["target"] == "6.14.0"
+    assert ["npm", "pkg", "set", "overrides[qs@>5 <6.14.0]=6.14.0"] in out["commands"]
+    assert written and all(o == {"qs@>5 <6.14.0": "6.14.0"} for o in written)  # the trial's own key
+
+
+async def test_npm_project_holds_an_override_past_a_parents_exact_pin(tmp_path, capsys, monkeypatch):
+    # express 4.17.1 declares qs 6.7.0 exactly: overriding it could break express, so it is held.
+    out, written = await _npm_fix_run(tmp_path, capsys, monkeypatch, widen_qs=False)
+    assert all(p["package"] != "qs" for p in out["planned"]) and written == []
+    qs = next(h for h in out["held"] if h["package"] == "qs")
+    assert qs["reason"] == "blocked" and "pins qs@6.7.0; upgrade express" in qs["detail"]
+    assert not any("overrides" in " ".join(c) for c in out["commands"])
+
+
+async def test_npm_project_holds_a_deprecated_target(tmp_path, capsys, monkeypatch):
+    # npm has no yank; a release its maintainer deprecated is treated as one.
+    out, _written = await _npm_fix_run(tmp_path, capsys, monkeypatch, widen_qs=True,
+                                       deprecated=frozenset({("qs", "6.14.0")}))
+    assert all(p["package"] != "qs" for p in out["planned"])
+    qs = next(h for h in out["held"] if h["package"] == "qs")
+    assert qs["reason"] == "would install a yanked version" and "qs 6.14.0, which is yanked (Bad release.)" in qs["detail"]
+
+
+async def test_npm_project_does_not_look_up_a_privately_resolved_target(tmp_path, capsys, monkeypatch):
+    # A qs from a private registry is not the public qs, whatever the public one's deprecations.
+    out, _written = await _npm_fix_run(tmp_path, capsys, monkeypatch, widen_qs=True,
+                                       deprecated=frozenset({("qs", "6.14.0")}),
+                                       qs_resolved="https://npm.corp.example/qs/-/qs-6.14.0.tgz")
+    assert [p["target"] for p in out["planned"] if p["package"] == "qs"] == ["6.14.0"]
+
+
+async def test_lock_drift_installing_a_deprecated_release_holds_every_fix(tmp_path, capsys, monkeypatch):
+    out, _written = await _npm_fix_run(
+        tmp_path, capsys, monkeypatch, widen_qs=True, deprecated=frozenset({("@babel/parser", "7.29.10")}),
+        drift_resolved="https://registry.npmjs.org/@babel/parser/-/parser-7.29.10.tgz")
+    assert out["planned"] == []
+    qs = next(h for h in out["held"] if h["package"] == "qs")
+    assert qs["reason"] == "would install a yanked version"
+    assert ("re-locking the project as it stands would install a yanked version: would install "
+            "@babel/parser 7.29.10, which is yanked") in qs["detail"]
+    assert any(c["package"] == "@babel/parser" and c["new"] == "7.29.10" for c in out["lock_drift"])
+
+
+async def test_lock_drift_from_a_private_registry_is_not_looked_up(tmp_path, capsys, monkeypatch):
+    out, _written = await _npm_fix_run(
+        tmp_path, capsys, monkeypatch, widen_qs=True, deprecated=frozenset({("@babel/parser", "7.29.10")}),
+        drift_resolved="https://npm.corp.example/@babel/parser/-/parser-7.29.10.tgz")
+    assert [p["package"] for p in out["planned"]] == ["qs"]
+
+
+def test_lock_drift_is_reported_in_text_and_json():
+    import io
+
+    from rich.console import Console
+
+    from packagealert.cli.fix_cmd import _plan_json, _print_plan
+    from packagealert.remediate.adapter import Change
+    from packagealert.remediate.planner import FixPlan
+
+    plan = FixPlan(drift=(Change("update", "ajv", "6.12.6", "8.20.0"),))
+    data = json.loads(json.dumps(_plan_json(Path("/p/package-lock.json"), plan, [], 0, None, {})))
+    assert data["lock_drift"] == [{"action": "update", "package": "ajv", "old": "6.12.6", "new": "8.20.0",
+                                   "fork_versions": []}]
+    buf = io.StringIO()
+    _print_plan(Console(file=buf, width=200), Path("/p/package-lock.json"), plan, [], 0, checked=1)
+    out = buf.getvalue()
+    assert "package-lock.json is out of date" in out and "ajv 6.12.6 → 8.20.0" in out
+
+
+@pytest.mark.parametrize("value, expected", [(None, 1), (4, 4), (0, 1), (-2, 1), (True, 1), ("4", 1), (99, 8)])
+def test_parallel_trials_comes_from_the_adapter_within_bounds(value, expected):
+    from types import SimpleNamespace
+
+    from packagealert.cli.fix_cmd import _parallel_trials
+
+    adapter = SimpleNamespace() if value is None else SimpleNamespace(parallel_trials=value)
+    assert _parallel_trials(adapter) == expected
+
+
+def test_npm_adapter_verifies_several_items_at_once():
+    from packagealert.cli.fix_cmd import _parallel_trials
+    from packagealert.languages.node_fix.npm import NpmFixAdapter
+
+    assert _parallel_trials(NpmFixAdapter()) > 1
+
+
+def test_a_partial_same_line_fix_says_what_the_rest_needs():
+    import io
+
+    from rich.console import Console
+
+    from packagealert.cli.fix_cmd import _plan_json, _print_plan
+    from packagealert.remediate.planner import FixPlan, PlannedFix
+
+    fix = PlannedFix(package="postcss-selector-parser", version="6.1.2", target="6.1.4", direct=False,
+                     path=["app", "postcss-selector-parser"], advisories=["GHSA-rj75", "GHSA-w9m9"],
+                     left_open=["GHSA-rj75"], cooldown_checked=True, verified=True, fixes_all="7.1.6")
+    plan = FixPlan(planned=[fix])
+    buf = io.StringIO()
+    _print_plan(Console(file=buf, width=300), Path("/p/package-lock.json"), plan, [], 0, checked=1)
+    assert ("still open after this: GHSA-rj75 (fixed in 7.1.6, a new major version: "
+            "use --allow-major postcss-selector-parser)") in buf.getvalue()
+    data = _plan_json(Path("/p/package-lock.json"), plan, [], 0, None, {})
+    assert data["planned"][0]["fixes_all"] == "7.1.6"
+
+
+async def test_in_copy_runs_edits_between_commands_in_order(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "p"
+    project.mkdir()
+    (project / "package.json").write_text("first")
+    seen = []
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            seen.append((argv[1], (cwd / "package.json").read_text()))
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy(["package.json"], [["npm", "install"],
+                                               lambda d: (d / "package.json").write_text("second"),
+                                               ["npm", "update"]])
+    assert seen == [("install", "first"), ("update", "second")]
+    assert len(out.results) == 2 and out.files == {"package.json": b"second"}
