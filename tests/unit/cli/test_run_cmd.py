@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from typer.testing import CliRunner
 
 from packagealert.cli.app import app
@@ -217,6 +218,18 @@ class TestProjectRunConfig:
         result, _ = _invoke(["run", "uv", "sync"],
                             proj_cfg=_proj_cfg())
         assert ".pa-run.toml" in result.output
+
+    @pytest.mark.parametrize(("args", "announced"), [
+        (["run", "npm", "install", "lodash"], True),
+        (["run", "bash"], True),
+        (["run", "npm", "pkg", "set", "overrides[qs@<6.14.0]=6.14.0"], False),   # passed straight through
+        (["run", "npm", "--version"], False),
+    ])
+    def test_proj_cfg_is_announced_only_for_a_command_it_applies_to(self, args, announced):
+        result, _ = _invoke(args, proj_cfg=_proj_cfg())
+        assert ("/project/.pa-run.toml" in result.output) is announced
+        if announced:
+            assert "Using run config: /project/.pa-run.toml" in result.output
 
     def test_proj_cfg_error_exits_1(self):
         err = ProjectRunConfigError(Path("/project/.pa-run.toml"), "unknown key: foo")

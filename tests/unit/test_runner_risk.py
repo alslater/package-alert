@@ -3330,3 +3330,53 @@ def test_abbreviated_pipenv_option_value_does_not_switch_off_the_lockfile_scan(t
     queries, blocked, _ = _runner()._resolve_query_packages(ctx)
     assert blocked is None
     assert _names(queries) == ["evilpkg"]
+
+
+def test_a_privately_resolved_lock_entry_is_not_looked_up_publicly(tmp_path):
+    """A lock entry from a private registry, git or a file is not the public package of that name:
+    neither the risk nor the cooldown gate may look it up on the public registry."""
+    import json
+
+    from packagealert.parsers.process_args import parse_npm_args
+
+    lock = {"name": "app", "lockfileVersion": 3, "packages": {
+        "": {"name": "app", "dependencies": {"public-pkg": "^1.0.0", "@corp/internal": "^1.0.0"}},
+        "node_modules/public-pkg": {"version": "1.0.0",
+                                    "resolved": "https://registry.npmjs.org/public-pkg/-/public-pkg-1.0.0.tgz"},
+        "node_modules/@corp/internal": {"version": "1.0.0",
+                                        "resolved": "https://npm.corp.example/@corp/internal/-/internal-1.0.0.tgz"},
+    }}
+    (tmp_path / "package.json").write_text('{"name": "app"}')
+    (tmp_path / "package-lock.json").write_text(json.dumps(lock))
+    parsed = parse_npm_args(["npm", "install"])
+    assert parsed is not None
+    ctx = _Context(argv=["npm", "install"], parsed=parsed, cwd=tmp_path)
+    queries, blocked_reason, _source = _runner()._resolve_query_packages(ctx)
+    assert blocked_reason is None
+    assert [(n, v) for _e, n, v in queries] == [("public-pkg", "1.0.0")]
+
+
+@pytest.mark.asyncio
+async def test_lockfile_gate_does_not_score_a_package_from_outside_the_public_registry():
+    """The shell gate judges only public lock entries, as a direct command's gate does: a private 'reqeusts' is not
+    the typosquat of the public 'requests', and its name is not looked up."""
+    import dataclasses
+
+    r = _runner(on_typosquat="block")
+    scan = _project_scan()
+    private = dataclasses.replace(scan, pinned=[dataclasses.replace(p, from_public_registry=False) for p in scan.pinned])
+    scored: list = []
+
+    async def recording_score(engine, keys, **kw):
+        from packagealert.scoring import ScoreOutcome
+        scored.extend(keys)
+        return ScoreOutcome(reports={}, failures=0)
+
+    with (
+        _db_patch(),
+        patch("packagealert.parsers.lockfiles.scan_project", return_value=private),
+        _engine_patch(typo=_typo(True, "requests", 1, 20), report=_report(20)),
+        patch("packagealert.scoring.score_packages", recording_score),
+    ):
+        ok = await r._risk_check_lockfiles(Path("/tmp"))
+    assert ok is True and scored == []

@@ -515,3 +515,41 @@ def test_an_unorderable_listed_version_falls_back_unverified():
         _f("A", ["1.1"], [[{"introduced": "0"}, {"fixed": "1.1"}]], version="1.0", affected_versions=["not!a!version"]),
     ], "PyPI")
     assert rec is not None and rec.version == "1.1" and not rec.verified
+
+
+@pytest.mark.parametrize("old, new, crosses", [
+    ("0.3.1", "0.4.0", True), ("0.0.3", "0.0.4", True), ("0.3.1", "0.3.9", False),
+    ("1.2.0", "1.9.0", False), ("1.9.0", "2.0.0", True), ("0.9.0", "1.0.0", True),
+])
+def test_npm_major_line_follows_semver_caret(old, new, crosses):
+    from packagealert.osv.remediation import _generic_key, _major_for
+    a, b = _major_for("npm", _generic_key(old)), _major_for("npm", _generic_key(new))
+    assert (a != b) is crosses
+
+
+def test_pypi_major_is_the_first_release_number():
+    from packagealert.osv.remediation import _major_for, _pypi_key
+    assert _major_for("PyPI", _pypi_key("0.3.1")) == _major_for("PyPI", _pypi_key("0.4.0"))
+
+
+# --- a same-line alternative when the full fix needs a new major ---
+
+def _psp(adv_id, fixed):
+    return _f(adv_id, [fixed], [[{"introduced": "0"}, {"fixed": fixed}]], package="postcss-selector-parser",
+              version="6.1.2", eco="npm")
+
+
+def test_a_major_fix_comes_with_the_best_same_line_alternative():
+    rec = recommend_fix("6.1.2", [_psp("GHSA-rj75", "7.1.6"), _psp("GHSA-w9m9", "6.1.4")], "npm")
+    assert rec is not None and (rec.version, rec.major_upgrade) == ("7.1.6", True)
+    assert (rec.same_line_version, rec.same_line_unfixed) == ("6.1.4", ("GHSA-rj75",))
+
+
+def test_no_same_line_alternative_when_nothing_on_the_line_fixes_anything():
+    rec = recommend_fix("6.1.2", [_psp("GHSA-rj75", "7.1.6")], "npm")
+    assert rec is not None and rec.major_upgrade and rec.same_line_version is None
+
+
+def test_no_same_line_alternative_when_the_fix_is_on_the_line():
+    rec = recommend_fix("6.1.2", [_psp("GHSA-w9m9", "6.1.4")], "npm")
+    assert rec is not None and not rec.major_upgrade and rec.same_line_version is None

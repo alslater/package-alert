@@ -5,7 +5,7 @@ import logging
 import os
 import shlex
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,12 +13,13 @@ import psutil
 
 from packagealert.config import WatchConfig
 from packagealert.languages import registry as lang_registry
-from packagealert.languages.base import ProcessInstall
+from packagealert.languages.base import PackageSpec, ProcessInstall
 from packagealert.languages.registry import _normalise_process_name
 from packagealert.managers import manager_registry_name
 from packagealert.models.events import PackageEvent, normalise_ecosystem
 from packagealert.monitors.base import AbstractMonitor
 from packagealert.parsers.process_args import (
+    COMMAND_LINE_REGISTRIES,
     InvalidInvocationDirectory,
     derive_site_packages,
     resolve_invocation_dirs,
@@ -71,6 +72,16 @@ class _PendingInstall:
     # lockfile scan, not just an edge case)
     pid: int | None = None
     pid_create_time: float | None = None
+    # The command's own --registry / --@scope:registry (ProcessInstall.registries): the
+    # lock scan after it exits applies them to entries without a resolved URL, as the
+    # sandbox does while a command runs (COMMAND_LINE_REGISTRIES).
+    registries: dict[str, str] = field(default_factory=dict)
+    # Whether the lock file is scanned when the process exits (False for a record
+    # that only holds deferred events), and the events held until then: a package
+    # from a private registry, git or a local path is judged on its source alone,
+    # so it is emitted once the install has written it.
+    scan_lockfile: bool = True
+    deferred_events: list[PackageEvent] = field(default_factory=list)
 
 
 def _moved_project_dir(cwd: Path, parsed: ProcessInstall) -> Path | None:
@@ -94,6 +105,28 @@ def _moved_lockfile_dir(cwd: Path, parsed: ProcessInstall, project: Path | None)
     if not lockfile_dir:
         return None
     return resolve_lockfile_dir(cwd, lockfile_dir, project or cwd)
+
+
+def _named_package_public(spec: PackageSpec, parsed: ProcessInstall, project_dir: Path | None) -> bool:
+    """Whether a package named on a command line comes from the public registry.
+
+    The spec says whether its source is a registry at all (a git or local spec
+    is not); the owning language's optional ``explicit_package_public`` hook
+    says which registry it is configured to come from, as for a sandboxed
+    command. Without the hook, or when it fails, the package counts as public.
+    """
+    if getattr(spec, "from_public_registry", True) is False:
+        return False
+    lang = lang_registry.for_ecosystem(spec.ecosystem)
+    try:
+        hook = getattr(lang, "explicit_package_public", None) if lang is not None else None
+        if lang is None or not callable(hook) or project_dir is None:
+            return True
+        # As the language writes the package spec, which is what the hook parses.
+        return hook(lang.serialise_package_spec(spec.name, spec.version), parsed, project_dir) is not False
+    except Exception:
+        log.warning("explicit_package_public raised for %s — treating it as public", spec.name, exc_info=True)
+        return True
 
 
 class ProcessMonitor(AbstractMonitor):
@@ -360,6 +393,7 @@ class ProcessMonitor(AbstractMonitor):
                             lockfile_dir=moved_lockfile,
                             pid=event_pid,
                             pid_create_time=create_time,
+                            registries=dict(getattr(parsed, "registries", None) or {}),
                         )
                         ppid = info.get("ppid")
                         parent_name = ""
@@ -393,11 +427,23 @@ class ProcessMonitor(AbstractMonitor):
                         site_packages_dir=site_pkgs,
                         pid=event_pid,
                         pid_create_time=create_time,
+                        from_public_registry=_named_package_public(spec, parsed, event_project_path),
                     )
                     log.info(
                         "Detected install: %s %s@%s via %s",
                         event.ecosystem, event.package_name, event.version, event.manager,
                     )
+                    if not event.from_public_registry and project_path:
+                        # Judged on its source alone: held until the process exits and the
+                        # install has written the package (see _PendingInstall).
+                        pending = self._pending.get(process_identity)
+                        if pending is None:
+                            pending = self._pending[process_identity] = _PendingInstall(
+                                manager=parsed.manager, registry_name=manager_registry_name(parsed.manager),
+                                cwd=project_path, site_pkgs=site_pkgs, pid=event_pid, pid_create_time=create_time,
+                                scan_lockfile=False)
+                        pending.deferred_events.append(event)
+                        continue
                     await self._queue.put(event)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 pass
@@ -413,7 +459,10 @@ class ProcessMonitor(AbstractMonitor):
         finished = self._pending.keys() - current_processes
         for process_identity in finished:
             pending = self._pending.pop(process_identity)
-            await self._emit_from_lockfile(pending)
+            for event in pending.deferred_events:
+                await self._queue.put(event.model_copy(update={"timestamp": datetime.now(UTC)}))
+            if pending.scan_lockfile:
+                await self._emit_from_lockfile(pending)
 
         self._seen_processes &= current_processes  # gc dead processes
 
@@ -443,6 +492,7 @@ class ProcessMonitor(AbstractMonitor):
             seen.add(pattern)
             candidate = lock_dir / pattern
             if candidate.exists():
+                token = COMMAND_LINE_REGISTRIES.set(pending.registries)
                 try:
                     packages = lang.parse_lockfile(candidate)
                 except Exception:
@@ -451,6 +501,8 @@ class ProcessMonitor(AbstractMonitor):
                         getattr(lang, "name", "?"), candidate, exc_info=True,
                     )
                     continue
+                finally:
+                    COMMAND_LINE_REGISTRIES.reset(token)
                 if packages:
                     break
 
@@ -475,6 +527,7 @@ class ProcessMonitor(AbstractMonitor):
                 site_packages_dir=pending.site_pkgs,
                 pid=pending.pid,
                 pid_create_time=pending.pid_create_time,
+                from_public_registry=getattr(spec, "from_public_registry", True) is not False,
             )
             await self._queue.put(event)
 

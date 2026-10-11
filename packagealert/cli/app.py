@@ -1418,12 +1418,17 @@ async def _run_scan_project(
     to_query = list(result.pinned)
     if scan_unpinned:
         to_query.extend(result.unpinned)
+    # A package from a private registry, git or a local path is not the public one of
+    # that name: its name is not sent to OSV or the risk lookups, nor judged by the
+    # public package's advisories. (The yank check makes the same distinction itself.)
+    public = [p for p in to_query if getattr(p, "from_public_registry", True) is not False]
+    not_public = len(to_query) - len(public)
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
-    findings, osv_failures = await _query_osv_findings(cfg, db, to_query)
+    findings, osv_failures = await _query_osv_findings(cfg, db, public)
 
     risks, risk_failures = await _risk_pass(
-        cfg, db, to_query, skip=no_risk, root=root, installed=installed
+        cfg, db, public, skip=no_risk, root=root, installed=installed
     )
 
     yanked: list = []
@@ -1494,6 +1499,8 @@ async def _run_scan_project(
             # and how many could not be checked. See packagealert.yanks.
             "yanked": yanked,
             "yank_failures": yank_failures,
+            # Locked packages from a private registry, git or a local path, not looked up publicly.
+            "not_public": not_public,
         }, indent=2))
         return
 
@@ -1597,12 +1604,15 @@ async def _run_scan_project(
     # checked" and "(67 packages checked)" on adjacent lines. The unchecked
     # count is stated alongside rather than silently dropped, so the two numbers
     # still add up to everything that was attempted.
-    checked = len(to_query) - osv_failures
+    checked = len(public) - osv_failures
     unchecked_note = f", {osv_failures} unchecked" if osv_failures else ""
     in_packages = f" in {vulnerable_packages} package{'' if vulnerable_packages == 1 else 's'}" if findings else ""
     console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow]{in_packages}, "
                   f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] "
                   f"({checked} packages checked{unchecked_note})")
+    if not_public:
+        console.print(f"[dim]{not_public} locked package(s) come from a private registry, git or a local path and "
+                      f"were not looked up in public advisory databases.[/dim]")
 
 
 def open_html_in_browser(html: str) -> None:
@@ -2229,7 +2239,7 @@ def run_cmd(
     .pa-run.toml and CLI only (PA_RUN_OPTS does not support --env). Boolean
     options (no_network, allow_external_lockfiles) are OR-ed — once set to
     true in any source they cannot be unset by another. When a .pa-run.toml
-    is used, its path is printed to the console.
+    is used for a sandboxed command, its path is printed to the console.
     """
     command = list(ctx.args)
     if not command:
@@ -2243,11 +2253,16 @@ def run_cmd(
         resolve_project_run_settings,
         warn_invalid_flag_tokens,
     )
-    from packagealert.sandbox.runner import _parse_flags
+    from packagealert.languages import registry as lang_registry
+    from packagealert.sandbox.runner import _SHELL_NAMES, _parse_flags, _try_parse
 
+    # A command the runner does not recognise (npm pkg set, npm --version) is run
+    # as it is, without the sandbox, so the run config does not apply to it.
+    lang_registry.load()
+    sandboxed = Path(command[0]).name in _SHELL_NAMES or _try_parse(command) is not None
     try:
         _settings = resolve_project_run_settings(
-            Path.cwd(), cfg, allow_project_env=allow_project_env, out=console,
+            Path.cwd(), cfg, allow_project_env=allow_project_env, out=console, announce=sandboxed,
         )
     except RunSettingsError:
         raise typer.Exit(1) from None

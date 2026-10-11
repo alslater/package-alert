@@ -21,8 +21,8 @@ class _Adapter:
     def load_graph(self, lockfile): raise NotImplementedError
     def locked_packages(self, lockfile): raise NotImplementedError
     def commands(self, plan): raise NotImplementedError
-    def trial_argv(self, pins, float_packages=()): raise NotImplementedError
-    def parse_trial(self, returncode, stderr, *, timed_out=False, pinned=None): raise NotImplementedError
+    def probe_argv(self): raise NotImplementedError
+    async def trial(self, pins, floats, run, *, force=()): raise NotImplementedError
 
 
 class _Lang:
@@ -133,7 +133,7 @@ def test_discover_survives_raising_names_and_iteration(tmp_path):
 
 
 @pytest.mark.parametrize("method", ["find_lockfile", "load_graph", "locked_packages", "commands",
-                                    "trial_argv", "parse_trial"])
+                                    "probe_argv", "trial"])
 def test_adapter_with_a_non_callable_operation_is_skipped(tmp_path, caplog, method):
     (tmp_path / "uv.lock").write_text("")
     good = _Adapter("uv", "uv.lock")
@@ -156,3 +156,20 @@ def test_adapter_with_a_malformed_string_attribute_is_skipped(tmp_path, caplog, 
         found = discover(tmp_path, [_Lang("third-party", [broken]), _Lang("python", [good])])
     assert found.matches == [(good, tmp_path / "uv.lock")]
     assert "Unusable fix adapter" in caplog.text
+
+
+def test_adapter_without_trial_is_skipped(tmp_path):
+    class Old:
+        name, ecosystem, lockfile_name = "old", "PyPI", "x.lock"
+        def find_lockfile(self, root): return root / "x.lock"
+        def load_graph(self, lockfile): ...
+        def locked_packages(self, lockfile): ...
+        def commands(self, plan, project_dir=None, sync_flags=()): ...
+        def trial_argv(self, pins, floats=()): ...
+        def parse_trial(self, *a, **k): ...
+
+    class Lang:
+        name = "x"
+        def fix_adapters(self): return [Old()]
+
+    assert discover(tmp_path, [Lang()]).matches == []

@@ -2940,7 +2940,7 @@ class PythonLanguage:
     def fix_adapters(self) -> list:
         """`pa fix` adapters for Python package managers (uv only so far).
 
-        Optional, provisional hook: see the fix_adapters() comment in base.py.
+        Optional hook: see the fix_adapters() comment in base.py.
         Imported here so loading the plugin does not load pa fix.
         """
         from packagealert.languages.python_fix.uv import UvFixAdapter
