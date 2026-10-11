@@ -236,7 +236,7 @@ def render_status(
     )
     if data.recent_alerts:
         for alert in data.recent_alerts:
-            ts = datetime.fromtimestamp(alert.alerted_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display; to_dict() uses UTC
+            ts = datetime.fromtimestamp(alert.alerted_at).strftime("%Y-%m-%d %H:%M")  # local time for display; to_dict() uses UTC
             colour = _SEV_COLOUR.get(alert.severity, "white")
             pkg = escape(alert.package)
             eco = escape(alert.ecosystem)

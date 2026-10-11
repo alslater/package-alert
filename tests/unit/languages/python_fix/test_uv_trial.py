@@ -119,7 +119,7 @@ def test_forked_update_lines_are_parsed():
     r = parse_trial(rc, err)
     assert r.status == "resolved"
     assert r.changes == (
-        Change("update", "aiohttp", "3.14.1", "3.14.4", ("3.14.1", "3.14.4")),
+        Change("update", "aiohttp", "3.14.1", "3.14.5", ("3.14.1", "3.14.5")),
         Change("update", "litellm", "1.88.1", "1.88.6"),
         Change("update", "yarl", "1.22.0", "1.25.1", ("1.22.0", "1.25.1")),
     )

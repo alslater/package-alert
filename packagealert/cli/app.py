@@ -723,7 +723,7 @@ async def _run_alerts(cfg, limit: int):
         rows = await cur.fetchall()
 
     for row in rows:
-        ts = dt.datetime.fromtimestamp(row["alerted_at"]).isoformat(timespec="seconds")  # noqa: DTZ006 — local time for display
+        ts = dt.datetime.fromtimestamp(row["alerted_at"]).isoformat(timespec="seconds")  # local time for display
         advisory_or_score = row["advisory_id"] or (
             f"risk:{row['risk_score']}" if row["risk_score"] else ""
         )
@@ -2400,7 +2400,7 @@ async def _schedule_list(cfg) -> None:
 
     for p in projects:
         last = (
-            datetime.datetime.fromtimestamp(p.last_scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
+            datetime.datetime.fromtimestamp(p.last_scanned_at).strftime("%Y-%m-%d %H:%M")  # local time for display
             if p.last_scanned_at
             else "never"
         )
@@ -2454,7 +2454,7 @@ async def _scans_list(cfg, project_path: str, limit: int) -> None:
     table.add_column("Highest Severity")
 
     for r in records:
-        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
+        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # local time for display
         sev = r.max_severity or "—"
         colour = _SEV_COLOUR.get(r.max_severity or "", "dim")
         table.add_row(
@@ -2538,7 +2538,7 @@ async def _scans_listall(cfg, limit: int) -> None:
     table.add_column("Highest Severity")
 
     for r in records:
-        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
+        date_str = datetime.datetime.fromtimestamp(r.scanned_at).strftime("%Y-%m-%d %H:%M")  # local time for display
         sev = r.max_severity or "—"
         colour = _SEV_COLOUR.get(r.max_severity or "", "dim")
         table.add_row(
@@ -2593,7 +2593,7 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
     osv_failures = getattr(record, "osv_failures", 0) or 0
     root_str = record.project_path
     sources = record.sources
-    date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")  # noqa: DTZ006 — local time for display
+    date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")  # local time for display
 
     if fmt == "json":
         print(jsonlib.dumps({

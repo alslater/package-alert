@@ -12,6 +12,7 @@ Only command lines the tool ACCEPTS are recorded.
 """
 import argparse
 import contextlib
+import importlib.metadata
 import io
 import json
 import sys
@@ -91,7 +92,15 @@ def _truth(tool, ns):
     packages = {"install": getattr(ns, "package_spec", None), "upgrade": getattr(ns, "packages", None),
                 "inject": getattr(ns, "dependencies", None),
                 "reinstall": [ns.package] if getattr(ns, "package", None) and cmd == "reinstall" else None}.get(str(cmd)) or []
-    reqs = getattr(ns, "requirements", None) if cmd == "inject" else None
+    # inject's -r files, and install's --lock pylock.toml: both name packages pipx installs.
+    reqs = {"inject": getattr(ns, "requirements", None), "install": getattr(ns, "lock", None)}.get(str(cmd))
+    reqs = str(reqs) if reqs and not isinstance(reqs, list) else reqs
+    if cmd == "install" and reqs:
+        # With --lock, pipx installs a named spec from the lock file unless
+        # valid_pypi_name() rejects it (a URL or archive), which it installs
+        # separately (Venv._install_locked_package).
+        from pipx.package_specifier import valid_pypi_name
+        packages = [p for p in packages if valid_pypi_name(p) is None]
     return {"cmd": cmd, "packages": sorted(packages),
             "req_files": sorted(reqs if isinstance(reqs, list) else [reqs] if reqs else []),
             "target": getattr(ns, "package", None) if cmd == "inject" else None}
@@ -128,6 +137,11 @@ def _corpus(tool):
                 out.append([sub, *tails[sub], spelling, *v])
                 if v and spelling.startswith("--"):
                     out.append([sub, *tails[sub], f"{spelling}={v[0]}"])
+    if tool == "pipx":
+        # Which named specs pipx takes from a --lock file and which it installs on top.
+        for spec in ("evilpkg==1.0", "evilpkg[extra]>=1", "git+https://example.com/evilpkg",
+                     "./evilpkg", "evilpkg-1.0-py3-none-any.whl", "https://example.com/evilpkg-1.0.tar.gz"):
+            out.append(["install", spec, "--lock", "pylock.toml"])
     return out
 
 
@@ -135,5 +149,5 @@ if __name__ == "__main__":
     tool = sys.argv[1]
     cases = [[argv, _truth(tool, ns)] for argv in _corpus(tool) if (ns := _parse(tool, argv)) is not None]
     path = Path(__file__).with_name(f"{tool}.json")
-    path.write_text(json.dumps(cases, indent=0) + "\n")
+    path.write_text(json.dumps({tool: importlib.metadata.version(tool), "cases": cases}, indent=0) + "\n")
     print(f"{tool}: {len(cases)} accepted cases recorded in {path}")

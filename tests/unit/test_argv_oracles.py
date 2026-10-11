@@ -73,7 +73,8 @@ def test_argparse_tool_parser_matches_the_tool_itself(tool):
     installs. Where it does not (`pipenv install -h x` only prints help),
     gating anyway is tolerated: over-gating is the safe direction, and
     returning None is the one that runs a command unchecked."""
-    cases = json.loads((_FIXTURES / f"{tool}.json").read_text())
+    fixture = json.loads((_FIXTURES / f"{tool}.json").read_text())
+    cases = fixture["cases"]
     mismatches = []
     for argv, truth in cases:
         if truth["cmd"] not in _INSTALLING[tool]:
@@ -84,7 +85,7 @@ def test_argparse_tool_parser_matches_the_tool_itself(tool):
         if (ours := _ours_argparse(tool, argv)) != expected:
             mismatches.append(f"{tool} {' '.join(argv)}\n    {tool}: {expected}\n    ours: {ours}")
     assert not mismatches, (
-        f"{len(mismatches)} of {len(cases)} command lines parse differently from {tool}:\n"
+        f"{len(mismatches)} of {len(cases)} command lines parse differently from {tool} {fixture[tool]}:\n"
         + "\n".join(mismatches[:20])
     )
 

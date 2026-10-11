@@ -1,5 +1,5 @@
 {
- "pip": "26.1.2",
+ "pip": "26.2.1",
  "long_options": {
   "--index-url": true,
   "--pypi-url": true,
@@ -13,6 +13,7 @@
   "--only-binary": true,
   "--prefer-binary": false,
   "--require-hashes": false,
+  "--no-require-hashes": false,
   "--pre": false,
   "--all-releases": true,
   "--only-final": true,
@@ -2520,6 +2521,62 @@
   ],
   [
    "--require-hashes",
+   false
+  ],
+  [
+   "--no-r",
+   false
+  ],
+  [
+   "--no-re",
+   false
+  ],
+  [
+   "--no-req",
+   false
+  ],
+  [
+   "--no-requ",
+   false
+  ],
+  [
+   "--no-requi",
+   false
+  ],
+  [
+   "--no-requir",
+   false
+  ],
+  [
+   "--no-require",
+   false
+  ],
+  [
+   "--no-require-",
+   false
+  ],
+  [
+   "--no-require-h",
+   false
+  ],
+  [
+   "--no-require-ha",
+   false
+  ],
+  [
+   "--no-require-has",
+   false
+  ],
+  [
+   "--no-require-hash",
+   false
+  ],
+  [
+   "--no-require-hashe",
+   false
+  ],
+  [
+   "--no-require-hashes",
    false
   ],
   [
