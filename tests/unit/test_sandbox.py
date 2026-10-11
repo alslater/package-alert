@@ -876,6 +876,17 @@ class TestTryParseLockfileInstallIntent:
         assert result is not None
         assert result.is_lockfile_install is False
 
+    @pytest.mark.parametrize("argv", [
+        ["uv", "self", "update"],
+        ["uv", "self", "version"],
+        ["uv", "-q", "self", "update"],
+    ])
+    def test_uv_self_is_not_sandboxed(self, argv):
+        """`uv self update` overwrites uv's own binary outside the project
+        (~/.local/bin), which the sandbox mounts read-only, and installs no
+        package — it must be exec'd directly rather than sandboxed."""
+        assert _try_parse(argv) is None
+
     def test_uv_sync_check_should_not_gate(self):
         """REGRESSION (P2 follow-up): `uv sync --check` only reports whether
         the environment is synchronized with the project (uv's own docs) —

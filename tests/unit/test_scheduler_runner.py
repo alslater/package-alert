@@ -26,49 +26,49 @@ class TestIsDue:
     # daily_hour=2, weekly_day=6 (Sunday), weekly_hour=2 throughout.
 
     def test_never_scanned_is_always_due(self):
-        now = dt.datetime(2026, 1, 6, 15, 0)  # Tuesday 15:00  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 6, 15, 0)  # Tuesday 15:00  # naive local time, matches production `_is_due` convention
         p = _make_project("daily", None)
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_daily_due_after_scheduled_hour_passes(self):
         # Tuesday 15:00; last ran Monday 02:15 — today's 02:00 window is in the past, not yet hit
-        now = dt.datetime(2026, 1, 6, 15, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 5, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 6, 15, 0)  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 5, 2, 15)  # naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_daily_not_due_before_scheduled_hour(self):
         # Tuesday 01:00; daily_hour=2 hasn't arrived yet
-        now = dt.datetime(2026, 1, 6, 1, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 5, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 6, 1, 0)  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 5, 2, 15)  # naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_daily_not_due_already_ran_today(self):
         # Tuesday 15:00; already ran at Tuesday 02:15 — after today's window
-        now = dt.datetime(2026, 1, 6, 15, 0)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 6, 2, 15)  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 6, 15, 0)  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 6, 2, 15)  # naive local time, matches production `_is_due` convention
         p = _make_project("daily", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_weekly_due_after_configured_day_and_hour(self):
         # Sunday 2026-01-11 15:00; last ran previous Sunday 02:15 — this week's window passed
-        now = dt.datetime(2026, 1, 11, 15, 0)   # Sunday, weekday=6  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 11, 15, 0)   # Sunday, weekday=6  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is True
 
     def test_weekly_not_due_already_ran_this_week(self):
         # Monday 2026-01-12 15:00; ran Sunday 02:15 — already hit this week's slot
-        now = dt.datetime(2026, 1, 12, 15, 0)   # Monday, weekday=0  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 11, 2, 15)   # Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 12, 15, 0)   # Monday, weekday=0  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 11, 2, 15)   # Sunday 02:15  # naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 
     def test_weekly_not_due_before_scheduled_hour_on_target_day(self):
         # Sunday 2026-01-11 01:00; weekly_hour=2 hasn't arrived yet today
-        now = dt.datetime(2026, 1, 11, 1, 0)    # Sunday, weekday=6, before 02:00  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
-        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # noqa: DTZ001 — naive local time, matches production `_is_due` convention
+        now = dt.datetime(2026, 1, 11, 1, 0)    # Sunday, weekday=6, before 02:00  # naive local time, matches production `_is_due` convention
+        last = dt.datetime(2026, 1, 4, 2, 15)    # prev Sunday 02:15  # naive local time, matches production `_is_due` convention
         p = _make_project("weekly", last.timestamp())
         assert _is_due(p, daily_hour=2, weekly_day=6, weekly_hour=2, _now=now) is False
 

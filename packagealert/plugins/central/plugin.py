@@ -130,7 +130,7 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
             # silently producing a table with no rows under it.
             _log_unparseable_outbox_entry(e.id, e.kind, "Skipping in pending-sync display.")
             continue
-        queued_at = datetime.fromtimestamp(e.created_at).strftime("%Y-%m-%d %H:%M")  # noqa: DTZ006 — local time for display
+        queued_at = datetime.fromtimestamp(e.created_at).strftime("%Y-%m-%d %H:%M")  # local time for display
         table.add_row(
             escape(str(payload.get("root") or "")),
             queued_at,

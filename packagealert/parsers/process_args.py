@@ -17,7 +17,7 @@ _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
 # and not another. Hand-maintained sets missed global options (`--log-file`,
 # `--keyring-provider`, `--use-feature`) and hidden aliases (`--source`,
 # `--pypi-url`), which a differential test against pip's parser found; see
-# CLAUDE.md for regenerating. Generated against: pip 24.0, 25.3, 26.1.2.
+# CLAUDE.md for regenerating. Generated against: pip 24.0, 25.3, 26.1.2, 26.2.1.
 _PIP_VALUE_FLAGS = frozenset({
     "--abi", "--all-releases", "--build-constraint", "--cache-dir",
     "--cert", "--client-cert", "--config-settings", "--constraint",
@@ -26,12 +26,13 @@ _PIP_VALUE_FLAGS = frozenset({
     "--implementation", "--index-url", "--keyring-provider", "--local-log",
     "--log", "--log-file", "--no-binary", "--only-binary", "--only-final",
     "--platform", "--prefix", "--progress-bar", "--proxy", "--pypi-url",
-    "--python", "--python-version", "--report", "--requirement",
-    "--requirements-from-script", "--resume-retries", "--retries", "--root",
-    "--root-user-action", "--source", "--source-dir", "--source-directory",
-    "--src", "--target", "--timeout", "--trusted-host",
-    "--upgrade-strategy", "--uploaded-prior-to", "--use-deprecated",
-    "--use-feature", "-C", "-c", "-e", "-f", "-i", "-r", "-t",
+    "--python", "--python-version", "--refresh-package", "--report",
+    "--requirement", "--requirements-from-script", "--resume-retries",
+    "--retries", "--root", "--root-user-action", "--source", "--source-dir",
+    "--source-directory", "--src", "--target", "--timeout",
+    "--trusted-host", "--upgrade-strategy", "--uploaded-prior-to",
+    "--use-deprecated", "--use-feature", "-C", "-c", "-e", "-f", "-i", "-r",
+    "-t",
 })
 _PIP_GLOBAL_VALUE_FLAGS = frozenset({
     "--cache-dir", "--cert", "--client-cert", "--default-timeout",
@@ -74,6 +75,17 @@ _PIP_GENERAL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
         "--require-virtualenv", "--resume-retries", "--retries",
         "--timeout", "--trusted-host", "--use-deprecated", "--use-feature",
         "--verbose", "--version",
+    }),
+    frozenset({
+        "--cache-dir", "--cert", "--client-cert", "--debug",
+        "--default-timeout", "--disable-pip-version-check",
+        "--exists-action", "--help", "--isolated", "--keyring-provider",
+        "--local-log", "--log", "--log-file", "--no-cache-dir",
+        "--no-color", "--no-input", "--no-proxy-env",
+        "--no-python-version-warning", "--proxy", "--python", "--quiet",
+        "--require-venv", "--require-virtualenv", "--resume-retries",
+        "--retries", "--timeout", "--trusted-host", "--use-deprecated",
+        "--use-feature", "--verbose", "--version",
     }),
 )
 _PIP_INSTALL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
@@ -153,9 +165,37 @@ _PIP_INSTALL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
         "--uploaded-prior-to", "--use-deprecated", "--use-feature",
         "--use-pep517", "--user", "--verbose", "--version",
     }),
+    frozenset({
+        "--abi", "--all-releases", "--break-system-packages",
+        "--build-constraint", "--cache-dir", "--cert",
+        "--check-build-dependencies", "--client-cert", "--compile",
+        "--config-settings", "--constraint", "--debug", "--default-timeout",
+        "--disable-pip-version-check", "--dry-run", "--editable",
+        "--exists-action", "--extra-index-url", "--find-links",
+        "--force-reinstall", "--group", "--help", "--ignore-installed",
+        "--ignore-requires-python", "--implementation", "--index-url",
+        "--isolated", "--keyring-provider", "--local-log", "--log",
+        "--log-file", "--no-binary", "--no-build-isolation",
+        "--no-cache-dir", "--no-clean", "--no-color", "--no-compile",
+        "--no-dependencies", "--no-deps", "--no-index", "--no-input",
+        "--no-proxy-env", "--no-python-version-warning",
+        "--no-require-hashes", "--no-user", "--no-warn-conflicts",
+        "--no-warn-script-location", "--only-binary", "--only-dependencies",
+        "--only-deps", "--only-final", "--platform", "--pre",
+        "--prefer-binary", "--prefix", "--progress-bar", "--proxy",
+        "--pypi-url", "--python", "--python-version", "--quiet",
+        "--refresh-package", "--report", "--require-hashes",
+        "--require-venv", "--require-virtualenv", "--requirement",
+        "--requirements-from-script", "--resume-retries", "--retries",
+        "--root", "--root-user-action", "--source", "--source-dir",
+        "--source-directory", "--src", "--target", "--timeout",
+        "--trusted-host", "--upgrade", "--upgrade-strategy",
+        "--uploaded-prior-to", "--use-deprecated", "--use-feature",
+        "--use-pep517", "--user", "--verbose", "--version",
+    }),
 )
 # Flags that consume the next argument as their value for `uv add` / `uv remove`.
-# Audited against: uv 0.12.23 `uv add --help` / `uv remove --help`, plus the
+# Audited against: uv 0.13.0 `uv add --help` / `uv remove --help`, plus the
 # hidden names probed from uv's CLI source.
 _UV_PROJECT_VALUE_FLAGS = frozenset({
     # Python selector
@@ -203,7 +243,7 @@ _UV_PROJECT_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `uv tool install/upgrade`.
-# Audited against: uv 0.12.23 `uv tool install --help` / `uv tool upgrade --help`,
+# Audited against: uv 0.13.0 `uv tool install --help` / `uv tool upgrade --help`,
 # plus the hidden names probed from uv's CLI source.
 _UV_TOOL_VALUE_FLAGS = frozenset({
     # Python selector
@@ -250,7 +290,7 @@ _UV_TOOL_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `pipx install/inject/etc`.
-# Audited against: pipx 1.14.1 `pipx install --help` / `pipx inject --help`.
+# Audited against: pipx 1.17.13 `pipx install --help` / `pipx inject --help`.
 _PIPX_VALUE_FLAGS = frozenset({
     "--python",
     "--suffix",
@@ -259,6 +299,10 @@ _PIPX_VALUE_FLAGS = frozenset({
     "--pip-args",
     "--backend",
     "--fetch-python",  # install only
+    "--app", "--include-resources-from", "--upgrade-strategy",  # install only
+    "--lock",  # install only: a pylock.toml, collected as a req_file
+    "--cooldown", "--output",
+    "--skip",  # upgrade-all / reinstall-all
     # Gone from pipx 1.14's help but still accepted by older pipx; keeping it
     # cannot swallow a real argument on 1.14, which rejects the command.
     "--spec",
@@ -864,7 +908,7 @@ def _uv_targets_system_python(rest: list[str]) -> bool:
 # Options that consume the next argument for `uv pip install` — uv's own set,
 # not pip's: `_PIP_VALUE_FLAGS` lacked 35 of these (`--resolution`,
 # `--torch-backend`, the global `--directory`/`--color`, …), so their values
-# were read as package names. Audited against: uv 0.12.23
+# were read as package names. Audited against: uv 0.13.0
 # `uv pip install --help`.
 _UV_PIP_INSTALL_VALUE_FLAGS = frozenset({
     "--allow-insecure-host", "--build-constraints", "--cache-dir", "--cert",
@@ -893,7 +937,7 @@ _UV_PIP_REQUIREMENT_FLAGS = frozenset({"-r", "--requirement", "--requirements"})
 # uv's global options that consume the next argument. uv accepts global options
 # BEFORE the subcommand (`uv -q add requests`, `uv --directory backend sync`),
 # so the subcommand is the first argument that is neither one of these, nor its
-# value, nor a boolean flag. Audited against: uv 0.12.23 `uv --help`.
+# value, nor a boolean flag. Audited against: uv 0.13.0 `uv --help`.
 _UV_GLOBAL_VALUE_FLAGS = frozenset({
     "--cache-dir",
     "--color",
@@ -1048,7 +1092,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
         rest = args[2:]
         req_files: list[str] = []
         skip_value_for: str | None = None
-        # Audited against: uv 0.12.23 `uv pip sync --help`.
+        # Audited against: uv 0.13.0 `uv pip sync --help`.
         _UV_PIP_SYNC_VALUE_FLAGS = frozenset({
             "-c", "--constraints", "-b", "--build-constraints",
             "--extra", "--group", "--cert", "--target", "-t",
@@ -1162,11 +1206,18 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
             # Executes an already-installed tool — not installing anything.
             return ParsedInstall(manager="uv", packages=[], ecosystem="pypi", venv_exe=venv_exe)
         return None
+    if subcmd == "self":
+        # `uv self update` replaces uv's own binary with a release downloaded
+        # from GitHub, in place wherever the standalone installer put it
+        # (~/.local/bin, ~/.cargo/bin, …). It installs no package, so there is
+        # nothing to check, and in the sandbox that directory is read-only, so
+        # the update can only fail. Unrecognised: exec'd directly.
+        return None
     if subcmd in ("run", "python", "init", "build", "publish", "export",
-                  "cache", "version", "generate-shell-completion", "self",
+                  "cache", "version", "generate-shell-completion",
                   "pip", "venv"):
         # None of these install from the lock file — `run`/`python` execute,
-        # `cache`/`version`/`venv`/`self` manage local state, `build`/`publish`
+        # `cache`/`version`/`venv` manage local state, `build`/`publish`
         # produce or upload artifacts, `export`/`generate-shell-completion`
         # only read. is_lockfile_install stays False (the default): scanning
         # the lock file here would gate a command that installs nothing.
@@ -1183,7 +1234,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
 # judged against all of them. An ambiguous prefix is left alone — both parsers
 # reject it (`pip install --requirem`: "ambiguous option"). uv, composer, pnpm
 # and yarn reject unknown prefixes outright. Audited against: pip 25.3,
-# pipenv 2026.6.2, pipx 1.14.1 (option columns of each `--help`).
+# pipenv 2026.8.0, pipx 1.17.13 (option columns of each `--help`).
 _PIPENV_GLOBAL_LONG_OPTIONS = frozenset({
     "--bare", "--clear", "--envs", "--help", "--man", "--no-site-packages",
     "--py", "--pypi-mirror", "--python", "--quiet", "--rm",
@@ -1192,63 +1243,70 @@ _PIPENV_GLOBAL_LONG_OPTIONS = frozenset({
 })
 _PIPENV_LONG_OPTIONS: dict[str, frozenset[str]] = {
     "install": frozenset({
-        "--all", "--categories", "--clear", "--deploy", "--dev",
-        "--editable", "--extra-pip-args", "--extras", "--help",
-        "--ignore-pipfile", "--index", "--no-site-packages", "--pre",
-        "--pypi-mirror", "--python", "--quiet", "--requirements",
-        "--site-packages", "--skip-lock", "--system", "--verbose",
+        "--all", "--categories", "--clear", "--deploy", "--dev", "--editable",
+        "--extra-pip-args", "--extras", "--help", "--ignore-pipfile",
+        "--index", "--no-site-packages", "--pre", "--pypi-mirror", "--python",
+        "--quiet", "--requirements", "--resolver", "--site-packages",
+        "--skip-lock", "--system", "--verbose",
     }),
     "sync": frozenset({
         "--all", "--bare", "--categories", "--clear", "--dev",
         "--extra-pip-args", "--extras", "--help", "--no-site-packages",
-        "--pre", "--pypi-mirror", "--python", "--quiet", "--site-packages",
-        "--system", "--verbose",
+        "--pre", "--pypi-mirror", "--python", "--quiet", "--resolver",
+        "--site-packages", "--system", "--verbose",
     }),
     "update": frozenset({
         "--all", "--bare", "--categories", "--clear", "--dev", "--dry-run",
         "--editable", "--extra-pip-args", "--extras", "--help",
         "--ignore-pipfile", "--index", "--lock-only", "--outdated", "--pre",
         "--pypi-mirror", "--python", "--quiet", "--requirements",
-        "--skip-lock", "--system", "--verbose",
+        "--resolver", "--skip-lock", "--system", "--verbose",
     }),
 }
 _PIPX_LONG_OPTIONS: dict[str, frozenset[str]] = {
     "install": frozenset({
-        "--backend", "--editable", "--fetch-missing-python",
-        "--fetch-python", "--force", "--global", "--help", "--include-deps",
-        "--index-url", "--pip-args", "--preinstall", "--python", "--quiet",
-        "--suffix", "--system-site-packages", "--verbose",
+        "--app", "--backend", "--cooldown", "--editable",
+        "--fetch-missing-python", "--fetch-python", "--force", "--global",
+        "--help", "--include-deps", "--include-resources-from", "--index-url",
+        "--lock", "--output", "--pip-args", "--preinstall", "--python",
+        "--quiet", "--skip-maintenance", "--suffix", "--system-site-packages",
+        "--upgrade", "--upgrade-strategy", "--verbose",
     }),
     "inject": frozenset({
-        "--backend", "--editable", "--force", "--global", "--help",
-        "--include-apps", "--include-deps", "--index-url", "--pip-args",
-        "--quiet", "--requirement", "--system-site-packages", "--verbose",
-        "--with-suffix",
+        "--backend", "--cooldown", "--editable", "--force", "--global",
+        "--help", "--include-apps", "--include-deps",
+        "--include-resources-from", "--index-url", "--output", "--pip-args",
+        "--quiet", "--requirement", "--skip-maintenance",
+        "--system-site-packages", "--verbose", "--with-suffix",
     }),
     "upgrade": frozenset({
-        "--backend", "--editable", "--fetch-missing-python",
+        "--backend", "--cooldown", "--editable", "--fetch-missing-python",
         "--fetch-python", "--force", "--global", "--help",
-        "--include-injected", "--index-url", "--install", "--pip-args",
-        "--python", "--quiet", "--system-site-packages", "--verbose",
+        "--include-injected", "--index-url", "--install", "--output",
+        "--pip-args", "--python", "--quiet", "--skip-maintenance",
+        "--system-site-packages", "--verbose",
     }),
     "reinstall": frozenset({
         "--backend", "--fetch-missing-python", "--fetch-python", "--global",
-        "--help", "--python", "--quiet", "--verbose",
+        "--help", "--output", "--python", "--quiet", "--skip-maintenance",
+        "--verbose",
     }),
     "upgrade-all": frozenset({
-        "--backend", "--editable", "--force", "--global", "--help",
-        "--include-injected", "--index-url", "--pip-args", "--quiet",
-        "--skip", "--system-site-packages", "--verbose",
+        "--backend", "--cooldown", "--editable", "--force", "--global",
+        "--help", "--include-injected", "--index-url", "--output",
+        "--pip-args", "--quiet", "--skip", "--skip-maintenance",
+        "--system-site-packages", "--verbose",
     }),
     "reinstall-all": frozenset({
         "--backend", "--fetch-missing-python", "--fetch-python", "--global",
-        "--help", "--python", "--quiet", "--skip", "--verbose",
+        "--help", "--output", "--python", "--quiet", "--skip",
+        "--skip-maintenance", "--verbose",
     }),
     "install-all": frozenset({
-        "--backend", "--editable", "--fetch-missing-python",
+        "--backend", "--cooldown", "--editable", "--fetch-missing-python",
         "--fetch-python", "--force", "--global", "--help", "--index-url",
-        "--pip-args", "--python", "--quiet", "--system-site-packages",
-        "--verbose",
+        "--pip-args", "--python", "--quiet", "--skip-maintenance",
+        "--system-site-packages", "--verbose",
     }),
 }
 
@@ -1441,6 +1499,19 @@ def _pipx_home() -> Path:
     return home / ".local" / "pipx"
 
 
+def _pipx_spec_comes_from_lock(spec: str) -> bool:
+    """Whether `pipx install <spec> --lock F` takes *spec* from the lock file:
+    pipx's `valid_pypi_name()` — a PEP 508 requirement with no URL whose name
+    is not an archive (pipx 1.17's ARCHIVE_EXTENSIONS)."""
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    try:
+        req = Requirement(spec)
+    except InvalidRequirement:
+        return False
+    return not req.url and not req.name.endswith((".whl", ".tar.gz", ".zip"))
+
+
 def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
     if not argv or _cmd(argv[0]) != "pipx":
         return None
@@ -1458,6 +1529,15 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
         # nargs="+"); checking only the first let `pipx install black evil`
         # install `evil` unchecked.
         packages = _positionals(args[1:], _PIPX_VALUE_FLAGS)
+        # `install --lock pylock.toml` installs EVERY package in the lock file
+        # (pipx's backend.install_lock()); collect_requirements_packages()
+        # reads it as PEP 751. A named spec pipx then satisfies FROM the lock
+        # is dropped: checking it unpinned would judge the newest release, not
+        # the locked one pipx installs. Only a URL or archive spec is still
+        # installed separately (pipx's valid_pypi_name()).
+        req_files = _value_flag_args(args[1:], frozenset({"--lock"})) if subcmd == "install" else []
+        if req_files:
+            packages = [p for p in packages if not _pipx_spec_comes_from_lock(p)]
         home = Path.home()
         return ParsedInstall(
             manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
@@ -1465,6 +1545,7 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
                 _pipx_home() / "venvs",
                 home / ".local" / "bin",
             ],
+            req_files=req_files,
         )
     if subcmd in ("inject",):
         positionals = _positionals(args[1:], _PIPX_VALUE_FLAGS)
@@ -1503,7 +1584,7 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
 # Composer options that consume the next argument when given as `--opt VALUE`
 # (they are shown as `--opt=VALUE`; Symfony Console accepts both, and also an
 # attached short value such as `-dsub`). `-d`/`--working-dir` is the only one
-# composer accepts before the subcommand. Audited against: Composer 2.10.1
+# composer accepts before the subcommand. Audited against: Composer 2.10.3
 # `composer --help` / `composer require --help` / `install --help` /
 # `update --help`.
 _COMPOSER_VALUE_FLAGS = frozenset({
@@ -1515,7 +1596,7 @@ _COMPOSER_VALUE_FLAGS = frozenset({
 
 # Options with an OPTIONAL value (`--opt[=VALUE]` in composer's help): Symfony
 # Console consumes the next argument for these when it does not start with `-`
-# (the composer oracle confirms it). Audited against: Composer 2.10.1.
+# (the composer oracle confirms it). Audited against: Composer 2.10.3.
 _COMPOSER_OPTIONAL_VALUE_FLAGS = frozenset({"--bump-after-update"})
 
 
@@ -1545,7 +1626,7 @@ def parse_composer_args(argv: list[str]) -> ParsedInstall | None:
 
 # Every spelling composer resolves to an install-family command (names, aliases,
 # unique abbreviations), from Symfony's Application::find(). GENERATED against
-# Composer 2.10.1 by tests/fixtures/argv_oracles/generate_composer_commands.php.
+# Composer 2.10.3 by tests/fixtures/argv_oracles/generate_composer_commands.php.
 _COMPOSER_COMMANDS: dict[str, str] = {
     "g": "global",
     "gl": "global",
@@ -1634,12 +1715,13 @@ def _parse_composer_subcommand(args: list[str]) -> ParsedInstall | None:
 # (`--pypi-mirror`, `--python`) or after it. `-e`/`--editable` and
 # `-r`/`--requirements` are listed too, so their values are never mistaken for
 # package names — parse_pipenv_args() then reads both back explicitly, since
-# each names something that IS installed. Audited against: pipenv 2026.6.2
+# each names something that IS installed. Audited against: pipenv 2026.8.0
 # `pipenv --help` / `pipenv install --help` / `sync --help` / `update --help`.
 _PIPENV_VALUE_FLAGS = frozenset({
     "--pypi-mirror", "--python",
     "--categories", "--extra-pip-args", "--extras", "-i", "--index",
     "-e", "--editable", "-r", "--requirements",
+    "--resolver",
 })
 
 

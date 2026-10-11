@@ -138,14 +138,14 @@ def scan_project(root: Path, *, prod_only: bool = False) -> ProjectScan:
 _PINNED_RE = re.compile(r"^([A-Za-z0-9_.-]+)==([^\s;]+)")
 _PUBLIC_PYPI_INDEXES = frozenset({"https://pypi.org/simple", "https://pypi.python.org/simple"})
 # pip's requirements-file options (pip._internal.req.req_file.build_parser(),
-# pip 26.1.2): every long spelling, and the short ones, mapped to whether the
+# pip 26.2.1): every long spelling, and the short ones, mapped to whether the
 # option takes a value. The source options (where pip finds packages) are
 # separate below. Generate this from pip when it changes.
 _REQ_LONG_OPTIONS = {
     "--index-url": True, "--pypi-url": True, "--extra-index-url": True, "--no-index": False,
     "--constraint": True, "--requirement": True, "--editable": True, "--find-links": True,
     "--no-binary": True, "--only-binary": True, "--prefer-binary": False, "--require-hashes": False,
-    "--pre": False, "--all-releases": True, "--only-final": True, "--trusted-host": True,
+    "--no-require-hashes": False, "--pre": False, "--all-releases": True, "--only-final": True, "--trusted-host": True,
     "--use-feature": True, "--hash": True, "--config-settings": True,
 }
 _REQ_SHORT_OPTIONS = {"-i": "--index-url", "-c": "--constraint", "-r": "--requirement", "-e": "--editable",

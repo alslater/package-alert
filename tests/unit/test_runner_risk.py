@@ -1719,6 +1719,31 @@ def test_uv_pip_sync_pylock_toml_resolves_the_real_packages(tmp_path):
     assert r._gate_resources_needed(ctx) is True
 
 
+@pytest.mark.parametrize("argv", [
+    ["pipx", "install", "black", "--lock", "pylock.toml"],
+    ["pipx", "install", "--lock=pylock.toml", "black"],
+    ["pipx", "install", "--lo", "pylock.toml", "black"],
+])
+def test_pipx_install_lock_preflights_every_locked_package(tmp_path, argv):
+    """`pipx install <pkg> --lock pylock.toml` installs every package in the lock
+    file, not just the one named, so each of them must reach pre-flight — at its
+    locked version. The named package is taken from the lock too, so it is not
+    also checked unpinned (the cooldown gate would judge the newest release)."""
+    (tmp_path / "pylock.toml").write_text(
+        'lock-version = "1.0"\n'
+        'created-by = "uv"\n\n'
+        '[[packages]]\n'
+        'name = "black"\n'
+        'version = "26.1.0"\n\n'
+        '[[packages]]\n'
+        'name = "evilpkg"\n'
+        'version = "1.0.0"\n'
+    )
+    queries, blocked_reason, _source = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
+    assert blocked_reason is None
+    assert sorted(queries) == [("pypi", "black", "26.1.0"), ("pypi", "evilpkg", "1.0.0")]
+
+
 def test_pip_install_requirements_toml_is_not_misrouted_to_pylock_parser(tmp_path):
     """REGRESSION (P1 follow-up): the pylock dispatch was keyed on any
     `.toml` suffix rather than PEP 751's exact filename convention.
@@ -3328,6 +3353,19 @@ def test_abbreviated_pipenv_option_value_does_not_switch_off_the_lockfile_scan(t
     (tmp_path / "Pipfile.lock").write_text(_lock("Pipfile.lock", "evilpkg"))
     ctx = _any_ctx(["pipenv", "install", "--pyth", "3.12"], tmp_path)
     queries, blocked, _ = _runner()._resolve_query_packages(ctx)
+    assert blocked is None
+    assert _names(queries) == ["evilpkg"]
+
+
+@pytest.mark.parametrize("argv", [
+    ["pipenv", "sync", "--resolver", "pip"],
+    ["pipenv", "sync", "--r", "pip"],
+])
+def test_pipenv_resolver_value_does_not_switch_off_the_lockfile_scan(tmp_path, argv):
+    """`--resolver NAME` (pipenv 2026.8) takes a value; read as a package it would turn the
+    command into a named install and the Pipfile.lock would go unscanned."""
+    (tmp_path / "Pipfile.lock").write_text(_lock("Pipfile.lock", "evilpkg"))
+    queries, blocked, _ = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
     assert blocked is None
     assert _names(queries) == ["evilpkg"]
 
