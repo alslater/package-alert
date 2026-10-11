@@ -7616,6 +7616,33 @@ async def test_scratch_run_needs_the_owners_scratch_approval(tmp_path, monkeypat
         await runner.run_captured(["npm", "ci"], cwd=tmp_path, scratch=True)  # scratch hook says no
 
 
+async def test_a_read_only_command_may_run_in_a_scratch_copy(tmp_path, monkeypatch):
+    """A command its plugin declares read-only changes nothing, so it may also run in a
+    disposable copy (pa fix runs its trials in a checked copy of the snapshot)."""
+    seen = {}
+
+    def fake_build_cmd(argv, write_dirs, **kw):
+        seen["argv"] = argv
+        return ["true"]
+
+    from packagealert.languages.python_fix.uv import (
+        is_read_only_command,
+        is_scratch_command,
+    )
+
+    trial = ["uv", "lock", "--dry-run", "--upgrade-package", "urllib3==2.8.0"]
+    assert is_read_only_command(trial) and not is_scratch_command(trial)
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path.parent)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.setattr("packagealert.sandbox.runner.build_cmd", fake_build_cmd)
+    monkeypatch.setattr("packagealert.sandbox.runner.bwrap_available", lambda: True)
+    runner = SandboxRunner(AppConfig())
+    await runner.run_captured(trial, cwd=tmp_path, scratch=True)
+    assert seen
+    with pytest.raises(CapturedRunError, match="not an approved"):  # neither read-only nor a scratch command
+        await runner.run_captured(["uv", "lock", "--upgrade"], cwd=tmp_path, scratch=True)
+
+
 async def test_scratch_run_binds_only_the_scratch_dir_writable(tmp_path, monkeypatch):
     # The scratch cwd is writable and absent from the read-only binds.
     seen = {}

@@ -232,7 +232,7 @@ class _Run:
     async def read_only(self, argv):
         raise AssertionError("npm trials run in a copy")
 
-    async def in_copy(self, files, argvs, edit=None):
+    async def in_copy(self, files, argvs, edit=None, read_back=None):
         self.calls.append((files, argvs, edit))
         after = self.raw if self.raw is not None else (
             json.dumps(self.after).encode() if self.after is not None else None)
@@ -280,7 +280,7 @@ async def test_forced_pin_edit_writes_the_override(tmp_path):
 
 async def test_existing_override_makes_the_trial_inconclusive():
     class _EditingRun(_Run):
-        async def in_copy(self, files, argvs, edit=None):
+        async def in_copy(self, files, argvs, edit=None, read_back=None):
             assert edit is not None
             import tempfile
             with tempfile.TemporaryDirectory() as d:
@@ -359,7 +359,7 @@ async def test_a_lock_in_a_format_pa_fix_does_not_read_is_inconclusive(change):
 
 async def test_no_command_result_is_inconclusive():
     class _Empty(_Run):
-        async def in_copy(self, files, argvs, edit=None):
+        async def in_copy(self, files, argvs, edit=None, read_back=None):
             return CopyResult((), {"package-lock.json": None})
 
     result = await npm_trial.run_trial(frozenset(), _lock("before.json"), [("qs", "6.14.0")], [],
@@ -1296,3 +1296,76 @@ def test_a_public_copy_on_either_side_outweighs_a_private_one(tmp_path):
         "": root, "node_modules/a/node_modules/q": entry("2.0.0", corp), "node_modules/b/node_modules/q": entry("1.0.0", reg)}}
     changes = (Change("update", "q", "1.0.0", "2.0.0"), Change("update", "q", "0.9.0", "1.0.0"))
     assert npm_trial.non_public_versions(after, changes, tmp_path, before=before) == {("q", "2.0.0")}
+
+
+_FOUR_SPACE_CRLF = (b'{\r\n    "name": "caf\\u00e9",\r\n    "dependencies": {\r\n        "express": "^4.17.1"\r\n'
+                    b'    }\r\n}\r\n')
+
+
+def test_an_override_round_leaves_package_json_byte_identical(tmp_path):
+    manifest = tmp_path / "package.json"
+    manifest.write_bytes(_FOUR_SPACE_CRLF)
+    entries = [("qs", "6.7.0", "6.14.0")]
+    add = npm_trial.override_edits(entries)
+    add(tmp_path)
+    assert "overrides" in json.loads(manifest.read_bytes())
+    npm_trial.override_removal(entries, add)(tmp_path)
+    assert manifest.read_bytes() == _FOUR_SPACE_CRLF
+
+
+def test_an_override_round_keeps_the_formatting_of_a_changed_package_json(tmp_path):
+    manifest = tmp_path / "package.json"
+    manifest.write_bytes(_FOUR_SPACE_CRLF)
+    entries = [("qs", "6.7.0", "6.14.0")]
+    add = npm_trial.override_edits(entries)
+    add(tmp_path)
+    added = manifest.read_bytes()
+    assert b'\r\n    "overrides": {\r\n        "qs@>5 <6.14.0": "6.14.0"\r\n    }\r\n}\r\n' in added
+    # npm raised a dependency range between the two edits.
+    manifest.write_bytes(added.replace(b'"^4.17.1"', b'"^4.21.2"'))
+    npm_trial.override_removal(entries, add)(tmp_path)
+    assert manifest.read_bytes() == (b'{\r\n    "name": "caf\xc3\xa9",\r\n    "dependencies": {\r\n'
+                                     b'        "express": "^4.21.2"\r\n    }\r\n}\r\n')
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    (b'{\n\t"name": "app"\n}', b'{\n\t"name": "app",\n\t"overrides": {\n\t\t"qs@>5 <6.14.0": "6.14.0"\n\t}\n}'),
+    (b'{"name": "app"}\n', b'{\n  "name": "app",\n  "overrides": {\n    "qs@>5 <6.14.0": "6.14.0"\n  }\n}\n'),
+])
+def test_an_override_edit_keeps_the_indent_and_trailing_newline(tmp_path, raw, expected):
+    (tmp_path / "package.json").write_bytes(raw)
+    npm_trial.override_edits([("qs", "6.7.0", "6.14.0")])(tmp_path)
+    assert (tmp_path / "package.json").read_bytes() == expected
+
+
+def test_existing_override_says_pa_fix_cannot_add_its_own(tmp_path):
+    (tmp_path / "package.json").write_text('{"overrides": {"lodash": "4.17.21"}}')
+    with pytest.raises(npm_trial.ExistingOverride) as info:
+        npm_trial.override_edit("lodash", "4.17.21")(tmp_path)
+    assert str(info.value) == "package.json already overrides lodash; pa fix cannot add its own override"
+
+
+_EMPTY_OVERRIDES = b'{\n  "name": "p",\n  "dependencies": {\n    "express": "^4.17.1"\n  },\n  "overrides": {}\n}\n'
+
+
+def test_an_override_round_keeps_the_project_s_own_empty_overrides(tmp_path):
+    """The printed commands delete ``overrides`` only when the project had none: a project's own
+    empty object is kept by the edits too."""
+    manifest = tmp_path / "package.json"
+    manifest.write_bytes(_EMPTY_OVERRIDES)
+    entries = [("qs", "6.7.0", "6.14.0")]
+    add = npm_trial.override_edits(entries)
+    add(tmp_path)
+    npm_trial.override_removal(entries, add)(tmp_path)
+    assert manifest.read_bytes() == _EMPTY_OVERRIDES
+
+
+def test_a_changed_package_json_keeps_the_project_s_own_empty_overrides(tmp_path):
+    manifest = tmp_path / "package.json"
+    manifest.write_bytes(_EMPTY_OVERRIDES)
+    entries = [("qs", "6.7.0", "6.14.0")]
+    add = npm_trial.override_edits(entries)
+    add(tmp_path)
+    manifest.write_bytes(manifest.read_bytes().replace(b'"^4.17.1"', b'"^4.21.2"'))
+    npm_trial.override_removal(entries, add)(tmp_path)
+    assert manifest.read_bytes() == _EMPTY_OVERRIDES.replace(b'"^4.17.1"', b'"^4.21.2"')

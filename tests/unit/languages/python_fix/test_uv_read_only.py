@@ -51,3 +51,39 @@ def test_the_python_plugin_answers_for_uv():
     assert lang is not None
     hook = getattr(lang, "is_read_only_command")  # noqa: B009 - optional hook, not on LanguageBase
     assert hook(["uv", "lock", "--dry-run"]) is True and hook(["uv", "publish"]) is False
+
+
+@pytest.mark.parametrize("argv", [
+    ["uv", "lock"],
+    ["uv", "lock", "--upgrade-package", "urllib3==2.8.0"],
+    ["/usr/bin/uv", "lock", "--upgrade-package", "zope.interface==6.0", "--upgrade-package", "a_b-c==1.0.post1"],
+])
+def test_scratch_command_accepts_exact_lock_pins(argv):
+    from packagealert.languages.python_fix.uv import is_scratch_command
+
+    assert is_scratch_command(argv)
+
+
+@pytest.mark.parametrize("argv", [
+    ["uv", "lock", "--dry-run"],
+    ["uv", "--directory", "x", "lock"],
+    ["uv", "lock", "--upgrade-package", "urllib3"],
+    ["uv", "lock", "--upgrade-package", "urllib3>=2"],
+    ["uv", "lock", "--upgrade-package"],
+    ["uv", "lock", "--upgrade-package=urllib3==2.8.0"],
+    ["uv", "lock", "--offline"],
+    ["uv", "sync"],
+    ["pip", "lock"],
+    ["uv"],
+])
+def test_scratch_command_rejects_anything_else(argv):
+    from packagealert.languages.python_fix.uv import is_scratch_command
+
+    assert not is_scratch_command(argv)
+
+
+def test_python_plugin_exposes_the_scratch_hook():
+    from packagealert.languages.python import PythonLanguage
+
+    assert PythonLanguage().is_scratch_command(["uv", "lock", "--upgrade-package", "a==1"])
+    assert not PythonLanguage().is_scratch_command(["uv", "lock", "--dry-run"])

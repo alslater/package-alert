@@ -273,3 +273,38 @@ def test_a_symlinked_lock_is_refused_before_it_is_read(tmp_path):
     (project / "package-lock.json").symlink_to(real)
     with pytest.raises(npm_lock.NpmLockError, match="symlink"):
         npm_lock.load_graph(project / "package-lock.json")
+
+
+def test_version_sets_collects_every_copy_by_name():
+    from packagealert.languages.node_fix import npm_lock
+
+    lock = {"lockfileVersion": 3, "packages": {
+        "": {"name": "p", "dependencies": {"qs": "^6", "a": "1"}},
+        "node_modules/qs": {"version": "6.14.0"},
+        "node_modules/a": {"version": "1.0.0", "dependencies": {"qs": "6.7.0"}},
+        "node_modules/a/node_modules/qs": {"version": "6.7.0"},
+    }}
+    sets = npm_lock.version_sets(lock)
+    assert sets["qs"] == frozenset({"6.14.0", "6.7.0"})
+    assert sets["a"] == frozenset({"1.0.0"})
+
+
+def test_npm_adapter_versions_in_reads_lock_bytes():
+    import json
+
+    from packagealert.languages.node_fix.npm import NpmFixAdapter
+
+    lock = {"lockfileVersion": 3, "packages": {"": {"name": "p"}, "node_modules/qs": {"version": "6.14.0"}}}
+    assert NpmFixAdapter().versions_in(json.dumps(lock).encode())["qs"] == frozenset({"6.14.0"})
+
+
+def test_npm_adapter_versions_in_refuses_another_format():
+    import json
+
+    import pytest
+
+    from packagealert.languages.node_fix import npm_lock
+    from packagealert.languages.node_fix.npm import NpmFixAdapter
+
+    with pytest.raises(npm_lock.NpmLockError):
+        NpmFixAdapter().versions_in(json.dumps({"lockfileVersion": 1}).encode())

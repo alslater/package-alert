@@ -286,11 +286,11 @@ def _lowest(item: PlannedFix) -> dict[tuple[str, str], str]:
 
 def _verified(
     item: PlannedFix, changes: tuple[Change, ...], ecosystem: str, parent: tuple[str, str] | None,
-    cooldown_checked: bool,
+    cooldown_checked: bool, after: Mapping[str, frozenset[str]] | None = None,
 ) -> PlannedFix:
     return dataclasses.replace(
         item, verified=True, changes=_extra_changes(item, changes, ecosystem), parent=parent,
-        cooldown_checked=cooldown_checked,
+        cooldown_checked=cooldown_checked, after=after,
     )
 
 
@@ -322,7 +322,7 @@ async def _forced(
         return young
     if not _moves_target(item, result.changes, ecosystem, drift):
         return _held(item, planner.COULD_NOT_VERIFY, f"{context}the forced trial did not move it")
-    return _with_companions(dataclasses.replace(_verified(item, result.changes, ecosystem, None, cooldown_checked()),
+    return _with_companions(dataclasses.replace(_verified(item, result.changes, ecosystem, None, cooldown_checked(), result.after),
                                                 forced=(blocker.parent, blocker.constraint)), result)
 
 
@@ -413,7 +413,7 @@ async def _judge_parent(
         item = dataclasses.replace(item, target=over)
     # The exact trial has passed every check above; checking it again would
     # only repeat the OSV lookup.
-    return _with_companions(_verified(item, exact.changes, ecosystem, parent, cooldown_checked()), exact)
+    return _with_companions(_verified(item, exact.changes, ecosystem, parent, cooldown_checked(), exact.after), exact)
 
 
 # The most packages pinning one item that a fix upgrades together.
@@ -582,7 +582,7 @@ async def _verify_one(
         return _split_hold(item, split)
     if not _moves_target(item, result.changes, ecosystem, drift):
         return _held(item, planner.COULD_NOT_VERIFY, f"the trial did not move {item.package} to {item.target}")
-    out = _with_companions(_verified(item, result.changes, ecosystem, None, cooldown_checked), result)
+    out = _with_companions(_verified(item, result.changes, ecosystem, None, cooldown_checked, result.after), result)
     # Reached only because the re-lock already moves it there (see _moves_target).
     return dataclasses.replace(out, by_relock=bool(relock))
 
@@ -781,6 +781,7 @@ async def verify_plan(
     separate = False
     separate_reason: str | None = None
     combined_changes: tuple[Change, ...] | None = None
+    combined_after: Mapping[str, frozenset[str]] | None = None
     combined_companions: tuple[tuple[str, str], ...] = ()
     if len(planned) > 1:
         checked = {(_name(ecosystem, p.package), p.target) for p in planned}
@@ -816,6 +817,7 @@ async def verify_plan(
                 planned = [dataclasses.replace(p, forced=newly_forced[i]) if i in newly_forced else p
                            for i, p in enumerate(planned)]
             combined_changes = combined.changes if combined.status == "resolved" else None
+            combined_after = combined.after if combined.status == "resolved" else None
             combined_companions = combined.companions if combined.status == "resolved" else ()
             separate_reason = await _combined_problem(
                 combined, planned, ecosystem=ecosystem, advisories=advisories, allow_major=allow_major,
@@ -871,7 +873,9 @@ async def verify_plan(
     return FixPlan(planned=planned, held=held, separate=separate, separate_reason=separate_reason,
                    trial_failure=shared,
                    command_changes=_command_changes(planned, combined_changes, separate, ecosystem),
-                   yanked_locked=tuple(locked[k] for k in sorted(locked)), drift=drift)
+                   yanked_locked=tuple(locked[k] for k in sorted(locked)), drift=drift,
+                   verified_after=(combined_after if combined_changes is not None and not separate and len(planned) > 1
+                                   else printed[0].after if printed else None))
 
 
 async def _drift_problem(

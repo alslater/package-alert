@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping, Sequence
+import json
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 from packagealert.languages.base import PackageSpec
@@ -147,37 +148,18 @@ class NpmFixAdapter:
 
         return [p for p in NodeLanguage()._parse_package_lock(lockfile) if p.version]
 
-    def commands(self, plan: FixPlan, project_dir: Path | None = None,
-                 sync_flags: tuple[str, ...] = ()) -> list[list[str]]:
-        """One ``npm pkg set 'overrides[<key>]=<target>'`` per forced pin, then one ``npm install``,
-        then the overrides removed again and a second ``npm install``.
+    def versions_in(self, lock: bytes) -> dict[str, frozenset[str]]:
+        """The package versions a package-lock.json's bytes install (NpmLockError for one pa fix cannot read)."""
+        return npm_lock.version_sets(npm_lock.check_lock(json.loads(lock), "the lock file"))
 
-        The overrides are temporary: the first install locks each target, and
-        since every dependent's range admits it (checked by the trial) npm keeps
-        it once they are gone, so package.json is left as it was. The empty
-        ``overrides`` object is removed too when the project had none.
+    def _parts(self, plan: FixPlan) -> tuple[list[tuple[str, str, str]], list[str]]:
+        """The printed commands' (override entries (name, lowest copy, target), install specs) for *plan*.
 
-        Each key is ``npm_trial.override_key()`` from the item's lowest
-        vulnerable copy (``PlannedFix.version``) to its target, the key its trial used.
-        A parent upgrade of a package the project does not depend on directly
-        (per the last ``load_graph()``) is an override too, scoped to the
-        parent's own major line, as ``npm_trial.run_trial`` applies it.
-
-        A forced pin can come with a parent upgrade (a release of the parent
-        whose range admits the target), which is printed too.
-
-        The install names every direct pin and direct parent upgrade (plain ``npm install``
-        when there are none) and updates the lock file and node_modules. With
-        *project_dir*, each command carries ``--prefix <dir>``. A plan whose
-        items only resolve one at a time (``separate``) gets its first item's
-        commands only. npm has no sync step, so *sync_flags* is unused.
+        One per package and major line, the higher; see ``commands``.
         """
-        if not plan.planned:
-            return []
         ordered = sorted(plan.planned, key=lambda f: f.package)
         if plan.separate:
             ordered = ordered[:1]
-        npm = ["npm", "--prefix", str(project_dir)] if project_dir is not None else ["npm"]
         # (name, lowest copy, target) per override, and name -> version per install. A direct
         # dependency is never forced (npm refuses an override on its name, EOVERRIDE), so a
         # forced item is always transitive and only ever an override.
@@ -216,9 +198,42 @@ class NpmFixAdapter:
             else:
                 override[line] = (min(held[0], low, key=npm_trial._key),
                                   max(held[1], target, key=npm_trial._key))
-        keys = [(npm_trial.override_key(name, low, target), target) for (name, _line), (low, target) in override.items()]
+        entries = [(name, low, target) for (name, _line), (low, target) in override.items()]
+        specs = [f"{name}@{v}" for (name, _line), v in install.items()]
+        return entries, specs
+
+    def commands(self, plan: FixPlan, project_dir: Path | None = None,
+                 sync_flags: tuple[str, ...] = ()) -> list[list[str]]:
+        """One ``npm pkg set 'overrides[<key>]=<target>'`` per forced pin, then one ``npm install``,
+        then the overrides removed again and a second ``npm install``.
+
+        The overrides are temporary: the first install locks each target, and
+        since every dependent's range admits it (checked by the trial) npm keeps
+        it once they are gone, so package.json is left as it was. The empty
+        ``overrides`` object is removed too when the project had none.
+
+        Each key is ``npm_trial.override_key()`` from the item's lowest
+        vulnerable copy (``PlannedFix.version``) to its target, the key its trial used.
+        A parent upgrade of a package the project does not depend on directly
+        (per the last ``load_graph()``) is an override too, scoped to the
+        parent's own major line, as ``npm_trial.run_trial`` applies it.
+
+        A forced pin can come with a parent upgrade (a release of the parent
+        whose range admits the target), which is printed too.
+
+        The install names every direct pin and direct parent upgrade (plain ``npm install``
+        when there are none) and updates the lock file and node_modules. With
+        *project_dir*, each command carries ``--prefix <dir>``. A plan whose
+        items only resolve one at a time (``separate``) gets its first item's
+        commands only. npm has no sync step, so *sync_flags* is unused.
+        """
+        if not plan.planned:
+            return []
+        npm = ["npm", "--prefix", str(project_dir)] if project_dir is not None else ["npm"]
+        entries, specs = self._parts(plan)
+        keys = [(npm_trial.override_key(name, low, target), target) for name, low, target in entries]
         cmds = [[*npm, "pkg", "set", f"overrides[{key}]={target}"] for key, target in keys]
-        cmds.append([*npm, "install", *(f"{name}@{v}" for (name, _line), v in install.items())])
+        cmds.append([*npm, "install", *specs])
         if keys:
             # The overrides only steer the first install: once the lock holds the
             # targets (which every dependent's range admits), they are removed and
@@ -228,6 +243,36 @@ class NpmFixAdapter:
                 cmds.append([*npm, "pkg", "delete", "overrides"])
             cmds.append([*npm, "install"])
         return cmds
+
+    written_files = ("package-lock.json", "package.json")
+    # The copy re-resolves with the project's .npmrc too (its registry, scopes and
+    # credentials), so a change to it after planning stops the write; it is never written.
+    # npm-shrinkwrap.json takes precedence over package-lock.json, and a project with
+    # one is refused at planning (npm_lock.read_lock); one appearing since stops the write.
+    stale_files = ("package-lock.json", "package.json", ".npmrc", "npm-shrinkwrap.json")
+
+    def apply_files(self, project_dir: Path) -> list[str]:
+        return list(npm_trial.FILES)
+
+    def apply_steps(self, plan: FixPlan) -> list[list[str] | Callable[[Path], None]]:
+        """The printed commands as lock-only steps for a scratch copy, as the trial ran them.
+
+        The overrides are added and removed by edits (raising
+        ``npm_trial.ExistingOverride`` when package.json already overrides a
+        package the plan overrides), and every install is lock-only with
+        scripts off (``npm_trial.FLAGS``).
+        """
+        if not plan.planned:
+            return []
+        entries, specs = self._parts(plan)
+        if not entries:
+            return [npm_trial.install_argv(specs)]
+        add = npm_trial.override_edits(entries)
+        return [add, npm_trial.install_argv(specs), npm_trial.override_removal(entries, add),
+                npm_trial.install_argv([])]
+
+    def sync_argv(self, plan: FixPlan, sync_flags: tuple[str, ...] = ()) -> list[str]:
+        return ["npm", "install"]
 
     def probe_argv(self) -> list[str]:
         return npm_trial.install_argv([])

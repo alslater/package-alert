@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import json
@@ -9,9 +10,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from packagealert.cli.fix_cmd import ApplyOptions, _apply_mode
 from packagealert.config import load_config
 from packagealert.languages.base import PackageSpec
 from packagealert.models.advisories import OsvAdvisory, OsvResult
+from packagealert.remediate.apply import ApplyResult, VersionChange
 
 _REG = 'source = { registry = "https://pypi.org/simple" }'
 LOCK = f"""
@@ -114,7 +117,7 @@ def _fake_trials(result=None, error=None, extra="", multi_fail=False, every=None
 
 async def _run(tmp_path, lock_text, fmt="json", degraded=(), trial_result=None, captured_error=None,
                extra_stderr="", multi_fail=False, bwrap=True, real_settings=False, settings=None,
-               cfg=None, cwd=None, every_trial=None, yanks=([], 0), **kw):
+               cfg=None, cwd=None, every_trial=None, yanks=([], 0), run_captured=None, **kw):
     from packagealert.cli.fix_cmd import _run_fix
     from packagealert.cli.run_settings import ProjectRunSettings
 
@@ -126,7 +129,9 @@ async def _run(tmp_path, lock_text, fmt="json", degraded=(), trial_result=None, 
     resolver = patch("packagealert.cli.run_settings.resolve_project_run_settings", return_value=settings)
     # pa fix runs from the project directory unless a test says otherwise.
     with contextlib.chdir(cwd or tmp_path), \
-            a, b, c, d, _fake_trials(trial_result, captured_error, extra_stderr, multi_fail, every_trial), \
+            a, b, c, d, (_fake_trials(trial_result, captured_error, extra_stderr, multi_fail, every_trial)
+                         if run_captured is None
+                         else patch("packagealert.sandbox.runner.SandboxRunner.run_captured", run_captured)), \
             patch("packagealert.sandbox.runner.bwrap_available", return_value=bwrap), \
             (contextlib.nullcontext() if real_settings else resolver), \
             patch("packagealert.cli.app._publication_age", AsyncMock(return_value=None)), \
@@ -1318,6 +1323,53 @@ async def test_in_copy_never_follows_a_symlink_in_or_out(tmp_path, monkeypatch):
     assert out.files == {"package.json": None, "package-lock.json": None}
 
 
+async def test_in_copy_reads_back_only_the_named_files(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "proj"
+    (project / "src").mkdir(parents=True)
+    (project / "uv.lock").write_text("lock")
+    (project / "src" / "a.py").write_text("a")
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            (kw["cwd"] / "uv.lock").write_text("new lock")
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy(["uv.lock", "src/a.py"], [["uv", "lock"]], read_back=["uv.lock"])
+    assert out.files == {"uv.lock": b"new lock"}
+
+
+async def test_in_copy_skips_a_file_under_a_symlinked_directory(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "link").symlink_to(outside, target_is_directory=True)
+    seen = {}
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            seen["exists"] = (kw["cwd"] / "link" / "secret.txt").exists()
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    await run.in_copy(["link/secret.txt"], [["uv", "lock"]])
+    assert seen["exists"] is False
+
+
 @pytest.mark.parametrize("name", ["../x", "/etc/passwd", "a/../../x", ""])
 async def test_in_copy_refuses_names_outside_the_project(tmp_path, monkeypatch, name):
     from packagealert.cli import fix_cmd
@@ -1354,13 +1406,14 @@ def test_forced_fix_is_labelled_in_text_and_json():
 
 
 async def _npm_fix_run(tmp_path, capsys, monkeypatch, *, widen_qs, deprecated=frozenset(), qs_resolved=None,
-                       drift_resolved=None):
+                       drift_resolved=None, unchecked=frozenset()):
     """pa fix over the npm fixture project; with *widen_qs* every declaration of qs admits 6.14.0.
 
     *deprecated* is the (name, version) pairs the public registry reports as
     deprecated releases; *qs_resolved* replaces the URL the override trial's
     qs copies resolve from. With *drift_resolved*, a plain re-lock moves
-    @babel/parser 7.29.9 to 7.29.10, resolved from that URL.
+    @babel/parser 7.29.9 to 7.29.10, resolved from that URL. *unchecked* is the
+    (name, version) pairs whose registry yank lookup fails.
     """
     import shutil
 
@@ -1408,8 +1461,9 @@ async def _npm_fix_run(tmp_path, capsys, monkeypatch, *, widen_qs, deprecated=fr
         from packagealert.yanks import YankedVersion
 
         # As check_yanks does, a package not from the public registry is not looked up.
-        return [YankedVersion("npm", p.name, p.version, "Bad release.") for p in packages
-                if p.from_public_registry and (p.name, p.version) in deprecated], 0
+        return ([YankedVersion("npm", p.name, p.version, "Bad release.") for p in packages
+                 if p.from_public_registry and (p.name, p.version) in deprecated],
+                sum((p.name, p.version) in unchecked for p in packages))
 
     a, b, c, d = _patches()
     settings = ProjectRunSettings(None, {}, [], False, False, False, False)
@@ -1739,3 +1793,784 @@ async def test_a_trial_whose_withdrawn_release_check_failed_is_not_verified(tmp_
     out = json.loads(capsys.readouterr().out)
     assert out["planned"] == []
     assert out["held"] and all(h["reason"] == "could not verify" and "withdrawn" in h["detail"] for h in out["held"])
+
+
+
+@pytest.mark.parametrize(("lock_only", "sync", "interactive", "env", "mode"), [
+    (False, False, True, {}, "sync"),
+    (False, False, False, {}, "lock-only"),
+    (False, False, True, {"CI": "true"}, "lock-only"),
+    (False, False, True, {"GITHUB_ACTIONS": "true"}, "lock-only"),
+    (False, False, True, {"CI": "false"}, "sync"),
+    (False, False, True, {"CI": "0"}, "sync"),
+    (True, False, True, {}, "lock-only"),
+    (False, True, False, {"CI": "1"}, "sync"),
+])
+def test_apply_mode(lock_only, sync, interactive, env, mode):
+    assert _apply_mode(lock_only, sync, interactive=interactive, env=env) == mode
+
+
+_APPLIED = ApplyResult(True, written=("uv.lock",), backup=Path("/b/1"),
+                       changes=(VersionChange("urllib3", ("2.7.0",), ("2.8.0",)),))
+
+
+async def test_lock_only_apply_reports_and_exits_0(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)) as ap, \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(return_value=0)) as sync:
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=False, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and ap.await_count == 1 and sync.await_count == 0
+    assert out["apply"] == {"mode": "lock-only", "applied": True, "reason": None, "written": ["uv.lock"],
+                            "backup": "/b/1", "synced": None, "sync_command": None, "remaining": [],
+                            "changes": [{"package": "urllib3", "before": ["2.7.0"], "after": ["2.8.0"]}]}
+
+
+async def test_sync_mode_runs_the_sync_in_the_project(tmp_path, capsys):
+    seen = {}
+
+    async def run(_self, argv, **kw):
+        seen["argv"], seen["cwd"] = argv, Path.cwd()
+        return 0
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", run):
+        code = await _run(tmp_path, LOCK, cwd=elsewhere, apply=ApplyOptions("sync", yes=True, interactive=False))
+    assert code == 0 and seen["argv"] == ["uv", "sync", "--locked"] and seen["cwd"].resolve() == tmp_path.resolve()
+    assert json.loads(capsys.readouterr().out)["apply"]["synced"] is True
+
+
+async def test_failed_sync_keeps_the_write_and_exits_1(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(return_value=1)):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["apply"]["applied"] is True and out["apply"]["synced"] is False
+
+
+async def test_json_sync_output_does_not_reach_stdout(tmp_path, capfd):
+    import os
+
+    async def noisy(_self, argv, **kw):
+        os.write(1, b"Installed 3 packages\n")
+        return 0
+
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", noisy):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    captured = capfd.readouterr()
+    json.loads(captured.out)  # stdout is still pure JSON
+    assert "Installed 3 packages" in captured.err
+
+
+async def test_unverified_plan_is_not_applied(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        code = await _run(tmp_path, LOCK, bwrap=False, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and ap.await_count == 0
+    assert out["apply"]["applied"] is False and "could not be verified" in out["apply"]["reason"]
+
+
+@pytest.mark.parametrize("answer", ["n\n", ""])  # "" is EOF
+async def test_declining_or_eof_applies_nothing(tmp_path, capsys, monkeypatch, answer):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(answer))
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("lock-only", yes=False, interactive=True))
+    assert code == 1 and ap.await_count == 0
+    assert "Not applied: declined" in capsys.readouterr().out
+
+
+async def test_yes_skips_the_prompt(tmp_path, capsys, monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)) as ap:
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("lock-only", yes=True, interactive=True))
+    out = capsys.readouterr().out
+    assert code == 0 and ap.await_count == 1
+    assert "uv.lock updated: urllib3 2.7.0 → 2.8.0" in out and "/b/1" in out
+
+
+async def test_refused_apply_exits_1_with_the_reason(tmp_path, capsys):
+    refused = ApplyResult(False, "the project changed while pa fix was running; run it again")
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=refused)):
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert code == 1
+    assert "Not applied: the project changed while pa fix was running" in capsys.readouterr().out
+
+
+async def test_snapshot_is_taken_before_planning(tmp_path, capsys):
+    """A lock changed during planning must be caught: the snapshot predates the OSV lookups."""
+    from packagealert.cli import app as app_module
+
+    seen = {}
+    real_query = app_module._query_osv_findings
+
+    async def query_then_edit_lock(*a, **kw):
+        (tmp_path / "uv.lock").write_text(LOCK + "\n# edited during planning\n")
+        return await real_query(*a, **kw)
+
+    async def fake_apply(adapter, plan, run, snap, backup_root, **kw):
+        seen["lock"] = snap.files["uv.lock"]
+        return _APPLIED
+
+    with patch("packagealert.remediate.apply.apply_plan", fake_apply), \
+            patch("packagealert.cli.app._query_osv_findings", query_then_edit_lock):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert seen["lock"] == LOCK.encode()
+
+
+async def test_clean_project_exits_0_under_apply(tmp_path, capsys):
+    code = await _run(tmp_path, ONLY_PROJECT, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert out["apply"]["applied"] is False and out["apply"]["reason"] == "nothing to apply"
+
+
+async def test_unparsed_sync_command_is_never_run(tmp_path, capsys, caplog):
+    run = AsyncMock(return_value=0)
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner._try_parse", return_value=None), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", run), \
+            caplog.at_level("WARNING"):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and run.await_count == 0 and out["apply"]["synced"] is False
+    assert "not recognised" in caplog.text
+
+
+@pytest.mark.parametrize("behaviour", ["raise", "malformed"])
+async def test_broken_sync_argv_is_not_run(tmp_path, capsys, caplog, behaviour):
+    from packagealert.languages.python_fix.uv import UvFixAdapter
+
+    def sync_argv(self, plan, flags):
+        if behaviour == "raise":
+            raise RuntimeError("boom")
+        return ["uv", 3]
+
+    run = AsyncMock(return_value=0)
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch.object(UvFixAdapter, "sync_argv", sync_argv), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", run), \
+            caplog.at_level("WARNING"):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and run.await_count == 0 and out["apply"]["synced"] is False
+    assert caplog.records
+
+
+@pytest.mark.parametrize("behaviour", ["raise", "numbers"])
+async def test_broken_written_files_falls_back_to_the_lock(tmp_path, capsys, caplog, behaviour):
+    from packagealert.languages.python_fix.uv import UvFixAdapter
+
+    def written_files(self):
+        if behaviour == "raise":
+            raise RuntimeError("boom")
+        return (1, 2)
+
+    seen = {}
+
+    async def fake_apply(adapter, plan, run, snap, backup_root, **kw):
+        seen["names"] = set(snap.files)
+        return _APPLIED
+
+    with patch("packagealert.remediate.apply.apply_plan", fake_apply), \
+            patch.object(UvFixAdapter, "written_files", property(written_files)), \
+            caplog.at_level("WARNING"):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert caplog.records
+    if behaviour == "raise":
+        # An adapter whose written_files cannot be read cannot apply: refused before apply_plan.
+        out = json.loads(capsys.readouterr().out)
+        assert code == 1 and not seen and "cannot apply fixes (boom)" in out["apply"]["reason"]
+    else:
+        assert code == 0 and seen["names"] == {"uv.lock"}
+
+
+async def test_failed_sync_prints_the_command(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(return_value=1)):
+        await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("sync", yes=True, interactive=False))
+    assert "run: uv sync --locked" in capsys.readouterr().out
+
+
+async def test_failed_sync_says_the_environment_was_not_synced(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(return_value=1)):
+        await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = capsys.readouterr().out
+    assert "Applied (lock, then the environment):" in out
+    assert "The environment was not synced" in out and "The environment was synced" not in out
+
+
+@pytest.mark.parametrize("args", [
+    ["--apply", "--lock-only", "--sync"],
+    ["--lock-only"],
+    ["--sync"],
+    ["--yes"],
+    ["--apply", "--no-verify"],
+])
+def test_invalid_apply_options_exit_2(tmp_path, args):
+    res, seen = _invoke([str(tmp_path), *args])
+    assert res.exit_code == 2 and not seen
+
+
+def test_json_apply_on_a_terminal_needs_yes(tmp_path, monkeypatch):
+    monkeypatch.setattr("packagealert.cli.fix_cmd._interactive", lambda: True)
+    res, seen = _invoke([str(tmp_path), "--apply", "--format", "json"])
+    assert res.exit_code == 2 and not seen
+    res, seen = _invoke([str(tmp_path), "--apply", "--format", "json", "--yes"])
+    assert res.exit_code == 0 and seen["apply"].yes
+
+
+def test_apply_options_reach_run_fix(tmp_path, monkeypatch):
+    monkeypatch.setattr("packagealert.cli.fix_cmd._interactive", lambda: False)
+    monkeypatch.delenv("CI", raising=False)
+    res, seen = _invoke([str(tmp_path), "--apply"])
+    assert res.exit_code == 0
+    assert seen["apply"] == ApplyOptions("lock-only", yes=False, interactive=False)
+    res, seen = _invoke([str(tmp_path)])
+    assert seen["apply"] is None
+
+
+async def test_snapshot_covers_the_uv_manifest_as_well_as_the_lock(tmp_path, capsys):
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "0.1.0"\n')
+    seen = {}
+
+    async def fake_apply(adapter, plan, run, snap, backup_root, **kw):
+        seen["files"] = snap.files
+        return _APPLIED
+
+    with patch("packagealert.remediate.apply.apply_plan", fake_apply):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert set(seen["files"]) == {"uv.lock", "pyproject.toml", "uv.toml", ".python-version"}
+    assert seen["files"]["pyproject.toml"] == (tmp_path / "pyproject.toml").read_bytes()
+
+
+async def test_snapshot_records_every_input_the_copy_reads(tmp_path, capsys):
+    """The files the re-resolve copies are recorded by digest before planning."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "0.1.0"\n')
+    seen = {}
+
+    async def fake_apply(adapter, plan, run, snap, backup_root, **kw):
+        seen["inputs"] = snap.inputs
+        return _APPLIED
+
+    with patch("packagealert.remediate.apply.apply_plan", fake_apply):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert seen["inputs"] is not None and set(seen["inputs"]) == {"pyproject.toml", "uv.lock"}
+    assert all(d.startswith("sha256 ") for d in seen["inputs"].values())
+
+
+async def test_inputs_that_cannot_be_listed_are_recorded_as_empty(tmp_path, capsys):
+    """A failed listing is recorded as no inputs, so the apply refuses instead of skipping the check."""
+    seen = {}
+
+    async def fake_apply(adapter, plan, run, snap, backup_root, **kw):
+        seen["inputs"] = snap.inputs
+        return _APPLIED
+
+    with patch("packagealert.remediate.apply.apply_plan", fake_apply), \
+            patch("packagealert.languages.python_fix.uv.UvFixAdapter.apply_files", side_effect=RuntimeError("boom")):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert seen["inputs"] == {}
+
+
+async def test_the_write_is_reported_before_the_sync_starts(tmp_path, capsys):
+    seen = {}
+
+    async def run(_self, argv, **kw):
+        seen["before_sync"] = capsys.readouterr().out
+        return 0
+
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", run):
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("sync", yes=True, interactive=False))
+    assert code == 0
+    assert "uv.lock updated: urllib3 2.7.0 → 2.8.0" in seen["before_sync"] and "/b/1" in seen["before_sync"]
+    assert "The environment was synced" in capsys.readouterr().out
+
+
+async def test_a_sync_that_raises_keeps_the_report_and_exits_1(tmp_path, capsys, caplog):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(side_effect=RuntimeError("bwrap died"))), \
+            caplog.at_level("WARNING"):
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = capsys.readouterr().out
+    assert code == 1
+    written, backup, not_synced = (out.index("uv.lock updated"), out.index("Originals saved in /b/1"),
+                                   out.index("The environment was not synced; run: uv sync --locked"))
+    assert written < backup < not_synced
+    assert "bwrap died" in caplog.text
+
+
+async def test_a_sync_that_raises_is_not_synced_in_json(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(side_effect=RuntimeError("x"))):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and out["apply"]["synced"] is False
+    assert out["apply"]["sync_command"] == ["uv", "sync", "--locked"]
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, asyncio.CancelledError])
+async def test_an_interrupted_sync_still_prints_the_json_then_stops(tmp_path, capsys, interrupt):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(side_effect=interrupt())), \
+            pytest.raises(interrupt):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["apply"]["applied"] is True and out["apply"]["synced"] is False
+    assert out["apply"]["written"] == ["uv.lock"]
+
+
+async def test_an_interrupted_text_sync_prints_the_report_then_stops(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)), \
+            patch("packagealert.sandbox.runner.SandboxRunner.run", AsyncMock(side_effect=KeyboardInterrupt())), \
+            pytest.raises(KeyboardInterrupt):
+        await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("sync", yes=True, interactive=False))
+    out = capsys.readouterr().out
+    assert "uv.lock updated" in out and "The environment was not synced; run: uv sync --locked" in out
+
+
+async def test_an_adapter_that_cannot_apply_is_refused_without_asking(tmp_path, capsys, monkeypatch):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("y\n"))
+    with patch("packagealert.remediate.apply.can_apply", return_value=False), \
+            patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("lock-only", yes=False, interactive=True))
+    out = capsys.readouterr().out
+    assert code == 1 and ap.await_count == 0
+    assert "Apply " not in out and "Not applied: the uv adapter cannot apply fixes" in out
+
+
+async def test_a_plan_without_an_end_state_is_refused_without_asking(tmp_path, capsys, monkeypatch):
+    import io
+
+    from packagealert.remediate import verify as verify_mod
+
+    real = verify_mod.verify_plan
+
+    async def no_end_state(plan, **kw):
+        return dataclasses.replace(await real(plan, **kw), verified_after=None)
+
+    monkeypatch.setattr("sys.stdin", io.StringIO("y\n"))
+    with patch("packagealert.remediate.verify.verify_plan", no_end_state), \
+            patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        code = await _run(tmp_path, LOCK, fmt="text", apply=ApplyOptions("lock-only", yes=False, interactive=True))
+    out = capsys.readouterr().out
+    assert code == 1 and ap.await_count == 0
+    assert "Apply " not in out and "Not applied: verification did not record" in out
+
+
+async def test_nothing_remains_when_nothing_was_applied(tmp_path, capsys):
+    refused = ApplyResult(False, "the re-resolve changed nothing")
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=refused)):
+        await _run(tmp_path, LOCK, multi_fail=True, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["deferred"] == ["urllib3"] and out["apply"]["remaining"] == []
+
+
+async def test_what_remains_is_listed_when_applied(tmp_path, capsys):
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)):
+        await _run(tmp_path, LOCK, multi_fail=True, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert json.loads(capsys.readouterr().out)["apply"]["remaining"] == ["urllib3"]
+
+
+async def test_unchecked_drift_yank_lookup_is_recorded_on_the_plan(tmp_path, capsys, monkeypatch):
+    """A re-lock version whose yank lookup fails is counted: --apply would write it unchecked."""
+    out, _ = await _npm_fix_run(
+        tmp_path, capsys, monkeypatch, widen_qs=True,
+        drift_resolved="https://registry.npmjs.org/@babel/parser/-/parser-7.29.10.tgz",
+        unchecked=frozenset({("@babel/parser", "7.29.10")}))
+    assert out["lock_drift_unchecked"] == 1
+
+
+async def test_checked_drift_records_no_unchecked_versions(tmp_path, capsys, monkeypatch):
+    out, _ = await _npm_fix_run(
+        tmp_path, capsys, monkeypatch, widen_qs=True,
+        drift_resolved="https://registry.npmjs.org/@babel/parser/-/parser-7.29.10.tgz")
+    assert out["lock_drift_unchecked"] == 0
+
+
+async def test_apply_refuses_when_drift_versions_were_not_yank_checked(tmp_path):
+    from packagealert.cli import fix_cmd
+    from packagealert.remediate.adapter import SyncSelection
+    from packagealert.remediate.apply import Snapshot
+    from packagealert.remediate.planner import FixPlan, PlannedFix
+
+    item = PlannedFix(package="qs", version="6.7.0", target="6.14.0", direct=False, path=["app", "qs"],
+                      advisories=["GHSA-q"], left_open=[], cooldown_checked=True, verified=True)
+    plan = FixPlan(planned=[item], verified_after={"qs": frozenset({"6.14.0"})}, drift_unchecked=2)
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        outcome, interrupted = await fix_cmd._apply(
+            fix_cmd.ApplyOptions("lock-only", yes=True, interactive=False), object(),
+            tmp_path / "package-lock.json", plan, object(), object(), SyncSelection(), Snapshot({}),
+            None, contextlib.nullcontext, osv_failures=0, unverified_reason=None, json_output=True)
+    assert ap.await_count == 0 and interrupted is None and outcome["applied"] is False
+    assert outcome["reason"] == ("2 version(s) that re-locking the project installs could not be "
+                                 "checked for withdrawn releases")
+
+
+@pytest.mark.parametrize(("osv_failures", "unverified", "drift_unchecked", "reason"), [
+    (3, None, 0, "3 package(s) could not be checked against OSV"),
+    (0, "the sandbox is unavailable", 0, "the plan could not be verified (the sandbox is unavailable)"),
+    (0, None, 2, "2 version(s) that re-locking the project installs could not be checked for withdrawn releases"),
+    (0, None, 0, "nothing to apply"),
+])
+async def test_an_empty_plan_reports_why_it_is_not_clean(tmp_path, osv_failures, unverified, drift_unchecked, reason):
+    """An OSV outage with no findings, or an unverified plan whose fixes were all held, is not
+    'nothing to apply': the reason names what could not be checked."""
+    from packagealert.cli import fix_cmd
+    from packagealert.remediate.adapter import SyncSelection
+    from packagealert.remediate.apply import Snapshot
+    from packagealert.remediate.planner import FixPlan
+
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock()) as ap:
+        outcome, _ = await fix_cmd._apply(
+            fix_cmd.ApplyOptions("lock-only", yes=True, interactive=False), object(),
+            tmp_path / "uv.lock", FixPlan(drift_unchecked=drift_unchecked), object(), object(),
+            SyncSelection(), Snapshot({}), None, contextlib.nullcontext,
+            osv_failures=osv_failures, unverified_reason=unverified, json_output=True)
+    assert ap.await_count == 0 and outcome["applied"] is False and outcome["reason"] == reason
+
+
+@pytest.mark.parametrize(("drift_unchecked", "reason", "applied", "synced", "code"), [
+    (2, "2 version(s) that re-locking the project installs could not be checked for withdrawn releases",
+     False, None, 1),
+    (0, "nothing to apply", False, None, 0),
+    (0, None, True, None, 0),
+    (0, None, True, False, 1),
+    (0, "declined", False, None, 1),
+])
+def test_exit_status_agrees_with_the_apply_outcome(drift_unchecked, reason, applied, synced, code):
+    """Under --apply only an applied plan, or a clean one with nothing to apply, exits 0;
+    every refusal (an empty plan with unchecked drift included) exits 1."""
+    from packagealert.cli.fix_cmd import _exit_status
+    from packagealert.remediate.planner import FixPlan
+
+    outcome = {"applied": applied, "reason": reason, "synced": synced}
+    assert _exit_status(FixPlan(drift_unchecked=drift_unchecked), osv_failures=0, unverified_reason=None,
+                        outcome=outcome) == code
+
+
+@pytest.mark.parametrize("member", ["written_files", "apply_files"])
+async def test_an_adapter_naming_a_file_with_a_nul_does_not_crash_the_snapshot(tmp_path, capsys, monkeypatch, member):
+    """A malformed adapter name is treated like any other malformed answer, not a traceback."""
+    from packagealert.languages.python_fix.uv import UvFixAdapter
+
+    if member == "written_files":
+        monkeypatch.setattr(UvFixAdapter, "written_files", ("uv.lock\0x",))
+    else:
+        monkeypatch.setattr(UvFixAdapter, "apply_files", lambda self, d: ["pyproject.toml\0"])
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)):
+        code = await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert code in (0, 1)
+    assert json.loads(capsys.readouterr().out)["apply"] is not None
+
+
+async def test_an_interrupted_apply_is_reported_before_the_interruption_propagates(tmp_path, capsys):
+    """pa fix prints the apply outcome (the backup included) and only then stops as interrupted."""
+    from packagealert.remediate.apply import ApplyResult
+
+    left = ApplyResult(False, "could not write the project's files (interrupted while writing; uv.lock could "
+                              "not be restored); the originals are in /b/2", backup=Path("/b/2"),
+                       interrupted=KeyboardInterrupt())
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=left)), \
+            pytest.raises(KeyboardInterrupt):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["apply"]["applied"] is False and out["apply"]["backup"] == "/b/2"
+    assert "uv.lock could not be restored" in out["apply"]["reason"]
+
+
+@pytest.mark.parametrize("swap", ["file", "directory"])
+async def test_in_copy_never_follows_a_symlink_swapped_in_after_its_checks(tmp_path, monkeypatch, swap):
+    """A file, or a directory above it, replaced by a symlink while the copy is being made
+    (after any check of the path) must not bring a file from outside the project into the copy."""
+    import shutil
+
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox import runner as sandbox_runner
+
+    scratch_root = tmp_path / "scratch"
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", scratch_root)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.py").write_text("secret")
+    project = tmp_path / "proj"
+    (project / "sub").mkdir(parents=True)
+    (project / "sub" / "a.py").write_text("real")
+    real_mkdir = Path.mkdir
+    state = {"swapped": False}
+
+    def mkdir(self, *a, **kw):
+        if not state["swapped"] and self.is_relative_to(scratch_root) and self.name == "sub":
+            state["swapped"] = True
+            if swap == "file":
+                (project / "sub" / "a.py").unlink()
+                (project / "sub" / "a.py").symlink_to(outside / "a.py")
+            else:
+                shutil.rmtree(project / "sub")
+                (project / "sub").symlink_to(outside, target_is_directory=True)
+        return real_mkdir(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    seen = {}
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            copied = kw["cwd"] / "sub" / "a.py"
+            seen["content"] = copied.read_text() if copied.is_file() else None
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    await run.in_copy(["sub/a.py"], [["uv", "lock"]])
+    assert state["swapped"]
+    assert seen["content"] != "secret"
+
+
+async def test_in_copy_reads_back_nothing_through_a_directory_symlink_left_in_the_copy(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.py").write_text("secret")
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            (kw["cwd"] / "src").symlink_to(outside, target_is_directory=True)
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy([], [["uv", "lock"]], read_back=["src/a.py"])
+    assert out.files == {"src/a.py": None}
+
+
+async def test_in_copy_keeps_each_file_s_permission_bits(tmp_path, monkeypatch):
+    """A tracked executable (a build helper) stays executable in the copy, so the re-resolve
+    runs it as the project would; set-id bits are not carried over, and the owner can always
+    read and write the copy, which the re-lock rewrites."""
+    import os
+    import stat as stat_mod
+
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "proj"
+    (project / "tools").mkdir(parents=True)
+    modes = {"tools/gen.sh": 0o4755, "uv.lock": 0o444, "pyproject.toml": 0o640}
+    for name, mode in modes.items():
+        (project / name).write_text("x")
+        os.chmod(project / name, mode)
+    seen = {}
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            for name in modes:
+                seen[name] = stat_mod.S_IMODE((kw["cwd"] / name).stat().st_mode)
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    await run.in_copy(list(modes), [["uv", "lock"]])
+    assert seen == {"tools/gen.sh": 0o755, "uv.lock": 0o644, "pyproject.toml": 0o640}
+
+
+async def test_a_file_changed_only_while_verifying_leaves_the_plan_unverified(tmp_path, capsys):
+    """A project file changed after the pre-planning snapshot, used by the trials, and changed
+    back before the apply passes every later check: the trials must use the snapshot's files,
+    so the change leaves the plan unverified and nothing is applied."""
+    from packagealert.remediate import apply as apply_module
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "1"\n')
+    original = (tmp_path / "pyproject.toml").read_bytes()
+    real_snapshot = apply_module.snapshot
+
+    def snapshot_then_change(*a, **kw):
+        snap = real_snapshot(*a, **kw)
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "1"\n'
+                                                 '[[tool.uv.index]]\nurl = "https://pypi.example.com/simple"\n')
+        return snap
+
+    with patch("packagealert.remediate.apply.snapshot", snapshot_then_change), \
+            patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)) as ap:
+        try:
+            code = await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+        finally:
+            (tmp_path / "pyproject.toml").write_bytes(original)
+    out = json.loads(capsys.readouterr().out)
+    assert code == 1 and ap.await_count == 0
+    assert "the project changed while pa fix was running" in out["apply"]["reason"]
+
+
+async def test_trials_run_in_a_copy_of_the_snapshotted_inputs(tmp_path, capsys):
+    """With a snapshot, a read-only trial runs in a scratch copy holding the snapshot's inputs,
+    not in the live project."""
+    from packagealert.sandbox.runner import CapturedRun
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "1"\n')
+    seen = []
+
+    async def run_captured(_self, argv, **kw):
+        seen.append((kw["cwd"], kw.get("scratch"), (kw["cwd"] / "pyproject.toml").read_text()))
+        pins = [a for a in argv if "==" in a]
+        lines = ["Resolved 4 packages in 1ms"]
+        for pin in pins:
+            name, ver = pin.split("==")
+            lines.append(f"Update {name} v{_INSTALLED[name]} -> v{ver}")
+        return CapturedRun(0, "", "\n".join(lines) + "\n")
+
+    with patch("packagealert.remediate.apply.apply_plan", AsyncMock(return_value=_APPLIED)):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False),
+                   run_captured=run_captured)
+    assert seen and all(cwd.resolve() != tmp_path.resolve() and scratch for cwd, scratch, _ in seen)
+    assert {text for _, _, text in seen} == {'[project]\nname = "proj"\nversion = "1"\n'}
+    assert not any(cwd.exists() for cwd, _, _ in seen)  # the copy is removed afterwards
+
+
+async def test_an_npm_trial_copy_differing_from_the_snapshot_runs_nothing(tmp_path, monkeypatch):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.remediate import apply as apply_module
+    from packagealert.remediate.adapter import ApplyRefused
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "proj"
+    project.mkdir()
+    for name, text in (("package.json", "{}"), ("package-lock.json", "{}"),
+                       (".npmrc", "registry=https://registry.npmjs.org/\n")):
+        (project / name).write_text(text)
+    files = ["package.json", "package-lock.json", ".npmrc"]
+    snap = apply_module.snapshot(project, files)
+    (project / ".npmrc").write_text("registry=https://npm.example.com/\n")
+    ran = []
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            ran.append(argv)
+            from packagealert.sandbox.runner import CapturedRun
+            return CapturedRun(0, "", "")
+
+    edits = []
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False),
+                                  snap=snap)
+    with pytest.raises(ApplyRefused):
+        await run.in_copy(files, [["npm", "install"]], edit=edits.append)
+    assert ran == [] and edits == [] and run.changed
+
+
+async def test_a_copy_of_executable_inputs_still_matches_the_snapshot(tmp_path, monkeypatch):
+    """The copy's own permission bits are what the snapshot recorded, so an unchanged
+    project with executable (or set-id) files is not taken for a changed one."""
+    import os
+
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.remediate import apply as apply_module
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "proj"
+    (project / "tools").mkdir(parents=True)
+    modes = {"pyproject.toml": 0o640, "uv.lock": 0o444, "tools/gen.sh": 0o4755, "tools/x.sh": 0o700}
+    for name, mode in modes.items():
+        (project / name).write_text(name)
+        os.chmod(project / name, mode)
+    snap = apply_module.snapshot(project, ["pyproject.toml", "uv.lock"], inputs=list(modes))
+    ran = []
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            ran.append(argv)
+            from packagealert.sandbox.runner import CapturedRun
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False),
+                                  snap=snap)
+    await run.in_copy(list(modes), [["uv", "lock"]])
+    await run.read_only(["uv", "lock", "--dry-run"])
+    run.close()
+    assert len(ran) == 2 and not run.changed
+
+
+def _snapshot_runner(tmp_path, monkeypatch, runner):
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.remediate import apply as apply_module
+    from packagealert.sandbox import runner as sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner, "SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "proj"
+    project.mkdir()
+    for name, text in (("pyproject.toml", '[project]\nname = "p"\n'), ("uv.lock", "lock A\n")):
+        (project / name).write_text(text)
+    snap = apply_module.snapshot(project, ["pyproject.toml", "uv.lock", "uv.toml"],
+                                 inputs=["pyproject.toml", "uv.lock"])
+    run = fix_cmd._FixTrialRunner(runner, project, ProjectRunSettings(None, {}, [], False, False, False, False),
+                                  snap=snap)
+    return project, run
+
+
+async def test_a_snapshot_runner_reads_only_the_snapshot_s_files(tmp_path, monkeypatch):
+    """Adapters read project files through run.project_dir (the lock, .npmrc) as well as
+    running commands: with a snapshot, all of it is one checked copy, so a change to the live
+    project during verification (and changed back before the apply) is never seen."""
+    seen = []
+
+    class Runner:
+        async def run_captured(self, argv, **kw):
+            from packagealert.sandbox.runner import CapturedRun
+            seen.append((kw["cwd"] / "uv.lock").read_text())
+            return CapturedRun(0, "", "")
+
+    project, run = _snapshot_runner(tmp_path, monkeypatch, Runner())
+    run.freeze()
+    (project / "uv.lock").write_text("lock B\n")
+    (project / "uv.toml").write_text('index-url = "https://pypi.example.com/simple"\n')
+    assert run.project_dir.resolve() != project.resolve()
+    assert (run.project_dir / "uv.lock").read_text() == "lock A\n"
+    assert not (run.project_dir / "uv.toml").exists()
+    await run.in_copy(["pyproject.toml", "uv.lock", "uv.toml"], [["uv", "lock"]])
+    await run.read_only(["uv", "lock", "--dry-run"])
+    assert seen == ["lock A\n", "lock A\n"] and not run.changed
+    frozen = run.project_dir
+    run.close()
+    assert not frozen.exists()
+
+
+def test_freezing_a_project_changed_since_the_snapshot_is_refused(tmp_path, monkeypatch):
+    from packagealert.remediate.adapter import ApplyRefused
+
+    project, run = _snapshot_runner(tmp_path, monkeypatch, None)
+    (project / "uv.lock").write_text("lock B\n")
+    with pytest.raises(ApplyRefused):
+        run.freeze()
+    assert run.changed and run.project_dir == project
+    assert not any((tmp_path / "scratch").iterdir())
+
+
+async def test_an_interruption_while_re_resolving_is_reported_then_raised(tmp_path, capsys):
+    async def interrupted(self, *a, **kw):
+        raise KeyboardInterrupt
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "proj"\nversion = "1"\n')
+
+    with patch("packagealert.cli.fix_cmd._FixTrialRunner.in_copy", interrupted), \
+            pytest.raises(KeyboardInterrupt):
+        await _run(tmp_path, LOCK, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    out = json.loads(capsys.readouterr().out)
+    assert out["apply"]["applied"] is False
+    assert out["apply"]["reason"] == "interrupted while re-resolving; nothing was written"

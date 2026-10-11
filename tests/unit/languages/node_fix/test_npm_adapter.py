@@ -135,7 +135,7 @@ class _Run:
     async def read_only(self, argv):
         raise AssertionError("npm trials run in a copy")
 
-    async def in_copy(self, files, argvs, edit=None):
+    async def in_copy(self, files, argvs, edit=None, read_back=None):
         self.calls.append(argvs)
         if argvs == [npm_trial.install_argv([])] and edit is None:
             # The baseline: an up-to-date lock, which a plain install leaves as it is.
@@ -198,7 +198,7 @@ async def test_trial_scopes_a_forced_override_by_the_lowest_copy(tmp_path):
     class _EditRun(_Run):
         project_dir: Path
 
-        async def in_copy(self, files, argvs, edit=None):
+        async def in_copy(self, files, argvs, edit=None, read_back=None):
             edits.append(edit)
             return await super().in_copy(files, argvs, edit)
 
@@ -226,7 +226,7 @@ async def test_trial_of_a_project_with_npm_shrinkwrap_is_inconclusive(tmp_path):
         async def read_only(self, argv):
             raise AssertionError("no command may run")
 
-        async def in_copy(self, files, argvs, edit=None):
+        async def in_copy(self, files, argvs, edit=None, read_back=None):
             raise AssertionError("no command may run")
 
     adapter = NpmFixAdapter()
@@ -267,7 +267,7 @@ class _BaselineRun:
     async def read_only(self, argv):
         raise AssertionError("npm trials run in a copy")
 
-    async def in_copy(self, files, argvs, edit=None):
+    async def in_copy(self, files, argvs, edit=None, read_back=None):
         import json
 
         from packagealert.remediate.adapter import CommandResult, CopyResult
@@ -514,3 +514,84 @@ async def test_no_release_is_looked_up_for_a_parent_installed_under_an_alias(tmp
 
     assert await NpmFixAdapter().parent_upgrade("real", "q", "1.0.5", _Project()) is None  # type: ignore[arg-type]
 
+
+
+async def test_resolved_trial_reports_the_resulting_locks_end_state(tmp_path):
+    from packagealert.languages.node_fix import npm_lock
+
+    (tmp_path / "package-lock.json").write_bytes((FX / "before.json").read_bytes())
+    after = (FX / "scoped_after.json").read_bytes()
+    result = await NpmFixAdapter().trial([("@babel/core", "7.26.10")], [], _Run(tmp_path, after))
+    assert result.status == "resolved"
+    assert result.after is not None
+    assert result.after == npm_lock.version_sets(json.loads(after))
+    assert result.after["@babel/core"] == frozenset({"7.26.10"})
+
+
+def _mixed_plan():
+    return FixPlan(planned=[_fix("express", "4.21.2", direct=True),
+                            _fix("qs", "6.14.0", forced=("express", "qs@6.7.0"), version="6.7.0")])
+
+
+def test_apply_steps_mirror_the_printed_commands(tmp_path):
+    steps = NpmFixAdapter().apply_steps(_mixed_plan())
+    assert len(steps) == 4 and callable(steps[0]) and callable(steps[2])
+    assert steps[1] == npm_trial.install_argv(["express@4.21.2"])
+    assert steps[3] == npm_trial.install_argv([])
+    (tmp_path / "package.json").write_text('{"name": "p"}')
+    steps[0](tmp_path)
+    key = npm_trial.override_key("qs", "6.7.0", "6.14.0")
+    assert json.loads((tmp_path / "package.json").read_text())["overrides"] == {key: "6.14.0"}
+    steps[2](tmp_path)
+    assert "overrides" not in json.loads((tmp_path / "package.json").read_text())
+
+
+def test_apply_steps_without_overrides_are_one_install():
+    plan = FixPlan(planned=[_fix("express", "4.21.2", direct=True)])
+    assert NpmFixAdapter().apply_steps(plan) == [npm_trial.install_argv(["express@4.21.2"])]
+
+
+def test_apply_steps_of_a_separate_plan_apply_its_first_item():
+    plan = FixPlan(planned=[_fix("qs", "6.14.0", forced=("express", "qs@6.7.0")),
+                            _fix("express", "4.21.2", direct=True)], separate=True)
+    assert NpmFixAdapter().apply_steps(plan) == [npm_trial.install_argv(["express@4.21.2"])]
+
+
+def test_every_apply_command_is_an_approved_scratch_command():
+    for step in NpmFixAdapter().apply_steps(_mixed_plan()):
+        if not callable(step):
+            assert npm_trial.is_scratch_command(step), step
+
+
+def test_apply_step_refuses_an_existing_project_override(tmp_path):
+    (tmp_path / "package.json").write_text('{"name": "p", "overrides": {"qs": "6.0.0"}}')
+    with pytest.raises(npm_trial.ExistingOverride):
+        step = NpmFixAdapter().apply_steps(_mixed_plan())[0]
+        assert callable(step)
+        step(tmp_path)
+
+
+def test_written_files_apply_files_and_sync(tmp_path):
+    adapter = NpmFixAdapter()
+    assert NpmFixAdapter.written_files == ("package-lock.json", "package.json")
+    assert adapter.apply_files(tmp_path) == npm_trial.FILES
+    assert adapter.sync_argv(_mixed_plan()) == ["npm", "install"]
+
+
+def test_apply_steps_leave_a_four_space_crlf_package_json_byte_identical(tmp_path):
+    raw = b'{\r\n    "name": "p\\u00e9",\r\n    "dependencies": {\r\n        "express": "4.17.1"\r\n    }\r\n}\r\n'
+    (tmp_path / "package.json").write_bytes(raw)
+    for step in NpmFixAdapter().apply_steps(_mixed_plan()):
+        if callable(step):
+            step(tmp_path)
+    assert (tmp_path / "package.json").read_bytes() == raw
+
+
+def test_stale_files_cover_the_npmrc_the_copy_resolves_with():
+    """.npmrc is copied for the re-resolve (npm_trial.FILES) but never written back;
+    npm-shrinkwrap.json, which npm reads in preference to package-lock.json, is only
+    checked: it must still be absent when the lock is written."""
+    assert NpmFixAdapter.stale_files == ("package-lock.json", "package.json", ".npmrc", "npm-shrinkwrap.json")
+    assert set(NpmFixAdapter.stale_files) == {*npm_trial.FILES, "npm-shrinkwrap.json"}
+    assert ".npmrc" not in NpmFixAdapter.written_files
+    assert "npm-shrinkwrap.json" not in NpmFixAdapter.written_files

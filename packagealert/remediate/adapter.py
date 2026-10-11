@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -72,6 +72,10 @@ class TrialResult:
     """(package, version) pins the adapter added to the ones asked for, which the
     printed commands need too (npm: a direct dependency the trial moved whose
     peer range rejected a pin). Verification records them as upgrades the fix needs."""
+    after: Mapping[str, frozenset[str]] | None = field(default=None, compare=False, hash=False)
+    """The resolved lock's end state, package name -> the versions it locks (as the
+    adapter's ``versions_in()`` reads a lock), when the trial knows it; None otherwise.
+    ``pa fix --apply`` requires a re-resolve to leave exactly this."""
 
 
 @dataclass(frozen=True)
@@ -91,8 +95,10 @@ class CopyResult:
 
 
 class TrialRunner(Protocol):
-    project_dir: Path
-    """The project the trial is for; read it, never write it."""
+    @property
+    def project_dir(self) -> Path:
+        """The project the trial is for; read it, never write it."""
+        ...
 
     async def read_only(self, argv: list[str]) -> CommandResult:
         """Run *argv* in the sandbox in the project directory."""
@@ -100,13 +106,14 @@ class TrialRunner(Protocol):
 
     async def in_copy(
         self, files: list[str], argvs: list[list[str] | Callable[[Path], None]],
-        edit: Callable[[Path], None] | None = None,
+        edit: Callable[[Path], None] | None = None, read_back: list[str] | None = None,
     ) -> CopyResult:
         """Run *argvs* in a scratch copy holding *files*, after *edit(copy_dir)* if given.
 
         An entry of *argvs* that is a callable is an edit made between commands
         (``step(copy_dir)``), in Python rather than in the sandbox; it has no
         result in ``CopyResult.results``, which holds one per command run.
+        ``CopyResult.files`` holds *read_back* (default: *files*) afterwards.
         """
         ...
 
@@ -125,6 +132,10 @@ class SyncSelection:
 
 class LockfileError(Exception):
     """A lock file exists but cannot be used; the message says why."""
+
+
+class ApplyRefused(Exception):
+    """An adapter cannot apply this plan in an isolated copy; the message says why."""
 
 
 class FixAdapter(Protocol):
@@ -152,6 +163,17 @@ class FixAdapter(Protocol):
 
     Optional attributes: ``can_force: bool = False`` (the adapter's ``trial`` accepts
     ``force`` versions) and ``pins_every_copy: bool = False``.
+
+    ``pa fix --apply`` uses ``apply_files``, ``apply_steps``, ``written_files``,
+    ``versions_in`` and ``sync_argv``, plus the optional ``stale_files:
+    tuple[str, ...]`` (default: ``written_files``): the project files recorded
+    when planning starts and checked unchanged before anything is written.
+    Only ``written_files`` are written, and each must be a file directly in the
+    project directory (a name with no ``/``); any other name refuses the apply.
+    The optional ``async confirm_in_project(plan, run)`` returns the end state the
+    plan reaches when re-resolved, read-only, in the project itself (``None`` when
+    the scratch copy holds every file the tool reads); a different end state from
+    the copy's refuses the apply.
     """
 
     name: str
