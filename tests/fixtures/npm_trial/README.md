@@ -1,6 +1,6 @@
 # npm trial fixtures
 
-Recorded with npm 11.8.0 on node v24.13.1 (2026-10-08), in a fresh
+Recorded with npm 11.21.0 on node v24.13.1 (2026-10-13), in a fresh
 `mktemp -d` scratch directory, with `F="--package-lock-only --ignore-scripts --no-audit --no-fund"`.
 
 `package.json` is the fixture project's manifest:
