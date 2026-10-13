@@ -2002,3 +2002,74 @@ async def test_a_direct_dependency_is_never_forced():
     assert forced == []
     [p] = out.planned
     assert p.parent == ("p", "5.0.7") and p.forced is None
+
+
+async def test_single_item_plan_keeps_its_trial_end_state():
+    after = {"pip": frozenset({"26.2.0"}), "chalice": frozenset({"1.33.0"})}
+    ok = TrialResult("resolved", (Change("update", "pip", "26.1.2", "26.2.0"),), after=after)
+    trial, _ = _trials({(frozenset({("pip", "26.2.0")}), frozenset()): ok})
+    out = await _run(FixPlan(planned=[_item()]), trial)
+    assert out.verified_after == after
+    assert out.planned[0].after == after
+
+
+async def test_combined_plan_keeps_the_combined_trial_end_state():
+    one = TrialResult("resolved", (Change("update", "pip", "26.1.2", "26.2.0"),),
+                      after={"pip": frozenset({"26.2.0"}), "x": frozenset({"1.0"})})
+    two = TrialResult("resolved", (Change("update", "x", "1.0", "1.1"),),
+                      after={"pip": frozenset({"26.1.2"}), "x": frozenset({"1.1"})})
+    both_after = {"pip": frozenset({"26.2.0"}), "x": frozenset({"1.1"})}
+    both = TrialResult("resolved", (Change("update", "pip", "26.1.2", "26.2.0"),
+                                    Change("update", "x", "1.0", "1.1")), after=both_after)
+    trial, _ = _trials({
+        (frozenset({("pip", "26.2.0")}), frozenset()): one,
+        (frozenset({("x", "1.1")}), frozenset()): two,
+        (frozenset({("pip", "26.2.0"), ("x", "1.1")}), frozenset()): both,
+    })
+    out = await _run(FixPlan(planned=[_item(), _item("x", "1.0", "1.1")]), trial)
+    assert not out.separate
+    assert out.verified_after == both_after
+
+
+async def test_trial_without_an_end_state_leaves_none():
+    ok = TrialResult("resolved", (Change("update", "pip", "26.1.2", "26.2.0"),))
+    trial, _ = _trials({(frozenset({("pip", "26.2.0")}), frozenset()): ok})
+    out = await _run(FixPlan(planned=[_item()]), trial)
+    assert out.verified_after is None
+
+
+def test_end_state_does_not_affect_equality_or_hashing():
+    a = TrialResult("resolved", after={"p": frozenset({"1"})})
+    b = TrialResult("resolved", after={"p": frozenset({"2"})})
+    assert a == b and hash(a) == hash(b)
+
+
+async def test_the_forced_route_keeps_its_trial_end_state():
+    blocked = TrialResult("blocked", blocker=Blocker("express", "qs@6.7.0"))
+    after = {"qs": frozenset({"6.14.0"}), "express": frozenset({"4.17.1"})}
+    forced = TrialResult("resolved", (Change("update", "qs", "6.7.0", "6.14.0"),), after=after)
+
+    async def trial(pins, floats, *, force=(), lowest=None):
+        return forced if force else blocked
+
+    out = await _run(FixPlan(planned=[_item("qs", "6.7.0", "6.14.0")]), trial, can_force=True, pins_every_copy=True)
+    [p] = out.planned
+    assert p.forced == ("express", "qs@6.7.0")
+    assert p.after == after and out.verified_after == after
+
+
+async def test_the_parent_route_keeps_its_exact_trial_end_state():
+    blocked = TrialResult("blocked", blocker=Blocker("chalice", "pip>=9,<26.2"))
+    changes = (Change("update", "pip", "26.1.2", "26.2.0"), Change("update", "chalice", "1.33.0", "1.34.0"))
+    floated = TrialResult("resolved", changes, after={"pip": frozenset({"26.2.0"}), "chalice": frozenset({"1.35.0"})})
+    after = {"pip": frozenset({"26.2.0"}), "chalice": frozenset({"1.34.0"})}
+    exact = TrialResult("resolved", changes, after=after)
+    trial, _ = _trials({
+        (frozenset({("pip", "26.2.0")}), frozenset()): blocked,
+        (frozenset({("pip", "26.2.0")}), frozenset({"chalice"})): floated,
+        (_EXACT, frozenset()): exact,
+    })
+    out = await _run(FixPlan(planned=[_item()]), trial)
+    [p] = out.planned
+    assert p.parent == ("chalice", "1.34.0")
+    assert p.after == after and out.verified_after == after

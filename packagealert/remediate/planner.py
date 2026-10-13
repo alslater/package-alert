@@ -10,6 +10,8 @@ from packagealert.osv.remediation import FixRecommendation, PackageFindings
 from packagealert.remediate.graph import DependencyGraph
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from packagealert.remediate.adapter import Change, Yank
 
 MALICIOUS = "malicious"
@@ -58,6 +60,8 @@ class PlannedFix:
     the lock drift); the printed commands re-lock, so a transitive package gets
     no pin of its own. A direct dependency keeps its usual pin: its trial and
     the combined trial ran it, and it raises the declared range to the fix."""
+    after: Mapping[str, frozenset[str]] | None = field(default=None, compare=False, hash=False, repr=False)
+    """The end state of this item's verifying trial (``TrialResult.after``)."""
 
     @property
     def all_parents(self) -> tuple[tuple[str, str], ...]:
@@ -92,6 +96,13 @@ class FixPlan:
     """The error every trial resolve failed with, when they all failed the same way."""
     drift: tuple[Change, ...] = ()
     """What re-locking the project changes with nothing pinned (an out-of-date lock): every printed command makes these too."""
+    drift_unchecked: int = 0
+    """How many versions in ``drift`` the registry yank lookup could not check. The
+    printed commands install them too, so ``--apply`` refuses while any is unchecked."""
+    verified_after: Mapping[str, frozenset[str]] | None = None
+    """The end state of the printed command's verifying trial: the combined
+    trial's for several items, the printed item's own otherwise. None when the
+    adapter's trials do not report one (then ``--apply`` cannot apply)."""
 
     @property
     def complete(self) -> bool:

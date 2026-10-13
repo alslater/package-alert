@@ -723,12 +723,15 @@ class SandboxRunner:
 
         With scratch, *cwd* is a disposable copy: it must lie strictly inside
         SCRATCH_ROOT (after resolving symlinks), it is bound writable, and the
-        owning plugin must approve the argv through is_scratch_command().
-        Every other path stays exactly as in a read-only run, so the copy is
-        the one writable directory the command gains.
+        owning plugin must approve the argv through is_scratch_command(), or
+        through is_read_only_command() (a command that changes nothing may run
+        in a copy too). Every other path stays exactly as in a read-only run, so
+        the copy is the one writable directory the command gains.
         """
-        hook = "is_scratch_command" if scratch else "is_read_only_command"
-        if not _approved_by_owner(argv, hook):
+        approved = _approved_by_owner(argv, "is_read_only_command")
+        if scratch and not approved:
+            approved = _approved_by_owner(argv, "is_scratch_command")
+        if not approved:
             kind = "scratch" if scratch else "read-only"
             raise CapturedRunError(f"not an approved {kind} command: {' '.join(argv)}")
         if not bwrap_available():

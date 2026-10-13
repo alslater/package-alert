@@ -143,6 +143,15 @@ def copies(lock: dict) -> dict[str, tuple[str, str | None]]:
     return out
 
 
+def version_sets(lock: dict) -> dict[str, frozenset[str]]:
+    """Each package name in *lock* (as written: npm names are case-sensitive) with every version installed."""
+    out: dict[str, set[str]] = {}
+    for name, version in copies(lock).values():
+        if version is not None:
+            out.setdefault(name, set()).add(version)
+    return {n: frozenset(v) for n, v in out.items()}
+
+
 def dependents(lock: dict) -> list[tuple[str, str, str | None, dict[str, str]]]:
     """The root and every installed copy, with npm's resolution of each dependency it declares.
 

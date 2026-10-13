@@ -15,7 +15,13 @@ from typing import Any
 
 from packagealert.languages.node_fix import npm_lock
 from packagealert.osv.remediation import _generic_key
-from packagealert.remediate.adapter import Blocker, Change, TrialResult, TrialRunner
+from packagealert.remediate.adapter import (
+    ApplyRefused,
+    Blocker,
+    Change,
+    TrialResult,
+    TrialRunner,
+)
 
 FLAGS = ("--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund")
 FILES = ["package.json", "package-lock.json", ".npmrc"]
@@ -38,8 +44,12 @@ Release = tuple[int, int, int]
 _Window = tuple[str, str, str, Release]
 
 
-class ExistingOverride(Exception):
+class ExistingOverride(ApplyRefused):
     """package.json already overrides this package; pa fix does not rewrite it."""
+
+    def __init__(self, name: str) -> None:
+        super().__init__(f"package.json already overrides {name}; pa fix cannot add its own override")
+        self.name = name
 
 
 class _EditFailed(Exception):
@@ -363,57 +373,130 @@ def override_edit(name: str, target: str, lowest: str | None = None) -> Callable
     return override_edits([(name, lowest or target, target)])
 
 
-def override_edits(entries: Sequence[tuple[str, str, str]]) -> Callable[[Path], None]:
-    """One edit adding an ``override_key(name, lowest, target): target`` entry per (name, lowest, target).
+@dataclasses.dataclass(frozen=True)
+class _JsonFormat:
+    """How a JSON file is laid out: its indent, newline and whether it ends in one."""
 
-    Raises ExistingOverride when the copied package.json already overrides one
-    of the names (several entries for one name, on different major lines, are
-    pa fix's own); _EditFailed when it cannot be read or written.
+    indent: str
+    newline: str
+    final_newline: bool
+
+
+_INDENT_RE = re.compile(r"^[ \t]+(?=\S)", re.MULTILINE)
+
+
+def _json_format(text: str) -> _JsonFormat:
+    """*text*'s layout: the first indented line's leading whitespace (default two spaces), CRLF or LF."""
+    indent = m.group(0) if (m := _INDENT_RE.search(text)) else "  "
+    return _JsonFormat(indent, "\r\n" if "\r\n" in text else "\n", text.endswith("\n"))
+
+
+def _dump_json(obj: object, fmt: _JsonFormat) -> bytes:
+    text = json.dumps(obj, indent=fmt.indent, ensure_ascii=False) + ("\n" if fmt.final_newline else "")
+    return text.replace("\n", fmt.newline).encode()
+
+
+def _read_manifest(path: Path) -> tuple[bytes, Any]:
+    raw = path.read_bytes()
+    return raw, json.loads(raw)
+
+
+class OverrideEdit:
+    """An edit adding ``override_key(name, lowest, target): target`` per (name, lowest, target) entry.
+
+    Keeps the copy's package.json layout, and remembers the bytes it started
+    from in each copy, so ``override_removal`` can put them back exactly.
     """
-    def edit(copy: Path) -> None:
+
+    def __init__(self, entries: Sequence[tuple[str, str, str]]) -> None:
+        self.entries = list(entries)
+        self.originals: dict[Path, bytes] = {}
+
+    def __call__(self, copy: Path) -> None:
         path = copy / "package.json"
         try:
-            manifest = json.loads(path.read_text())
+            raw, manifest = _read_manifest(path)
             if not isinstance(manifest, dict):
                 raise TypeError("package.json is not an object")
             overrides = manifest.setdefault("overrides", {})
             if not isinstance(overrides, dict):
                 raise TypeError("package.json overrides is not an object")
+            fmt = _json_format(raw.decode())
         except (OSError, ValueError, TypeError) as exc:
             raise _EditFailed(str(exc)) from exc
-        for name, _lowest, _target in entries:
+        for name, _lowest, _target in self.entries:
             if _overrides(overrides, name.lower()):
                 raise ExistingOverride(name)
-        for name, low, target in entries:
+        for name, low, target in self.entries:
             overrides[override_key(name, low, target)] = target
         try:
-            path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+            path.write_bytes(_dump_json(manifest, fmt))
         except OSError as exc:
             raise _EditFailed(str(exc)) from exc
-    return edit
+        self.originals[copy] = raw
 
 
-def override_removal(entries: Sequence[tuple[str, str, str]]) -> Callable[[Path], None]:
-    """An edit removing the keys ``override_edits(entries)`` added (and ``overrides`` itself once empty).
+def override_edits(entries: Sequence[tuple[str, str, str]]) -> OverrideEdit:
+    """One edit adding an ``override_key(name, lowest, target): target`` entry per (name, lowest, target).
 
-    The project's own overrides stay. Raises _EditFailed when package.json
-    cannot be read or written.
+    The file keeps its indent, newline style and final newline. Raises
+    ExistingOverride when the copied package.json already overrides one of the
+    names (several entries for one name, on different major lines, are pa
+    fix's own); _EditFailed when it cannot be read or written.
+    """
+    return OverrideEdit(entries)
+
+
+def override_removal(entries: Sequence[tuple[str, str, str]], added: OverrideEdit | None = None,
+                     ) -> Callable[[Path], None]:
+    """An edit removing the keys ``override_edits(entries)`` added (and ``overrides`` itself once
+    empty, unless *added*'s original package.json had its own).
+
+    The project's own overrides stay, and the file keeps its layout. When
+    *added* is the edit that added the keys and removing them leaves the very
+    object it started from (key order included), its original bytes are
+    written back. Raises _EditFailed when package.json cannot be read or written.
     """
     def edit(copy: Path) -> None:
         path = copy / "package.json"
         try:
-            manifest = json.loads(path.read_text())
+            raw, manifest = _read_manifest(path)
             overrides = manifest.get("overrides") if isinstance(manifest, dict) else None
             if not isinstance(overrides, dict):
                 raise TypeError("package.json overrides is not an object")
             for name, low, target in entries:
                 overrides.pop(override_key(name, low, target), None)
-            if not overrides:
+            original = added.originals.pop(copy, None) if added is not None else None
+            # Removed once empty unless the project had its own (the printed commands, too,
+            # delete it only when package.json had no overrides entry).
+            if not overrides and not _has_overrides_entry(original):
                 del manifest["overrides"]
-            path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n")
+            if original is not None and _same_object(original, manifest):
+                path.write_bytes(original)
+            else:
+                path.write_bytes(_dump_json(manifest, _json_format(raw.decode())))
         except (OSError, ValueError, TypeError) as exc:
             raise _EditFailed(str(exc)) from exc
     return edit
+
+
+def _has_overrides_entry(raw: bytes | None) -> bool:
+    """Whether the package.json in *raw* has an ``overrides`` entry (False when unknown)."""
+    if raw is None:
+        return False
+    try:
+        manifest = json.loads(raw)
+    except ValueError:
+        return False
+    return isinstance(manifest, dict) and "overrides" in manifest
+
+
+def _same_object(raw: bytes, obj: object) -> bool:
+    """Whether the JSON in *raw* is *obj*, with every object's keys in the same order."""
+    try:
+        return json.loads(raw, object_pairs_hook=list) == json.loads(json.dumps(obj), object_pairs_hook=list)
+    except ValueError:
+        return False
 
 
 def _declared_spec(lock: dict, path: str, name: str, holder: str) -> str | None:
@@ -703,7 +786,7 @@ async def _resulting_lock(
     try:
         out = await run.in_copy(FILES, argvs, edit)
     except ExistingOverride as exc:
-        return TrialResult("inconclusive", detail=f"package.json already overrides {exc}")
+        return TrialResult("inconclusive", detail=f"package.json already overrides {exc.name}")
     except _EditFailed as exc:
         return TrialResult("inconclusive", detail=f"could not add the override to package.json: {exc}")
     last = out.results[-1] if out.results else None
@@ -784,7 +867,7 @@ async def run_trial(
         # targets, they are removed and the project re-locked. Every dependent's
         # range admits the target (checked here and after the run), so npm keeps
         # it; the second lock is the one judged, and package.json is left as it was.
-        argvs += [override_removal(entries), install_argv([])]
+        argvs += [override_removal(entries, edit), install_argv([])]
     # Packages this trial pins change with it, so their ranges are judged in
     # the resulting lock instead (``_pinned_after``).
     pinned = frozenset(n for n, _v in pins)
@@ -810,7 +893,8 @@ async def run_trial(
         return TrialResult("inconclusive", detail=f"could not read the trial's lock file: {exc}")
     result = TrialResult("resolved", changes, declined=declined,
                          non_public=non_public_versions(after, changes, run.project_dir, before=before,
-                                                        declined=declined))
+                                                        declined=declined),
+                         after=npm_lock.version_sets(after))
     # A direct dependency whose exact peer range a pin overrides (@vitest/ui 4.1.10
     # wanting vitest 4.1.10) makes npm warn while moving it; naming the version it
     # moves to in the same install avoids that, and the printed install names it too.

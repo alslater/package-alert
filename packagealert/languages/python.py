@@ -2937,6 +2937,12 @@ class PythonLanguage:
 
         return is_read_only_command(argv)
 
+    def is_scratch_command(self, argv: list[str]) -> bool:
+        """Whether *argv* is a uv command pa fix runs in a scratch copy (see python_fix.uv)."""
+        from packagealert.languages.python_fix.uv import is_scratch_command
+
+        return is_scratch_command(argv)
+
     def fix_adapters(self) -> list:
         """`pa fix` adapters for Python package managers (uv only so far).
 
