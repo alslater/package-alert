@@ -290,7 +290,7 @@ _UV_TOOL_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `pipx install/inject/etc`.
-# Audited against: pipx 1.17.13 `pipx install --help` / `pipx inject --help`.
+# Audited against: pipx 1.17.14 `pipx install --help` / `pipx inject --help`.
 _PIPX_VALUE_FLAGS = frozenset({
     "--python",
     "--suffix",
@@ -1234,7 +1234,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
 # judged against all of them. An ambiguous prefix is left alone — both parsers
 # reject it (`pip install --requirem`: "ambiguous option"). uv, composer, pnpm
 # and yarn reject unknown prefixes outright. Audited against: pip 25.3,
-# pipenv 2026.8.0, pipx 1.17.13 (option columns of each `--help`).
+# pipenv 2026.9.1, pipx 1.17.14 (option columns of each `--help`).
 _PIPENV_GLOBAL_LONG_OPTIONS = frozenset({
     "--bare", "--clear", "--envs", "--help", "--man", "--no-site-packages",
     "--py", "--pypi-mirror", "--python", "--quiet", "--rm",
@@ -1243,20 +1243,20 @@ _PIPENV_GLOBAL_LONG_OPTIONS = frozenset({
 })
 _PIPENV_LONG_OPTIONS: dict[str, frozenset[str]] = {
     "install": frozenset({
-        "--all", "--categories", "--clear", "--deploy", "--dev", "--editable",
+        "--all", "--categories", "--clear", "--config-settings", "--deploy", "--dev", "--editable",
         "--extra-pip-args", "--extras", "--help", "--ignore-pipfile",
         "--index", "--no-site-packages", "--pre", "--pypi-mirror", "--python",
         "--quiet", "--requirements", "--resolver", "--site-packages",
         "--skip-lock", "--system", "--verbose",
     }),
     "sync": frozenset({
-        "--all", "--bare", "--categories", "--clear", "--dev",
+        "--all", "--bare", "--categories", "--clean", "--clear", "--dev",
         "--extra-pip-args", "--extras", "--help", "--no-site-packages",
         "--pre", "--pypi-mirror", "--python", "--quiet", "--resolver",
         "--site-packages", "--system", "--verbose",
     }),
     "update": frozenset({
-        "--all", "--bare", "--categories", "--clear", "--dev", "--dry-run",
+        "--all", "--bare", "--categories", "--clear", "--config-settings", "--dev", "--dry-run",
         "--editable", "--extra-pip-args", "--extras", "--help",
         "--ignore-pipfile", "--index", "--lock-only", "--outdated", "--pre",
         "--pypi-mirror", "--python", "--quiet", "--requirements",
@@ -1715,13 +1715,13 @@ def _parse_composer_subcommand(args: list[str]) -> ParsedInstall | None:
 # (`--pypi-mirror`, `--python`) or after it. `-e`/`--editable` and
 # `-r`/`--requirements` are listed too, so their values are never mistaken for
 # package names — parse_pipenv_args() then reads both back explicitly, since
-# each names something that IS installed. Audited against: pipenv 2026.8.0
+# each names something that IS installed. Audited against: pipenv 2026.9.1
 # `pipenv --help` / `pipenv install --help` / `sync --help` / `update --help`.
 _PIPENV_VALUE_FLAGS = frozenset({
     "--pypi-mirror", "--python",
     "--categories", "--extra-pip-args", "--extras", "-i", "--index",
     "-e", "--editable", "-r", "--requirements",
-    "--resolver",
+    "--resolver", "--config-settings",
 })
 
 

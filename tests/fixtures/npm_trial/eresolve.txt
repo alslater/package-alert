@@ -11,11 +11,9 @@ npm error peer react@"^18.2.0" from react-dom@18.2.0
 npm error node_modules/react-dom
 npm error   react-dom@"18.2.0" from the root project
 npm error
-npm error Fix the upstream dependency conflict, or retry
-npm error this command with --force or --legacy-peer-deps
-npm error to accept an incorrect (and potentially broken) dependency resolution.
+npm error Fix the upstream dependency conflict, or retry this command with --force or --legacy-peer-deps to accept an incorrect (and potentially broken) dependency resolution.
 npm error
 npm error
 npm error For a full report see:
-npm error <npm-cache>/_logs/2026-10-08T12_08_24_894Z-eresolve-report.txt
-npm error A complete log of this run can be found in: <npm-cache>/_logs/2026-10-08T12_08_24_894Z-debug-0.log
+npm error <npm-cache>/_logs/2026-10-13T14_30_14_766Z-eresolve-report.txt
+npm error A complete log of this run can be found in: <npm-cache>/_logs/2026-10-13T14_30_14_766Z-debug-0.log

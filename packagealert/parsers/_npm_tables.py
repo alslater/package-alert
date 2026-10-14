@@ -1,6 +1,6 @@
 """npm argv-parsing data, GENERATED — do not edit by hand.
 
-Generated from npm 11.8.0 (nopt 9.0.0) by
+Generated from npm 11.21.0 (nopt 9.0.0) by
 tests/fixtures/argv_oracles/generate_npm_tables.js; see packagealert/parsers/npm_argv.py.
 """
 
@@ -8,9 +8,16 @@ tests/fixtures/argv_oracles/generate_npm_tables.js; see packagealert/parsers/npm
 # a nopt type ("Boolean", "String", "Number", "Array", ...), "null", or "=literal".
 NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "_auth": ("list", ("null", "String")),
-    "access": ("list", ("null", "=restricted", "=public")),
+    "access": ("list", ("null", "=restricted", "=public", "=private")),
     "all": ("single", ("Boolean",)),
+    "allow-directory": ("list", ("=all", "=none", "=root")),
+    "allow-file": ("list", ("=all", "=none", "=root")),
+    "allow-git": ("list", ("=all", "=none", "=root")),
+    "allow-remote": ("list", ("=all", "=none", "=root")),
     "allow-same-version": ("single", ("Boolean",)),
+    "allow-scripts": ("list", ("String", "Array")),
+    "allow-scripts-pending": ("single", ("Boolean",)),
+    "allow-scripts-pin": ("single", ("Boolean",)),
     "also": ("list", ("null", "=dev", "=development")),
     "audit": ("single", ("Boolean",)),
     "audit-level": ("list", ("null", "=info", "=low", "=moderate", "=high", "=critical", "=none")),
@@ -30,6 +37,7 @@ NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "color": ("list", ("=always", "Boolean")),
     "commit-hooks": ("single", ("Boolean",)),
     "cpu": ("list", ("null", "String")),
+    "dangerously-allow-all-scripts": ("single", ("Boolean",)),
     "depth": ("list", ("null", "Number")),
     "description": ("single", ("Boolean",)),
     "dev": ("single", ("Boolean",)),
@@ -66,6 +74,7 @@ NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "if-present": ("single", ("Boolean",)),
     "ignore-scripts": ("single", ("Boolean",)),
     "include": ("list", ("Array", "=prod", "=dev", "=optional", "=peer")),
+    "include-attestations": ("single", ("Boolean",)),
     "include-staged": ("single", ("Boolean",)),
     "include-workspace-root": ("single", ("Boolean",)),
     "init-author-email": ("single", ("String",)),
@@ -99,6 +108,8 @@ NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "long": ("single", ("Boolean",)),
     "maxsockets": ("single", ("Number",)),
     "message": ("single", ("String",)),
+    "min-release-age": ("list", ("null", "Number")),
+    "min-release-age-exclude": ("list", ("Array", "String")),
     "name": ("list", ("null", "String")),
     "node-gyp": ("single", ("path",)),
     "node-options": ("list", ("null", "String")),
@@ -118,7 +129,7 @@ NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "package-lock-only": ("single", ("Boolean",)),
     "packages": ("list", ("null", "String", "Array")),
     "packages-all": ("single", ("Boolean",)),
-    "packages-and-scopes-permission": ("list", ("null", "=read-only", "=read-write", "=no-access")),
+    "packages-and-scopes-permission": ("list", ("null", "=read-only", "=read-write", "=read-write-stage-only", "=no-access")),
     "parseable": ("single", ("Boolean",)),
     "password": ("list", ("null", "String")),
     "prefer-dedupe": ("single", ("Boolean",)),
@@ -156,6 +167,7 @@ NPM_TYPES: dict[str, tuple[str, tuple[str, ...]]] = {
     "shrinkwrap": ("single", ("Boolean",)),
     "sign-git-commit": ("single", ("Boolean",)),
     "sign-git-tag": ("single", ("Boolean",)),
+    "strict-allow-scripts": ("single", ("Boolean",)),
     "strict-peer-deps": ("single", ("Boolean",)),
     "strict-ssl": ("single", ("Boolean",)),
     "tag": ("single", ("String",)),
@@ -219,7 +231,7 @@ NPM_SHORTHANDS: dict[str, tuple[str, ...]] = {
     "ws": ("--workspaces",),
     "y": ("--yes",),
 }
-NPM_COMMANDS: tuple[str, ...] = ("access", "adduser", "audit", "bugs", "cache", "ci", "completion", "config", "dedupe", "deprecate", "diff", "dist-tag", "docs", "doctor", "edit", "exec", "explain", "explore", "find-dupes", "fund", "get", "help", "help-search", "init", "install", "install-ci-test", "install-test", "link", "ll", "login", "logout", "ls", "org", "outdated", "owner", "pack", "ping", "pkg", "prefix", "profile", "prune", "publish", "query", "rebuild", "repo", "restart", "root", "run", "sbom", "search", "set", "shrinkwrap", "star", "stars", "start", "stop", "team", "test", "token", "undeprecate", "uninstall", "unpublish", "unstar", "update", "version", "view", "whoami")
+NPM_COMMANDS: tuple[str, ...] = ("access", "adduser", "approve-scripts", "audit", "bugs", "cache", "ci", "completion", "config", "dedupe", "deny-scripts", "deprecate", "diff", "dist-tag", "docs", "doctor", "edit", "exec", "explain", "explore", "find-dupes", "fund", "get", "help", "help-search", "init", "install", "install-ci-test", "install-scripts", "install-test", "link", "ll", "login", "logout", "ls", "org", "outdated", "owner", "pack", "ping", "pkg", "prefix", "profile", "prune", "publish", "query", "rebuild", "repo", "restart", "root", "run", "sbom", "search", "set", "shrinkwrap", "stage", "star", "stars", "start", "stop", "team", "test", "token", "trust", "undeprecate", "uninstall", "unpublish", "unstar", "update", "version", "view", "whoami")
 NPM_COMMAND_ALIASES: dict[str, str] = {
     "add": "install",
     "add-user": "adduser",
@@ -267,6 +279,7 @@ NPM_COMMAND_ALIASES: dict[str, str] = {
     "sit": "install-ci-test",
     "t": "test",
     "tst": "test",
+    "u": "update",
     "udpate": "update",
     "un": "uninstall",
     "unlink": "uninstall",
