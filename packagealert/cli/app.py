@@ -944,31 +944,10 @@ def _print_findings_by_package(
 
 
 def _remediations_json(findings: list[dict], ages: dict | None, cooldown_days: int | None) -> list[dict]:
-    """Per-package upgrade advice for the JSON output."""
-    from packagealert.osv.remediation import group_findings
+    """Per-package upgrade advice for the JSON output (see ``remediations_json``)."""
+    from packagealert.osv.remediation import remediations_json
 
-    out = []
-    for group in group_findings(findings):
-        rec = group.recommendation
-        version = rec.version if rec is not None else None
-        age = (ages or {}).get((group.ecosystem, group.package, version)) if version else None
-        out.append({
-            "package": group.package,
-            "ecosystem": group.ecosystem,
-            "version": group.version,
-            # One entry per vulnerability; `aliases` are the other ids this
-            # scan reported for the same flaw.
-            "advisories": [{"id": a.id, "aliases": a.other_ids} for a in group.advisories],
-            "recommended_version": version,
-            "unfixed_advisory_ids": [a.id for a in group.unfixed_advisories()] if rec is not None else None,
-            "major_upgrade": rec.major_upgrade if rec is not None else None,
-            # False when some advisory had no OSV range data, so the choice rests
-            # on its fixed-version list alone.
-            "verified": rec.verified if rec is not None else None,
-            "recommended_age_days": age,
-            "in_cooldown": (age < cooldown_days) if age is not None and cooldown_days is not None else None,
-        })
-    return out
+    return remediations_json(findings, ages, cooldown_days)
 
 
 _RISK_LEVEL_COLOUR = {"critical": "red", "warning": "yellow", "info": "cyan"}
@@ -1458,6 +1437,8 @@ async def _run_scan_project(
 
     from datetime import datetime
 
+    remediations = _remediations_json(findings, ages, cooldown_days)
+
     from packagealert.models.scans import ScanResult
     scan = ScanResult(
         project_path=str(root),
@@ -1471,6 +1452,7 @@ async def _run_scan_project(
         osv_failures=osv_failures,
         yanked=yanked,
         yank_failures=yank_failures,
+        remediations=remediations,
     )
     await plugin_registry.fire_on_scan_complete(scan)
 
@@ -1484,7 +1466,7 @@ async def _run_scan_project(
             "findings": findings,
             # One recommended upgrade per vulnerable package; see
             # packagealert.osv.remediation.
-            "remediations": _remediations_json(findings, ages, cooldown_days),
+            "remediations": remediations,
             "risks": risks,
             # How many packages could not be scored. Without it a fully failed risk
             # pass emitted "risks": [] — indistinguishable from a clean scan, so a

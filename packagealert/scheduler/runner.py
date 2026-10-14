@@ -87,6 +87,7 @@ class ScheduledScanner:
                 log.exception("Scheduled scan failed for %s", project.path)
                 continue
             from packagealert.models.scans import ScanResult
+            from packagealert.osv.remediation import remediations_json
             from packagealert.plugins.registry import plugin_registry
             now_utc = datetime.datetime.now(datetime.UTC)
             scanned_at = now_utc.timestamp()
@@ -98,6 +99,9 @@ class ScheduledScanner:
                 sources=sources,
                 scanned_at=now_utc,
                 osv_failures=osv_failures,
+                # The recommended versions' ages are not looked up here, so those
+                # fields are left unknown.
+                remediations=remediations_json(findings),
             )
             plugin_stores_scans = plugin_registry.has_scan_store()
             if not plugin_stores_scans:
