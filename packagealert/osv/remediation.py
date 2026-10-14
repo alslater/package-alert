@@ -398,3 +398,35 @@ def group_findings(findings: list[dict]) -> list[PackageFindings]:
         if group.version:
             group.recommendation = recommend_fix(group.version, group.findings, group.ecosystem)
     return list(groups.values())
+
+
+def remediations_json(findings: list[dict], ages: Mapping | None = None,
+                      cooldown_days: int | None = None) -> list[dict]:
+    """Per-package upgrade advice, as ``scan-project --format json`` emits it and pa-central stores it.
+
+    *ages* maps (ecosystem, package, version) to the recommended version's age in
+    days, and *cooldown_days* is the cooldown period: both are known only to a scan
+    that looked them up, and without them those fields are None (unknown).
+    """
+    out = []
+    for group in group_findings(findings):
+        rec = group.recommendation
+        version = rec.version if rec is not None else None
+        age = (ages or {}).get((group.ecosystem, group.package, version)) if version else None
+        out.append({
+            "package": group.package,
+            "ecosystem": group.ecosystem,
+            "version": group.version,
+            # One entry per vulnerability; `aliases` are the other ids this
+            # scan reported for the same flaw.
+            "advisories": [{"id": a.id, "aliases": a.other_ids} for a in group.advisories],
+            "recommended_version": version,
+            "unfixed_advisory_ids": [a.id for a in group.unfixed_advisories()] if rec is not None else None,
+            "major_upgrade": rec.major_upgrade if rec is not None else None,
+            # False when some advisory had no OSV range data, so the choice rests
+            # on its fixed-version list alone.
+            "verified": rec.verified if rec is not None else None,
+            "recommended_age_days": age,
+            "in_cooldown": (age < cooldown_days) if age is not None and cooldown_days is not None else None,
+        })
+    return out

@@ -450,3 +450,34 @@ async def test_daemon_does_not_start_scheduler_when_disabled():
             pass
 
     MockScanner.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_scan_result_carries_remediations(tmp_path):
+    """A scheduled scan hands plugins (pa-central's upload) the upgrade advice for its findings;
+    the recommended version's age is not looked up here, so it is left unknown."""
+    from packagealert.config import AppConfig
+    from packagealert.scheduler.db import add_project
+    from packagealert.scheduler.runner import ScheduledScanner
+    from packagealert.storage.db import open_db
+
+    finding = {
+        "advisory_id": "GHSA-q238-5cxm-5c9h", "package": "Django", "ecosystem": "PyPI", "version": "5.2.15",
+        "fixed_versions": ["5.2.17"], "affected_ranges": [[{"introduced": "0"}, {"fixed": "5.2.17"}]],
+        "is_malicious": False, "severity": "HIGH", "summary": "s", "details": None, "url": "u",
+    }
+    db = await open_db(tmp_path / "test.db")
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    await add_project(db, path=str(project_dir), schedule="daily", scan_type="project")
+    scanner = ScheduledScanner(AppConfig(), db)
+    fired = AsyncMock()
+    with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([finding], ["uv.lock"], 0))), \
+         patch("packagealert.plugins.registry.plugin_registry.fire_on_scan_complete", new=fired), \
+         patch("packagealert.plugins.registry.plugin_registry.has_scan_store", return_value=True):
+        await scanner.run_due_scans()
+    await db.close()
+    assert fired.await_args is not None
+    [r] = fired.await_args.args[0].remediations
+    assert (r["package"], r["recommended_version"]) == ("Django", "5.2.17")
+    assert r["recommended_age_days"] is None and r["in_cooldown"] is None

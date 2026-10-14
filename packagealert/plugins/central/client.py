@@ -7,6 +7,7 @@ from typing import Any, Literal, TypedDict
 import httpx
 
 from packagealert.models.scans import ScanResult
+from packagealert.osv.remediation import remediations_json
 from packagealert.plugins.base import ScanNotFound
 
 log = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class ScanPayload(TypedDict):
     risk_failures: int
     osv_failures: int
     sources: list[str]
+    remediations: list[dict]
     scanned_at: str
 
 
@@ -187,6 +189,11 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         "risk_failures": scan.risk_failures,
         "osv_failures": scan.osv_failures,
         "sources": scan.sources,
+        # The scan's own upgrade advice (with the live ages a scan-project looked
+        # up), else derived from its findings for a ScanResult built without it.
+        # A pa-central that predates the field ignores it.
+        "remediations": scan.remediations if scan.remediations is not None
+        else remediations_json(scan.findings),
         "scanned_at": scan.scanned_at.isoformat(),
     }
 

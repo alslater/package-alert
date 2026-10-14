@@ -734,3 +734,52 @@ def test_heartbeat_tuple_result_is_always_truthy_even_on_failure():
     assert bool(failure_result) is True  # the hazard, demonstrated directly
     ok, _err = failure_result
     assert ok is False  # the correct way to check outcome
+
+
+_DJANGO_FINDING = {
+    "advisory_id": "GHSA-q238-5cxm-5c9h", "package": "Django", "ecosystem": "PyPI", "version": "5.2.15",
+    "fixed_versions": ["5.2.17", "6.0.8"], "affected_ranges": [
+        [{"introduced": "0"}, {"fixed": "5.2.17"}], [{"introduced": "6.0a1"}, {"fixed": "6.0.8"}]],
+    "is_malicious": False, "severity": "HIGH", "summary": "s", "details": None, "url": "u",
+}
+
+# The fields pa-central's Remediation schema reads (backend/app/schemas/__init__.py).
+_CENTRAL_REMEDIATION_FIELDS = {
+    "package", "ecosystem", "version", "advisories", "recommended_version", "unfixed_advisory_ids",
+    "major_upgrade", "verified", "recommended_age_days", "in_cooldown",
+}
+
+
+def test_build_scan_payload_sends_the_scan_s_remediations():
+    """pa-central stores and shows the upgrade advice a scan computed (with its live ages)."""
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+    remediations = [{"package": "Django", "recommended_version": "5.2.17", "recommended_age_days": 3.0}]
+    scan = ScanResult(
+        project_path="/p", scan_type="project", finding_count=1, findings=[_DJANGO_FINDING],
+        sources=["uv.lock"], scanned_at=datetime(2026, 1, 1, tzinfo=UTC), remediations=remediations,
+    )
+    assert build_scan_payload("host", scan)["remediations"] == remediations
+
+
+def test_build_scan_payload_derives_remediations_a_scan_did_not_carry():
+    """A ScanResult built without remediations (another plugin's) still uploads advice derived
+    from its findings, in the shape pa-central accepts, with the live-only fields unknown."""
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+    scan = ScanResult(
+        project_path="/p", scan_type="project", finding_count=1, findings=[_DJANGO_FINDING],
+        sources=["uv.lock"], scanned_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    [r] = build_scan_payload("host", scan)["remediations"]
+    assert set(r) == _CENTRAL_REMEDIATION_FIELDS
+    assert (r["package"], r["recommended_version"]) == ("Django", "5.2.17")
+    assert r["recommended_age_days"] is None and r["in_cooldown"] is None
+
+
+def test_build_scan_payload_clean_scan_has_no_remediations():
+    from packagealert.models.scans import ScanResult
+    from packagealert.plugins.central.client import build_scan_payload
+    scan = ScanResult(project_path="/p", scan_type="project", finding_count=0, findings=[],
+                      sources=[], scanned_at=datetime(2026, 1, 1, tzinfo=UTC))
+    assert build_scan_payload("host", scan)["remediations"] == []

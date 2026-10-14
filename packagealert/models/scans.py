@@ -32,3 +32,7 @@ class ScanResult:
     # (see packagealert.yanks). Not findings: finding_count is unchanged.
     yanked: list[dict] = field(default_factory=list)
     yank_failures: int = 0
+    # One upgrade recommendation per vulnerable package, as `scan-project --format
+    # json` emits it (packagealert.osv.remediation.remediations_json). None when
+    # the producer did not compute it; consumers may derive it from `findings`.
+    remediations: list[dict] | None = None

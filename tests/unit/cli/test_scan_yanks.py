@@ -85,3 +85,23 @@ async def test_installed_scan_does_not_check_yanks(tmp_path, capsys):
     check.assert_not_awaited()
     out = json.loads(capsys.readouterr().out)
     assert out["yanked"] == [] and out["yank_failures"] == 0 and out["findings"]
+
+
+async def test_scan_result_carries_the_remediations_the_json_shows(tmp_path, capsys):
+    """Plugins (pa-central's upload) get the same upgrade advice as the JSON output, with the
+    recommended version's live age and cooldown mark."""
+    def ages(_db, groups):
+        return {(g.ecosystem, g.package, g.recommendation.version): 2.0 for g in groups if g.recommendation}
+
+    fired = AsyncMock()
+    a, b, c = _scan_with_a_vulnerable_django(tmp_path)
+    with a, b, c, patch("packagealert.cli.app._recommendation_ages", AsyncMock(side_effect=ages)), \
+            patch("packagealert.yanks.check_yanks", AsyncMock(return_value=([], 0))), \
+            patch("packagealert.cli.app.plugin_registry.fire_on_scan_complete", fired):
+        await _run_scan_project(load_config(None), tmp_path, scan_unpinned=False, installed=False,
+                                show_details=False, fmt="json", no_risk=True)
+    out = json.loads(capsys.readouterr().out)
+    assert fired.await_args is not None
+    scan = fired.await_args.args[0]
+    assert scan.remediations == out["remediations"] and scan.remediations
+    assert scan.remediations[0]["recommended_age_days"] == 2.0 and scan.remediations[0]["in_cooldown"] is True
