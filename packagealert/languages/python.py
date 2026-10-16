@@ -2621,18 +2621,24 @@ class PythonLanguage:
         creds_dir = self._uv_credentials_dir()
         if not creds_dir.exists():
             return []
+        # Resolved: bwrap skips a bind whose destination is a symlink (a credential dir linked to
+        # ~/.auth/uv). Container isolation also places the snapshot where uv names the dir, from
+        # sandbox_hidden_home_paths().
         try:
-            creds_dir = creds_dir.resolve(strict=True)
+            source = creds_dir.resolve(strict=True)
         except OSError:
             return []
         tmp = Path(tempfile.mkdtemp(prefix="pa-uv-auth-"))
         try:
             shutil.copytree(
-                creds_dir,
+                source,
                 tmp,
                 dirs_exist_ok=True,
                 ignore=lambda _dir, names: {n for n in names if (Path(_dir) / n).is_symlink()},
             )
+            # copytree copies the source directory's mode onto tmp; keep the
+            # snapshot private whatever the credential dir's mode was.
+            os.chmod(tmp, 0o700)
         except Exception:
             log.warning(
                 "python:uv-auth — failed to snapshot credentials dir %s, flag will have no effect",
@@ -2641,7 +2647,7 @@ class PythonLanguage:
             )
             shutil.rmtree(tmp, ignore_errors=True)
             return []
-        return [(tmp, creds_dir)]
+        return [(tmp, source)]
 
     def configure_sandbox_writable_warning(self, parsed, cwd, flags, targets) -> str | None:
         if "uv-auth" not in flags:
@@ -2874,6 +2880,13 @@ class PythonLanguage:
             home / ".config" / "uv",
         ]
         return [p for p in candidates if p.exists()]
+
+    def sandbox_hidden_home_paths(self) -> list[Path]:
+        # uv's credential store sits inside ~/.local/share/uv, a runtime home_ro path; only
+        # python:uv-auth's writable snapshot may provide it (#83). The default location is hidden
+        # too: the trial's uv may look there when pa's XDG_DATA_HOME differs from its own.
+        paths = [self._uv_credentials_dir(), Path.home() / ".local" / "share" / "uv" / "credentials"]
+        return list(dict.fromkeys(paths))
 
     @staticmethod
     def _abs_editable(val: str, cwd: Path) -> str:

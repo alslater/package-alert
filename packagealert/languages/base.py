@@ -306,6 +306,16 @@ class LanguageBase(Protocol):
     # classify_cache_file() and cache_file_globs() are reused for these
     # roots; only the detection mechanism differs.
     #
+    # sandbox_hidden_home_paths() -> list[Path] is another optional capability, not a
+    # Protocol member (same reasoning as poll_only_cache_paths above): paths under $HOME
+    # a sandboxed command must not see unless a flag's writable bind provides them —
+    # credentials inside a directory home_ro_paths()/the runtime allowlist exposes, such
+    # as uv's credential store inside ~/.local/share/uv (#83). Callers use getattr +
+    # callable (sandbox/isolation.py's _hidden_home_paths()); a plugin without it hides nothing.
+    # Any iterable of Path/str is accepted. A failing hook refuses (fails closed): one that
+    # raises, returns a non-iterable or a bare str/Path, or yields a non-path item makes
+    # container isolation refuse the trial, naming the plugin.
+    #
     # fix_adapters() -> list[FixAdapter] is another optional capability, not a
     # Protocol member, for the same reasons as poll_only_cache_paths(). It
     # supplies `pa fix`'s package-manager adapters (see

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import os
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1297,6 +1298,28 @@ async def test_in_copy_stops_after_a_failing_command_and_still_cleans_up(tmp_pat
     run = fix_cmd._FixTrialRunner(Runner(), tmp_path, ProjectRunSettings(None, {}, [], False, False, False, False))
     out = await run.in_copy([], [["npm", "install"], ["npm", "update", "x"]])
     assert len(calls) == 1 and out.results[0].returncode == 1
+    assert list((tmp_path / "scratch").iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits this relies on")
+async def test_in_copy_removes_a_copy_the_command_left_unreadable(tmp_path, monkeypatch):
+    # A trial that locks a directory in its copy (mode 000) must not crash the cleanup or leave it.
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            (cwd / "node_modules" / "locked" / "inner").mkdir(parents=True)
+            (cwd / "node_modules" / "locked" / "inner" / "f").write_text("x")
+            (cwd / "node_modules" / "locked").chmod(0)
+            return CapturedRun(0, "ok", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), tmp_path, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy([], [["npm", "install"]])
+    assert out.results[0].stdout == "ok"
     assert list((tmp_path / "scratch").iterdir()) == []
 
 

@@ -2880,6 +2880,27 @@ class TestConfigureSandboxWritableDispatch:
 
         assert (src, dest) in captured, f"Expected {(src, dest)} in captured writable_binds: {captured}"
 
+    @pytest.mark.parametrize("argv", [["npm", "install", "lodash"], ["bash"]], ids=["install", "shell"])
+    def test_a_kept_rejected_ancestor_reaches_the_final_cleanup(self, tmp_path, monkeypatch, argv):
+        """pa run and pa run shell: the WritableBinds object, with its deferred snapshots, reaches
+        the final cleanup uncopied, so a rejected ancestor kept during the run is removed after it."""
+        import asyncio
+
+        project = tmp_path / "project"
+        project.mkdir()
+        monkeypatch.chdir(project)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        outer = tmp_path / "pa-outer-guard"
+        inner = outer / "pa-inner"
+        inner.mkdir(parents=True)
+        (outer / "credentials.toml").write_text("secret")
+        dest = tmp_path / "dest-guard"
+        dest.mkdir()
+        _bwrap_cmds, captured = self._setup_common(monkeypatch, [(inner, dest), (outer, Path("/etc/pa-nope"))])
+        asyncio.run(_make_runner().run(argv))
+        assert captured == [(inner, dest)]  # only the accepted pair is mounted
+        assert not outer.exists()
+
     def test_install_cleans_up_temp_dirs_on_success(self, tmp_path, monkeypatch):
         """_run_cs: src temp dirs are deleted in finally block when subprocess exits 0."""
         project = tmp_path / "project"
@@ -3208,6 +3229,305 @@ class TestConfigureSandboxWritableDispatch:
         )
 
 
+class TestCollectWritableBindsCleansRejectedSnapshots:
+    """A snapshot the collector refuses to mount must not be left in the temp dir."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, tmp_path, monkeypatch):
+        self.tmp = tmp_path / "tmp"
+        self.tmp.mkdir()
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        monkeypatch.setenv("HOME", str(self.home))
+        monkeypatch.setattr("packagealert.sandbox.runner.tempfile.gettempdir", lambda: str(self.tmp))
+
+    def _snap(self, name="pa-snap"):
+        d = self.tmp / name
+        d.mkdir()
+        (d / "credentials.toml").write_text("secret")
+        return d
+
+    def _collect(self, monkeypatch, *returns):
+        from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod
+        from packagealert.languages.base import SandboxTargets
+
+        langs = []
+        for i, rv in enumerate(returns):
+            lang = MagicMock()
+            lang.name = f"lang{i}"
+            if isinstance(rv, BaseException):
+                lang.configure_sandbox_writable = MagicMock(side_effect=rv)
+            else:
+                lang.configure_sandbox_writable = MagicMock(return_value=rv)
+            langs.append(lang)
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: langs)
+        return runner_mod._collect_writable_binds(
+            runner_mod.lang_registry, flags_by_lang={}, cwd=Path("."),
+            targets=SandboxTargets(), parsed_by_lang={},
+        )
+
+    def test_dest_outside_home_removes_snapshot(self, tmp_path, monkeypatch):
+        snap = self._snap()
+        outside = tmp_path / "elsewhere" / "credentials"
+        outside.mkdir(parents=True)
+        pairs, _ = self._collect(monkeypatch, [(snap, outside)])
+        assert pairs == []
+        assert not snap.exists()
+
+    def test_dest_overlapping_cwd_removes_snapshot(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod
+        from packagealert.languages.base import SandboxTargets
+
+        snap = self._snap()
+        dest = self.home / "project"
+        dest.mkdir()
+        lang = MagicMock()
+        lang.name = "x"
+        lang.configure_sandbox_writable = MagicMock(return_value=[(snap, dest)])
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [lang])
+        pairs, _ = runner_mod._collect_writable_binds(
+            runner_mod.lang_registry, flags_by_lang={}, cwd=dest,
+            targets=SandboxTargets(), parsed_by_lang={},
+        )
+        assert pairs == []
+        assert not snap.exists()
+
+    def test_duplicate_of_same_src_never_deletes_the_accepted_snapshot(self, monkeypatch):
+        keep = self._snap("pa-keep")
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, [(keep, dest), (keep, dest)])
+        assert pairs == [(keep, dest)]
+        assert keep.exists()
+
+    def test_rejected_duplicate_with_distinct_src_is_removed(self, monkeypatch):
+        keep = self._snap("pa-keep")
+        other = self._snap("pa-other")
+        dest = self.home / "dest"
+        dest.mkdir()
+        link = self.tmp / "pa-link"
+        link.symlink_to(keep)
+        # (link, dest) resolves to the same key as (keep, dest): a duplicate
+        # whose src is the very directory that was accepted - must survive.
+        pairs, _ = self._collect(monkeypatch, [(keep, dest), (link, dest), (other, self.tmp / "nope")])
+        assert pairs == [(keep, dest)]
+        assert keep.exists()
+        assert not other.exists()
+
+    def test_unsafe_src_outside_tempdir_is_never_deleted(self, tmp_path, monkeypatch):
+        victim = tmp_path / "pa-precious"  # pa- prefixed but NOT under the temp dir
+        victim.mkdir()
+        (victim / "data").write_text("keep me")
+        unprefixed = self.tmp / "precious"  # under temp dir but no pa- prefix
+        unprefixed.mkdir()
+        bad_dest = tmp_path / "elsewhere"
+        bad_dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, [(victim, bad_dest), (unprefixed, bad_dest)])
+        assert pairs == []
+        assert (victim / "data").read_text() == "keep me"
+        assert unprefixed.exists()
+
+    def test_interruption_removes_snapshots_accepted_so_far_and_propagates(self, monkeypatch):
+        first = self._snap("pa-first")
+        rejected = self._snap("pa-rejected")
+        dest = self.home / "dest"
+        dest.mkdir()
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(
+                monkeypatch,
+                [(first, dest), (rejected, self.tmp / "nope")],
+                KeyboardInterrupt(),
+            )
+        assert not first.exists()
+        assert not rejected.exists()
+
+    def _interrupt_on_dest_check(self, monkeypatch, nth):
+        import packagealert.sandbox.runner as runner_mod
+
+        real = runner_mod._is_safe_writable_bind_dest
+        calls = []
+
+        def check(dest, cwd=None):
+            calls.append(dest)
+            if len(calls) == nth:
+                raise KeyboardInterrupt()
+            return real(dest, cwd)
+
+        monkeypatch.setattr(runner_mod, "_is_safe_writable_bind_dest", check)
+
+    def test_interruption_within_one_plugins_list_removes_its_snapshots(self, monkeypatch):
+        # Ctrl-C while validating the second entry: the first is accepted but still only in this
+        # plugin's own list, and the third has not been looked at.
+        accepted, current, unseen = self._snap("pa-one"), self._snap("pa-two"), self._snap("pa-three")
+        dests = []
+        for n in ("d1", "d2", "d3"):
+            (self.home / n).mkdir()
+            dests.append(self.home / n)
+        self._interrupt_on_dest_check(monkeypatch, 2)
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(monkeypatch, [(accepted, dests[0]), (current, dests[1]), (unseen, dests[2])])
+        assert not accepted.exists()
+        assert not current.exists()
+        assert not unseen.exists()
+
+    def test_interruption_within_a_list_still_never_deletes_an_unsafe_src(self, tmp_path, monkeypatch):
+        snap = self._snap("pa-one")
+        victim = tmp_path / "pa-precious"  # pa- prefixed but NOT under the temp dir
+        victim.mkdir()
+        (victim / "data").write_text("keep me")
+        unprefixed = self.tmp / "precious"
+        unprefixed.mkdir()
+        dest = self.home / "dest"
+        dest.mkdir()
+        self._interrupt_on_dest_check(monkeypatch, 1)
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(monkeypatch, [(snap, dest), (victim, dest), (unprefixed, dest), (Path("pa-rel"), dest)])
+        assert not snap.exists()
+        assert (victim / "data").read_text() == "keep me"
+        assert unprefixed.exists()
+
+    def test_interruption_in_a_later_plugin_removes_the_earlier_plugins_snapshots(self, monkeypatch):
+        first = self._snap("pa-first")
+        dest = self.home / "dest"
+        dest.mkdir()
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(monkeypatch, [(first, dest)], KeyboardInterrupt())
+        assert not first.exists()
+
+    def test_interruption_removes_a_rejected_ancestor_of_an_accepted_snapshot(self, monkeypatch):
+        # On abort the accepted snapshot is deleted too, so its rejected parent must not be kept.
+        outer = self._snap("pa-outer")
+        inner = outer / "pa-inner"
+        inner.mkdir()
+        (inner / "credentials.toml").write_text("inner")
+        dest = self.home / "dest"
+        dest.mkdir()
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(monkeypatch, [(inner, dest), (outer, self.tmp / "nope")], KeyboardInterrupt())
+        assert not outer.exists()
+
+    def test_malformed_entries_with_a_snapshot_first_are_cleaned(self, monkeypatch):
+        s1 = self._snap("pa-str-dest")
+        s2 = self._snap("pa-three")
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, [(s1, "not-a-path"), (s2, dest, "extra")])
+        assert pairs == []
+        assert not s1.exists()
+        assert not s2.exists()
+
+    def test_non_list_return_snapshots_are_cleaned_best_effort(self, monkeypatch):
+        s1 = self._snap("pa-tuple-ret")
+        s2 = self._snap("pa-set-item")
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, (s1, dest), {(s2, dest)})
+        assert pairs == []
+        assert not s1.exists()
+        assert not s2.exists()
+
+    def test_rejected_src_containing_an_accepted_src_is_kept(self, monkeypatch):
+        outer = self._snap("pa-a")
+        inner = outer / "pa-b"
+        inner.mkdir()
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(
+            monkeypatch, [(inner, dest), (outer, self.tmp / "nope")],
+        )
+        assert pairs == [(inner, dest)]
+        assert inner.exists()
+
+    def test_a_kept_rejected_ancestor_is_removed_by_the_final_cleanup(self, monkeypatch):
+        # Kept at collection only to protect the accepted snapshot inside it; never mounted, and
+        # gone with it when the caller cleans up.
+        import packagealert.sandbox.runner as runner_mod
+
+        outer = self._snap("pa-outer")
+        inner = outer / "pa-inner"
+        inner.mkdir()
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, [(inner, dest), (outer, self.tmp / "nope")])
+        assert list(pairs) == [(inner, dest)]  # only the accepted pair is mounted
+        assert (outer / "credentials.toml").exists()
+        runner_mod._cleanup_writable_binds(pairs)
+        assert not outer.exists()
+
+    @pytest.mark.parametrize("via_link", [False, True])
+    def test_rejected_src_inside_an_accepted_src_is_kept(self, monkeypatch, via_link):
+        # Deleting it would truncate the accepted snapshot before it is mounted or copied.
+        outer = self._snap("pa-a")
+        inner = outer / "pa-b"
+        inner.mkdir()
+        (inner / "credentials.toml").write_text("token")
+        rejected_src = inner
+        if via_link:
+            rejected_src = self.tmp / "pa-link-in"
+            rejected_src.symlink_to(inner)
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(
+            monkeypatch, [(outer, dest), (rejected_src, self.tmp / "nope")],
+        )
+        assert pairs == [(outer, dest)]
+        assert (inner / "credentials.toml").read_text() == "token"
+
+    def test_a_rejected_src_beside_an_accepted_one_is_still_removed(self, monkeypatch):
+        outer = self._snap("pa-a")
+        sibling = self._snap("pa-ab")  # a name prefix, not a path prefix
+        dest = self.home / "dest"
+        dest.mkdir()
+        pairs, _ = self._collect(monkeypatch, [(outer, dest), (sibling, self.tmp / "nope")])
+        assert pairs == [(outer, dest)]
+        assert outer.exists() and not sibling.exists()
+
+    def test_interrupt_in_post_loop_cleanup_still_cleans_accepted(self, monkeypatch):
+        import packagealert.sandbox.runner as runner_mod
+
+        first = self._snap("pa-first")
+        dest = self.home / "dest"
+        dest.mkdir()
+        real = runner_mod._unshared_rejected
+
+        def boom(rejected, accepted):
+            if not getattr(boom, "fired", False):
+                boom.fired = True
+                raise KeyboardInterrupt
+            return real(rejected, accepted)
+
+        monkeypatch.setattr(runner_mod, "_unshared_rejected", boom)
+        with pytest.raises(KeyboardInterrupt):
+            self._collect(monkeypatch, [(first, dest)])
+        assert not first.exists()
+
+    @pytest.mark.parametrize("exc", [KeyboardInterrupt, OSError])
+    def test_warning_print_failure_cleans_snapshots(self, monkeypatch, exc):
+        from unittest.mock import MagicMock
+
+        import packagealert.sandbox.runner as runner_mod
+        from packagealert.languages.base import SandboxTargets
+
+        snap = self._snap("pa-print")
+        dest = self.home / "dest"
+        dest.mkdir()
+        lang = MagicMock()
+        lang.name = "x"
+        lang.configure_sandbox_writable = MagicMock(return_value=[(snap, dest)])
+        lang.configure_sandbox_writable_warning = MagicMock(return_value="[yellow]warn[/yellow]")
+        monkeypatch.setattr(runner_mod.lang_registry, "all_languages", lambda: [lang])
+        runner = _make_runner()
+        runner._console = MagicMock()
+        runner._console.print.side_effect = exc
+        with pytest.raises(exc):
+            runner._collect_and_print_writable_binds({}, Path("."), SandboxTargets(), {})
+        assert not snap.exists()
+
+
 class TestCollectWritableBindsValidation:
     """_collect_writable_binds skips and logs bad return values from plugins."""
 
@@ -3300,7 +3620,7 @@ class TestCollectWritableBindsValidation:
         assert any("duplicate entry" in r.message for r in caplog.records)
 
     def test_duplicate_entries_with_different_spellings_are_deduped(self, tmp_path, monkeypatch, caplog):
-        """Entries that resolve to the same path (e.g. via .. or symlink) count as duplicates."""
+        """Entries that resolve to the same path (e.g. via a symlink) count as duplicates."""
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HOME", str(home))
@@ -3309,12 +3629,42 @@ class TestCollectWritableBindsValidation:
         dest = home / "dest"
         dest.mkdir()
         # Two spellings of dest that resolve identically.
-        dest_via_dotdot = home / "dest" / ".." / "dest"
+        alias = home / "alias"
+        alias.symlink_to(dest)
         import logging
         with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
-            pairs, _ = self._call([(src, dest), (src, dest_via_dotdot)], monkeypatch)
+            pairs, _ = self._call([(src, dest), (src, alias)], monkeypatch)
         assert len(pairs) == 1
         assert any("duplicate entry" in r.message for r in caplog.records)
+
+    def test_dest_with_dotdot_is_rejected(self, tmp_path, monkeypatch, caplog):
+        """A dest is mounted as written, and a ".." in it cannot be placed without resolving it."""
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        (home / "dest").mkdir()
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, home / "dest" / ".." / "dest")], monkeypatch)
+        assert pairs == []
+        assert any("failed safety checks" in r.message for r in caplog.records)
+
+    def test_dest_written_outside_home_is_rejected_even_if_it_resolves_inside(self, tmp_path, monkeypatch, caplog):
+        """bwrap mounts at the dest as written: /tmp/link -> ~/x would be a writable mount at /tmp/link."""
+        home = tmp_path / "home"
+        (home / "x").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        src = tmp_path / "pa-test-src"
+        src.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(home / "x")
+        import logging
+        with caplog.at_level(logging.WARNING, logger="packagealert.sandbox.runner"):
+            pairs, _ = self._call([(src, link)], monkeypatch)
+        assert pairs == []
+        assert any("failed safety checks" in r.message for r in caplog.records)
 
     def test_dest_outside_home_is_rejected(self, tmp_path, monkeypatch, caplog):
         """Dest pointing outside $HOME (e.g. /etc) must be rejected with a warning."""

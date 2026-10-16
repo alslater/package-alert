@@ -292,6 +292,82 @@ Language plugins contribute additional variables via the `sandbox_env()` contrac
 
 Variables not on the combined allowlist are removed. Use `--env VAR` or `sandbox.extra_env` in the config file to forward additional variables.
 
+## Container isolation
+
+bwrap needs unprivileged user namespaces, which most hosted containers do not allow (Docker's default seccomp profile and AppArmor block them; AWS Fargate cannot enable them). Inside such a container `pa fix` cannot verify anything, because every trial resolve runs under `bwrap`. Container isolation runs the same approved trial commands without bwrap, in a container that is already the isolation boundary.
+
+### Opt-in
+
+```
+PA_SANDBOX_ISOLATION=container
+```
+
+| Value | Behaviour |
+|---|---|
+| unset, empty or `bwrap` | bwrap isolation, as described above |
+| `container` | container isolation |
+| anything else | every sandboxed command is refused: `unknown PA_SANDBOX_ISOLATION value '<v>' (expected bwrap or container)` |
+
+Surrounding whitespace is ignored; case is significant (`Container` is unknown). An unknown value never falls back, so a typo cannot silently mean less isolation.
+
+It is an environment variable only, with no config key and no auto-detection. Config files travel (config templates pushed to a fleet, shared dotfiles), and a key could switch isolation off on every laptop that received it. An environment variable is set by whoever launches the process and does not persist. Detecting a container from `/.dockerenv` or cgroups is unreliable, and a wrong guess would silently drop all isolation. `sandbox.backend` is not involved: it selects the snapshot backend, not isolation.
+
+Opting in makes the deployment responsible for what bwrap's namespaces otherwise provide. [THREAT_MODEL.md](THREAT_MODEL.md#container-isolation-pa_sandbox_isolationcontainer) states those requirements (R1-R4).
+
+### What runs under it
+
+`pa fix` trials, and `pa fix --apply --lock-only`, run under container isolation. Approvals, gates and the environment allowlist are the same as under bwrap.
+
+Two things are refused outright:
+
+- **`pa run`** exits 1 with `pa run is not supported with PA_SANDBOX_ISOLATION=container`. `pa run` installs, and its post-install scan and rollback assume bwrap confined writes to the working directory and the snapshotted targets. Without a read-only root an install script can write anywhere the user can, and a rollback would not undo it.
+- **`pa fix --apply` in sync mode** (`--sync`, and the default at a terminal outside CI) exits 2 before anything is planned or written, with `pa fix --apply under PA_SANDBOX_ISOLATION=container needs --lock-only (installing is not supported)`. Non-interactive `--apply` already means `--lock-only`.
+
+A precondition that fails (running as root, a credential path in `$HOME`) is reported by `pa fix` as the `unverified_reason`, not as a held item.
+
+### Guarantees
+
+| bwrap guarantee | Under container isolation |
+|---|---|
+| Environment allowlist (`--clearenv` + `--setenv`) | Reproduced: the child gets exactly the allowlisted environment, with `HOME` and `XDG_*` redirected to the fresh home |
+| `$HOME` hidden, home allowlist re-exposed | Behaviour reproduced by a fresh home holding copies of the allowlisted entries. Containment is the deployment's job (R2) |
+| Writable binds (`python:uv-auth`) | Reproduced: the snapshot is copied to its destination, rebased into the fresh home |
+| Paths a plugin hides unless granted (uv's credential store) | Reproduced as intended: left out of the fresh home, provided only by the flag's writable snapshot. bwrap does not hide them yet (#83) |
+| `--unshare-net` (`--no-network`) | Refused: `container isolation cannot disable the network; run with network access or use bwrap isolation` |
+| `sandbox.extra_tmpfs` | Refused: `container isolation cannot hide paths (sandbox.extra_tmpfs); remove it or use bwrap isolation` |
+| A home entry inside a credential path (for example `python:ssh-keys`) | Refused: under bwrap this grants credential access, which R2 forbids |
+| `--unshare-pid`, `--die-with-parent` | Partly reproduced: own session, process group killed on timeout. Same-uid `/proc` exposure is the deployment's job (R1) |
+| User namespace, uid separation | Delegated to R1 and R3. Running as root is refused |
+| Read-only root | Dropped. Captured commands are approved read-only or run in a scratch copy; the mount was defence in depth. The container must be disposable (R4) |
+| Fresh `/tmp` | Delegated: nothing readable may hold secrets (R2) |
+
+Two preconditions are checked before any trial: the user is not root (`container isolation refuses to run as root; run package-alert as an unprivileged user`), and none of the credential paths (`~/.ssh`, `~/.aws`, `~/.gnupg`, ...) exists in `$HOME`. The second is a tripwire for the common misconfiguration, not a check for every secret.
+
+### The fresh home
+
+Each command gets a new `pa-home-*` directory in the system temp directory as `$HOME`, removed afterwards.
+
+- **Copies, not links.** Each allowlisted home entry (`~/.npmrc`, `~/.config/uv`, `~/.config/pip`, ...) is copied by content to the same relative path, so a trial's writes cannot reach the original. The path is kept as written below `$HOME`, as bwrap mounts it: with `~/.config -> ~/dotfiles/config`, `~/.config/uv` is copied to `<home>/.config/uv`, where uv looks, and the same holds for writable-bind destinations and rebased `XDG_*` values. Only a symlinked `$HOME` itself is resolved. Entries outside `$HOME`, and the working directory, project directory and lock-file root, are not copied; they are visible at their own paths, as under bwrap.
+- **Credential links skipped.** A symlink inside an entry is followed, but anything that resolves into a credential path is skipped. Only regular files and directories are copied.
+- **64 MiB limit.** The total copy is capped at 64 MiB and 100,000 files and directories. A symlinked alias of a directory is copied at its own path too, so aliases count once per path; only a link back to an ancestor is skipped, as a loop. Over the cap the command is refused with `home entry <path> is too large to copy under container isolation; install toolchains outside $HOME`. Runtime entries are copied too (`~/.local/share/uv`, `~/.local/bin`, pipx, `~/.nvm`, `~/.pyenv`), so a home holding uv-managed Pythons (`~/.local/share/uv/python`) is refused. Install uv, Node and other toolchains outside `$HOME` (system-wide in a container image).
+- **XDG rebasing.** `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are set inside the fresh home. A value under the real `$HOME` is rebased to the same relative path; an unset, relative or outside-`$HOME` value becomes `<home>/.config`, `<home>/.cache` or `<home>/.local/share`. uv therefore looks where the credential snapshot was placed. Only `HOME` and `XDG_*` are redirected: a forwarded path variable that points into the real `$HOME` (`UV_CACHE_DIR`, `GIT_CONFIG_GLOBAL`, `PIPX_HOME`, ...) is used as-is, so the command reads and writes that real location (THREAT_MODEL.md R4).
+
+The fresh home gives tools the same configuration they see under bwrap. It is not containment: with no mount namespace, hostile code can still read the real home by absolute path.
+
+### Private registries
+
+`python:uv-auth` and `~/.npmrc` work as under bwrap. `~/.npmrc` is copied into the fresh home as an allowlisted entry.
+
+- **Container isolation:** uv's credential store is visible to trials only through `python:uv-auth`. It is a `sandbox_hidden_home_paths()` entry (see [LANGUAGES.md](LANGUAGES.md)): left out of the fresh home, and provided only by the flag's writable snapshot. Without the flag a trial cannot authenticate to a private uv index. Set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials.
+- **bwrap:** the store is currently visible whenever `~/.local/share/uv` exists, with or without the flag, until #83 is fixed.
+- Once granted, repository code (build backends, `setup.py`) can read the credential. Use read-only tokens scoped to the registry.
+
+### Timeouts
+
+Each command runs in its own session. Its process group is killed on timeout and again when the command exits, so build backends, `git` and network fetches do not outlive it.
+
+A process that calls `setsid` leaves the group and escapes. This is why R4 requires a disposable container. If such a process holds the command's output pipe, the command is reported `timed_out` (an inconclusive trial) where bwrap's PID namespace would have let it finish normally. That is the safe direction.
+
 ## Virtualenv Handling
 
 ### pip
@@ -322,7 +398,8 @@ pipenv manages its own virtualenv and creates it on first run. The pipenv venvs 
 
 ```toml
 [sandbox]
-# Snapshot/restore backend. Currently only "filesystem" is available.
+# Snapshot/restore backend (not the isolation: see "Container isolation").
+# Currently only "filesystem" is available.
 backend = "filesystem"
 
 # Additional environment variable names to forward into the sandbox.
