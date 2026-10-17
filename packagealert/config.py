@@ -54,11 +54,12 @@ class LogConfig(BaseModel):
 
 
 class DaemonLogConfig(LogConfig):
-    file: NullableExpandedPath = _SHARE_DIR / "daemon.log"
+    # A factory, so the default follows _SHARE_DIR at instantiation rather than at import.
+    file: NullableExpandedPath = Field(default_factory=lambda: _SHARE_DIR / "daemon.log")
 
 
 class CliLogConfig(LogConfig):
-    file: NullableExpandedPath = _SHARE_DIR / "cli.log"
+    file: NullableExpandedPath = Field(default_factory=lambda: _SHARE_DIR / "cli.log")
 
 
 class HeuristicsConfig(BaseModel):

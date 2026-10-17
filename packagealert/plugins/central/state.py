@@ -84,8 +84,9 @@ def _default_state() -> dict[str, Any]:
     }
 
 
-def read_overlay(path: Path = _OVERLAY_PATH) -> str | None:
+def read_overlay(path: Path | None = None) -> str | None:
     """Return the persisted fleet config overlay TOML, or None if absent/unreadable."""
+    path = _OVERLAY_PATH if path is None else path
     try:
         return path.read_text()
     except FileNotFoundError:
@@ -95,14 +96,16 @@ def read_overlay(path: Path = _OVERLAY_PATH) -> str | None:
         return None
 
 
-def write_overlay(toml_str: str, path: Path = _OVERLAY_PATH) -> None:
+def write_overlay(toml_str: str, path: Path | None = None) -> None:
+    path = _OVERLAY_PATH if path is None else path
     try:
         _write_secure(path, toml_str)
     except Exception:
         log.warning("Could not write central overlay file %s", path, exc_info=True)
 
 
-def read_state(path: Path = _STATE_PATH) -> dict[str, Any]:
+def read_state(path: Path | None = None) -> dict[str, Any]:
+    path = _STATE_PATH if path is None else path
     try:
         return json.loads(path.read_text())
     except FileNotFoundError:
@@ -112,7 +115,8 @@ def read_state(path: Path = _STATE_PATH) -> dict[str, Any]:
         return _default_state()
 
 
-def write_state(state: dict[str, Any], path: Path = _STATE_PATH) -> None:
+def write_state(state: dict[str, Any], path: Path | None = None) -> None:
+    path = _STATE_PATH if path is None else path
     try:
         _write_secure(path, json.dumps(state, default=str))
     except Exception:
