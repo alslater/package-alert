@@ -2,16 +2,16 @@ from __future__ import annotations
 
 import logging
 
-from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
 from packagealert.models.advisories import OsvResult
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport
+from packagealert.safe_output import make_console
 
 log = logging.getLogger(__name__)
-_console = Console(stderr=True)
+_console = make_console(stderr=True)
 
 
 def alert_malicious(event: PackageEvent, result: OsvResult) -> None:

@@ -23,6 +23,7 @@ from packagealert.plugins.central.state import (
     write_overlay,
     write_state,
 )
+from packagealert.safe_output import make_console
 from packagealert.storage.db import DEFAULT_DB_PATH, open_db
 
 if TYPE_CHECKING:
@@ -47,10 +48,9 @@ _STATUS_COLOUR = {
 
 
 def _render_scans_table(records: list[dict], *, title: str, show_project: bool = False) -> None:
-    from rich.console import Console
     from rich.markup import escape
     from rich.table import Table
-    console = Console()
+    console = make_console()
     if not records:
         console.print("[dim]No scan results found.[/dim]")
         return
@@ -109,7 +109,6 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
     import json as jsonlib
     from datetime import datetime
 
-    from rich.console import Console
     from rich.markup import escape
     from rich.table import Table
     if not entries:
@@ -139,16 +138,15 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
         rows_added += 1
     if rows_added == 0:
         return
-    Console().print(table)
+    make_console().print(table)
 
 
 def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     import json as jsonlib
     from pathlib import Path
 
-    from rich.console import Console
     from rich.markup import escape
-    console = Console()
+    console = make_console()
 
     scan_id = record.get("id")
     project_path = str(record.get("project_path") or "")
@@ -523,8 +521,7 @@ class CentralPlugin(AgentPlugin):
             return False
         records = await self._client.list_scans(hostname, project_path, limit)
         if records is None:
-            from rich.console import Console
-            Console().print("[red]Failed to fetch scans from fleet server.[/red]")
+            make_console().print("[red]Failed to fetch scans from fleet server.[/red]")
             await self._render_pending_scans(project_path)
             return True
         _render_scans_table(records, title=f"Scan results: {project_path}")
@@ -536,8 +533,7 @@ class CentralPlugin(AgentPlugin):
             return False
         records = await self._client.list_scans(hostname, None, limit)
         if records is None:
-            from rich.console import Console
-            Console().print("[red]Failed to fetch scans from fleet server.[/red]")
+            make_console().print("[red]Failed to fetch scans from fleet server.[/red]")
             await self._render_pending_scans(None)
             return True
         _render_scans_table(records, title="All scan results", show_project=True)
@@ -552,8 +548,7 @@ class CentralPlugin(AgentPlugin):
         except ScanNotFound:
             # Server authoritatively says this scan ID does not exist — don't
             # fall through to local SQLite, which uses a different ID space.
-            from rich.console import Console
-            Console().print(f"[red]No scan result found with ID {scan_id}[/red]")
+            make_console().print(f"[red]No scan result found with ID {scan_id}[/red]")
             return True
         if record is None:
             # Network/server error — fall through so the user gets feedback.

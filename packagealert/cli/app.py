@@ -26,6 +26,7 @@ from packagealert.daemon_pid import (
 from packagealert.logging_setup import configure_logging
 from packagealert.osv.remediation import fixed_versions_of
 from packagealert.plugins.registry import plugin_registry
+from packagealert.safe_output import make_console, strip_control
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ app = typer.Typer(
     name="package-alert",
     help="package-alert: Real-time developer security monitor for Python, Node.js, and PHP packages.",
 )
-console = Console()
+console = make_console()
 
 _update_thread: threading.Thread | None = None
 _atexit_registered = False
@@ -194,7 +195,7 @@ def _main(verbose: bool = typer.Option(False, "--verbose", "-v", help="Show log 
 
     notice = read_notice()
     if notice:
-        Console(stderr=True).print(f"[dim yellow]{notice}[/dim yellow]")
+        make_console(stderr=True).print(f"[dim yellow]{notice}[/dim yellow]")
 
     stale = is_cache_stale()
 
@@ -239,7 +240,7 @@ def _apply_config_veto(
             vetoes = True
         if vetoes:
             if warn:
-                Console(stderr=True).print(
+                make_console(stderr=True).print(
                     f"Warning: --config ignored because plugin '{name}' "
                     "enforces central policy.",
                     style="yellow",
@@ -256,7 +257,7 @@ def _apply_config_veto(
             vetoes = True
         if vetoes:
             if warn:
-                Console(stderr=True).print(
+                make_console(stderr=True).print(
                     f"Warning: --config ignored because plugin '{name}' "
                     "enforces central policy.",
                     style="yellow",
@@ -1382,7 +1383,7 @@ async def _run_scan_project(
         result = detect_project(root, prod_only=prod_only)
 
     if prod_only and result.dev_undetectable:
-        warn_console = Console(stderr=True)
+        warn_console = make_console(stderr=True)
         for src in result.dev_undetectable:
             warn_console.print(
                 f"Warning: {src} — some packages could not be classified as dev or prod and were included in the scan.",
@@ -1602,14 +1603,13 @@ def open_html_in_browser(html: str) -> None:
     import tempfile
     import webbrowser
 
-    from rich.console import Console
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".html", prefix="package-alert-", dir="/tmp", delete=False
     ) as f:
         f.write(html)
         tmp_path = f.name
     webbrowser.open(f"file://{tmp_path}")
-    Console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
+    make_console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
 def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0) -> str:
@@ -1632,7 +1632,11 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
     were never actually checked. The text and JSON outputs both report it, so an
     HTML report that omitted it was the one format that still looked clean.
     """
-    from html import escape
+    from html import escape as _html_escape
+
+    def escape(text: str) -> str:
+        # Printed to stdout by --format html, so registry text must not carry control sequences.
+        return _html_escape(strip_control(text))
     malicious, vulnerable, _ = _count_advisories(findings)
 
     _SEVERITY_BG = {"CRITICAL": "#7f1d1d", "HIGH": "#dc2626", "MEDIUM": "#d97706", "LOW": "#16a34a"}

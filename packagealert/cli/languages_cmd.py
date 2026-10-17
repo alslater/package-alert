@@ -5,14 +5,14 @@ from pathlib import Path
 from typing import cast
 
 import typer
-from rich.console import Console
 from rich.markup import escape as markup_escape
 from rich.table import Table
 
 from packagealert.languages import registry as _registry_module
+from packagealert.safe_output import make_console
 
 languages_app = typer.Typer(help="Show information about supported languages and ecosystems.")
-console = Console()
+console = make_console()
 log = logging.getLogger(__name__)
 
 

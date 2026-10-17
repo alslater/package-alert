@@ -7,6 +7,7 @@ import shutil
 from packagealert.models.advisories import OsvResult
 from packagealert.models.events import PackageEvent
 from packagealert.models.risk import RiskReport
+from packagealert.safe_output import strip_control
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +42,8 @@ async def _send(summary: str, body: str, urgency: str = "normal") -> None:
             "notify-send",
             "--urgency", urgency,
             "--app-name", "package-alert",
-            summary,
-            body,
+            strip_control(summary),
+            strip_control(body),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

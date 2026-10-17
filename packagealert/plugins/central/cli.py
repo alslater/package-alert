@@ -9,12 +9,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from rich.console import Console
 from rich.markup import escape
 
+from packagealert.safe_output import make_console
 from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
 
-console = Console()
+console = make_console()
 
 
 def _state_path() -> Path:

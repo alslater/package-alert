@@ -6,6 +6,7 @@ import logging.handlers
 from rich.logging import RichHandler
 
 from packagealert.config import LogConfig
+from packagealert.safe_output import make_console
 
 
 def configure_logging(cfg: LogConfig, *, verbose: bool = True) -> None:
@@ -13,6 +14,7 @@ def configure_logging(cfg: LogConfig, *, verbose: bool = True) -> None:
 
     if verbose:
         rich_handler = RichHandler(
+            console=make_console(stderr=True),
             rich_tracebacks=True,
             markup=True,
             show_path=False,
