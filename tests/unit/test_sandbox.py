@@ -8546,3 +8546,117 @@ def test_an_unverifiable_manifest_on_one_copy_still_flags_the_package(tmp_path, 
     monkeypatch.setattr(runner, "_close_gate_resources", lambda res: _async_value(None))
     with unittest.mock.patch("packagealert.scoring.score_packages", fake_score):
         assert asyncio.run(runner._post_scan_risk(packages, non_public={("npm", "x", "1.0.0", priv_root)})) is False
+
+
+class TestLockfileInstallWithAmbiguousPackage:
+    def test_lockfile_is_scanned_alongside_a_package(self, tmp_path, monkeypatch):
+        """`pnpm install --prod false`: pnpm 8-11 install the lock file, pnpm 12 also a
+        package named false, so pre-flight checks both."""
+        import packagealert.sandbox.runner as runner_mod
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+        ctx = runner_mod._Context(argv=["pnpm", "install", "--prod", "false"],
+                                  parsed=runner_mod._try_parse(["pnpm", "install", "--prod", "false"]), cwd=tmp_path)
+        scan = _fake_scan_result([("npm", "lodash", "4.17.21")])
+        with unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan), \
+             unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan):
+            queries, blocked, _src = _make_runner()._resolve_query_packages(ctx)
+        assert blocked is None
+        names = {q[1] for q in queries}
+        assert {"false", "lodash"} <= names
+
+
+class TestPnpmRegistryProvenance:
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "add", "@corp/pkg", "--registry", "https://npm.corp.example/"],
+        ["node", "/p/node_modules/.bin/pnpm", "add", "@corp/pkg", "--@corp:registry=https://npm.corp.example/"],
+    ])
+    def test_private_package_is_not_queried_publicly(self, tmp_path, monkeypatch, argv):
+        # A package from a registry named on the command line is never looked up on the public one.
+        import packagealert.sandbox.runner as runner_mod
+
+        monkeypatch.chdir(tmp_path)
+        for key in [k for k in os.environ if k.lower().startswith("npm_config_")]:
+            monkeypatch.delenv(key)
+        ctx = runner_mod._Context(argv=argv, parsed=runner_mod._try_parse(argv), cwd=tmp_path)
+        queries, blocked, _src = _make_runner()._resolve_query_packages(ctx)
+        assert blocked is None and all(q[1] != "@corp/pkg" for q in queries)
+
+
+class TestPnpmDeployDestination:
+    """`pnpm deploy <dir>` installs into <dir>/node_modules (#87): scanned and restored."""
+
+    def test_deploy_destination_is_a_scan_target(self, tmp_path):
+        from packagealert.languages.node import NodeLanguage
+
+        node = NodeLanguage()
+        parsed = node.parse_process_install(["pnpm", "--filter", "web", "deploy", "out"])
+        assert parsed is not None and parsed.install_dirs == ["out"]
+        targets = node.resolve_sandbox_targets(parsed, tmp_path)
+        assert tmp_path / "out" / "node_modules" in targets.scan_targets
+
+    def test_deploy_destination_is_normalised_lexically(self, tmp_path):
+        # pnpm's path.join() makes `missing/../out` into `out` even though `missing` does not exist.
+        from packagealert.languages.node import NodeLanguage
+
+        node = NodeLanguage()
+        parsed = node.parse_process_install(["pnpm", "deploy", "missing/../out"])
+        targets = node.resolve_sandbox_targets(parsed, tmp_path)
+        assert tmp_path / "out" / "node_modules" in targets.scan_targets
+        assert tmp_path / "out" in targets.snapshot_only_dirs
+
+    def test_deploy_destination_root_is_snapshotted(self, tmp_path):
+        from packagealert.languages.node import NodeLanguage
+
+        node = NodeLanguage()
+        parsed = node.parse_process_install(["pnpm", "deploy", "out"])
+        targets = node.resolve_sandbox_targets(parsed, tmp_path)
+        assert tmp_path / "out" in targets.snapshot_only_dirs
+
+    def test_forced_deploy_over_existing_output_is_rolled_back(self, tmp_path, monkeypatch):
+        # `deploy --force` deletes the destination first and copies project files into it.
+        import asyncio
+        import shutil
+
+        (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+        monkeypatch.chdir(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "keep.txt").write_text("existing")
+
+        def forced_deploy():
+            shutil.rmtree(out)
+            (out / "node_modules" / "evilpkg").mkdir(parents=True)
+            (out / "node_modules" / "evilpkg" / "package.json").write_text('{"name": "evilpkg", "version": "1.0.0"}')
+            (out / "index.js").write_text("copied")
+
+        TestRunFollowsTheInvocationsProjectAfterTheRun._patch_common(monkeypatch, on_run=forced_deploy)
+        asyncio.run(_make_runner().run(["pnpm", "deploy", "--force", "out"], no_change=True))
+        assert (out / "keep.txt").read_text() == "existing"
+        assert not (out / "index.js").exists() and not (out / "node_modules").exists()
+
+    def test_deploy_output_is_scanned_and_removed_with_no_change(self, tmp_path, monkeypatch):
+        import asyncio
+
+        import packagealert.sandbox.runner as runner_mod
+
+        (tmp_path / "pnpm-lock.yaml").write_text("lockfileVersion: '9.0'\n")
+        monkeypatch.chdir(tmp_path)
+        deployed = tmp_path / "out" / "node_modules" / "evilpkg"
+
+        def deploy():
+            deployed.mkdir(parents=True)
+            (deployed / "package.json").write_text('{"name": "evilpkg", "version": "1.0.0"}')
+
+        TestRunFollowsTheInvocationsProjectAfterTheRun._patch_common(monkeypatch, on_run=deploy)
+        scanned: list[Path] = []
+
+        def _record(targets, *a, **kw):
+            scanned.extend(targets)
+            return []
+
+        monkeypatch.setattr(runner_mod, "_collect_new_packages", _record)
+        asyncio.run(_make_runner().run(["pnpm", "deploy", "out"], no_change=True))
+        assert tmp_path / "out" / "node_modules" in scanned
+        assert not deployed.exists()

@@ -3541,3 +3541,308 @@ def test_npm_registry_options_are_recorded(argv, registries):
 
     parsed = parse_npm_args(argv)
     assert parsed is not None and parsed.registries == registries
+
+
+# Every pnpm option that consumes the next argument, across pnpm 8.15.9, 9.15.9, 10.34.7,
+# 11.28.6 and 12.14.0, as each version's own parser reported it (#87): pnpm 8-11 by running
+# their parseCliArgs() on every candidate option before and after every install-type command,
+# pnpm 12 (clap) by a value-less probe. Options whose type can be Boolean are excluded (nopt
+# leaves a following argument alone for them), as are those pnpm 8-11 read as an abbreviation
+# or a run of shorthands of a Boolean (--repo in pnpm 11 is -r -e -p -o).
+_PNPM_AUDITED_VALUE_OPTIONS = ['--allow-build', '--cache-dir', '--changed-files-ignore-pattern', '--child-concurrency', '--cpu', '--depth', '--dir', '--fetch-min-speed-ki-bps', '--fetch-retries', '--fetch-retry-factor', '--fetch-retry-maxtimeout', '--fetch-retry-mintimeout', '--fetch-timeout', '--fetch-warn-timeout-ms', '--filter', '--filter-prod', '--global-bin-dir', '--global-dir', '--global-pnpmfile', '--hoist-pattern', '--hoisting-limits', '--http-proxy', '--https-proxy', '--libc', '--lockfile-dir', '--loglevel', '--merge-git-branch-lockfiles-branch-pattern', '--modules-dir', '--network-concurrency', '--node-linker', '--node-package-map-type', '--noproxy', '--npm-path', '--npmrc-auth-file', '--only', '--os', '--package-import-method', '--pm-on-fail', '--pnpm', '--pnpmfile', '--pnpr-server', '--public-hoist-pattern', '--registry', '--reporter', '--resume-from', '--save-catalog-name', '--save-prefix', '--scripts-prepend-node-path', '--state-dir', '--store-dir', '--test-pattern', '--trust-policy', '--trust-policy-exclude', '--trust-policy-ignore-after', '--user-agent', '--userconfig', '--verify-deps-before-run', '--virtual-store-dir', '--workspace-concurrency', '--workspace-packages', '-C', '-F']
+
+
+class TestPnpmAudit:
+    """pnpm 8-12 (#87): options, commands and executable names, from pnpm's own parsers."""
+
+    @pytest.mark.parametrize("opt", _PNPM_AUDITED_VALUE_OPTIONS)
+    def test_value_option_is_not_read_as_a_package(self, opt):
+        after = parse_pnpm_args(["pnpm", "add", opt, "VAL", "lodash"])
+        before = parse_pnpm_args(["pnpm", opt, "VAL", "add", "lodash"])
+        assert after is not None and after.packages == ["lodash"]
+        assert before is not None and before.packages == ["lodash"]
+
+    @pytest.mark.parametrize("opt", ["--color", "--link-workspace-packages", "--repo", "--save-dev", "-r", "-g"])
+    def test_boolean_option_does_not_swallow_the_next_argument(self, opt):
+        result = parse_pnpm_args(["pnpm", "add", opt, "lodash"])
+        assert result is not None and result.packages == ["lodash"]
+
+    def test_update_value_option_keeps_the_lockfile_scan(self):
+        result = parse_pnpm_args(["pnpm", "update", "--loglevel", "warn"])
+        assert result is not None and result.packages == [] and result.is_lockfile_install
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "ci"], ["pnpm", "clean-install"], ["pnpm", "ic"], ["pnpm", "install-clean"],
+        ["pnpm", "install-test"], ["pnpm", "it"],
+        ["pnpm", "deploy", "out"], ["pnpm", "pipeline", "build"],
+        ["pnpm", "unlink"], ["pnpm", "dislink"],
+        ["pnpm", "recursive", "install"], ["pnpm", "m", "install"], ["pnpm", "multi", "--filter", "web", "install"],
+        ["pnpm", "with", "current", "install"], ["pnpm", "with", "10", "install"],
+    ])
+    def test_lockfile_install_commands_are_gated(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.should_gate and result.is_lockfile_install and result.packages == []
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "recursive", "add", "lodash"], ["pnpm", "m", "add", "lodash"],
+        ["pnpm", "with", "10", "add", "lodash"], ["pnpm", "with", "current", "--filter", "web", "add", "lodash"],
+        ["pn", "add", "lodash"], ["/opt/pnpm/pn", "add", "lodash"],
+        ["node", "/p/node_modules/.bin/pnpm", "add", "lodash"],
+        ["node", "/p/node_modules/.bin/pn", "add", "lodash"],
+        ["node", "/usr/lib/node_modules/pnpm/bin/pnpm.cjs", "add", "lodash"],
+        ["node", "/usr/lib/node_modules/pnpm/bin/pnpm.mjs", "add", "lodash"],
+    ])
+    def test_proxies_and_executable_names_reach_the_inner_install(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.manager == "pnpm" and result.packages == ["lodash"]
+
+    def test_uni_is_a_removal(self):
+        result = parse_pnpm_args(["pnpm", "uni", "lodash"])
+        assert result is not None and result.packages == [] and not result.is_lockfile_install
+
+    @pytest.mark.parametrize(("argv", "packages"), [
+        (["pnpm", "self-update"], ["pnpm"]), (["pnpm", "self-update", "10"], ["pnpm@10"]),
+    ])
+    def test_self_update_is_a_global_install_of_pnpm(self, argv, packages):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.global_install and result.packages == packages
+
+    def test_a_node_led_pnpm_is_not_read_as_npm(self):
+        from packagealert.parsers.process_args import parse_npm_args
+
+        for script in ("/p/node_modules/.bin/pnpm", "/usr/lib/node_modules/pnpm/bin/pnpm.cjs", "/p/node_modules/.bin/pnpx"):
+            assert parse_npm_args(["node", script, "install"]) is None
+        assert parse_npm_args(["node", "/usr/lib/node_modules/npm/bin/npm-cli.js", "install"]) is not None
+
+    def test_node_plugin_monitors_and_shims_pn(self):
+        from packagealert.languages.node import NodeLanguage
+
+        assert "pn" in NodeLanguage.process_names
+        assert "pn" in NodeLanguage().package_manager_names()
+        parsed = NodeLanguage().parse_process_install(["node", "/p/node_modules/.bin/pnpm", "install"])
+        assert parsed is not None and parsed.manager == "pnpm" and parsed.lockfile_hint == "pnpm-lock.yaml"
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "install", "lodash"], ["pnpm", "i", "lodash"],
+        ["node", "/p/node_modules/.bin/pnpm", "install", "lodash"], ["pn", "i", "lodash"],
+    ])
+    def test_install_with_packages_installs_those_packages(self, argv):
+        # pnpm parses `install <pkg>` as `add <pkg>`, so the named package is what to check.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == ["lodash"] and not result.is_lockfile_install
+
+    @pytest.mark.parametrize(("argv", "packages", "lockfile"), [
+        (["pnpm", "pm", "add", "lodash"], ["lodash"], False),
+        (["pnpm", "pm", "install"], [], True),
+        (["pnpm", "--filter", "web", "pm", "add", "lodash"], ["lodash"], False),
+    ])
+    def test_a_leading_pm_is_the_built_in_command(self, argv, packages, lockfile):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages and result.is_lockfile_install == lockfile
+
+    def test_versioned_with_runs_only_its_own_arguments(self):
+        # The spawned pnpm gets only the arguments after the version and the original cwd.
+        outer = parse_pnpm_args(["pnpm", "-C", "other", "with", "10", "install"])
+        assert outer is not None and outer.working_dir is None and outer.is_lockfile_install
+        inner = parse_pnpm_args(["pnpm", "with", "10", "-C", "x", "install"])
+        assert inner is not None and inner.working_dir == "x"
+
+    @pytest.mark.parametrize(("argv", "packages", "working_dir"), [
+        (["pnpm", "pm", "with", "current", "add", "lodash"], ["lodash"], None),
+        (["pnpm", "-C", "other", "pm", "with", "current", "add", "lodash"], ["lodash"], "other"),
+        (["pnpm", "pm", "with", "10", "add", "lodash"], ["lodash"], None),
+        (["pnpm", "-C", "other", "pm", "with", "10", "install"], [], None),
+    ])
+    def test_pm_before_with(self, argv, packages, working_dir):
+        # pnpm strips the leading pm, then handles `with` as usual.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages and result.working_dir == working_dir
+
+    @pytest.mark.parametrize(("argv", "packages", "lockfile"), [
+        (["pnpm", "recursive", "with", "current", "add", "lodash"], ["lodash"], False),
+        (["pnpm", "m", "with", "10", "install"], [], True),
+        (["pnpm", "multi", "pm", "add", "lodash"], ["lodash"], False),
+        (["pnpm", "with", "current", "recursive", "add", "lodash"], ["lodash"], False),
+        (["pnpm", "pm", "recursive", "with", "10", "add", "lodash"], ["lodash"], False),
+    ])
+    def test_combined_proxies(self, argv, packages, lockfile):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages and result.is_lockfile_install == lockfile
+
+    @pytest.mark.parametrize(("argv", "packages", "lockfile"), [
+        # pnpm 8-11 read `false` as --prod's value; pnpm 12 installs a package named false.
+        (["pnpm", "install", "--prod", "false"], ["false"], True),
+        (["pnpm", "update", "--latest", "true"], ["true"], True),
+        (["pnpm", "add", "--save-dev", "false", "lodash"], ["false", "lodash"], False),
+        (["pnpm", "install", "true"], ["true"], False),
+        (["pnpm", "install", "--prod=false", "lodash"], ["lodash"], False),
+    ])
+    def test_explicit_boolean_values(self, argv, packages, lockfile):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages and result.is_lockfile_install == lockfile
+
+    @pytest.mark.parametrize(("argv", "registries"), [
+        (["pnpm", "add", "@corp/pkg", "--registry", "https://npm.corp.example/"],
+         {"registry": "https://npm.corp.example/"}),
+        (["node", "/p/pnpm.cjs", "add", "@corp/pkg", "--@corp:registry=https://npm.corp.example/"],
+         {"@corp:registry": "https://npm.corp.example/"}),
+        (["pnpm", "--@corp:registry", "https://npm.corp.example/", "add", "@corp/pkg"],
+         {"@corp:registry": "https://npm.corp.example/"}),
+        (["pnpm", "with", "10", "add", "x", "--registry=https://r.example/"], {"registry": "https://r.example/"}),
+    ])
+    def test_registry_options_are_recorded(self, argv, registries):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.registries == registries
+        assert "https://npm.corp.example/" not in result.packages and "https://r.example/" not in result.packages
+
+    @pytest.mark.parametrize(("argv", "working_dir"), [
+        (["pnpm", "install", "--prefix", "sub"], "sub"),
+        (["pnpm", "--prefix=sub", "install"], "sub"),
+        (["pnpm", "-C", "a", "--prefix", "b", "install"], "a"),  # pnpm 11/12: the canonical spelling wins
+        (["pnpm", "--prefix", "b", "--dir=a", "install"], "a"),
+    ])
+    def test_prefix_is_an_alias_of_dir(self, argv, working_dir):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.working_dir == working_dir and result.is_lockfile_install
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "--prod", "false", "with", "current", "install"],
+        ["pnpm", "--prod", "false", "with", "10", "install"],
+        ["pnpm", "--frozen-lockfile", "true", "recursive", "install"],
+    ])
+    def test_boolean_value_before_a_proxy(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.is_lockfile_install
+
+    @pytest.mark.parametrize(("argv", "dirs"), [
+        (["pnpm", "deploy", "--prod", "false", "out"], ["false", "out"]),  # pnpm 8-11 deploy to out
+        (["pnpm", "deploy", "out", "--prod", "false"], ["out"]),
+    ])
+    def test_deploy_destination_after_a_boolean_value(self, argv, dirs):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.install_dirs == dirs
+
+    @pytest.mark.parametrize(("argv", "registry"), [
+        (["pnpm", "add", "@corp/pkg", "--registry=https://private.example/", "--hoist-pattern",
+          "--registry=https://registry.npmjs.org/"], "https://private.example/"),
+        (["pnpm", "add", "@corp/pkg", "--registry=https://registry.npmjs.org/", "--hoist-pattern",
+          "--registry=https://private.example/"], "https://registry.npmjs.org/"),
+    ])
+    def test_an_option_value_is_not_read_as_a_registry(self, argv, registry):
+        # pnpm reads the last token as --hoist-pattern's value, not as a registry.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.registries == {"registry": registry}
+
+    def test_equals_form_scoped_registry_does_not_consume_the_next_package(self):
+        result = parse_pnpm_args(["pnpm", "add", "--@corp:registry=https://npm.corp.example/:registry", "lodash"])
+        assert result is not None and result.packages == ["lodash"]
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "install", "--proxy", "http://proxy.example:8080"],
+        ["pnpm", "--store", "s", "install"],
+        ["pnpm", "install", "--lockfile-directory", "l"],
+    ])
+    def test_renamed_and_url_options_keep_the_lockfile_scan(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == [] and result.is_lockfile_install
+
+    def test_lockfile_directory_is_the_alias_of_lockfile_dir(self):
+        assert parse_pnpm_args(["pnpm", "install", "--lockfile-directory", "l"]).lockfile_dir == "l"  # type: ignore[union-attr]
+        both = parse_pnpm_args(["pnpm", "install", "--lockfile-dir", "a", "--lockfile-directory", "b"])
+        assert both is not None and both.lockfile_dir == "a"
+
+    @pytest.mark.parametrize(("argv", "is_global"), [
+        (["pnpm", "add", "--global", "--no-global", "lodash"], False),
+        (["node", "/p/pnpm.cjs", "install", "--global", "--no-global", "lodash"], False),
+        (["node", "/p/pnpm.cjs", "install", "--global", "false", "lodash"], False),
+        (["pnpm", "add", "-g", "false", "lodash"], False),
+        (["pnpm", "add", "--global=false", "lodash"], False),
+        (["pnpm", "add", "--no-global", "-g", "lodash"], True),
+        (["pnpm", "add", "--global", "true", "lodash"], True),
+        (["pnpm", "add", "--global=true", "lodash"], True),
+        (["pnpm", "update", "-g", "--no-global"], False),
+    ])
+    def test_global_mode_follows_its_overrides(self, argv, is_global):
+        # The last of -g/--global and --no-global/--global=false wins (nopt). For `--global
+        # false`, pnpm 8-11 install locally and pnpm 12 globally, so it stays local: sandboxed.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.global_install is is_global
+        if not is_global and argv[-1] == "lodash":
+            assert "lodash" in result.packages
+
+    @pytest.mark.parametrize(("argv", "is_global"), [
+        (["pnpm", "install", "--global", "--no-global=true", "lodash"], False),
+        (["node", "/p/pnpm.cjs", "install", "--global", "--no-global=true", "lodash"], False),
+        (["pnpm", "add", "-g=false", "lodash"], False),
+        (["pnpm", "add", "--no-global=false", "lodash"], True),
+        (["pnpm", "add", "-g=true", "lodash"], True),
+    ])
+    def test_equals_form_global_overrides(self, argv, is_global):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.global_install is is_global
+
+    @pytest.mark.parametrize(("argv", "working_dir", "lockfile_dir"), [
+        # pnpm 8-11 read the second token as --hoist-pattern's value.
+        (["pnpm", "install", "--hoist-pattern", "--prefix=sub"], None, None),
+        (["pnpm", "install", "--hoist-pattern", "--lockfile-directory=l"], None, None),
+        (["pnpm", "install", "--hoist-pattern", "-C", "x"], None, None),
+        (["pnpm", "install", "--prefix=sub", "--hoist-pattern", "p"], "sub", None),
+    ])
+    def test_directory_options_skip_other_options_values(self, argv, working_dir, lockfile_dir):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.working_dir == working_dir and result.lockfile_dir == lockfile_dir
+
+    @pytest.mark.parametrize(("argv", "is_global", "packages"), [
+        # nopt leaves an option-like token for a plain String option (--save-prefix gets "").
+        (["node", "/p/pnpm.cjs", "add", "--global", "--save-prefix", "--no-global", "lodash"], False, ["lodash"]),
+        (["pnpm", "add", "-C", "--no-global", "lodash"], False, ["lodash"]),
+        # An array option takes it: --hoist-pattern's value here is "--global".
+        (["pnpm", "add", "--hoist-pattern", "--global", "lodash"], False, ["lodash"]),
+    ])
+    def test_string_option_leaves_an_option_like_token(self, argv, is_global, packages):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.global_install is is_global and result.packages == packages
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "install", "--global=evilpkg"], ["node", "/p/pnpm.cjs", "install", "--global=evilpkg"],
+        ["pnpm", "add", "-g=evilpkg"],
+    ])
+    def test_global_equals_a_package_installs_it_globally(self, argv):
+        # nopt splits the non-Boolean value off as a positional.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.global_install and result.packages == ["evilpkg"]
+
+    @pytest.mark.parametrize("argv", [
+        ["pnpm", "install", "--hoist-pattern", "--global=evilpkg"],
+        ["node", "/p/pnpm.cjs", "update", "--hoist-pattern", "--global=evilpkg"],
+    ])
+    def test_a_consumed_global_equals_is_not_a_package(self, argv):
+        # pnpm 8-11 take `--global=evilpkg` as --hoist-pattern's value and install the lock file.
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == [] and result.is_lockfile_install
+
+    @pytest.mark.parametrize("argv", [
+        ["node", "/p/pnpm.cjs", "--", "install", "lodash"], ["pnpm", "--", "add", "lodash"],
+        ["pnpm", "--filter", "web", "--", "add", "lodash"],
+    ])
+    def test_end_of_options_before_the_command(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == ["lodash"]
+
+    def test_with_current_keeps_the_outer_options(self):
+        # `with current` is reparsed in the same process, so outer options still apply.
+        result = parse_pnpm_args(["pnpm", "-C", "other", "with", "current", "install"])
+        assert result is not None and result.working_dir == "other" and result.is_lockfile_install
+
+    @pytest.mark.parametrize(("argv", "dirs"), [
+        (["pnpm", "--filter", "web", "deploy", "out"], ["out"]),
+        (["pnpm", "deploy", "--prod", "/abs/out"], ["/abs/out"]),
+        (["pnpm", "deploy"], []),
+    ])
+    def test_deploy_records_its_destination(self, argv, dirs):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.install_dirs == dirs and result.is_lockfile_install
+
+    def test_unrecognised_commands_stay_unrecognised(self):
+        for argv in (["pnpm", "run", "build"], ["pnpm", "dlx", "cowsay"], ["pnpm", "with", "10"], ["pn", "audit"]):
+            assert parse_pnpm_args(argv) is None
