@@ -1,6 +1,6 @@
 """npm argv-parsing data, GENERATED — do not edit by hand.
 
-Generated from npm 11.21.0 (nopt 9.0.0) by
+Generated from npm 11.21.1 (nopt 9.0.0) by
 tests/fixtures/argv_oracles/generate_npm_tables.js; see packagealert/parsers/npm_argv.py.
 """
 

@@ -1,8 +1,8 @@
-# uv 0.13.0 rc=0
+# uv 0.13.1 rc=0
 Using CPython 3.13.13
-Resolved 10 packages in 3.45s
+Resolved 10 packages in 2.53s
 Remove ansicon v1.89.0
-Remove blessed v1.50.0
+Remove blessed v1.51.0
 Update chalice v1.33.0 -> v0.10.1
 Update click v8.5.0 -> v6.6
 Remove editor v2.0.1

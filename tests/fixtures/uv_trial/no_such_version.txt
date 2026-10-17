@@ -1,4 +1,4 @@
-# uv 0.13.0 rc=1
+# uv 0.13.1 rc=1
 Using CPython 3.13.13
 error: No solution found when resolving dependencies
   cause: Because requests>=2.33.0 depends on urllib3>=1.26,<3 and all of:

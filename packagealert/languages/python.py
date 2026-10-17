@@ -88,7 +88,7 @@ _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info\Z")
 # written alongside a leaf are told apart from the real entry STRUCTURALLY
 # (the entry is a symlink, a companion a regular file), not by suffix alone,
 # which a wheel whose tag set ends in one of those suffixes would defeat —
-# see _uv_wheel_index_entry_to_metadata(). Audited against: uv 0.13.0 — see
+# see _uv_wheel_index_entry_to_metadata(). Audited against: uv 0.13.1 — see
 # "Auditing the uv cache-layout assumptions" in .claude/CLAUDE.md for how/when
 # to re-check this.
 _UV_TAG_COMPONENT_RE = r"[A-Za-z0-9_]+"
@@ -115,7 +115,7 @@ _UV_CACHE_HASH_RE = re.compile(r"^[0-9a-f]{16}\Z")
 # "wheels-v6.txt"; recursively watching any such lookalike (e.g. a manual
 # backup of the whole cache) could reopen the inotify watch exhaustion this
 # scoping was meant to prevent, so glob matches are filtered through this
-# pattern before being watched. Audited against: uv 0.13.0 — see "Auditing the
+# pattern before being watched. Audited against: uv 0.13.1 — see "Auditing the
 # uv cache-layout assumptions" in .claude/CLAUDE.md for how/when to re-check
 # this.
 _UV_CACHE_SCHEMA_DIR_RE = re.compile(r"^(?:wheels|sdists)-v\d+\Z")
