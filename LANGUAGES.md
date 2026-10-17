@@ -77,6 +77,7 @@ class ProcessInstall:
     working_dir: str | None = None   # chdir-style (uv --directory, npm --prefix, cargo -C); relative to the process cwd
     project_dir: str | None = None   # project discovery only (uv --project); relative to the effective working dir
     lockfile_dir: str | None = None  # lock file alone (pnpm --lockfile-dir); relative to the process cwd
+    install_dirs: list[str] = field(default_factory=list)  # installed into besides the project (pnpm deploy <dir>); relative to the effective working dir
 
 @dataclass
 class SandboxPaths:
@@ -639,7 +640,11 @@ real bypass in a built-in parser:
    for a chdir-style option, `project_dir` for one that only moves project
    discovery, `lockfile_dir` for one that moves the lock file alone. Relative
    paths are resolved exactly as the tool resolves them — measure it; pnpm
-   resolves `--lockfile-dir` against the process cwd even under `-C`.
+   resolves `--lockfile-dir` against the process cwd even under `-C`. A
+   command that installs into a directory besides the project (`pnpm deploy
+   <dir>`) lists it in `install_dirs`. `resolve_sandbox_targets()` should then
+   add that directory's install target to `scan_targets`, so it is scanned
+   after the run and snapshotted for rollback.
 5. **Mark global installs** (`global_install=True`, and `defer_to_lockfile`
    False): their lock file is not the current project's.
 6. **Mark a named package that does not come from the public registry**

@@ -192,6 +192,9 @@ class ProcessInstall:
     # ProcessInstall as a bare install, but scanning the lock file for them
     # would gate packages the command is not installing — including, for a
     # removal, the very package being removed — and could block it outright.
+    # `packages` may still be non-empty when a token's meaning differs between
+    # versions of the tool (pnpm 8-11 read `--prod false` as an option value,
+    # pnpm 12 installs a package named false); both are then checked.
     is_lockfile_install: bool = False
     # False for a command that is guaranteed to install/change nothing no
     # matter what packages/req_files/is_lockfile_install say — a report-only
@@ -226,6 +229,10 @@ class ProcessInstall:
     # NOT to `working_dir` — and None means the project directory. See
     # parsers.process_args.resolve_lockfile_dir().
     lockfile_dir: str | None = None
+    # Directories other than the project the command installs into (pnpm
+    # `deploy <dir>`), each as given: relative to the effective working
+    # directory, which resolve_sandbox_targets() receives as its directory.
+    install_dirs: list[str] = field(default_factory=list)
     # Registry settings given on the command line, keyed as the manager names
     # them (npm: "registry", "@scope:registry"); see ParsedInstall.registries.
     registries: dict[str, str] = field(default_factory=dict)

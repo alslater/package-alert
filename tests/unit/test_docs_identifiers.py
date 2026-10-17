@@ -19,7 +19,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _DOCS = [".claude/CLAUDE.md", "LANGUAGES.md", "SANDBOX.md", "ARCHITECTURE.md", "README.md"]
 _IDENTIFIER = re.compile(r"`(_[A-Za-z]\w+|[A-Z][A-Z0-9_]{3,}|test_\w+|Test[A-Z]\w+)(?:\(\))?`")
 # Environment variables are not code identifiers.
-_ENV_VAR = re.compile(r"(UV|XDG|PIPENV|PIP|NPM|COMPOSER|VIRTUAL|CONDA|HOME|PATH)_?\w*")
+_ENV_VAR = re.compile(r"(UV|XDG|PIPENV|PIP|NPM|PNPM|COMPOSER|VIRTUAL|CONDA|HOME|PATH)_?\w*")
 # Named deliberately as history ("... was REPLACED by ...").
 _INTENTIONAL = {"test_transient_malformed_nesting_is_retried_and_recovers"}
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from collections.abc import Mapping
@@ -517,7 +518,7 @@ class NodeLanguage:
     # calls regardless — there is exactly one NodeLanguage instance per
     # process and nothing ever mutates the list in place.
     ecosystems = ["npm"]  # noqa: RUF012
-    process_names = ["npm", "yarn", "pnpm", "node", "nodejs"]  # noqa: RUF012
+    process_names = ["npm", "yarn", "pnpm", "pn", "node", "nodejs"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
     author: str = "builtin"
     repository: str = "builtin"
@@ -579,6 +580,8 @@ class NodeLanguage:
             project_dir=result.project_dir,
             # pnpm's `--lockfile-dir`: the lock file lives apart from the project.
             lockfile_dir=result.lockfile_dir,
+            # pnpm `deploy <dir>`: installs into that directory too.
+            install_dirs=list(result.install_dirs),
             # npm's `--registry`/`--@scope:registry`: where the named packages come from.
             registries=result.registries,
         )
@@ -1180,6 +1183,17 @@ class NodeLanguage:
         targets = SandboxTargets()
         # node_modules lives under cwd, already covered by the cwd bind
         targets.scan_targets.append(cwd / "node_modules")
+        # pnpm `deploy <dir>` installs into <dir>/node_modules as well; as a scan
+        # target it is also snapshotted, so --no-change and a failed post-install
+        # check restore it.
+        # The destination itself is snapshotted too: deploy copies project files
+        # there, and `deploy --force` deletes what was there first.
+        for d in getattr(parsed, "install_dirs", None) or []:
+            if isinstance(d, str) and d:
+                # Lexically, as pnpm's path.join() does: `missing/../out` is `out`.
+                dest = Path(os.path.normpath(cwd / d))
+                targets.scan_targets.append(dest / "node_modules")
+                targets.snapshot_only_dirs.append(dest)
         npm_cache = Path.home() / ".npm"
         if npm_cache.exists():
             targets.write_dirs.append(npm_cache)
@@ -1398,7 +1412,8 @@ class NodeLanguage:
         ]
 
     def package_manager_names(self) -> list[str]:
-        return ["npm", "yarn", "pnpm"]
+        # pn is pnpm's short name, shipped from pnpm 11.
+        return ["npm", "yarn", "pnpm", "pn"]
 
     def project_shim_names(self) -> list[str]:
         return self.package_manager_names()

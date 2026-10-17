@@ -558,6 +558,10 @@ class ParsedInstall:
     # to working_dir: measured, `pnpm -C sub install --lockfile-dir locks`
     # writes ./locks/pnpm-lock.yaml. None means the project directory.
     lockfile_dir: str | None = None
+    # Directories other than the project the command installs into (pnpm
+    # `deploy <dir>`), each as given: relative to the effective working
+    # directory, as pnpm resolves it.
+    install_dirs: list[str] = field(default_factory=list)
     # Registry settings given on the command line, keyed as the manager names
     # them (npm: "registry", "@scope:registry"). They take precedence over the
     # environment and config files when deciding which registry a named
@@ -1925,35 +1929,249 @@ def _parse_yarn_subcommand(args: list[str]) -> ParsedInstall | None:
     return None
 
 
-# pnpm options that consume the next argument, across `add`/`install`/
-# `dedupe`/`fetch` (pnpm accepts them before the subcommand too). Audited
-# against: pnpm 7.26.3 `pnpm add --help` / `pnpm install --help` /
-# `pnpm dedupe --help` / `pnpm fetch --help`.
+# pnpm options that consume the next argument, before or after the subcommand.
+# Audited against: pnpm 8.15.9, 9.15.9, 10.34.7, 11.28.6 and 12.14.0, by each
+# version's own parser: pnpm 8-11 run their parseCliArgs() over every candidate
+# option (from every `--help` and the bundled option-type tables) before and
+# after every install-type command; pnpm 12 (Rust, clap) is probed value-less,
+# where "a value is required" marks a value option. The union is safe because
+# none of these is a known Boolean in another version. Left out: options whose
+# type can be Boolean (`--color`, `--link-workspace-packages`), for which nopt
+# leaves a following argument alone; `--depth` before the subcommand; and
+# spellings pnpm 8-11 read as an abbreviation or a run of single-letter
+# shorthands of Booleans (`--repo` is `-r -e -p -o` in pnpm 11, but a value
+# option of pnpm 12's `pipeline`). Unique-prefix abbreviations of these, which
+# pnpm 8-11 accept, are not modelled (#87).
 _PNPM_VALUE_FLAGS = frozenset({
-    "-C", "--dir",
-    "--changed-files-ignore-pattern", "--child-concurrency", "--filter",
-    "--filter-prod", "--hoist-pattern", "--lockfile-dir", "--loglevel",
-    "--modules-dir", "--network-concurrency", "--package-import-method",
-    "--public-hoist-pattern", "--reporter", "--store-dir", "--test-pattern",
-    "--virtual-store-dir",
+    "-C", "-F", "--prefix", "--proxy", "--store", "--lockfile-directory", "--allow-build", "--cache-dir", "--changed-files-ignore-pattern",
+    "--child-concurrency", "--cpu", "--depth", "--dir", "--fetch-min-speed-ki-bps",
+    "--fetch-retries", "--fetch-retry-factor", "--fetch-retry-maxtimeout",
+    "--fetch-retry-mintimeout", "--fetch-timeout", "--fetch-warn-timeout-ms", "--filter",
+    "--filter-prod", "--global-bin-dir", "--global-dir", "--global-pnpmfile",
+    "--hoist-pattern", "--hoisting-limits", "--http-proxy", "--https-proxy", "--libc",
+    "--lockfile-dir", "--loglevel", "--merge-git-branch-lockfiles-branch-pattern",
+    "--modules-dir", "--network-concurrency", "--node-linker", "--node-package-map-type",
+    "--noproxy", "--npm-path", "--npmrc-auth-file", "--only", "--os",
+    "--package-import-method", "--pm-on-fail", "--pnpm", "--pnpmfile", "--pnpr-server",
+    "--public-hoist-pattern", "--registry", "--reporter", "--resume-from",
+    "--save-catalog-name", "--save-prefix", "--scripts-prepend-node-path", "--state-dir",
+    "--store-dir", "--test-pattern", "--trust-policy", "--trust-policy-exclude",
+    "--trust-policy-ignore-after", "--user-agent", "--userconfig", "--verify-deps-before-run",
+    "--virtual-store-dir", "--workspace-concurrency", "--workspace-packages",
+})
+
+# Executable names: `pn` and `pnx` ship from pnpm 11. pnpx/pnx run `dlx`, a
+# download-and-run command, which (like npx) is not gated.
+_PNPM_NAMES = frozenset({"pnpm", "pn"})
+# Commands that install from the lock file with no package names of their own.
+_PNPM_LOCKFILE_COMMANDS = frozenset({
+    "install-test", "it", "ci", "clean-install", "ic", "install-clean",
+    "dedupe", "fetch", "deploy", "pipeline", "unlink", "dislink",
+})
+# Commands that run another pnpm command: `recursive <cmd>` in every
+# workspace project, `with <version> <cmd>` under another pnpm version.
+_PNPM_RECURSIVE = frozenset({"recursive", "multi", "m"})
+
+
+# Value options whose value may itself start with `-`. For the rest (plain
+# String types such as `-C`, `--store-dir`, `--save-prefix`), pnpm 8-11's nopt
+# leaves an option-like next token alone and records an empty value; pnpm 12's
+# clap rejects it. Measured with pnpm 8-11's own parseCliArgs() (#87).
+_PNPM_DASH_VALUE_FLAGS = frozenset({
+    "-F", "--allow-build", "--changed-files-ignore-pattern", "--child-concurrency", "--cpu",
+    "--fetch-retries", "--fetch-retry-factor", "--fetch-retry-maxtimeout",
+    "--fetch-retry-mintimeout", "--fetch-timeout", "--filter", "--filter-prod",
+    "--hoist-pattern", "--hoisting-limits", "--https-proxy", "--libc", "--loglevel",
+    "--network-concurrency", "--node-linker", "--node-package-map-type", "--only", "--os",
+    "--package-import-method", "--pm-on-fail", "--prefix", "--proxy", "--public-hoist-pattern",
+    "--registry", "--test-pattern", "--trust-policy", "--trust-policy-exclude",
+    "--trust-policy-ignore-after", "--workspace-packages",
 })
 
 
-def parse_pnpm_args(argv: list[str]) -> ParsedInstall | None:
+def _pnpm_consumes(flag: str, nxt: str | None) -> bool:
+    """Whether pnpm reads *nxt*, the argument after *flag*, as *flag*'s value."""
+    if not (flag in _PNPM_VALUE_FLAGS or _is_scoped_registry_flag(flag)):
+        return False
+    return not (nxt is not None and nxt.startswith("-") and nxt != "-" and flag not in _PNPM_DASH_VALUE_FLAGS)
+
+
+def _pnpm_locate(flag: str, nxt: str | None) -> bool:
+    """_pnpm_consumes, plus `true`/`false` after a Boolean option, which pnpm 8-11
+    consume (nopt). For finding the command only: package collection keeps such a
+    token, since pnpm 12 installs it (see _pnpm_packages())."""
+    return _pnpm_consumes(flag, nxt) or (nxt in ("true", "false") and "=" not in flag)
+
+
+def _is_scoped_registry_flag(flag: str) -> bool:
+    """`--@scope:registry` given separately from its value (not the `=` form)."""
+    return flag.startswith("--@") and flag.endswith(":registry") and "=" not in flag
+
+
+def _pnpm_registries(args: list[str]) -> dict[str, str]:
+    """`--registry` and `--@scope:registry` settings, the last of each winning, keyed as
+    npm and pnpm name them."""
+    found: dict[str, str] = {}
+    i = 0
+    while i < len(args) and args[i] != "--":
+        arg = args[i]
+        name, eq, value = arg.partition("=")
+        if name == "--registry" or (name.startswith("--@") and name.endswith(":registry")):
+            if not eq:
+                nxt = args[i + 1] if i + 1 < len(args) else None
+                value = nxt if nxt is not None and _pnpm_consumes(name, nxt) else ""
+                i += 1 if value else 0
+            if value:
+                found[name[2:]] = value
+        elif arg.startswith("-") and _pnpm_consumes(arg, args[i + 1] if i + 1 < len(args) else None):
+            i += 1  # another option's value, never a registry option
+        i += 1
+    return found
+
+
+def _pnpm_is_global(args: list[str]) -> bool:
+    """Whether the command installs globally: the last of `-g`/`--global` and
+    `--no-global`/`--global=false` wins (nopt). `--global false` is local to
+    pnpm 8-11 (nopt consumes the value) but global to pnpm 12, which installs a
+    package named false; it is treated as local, so it stays sandboxed."""
+    is_global = False
+    i = 0
+    while i < len(args) and args[i] != "--":
+        arg = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else None
+        name, eq, value = arg.partition("=")
+        if name in ("-g", "--global") and not eq:
+            is_global = nxt != "false"
+            i += 2 if nxt in ("true", "false") else 1
+            continue
+        if name in ("-g", "--global"):
+            is_global = value != "false"
+        elif name == "--no-global":
+            is_global = bool(eq) and value == "false"
+        elif arg.startswith("-") and _pnpm_consumes(arg, nxt):
+            i += 1
+        i += 1
+    return is_global
+
+
+def _pnpm_option_values(args: list[str], flags: frozenset[str]) -> list[str]:
+    """The values given to *flags* (separate or `=` form), in order, skipping
+    tokens pnpm consumes as another option's value."""
+    values: list[str] = []
+    i = 0
+    while i < len(args) and args[i] != "--":
+        arg = args[i]
+        if not arg.startswith("-"):
+            i += 1
+            continue
+        name, eq, value = arg.partition("=")
+        if name in flags:
+            nxt = args[i + 1] if i + 1 < len(args) else None
+            if eq:
+                values.append(value)
+            elif nxt is not None and _pnpm_consumes(arg, nxt):
+                values.append(nxt)
+        if not eq and _pnpm_consumes(arg, args[i + 1] if i + 1 < len(args) else None):
+            i += 1
+        i += 1
+    return values
+
+
+def _pnpm_args(argv: list[str]) -> list[str] | None:
+    """The arguments after pnpm's executable, or None if *argv* is not pnpm.
+
+    pnpm 8-11 are JavaScript run by node, so a process may show as
+    `node …/.bin/pnpm …` or `node …/pnpm/bin/pnpm.cjs …`.
+    """
+    def name(path: str) -> str:
+        n = _cmd(path)
+        for suffix in (".cjs", ".mjs", ".js"):
+            n = n.removesuffix(suffix)
+        return n
+
     if not argv:
         return None
-    cmd = _cmd(argv[0])
-    if cmd != "pnpm":
+    if name(argv[0]) in _PNPM_NAMES:
+        return argv[1:]
+    if _cmd(argv[0]) in ("node", "nodejs") and len(argv) > 1 and name(argv[1]) in _PNPM_NAMES:
+        return argv[2:]
+    return None
+
+
+def _pnpm_packages(args: list[str]) -> tuple[list[str], bool]:
+    """The positionals of an install-type command, and whether any is a real name.
+
+    `true`/`false` straight after a Boolean option is that option's value to
+    pnpm 8-11 (nopt: `--prod false`) but a package to pnpm 12, which installs
+    a package named `false`. It is kept as a package, so it is checked, but
+    does not count as naming one, so the lock-file install still applies.
+    """
+    # nopt splits a Boolean option's `=` value that is not true/false off as a
+    # positional (`--global=evilpkg` installs evilpkg globally).
+    split = [v for v in _pnpm_option_values(args, frozenset({"-g", "--global"}))
+             if v not in ("", "true", "false")]
+    return _positionals_by(args, _pnpm_consumes) + split, bool(_pnpm_named(args) or split)
+
+
+def _pnpm_named(args: list[str]) -> list[str]:
+    """Positionals other than a `true`/`false` straight after a Boolean option."""
+    named: list[str] = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            named.extend(args[i + 1:])
+            break
+        if arg.startswith("-"):
+            i += 2 if _pnpm_consumes(arg, args[i + 1] if i + 1 < len(args) else None) else 1
+            continue
+        prev = args[i - 1] if i > 0 else ""
+        if not (arg in ("true", "false") and prev.startswith("-") and "=" not in prev):
+            named.append(arg)
+        i += 1
+    return named
+
+
+def parse_pnpm_args(argv: list[str]) -> ParsedInstall | None:
+    args = _pnpm_args(argv)
+    if args is None:
         return None
-    args = argv[1:]
+    consumes = _pnpm_locate
+    i = _skip_options(args, 0, consumes)
+    # Prefixes that run another command, in any combination, as pnpm resolves
+    # them: a leading `pm` selects the built-in command; `recursive`/`multi`/`m`
+    # runs it in every workspace project; `with current` reparses it in this
+    # process (outer options kept), while `with <version> <args>` spawns that
+    # pnpm with only <args>, in this process's cwd (pnpm 11's spawnPnpm()
+    # passes no cwd), so the outer options do not apply.
+    if i < len(args) and args[i] == "--":
+        # nopt ends option parsing at `--`; what follows is the command.
+        args = [*args[:i], *args[i + 1:]]
+    while i < len(args):
+        if args[i] == "pm" or args[i] in _PNPM_RECURSIVE:
+            args = [*args[:i], *args[i + 1:]]
+        elif args[i] == "with" and i + 1 < len(args) and args[i + 1] == "current":
+            args = [*args[:i], *args[i + 2:]]
+        elif args[i] == "with" and i + 1 < len(args):
+            return parse_pnpm_args(["pnpm", *args[i + 2:]])
+        else:
+            break
+        i = _skip_options(args, i, consumes)
     result, _i = _dispatch_subcommand(
-        args, _in_set(_PNPM_VALUE_FLAGS), lambda rest: _parse_pnpm_subcommand(args, rest)
+        args, consumes, lambda rest: _parse_pnpm_subcommand(args, rest)
     )
     if result is not None:
-        # `-C`/`--dir` changes the directory pnpm runs in; `--lockfile-dir`
-        # moves pnpm-lock.yaml alone.
-        result.working_dir = _last_flag_value(args, frozenset({"-C", "--dir"}))
-        result.lockfile_dir = _last_flag_value(args, frozenset({"--lockfile-dir"}))
+        # `-C`/`--dir` changes the directory pnpm runs in, as does its alias
+        # `--prefix`; with both spellings pnpm 11 and 12 keep the canonical one.
+        # `--lockfile-dir` moves pnpm-lock.yaml alone.
+        dirs = _pnpm_option_values(args, frozenset({"-C", "--dir"}))
+        prefixes = _pnpm_option_values(args, frozenset({"--prefix"}))
+        result.working_dir = (dirs or prefixes or [None])[-1]
+        lockfile_dirs = (_pnpm_option_values(args, frozenset({"--lockfile-dir"}))
+                         or _pnpm_option_values(args, frozenset({"--lockfile-directory"})))
+        result.lockfile_dir = lockfile_dirs[-1] if lockfile_dirs else None
+        # Where the named packages come from, for the provenance check.
+        result.registries = _pnpm_registries(args)
     return result
 
 
@@ -1964,41 +2182,62 @@ def _parse_pnpm_subcommand(all_args: list[str], args: list[str]) -> ParsedInstal
     if not args:
         return None
     subcmd = args[0]
+    if subcmd in _PNPM_RECURSIVE:
+        # `recursive <cmd>` runs <cmd> in every workspace project.
+        result, _i = _dispatch_subcommand(
+            args[1:], _pnpm_locate, lambda inner: _parse_pnpm_subcommand(all_args, inner)
+        )
+        return result
+    if subcmd == "self-update":
+        # Installs pnpm itself from the registry (pnpm 9+), like `npm install -g pnpm`.
+        versions, _named = _pnpm_packages(args[1:])
+        return ParsedInstall(
+            manager="pnpm", packages=[f"pnpm@{versions[0]}" if versions else "pnpm"],
+            ecosystem="npm", global_install=True,
+        )
     if subcmd in ("add", "install", "i"):
-        packages = []
-        if subcmd == "add":
-            packages = _positionals(args[1:], _PNPM_VALUE_FLAGS)
+        # pnpm parses `install <pkg>` as `add <pkg>`.
+        packages, named = _pnpm_packages(args[1:])
         # `-g`/`--global` installs into pnpm's global store, not the project:
         # a global install, handled like `npm install -g`.
-        is_global = "-g" in all_args or "--global" in all_args
+        is_global = _pnpm_is_global(all_args)
         # `install`/`i` with no explicit packages materialises the existing
         # pnpm-lock.yaml in full; `add` always names its own packages.
         return ParsedInstall(
             manager="pnpm", packages=packages, ecosystem="npm",
             global_install=is_global,
-            is_lockfile_install=not packages and not is_global,
+            is_lockfile_install=not named and not is_global,
         )
     if subcmd in ("update", "up", "upgrade"):
         # pnpm's own commandNames for `update`. It installs NEWER versions: of
         # the named packages, or of everything.
-        packages = _positionals(args[1:], _PNPM_VALUE_FLAGS)
+        packages, named = _pnpm_packages(args[1:])
         return ParsedInstall(
             manager="pnpm", packages=packages, ecosystem="npm",
-            global_install="-g" in all_args or "--global" in all_args,
-            is_lockfile_install=not packages and not ("-g" in all_args or "--global" in all_args),
+            global_install=_pnpm_is_global(all_args),
+            is_lockfile_install=not named and not _pnpm_is_global(all_args),
         )
-    if subcmd in ("dedupe", "fetch"):
-        # Both install from the existing lock file with no package names of
-        # their own (dedupe re-installs with newer-compatible versions;
-        # fetch populates the virtual store from it). Exception: `dedupe
-        # --check` only reports whether changes are possible "without
-        # installing packages or editing the lockfile" (pnpm's own docs) —
-        # nothing to gate regardless of is_lockfile_install.
+    if subcmd in _PNPM_LOCKFILE_COMMANDS:
+        # Each installs from the existing lock file with no package names of
+        # its own: dedupe re-installs with newer-compatible versions, fetch
+        # populates the virtual store, ci/install-test/pipeline do a frozen
+        # install, deploy installs a workspace project's dependencies into a
+        # target directory, and unlink reinstalls what it unlinks. Their
+        # positionals are a directory, a pipeline name or linked packages,
+        # never packages to install. Exception: `dedupe --check` only reports
+        # whether changes are possible "without installing packages or
+        # editing the lockfile" (pnpm's own docs).
         is_check_only = subcmd == "dedupe" and "--check" in all_args
+        # deploy's destination: its first positional, unless that is a `true`/
+        # `false` pnpm 8-11 read as a Boolean option's value, so both are kept.
+        positionals = _positionals_by(args[1:], _pnpm_consumes)
+        destinations = positionals[:1] + [p for p in _pnpm_named(args[1:]) if p not in positionals[:1]][:1]
         return ParsedInstall(
             manager="pnpm", packages=[], ecosystem="npm",
             is_lockfile_install=True,
             should_gate=not is_check_only,
+            # deploy's destination, so its node_modules is scanned and restored.
+            install_dirs=destinations if subcmd == "deploy" else [],
         )
     if subcmd == "import":
         # Generates pnpm-lock.yaml from a *different* manager's lockfile
@@ -2007,7 +2246,7 @@ def _parse_pnpm_subcommand(all_args: list[str], args: list[str]) -> ParsedInstal
         # nonexistent) lock file here would gate a command that installs
         # nothing. Not a lockfile-install case.
         return ParsedInstall(manager="pnpm", packages=[], ecosystem="npm")
-    if subcmd in ("remove", "rm", "uninstall", "un"):
+    if subcmd in ("remove", "rm", "uninstall", "un", "uni"):
         # Removal mutates pnpm-lock.yaml, but removes a package rather than
         # installing one — scanning the lock file here would gate the very
         # dependency being removed. Not a lockfile-install case.
@@ -2037,7 +2276,7 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     cmd = _cmd(argv[0])
     if cmd == "npm":
         args = argv[1:]
-    elif cmd in ("node", "nodejs") and len(argv) > 1 and "npm" in _basename(argv[1]):
+    elif cmd in ("node", "nodejs") and len(argv) > 1 and _cmd(argv[1]) == "npm":
         # node /path/to/npm-cli.js install ...
         args = argv[2:]
     else:

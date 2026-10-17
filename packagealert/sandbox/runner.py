@@ -2277,8 +2277,10 @@ class SandboxRunner:
                 f"{added} packages ({', '.join(file_sources) or 'no packages found'})"
             )
 
-        if not parsed.packages and not parsed.req_files and parsed.is_lockfile_install:
-            # Lock-file install — read the lock file for exact versions.
+        if not parsed.req_files and parsed.is_lockfile_install:
+            # Lock-file install — read the lock file for exact versions. Its
+            # packages, if any, are checked as well (above): a token pnpm 8-11
+            # read as a Boolean option's value but pnpm 12 installs.
             # `is_lockfile_install` is required here, not inferred from empty
             # packages/req_files: a removal (`npm uninstall`, `yarn/pnpm
             # remove`) or an unrelated non-install subcommand (`pipenv
@@ -2317,14 +2319,15 @@ class SandboxRunner:
             else:
                 scan = scan_project(ctx.lockfile_root)
             # Only packages locked from the public registry are looked up there.
-            queries = (
+            locked = (
                 [(p.ecosystem, p.name, p.version) for p in scan.pinned
                  if p.ecosystem == parsed.ecosystem and p.from_public_registry]
                 + [(p.ecosystem, p.name, None) for p in scan.unpinned
                    if p.ecosystem == parsed.ecosystem and p.from_public_registry]
             )
+            queries.extend(locked)
             lock_sources = ", ".join(scan.sources) if scan.sources else "no lock file found"
-            source_parts.append(f"{len(queries)} packages ({lock_sources})")
+            source_parts.append(f"{len(locked)} packages ({lock_sources})")
 
         return queries, None, "; ".join(source_parts)
 
@@ -3330,6 +3333,8 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         lockfile_dir=getattr(pi, "lockfile_dir", None),
         # getattr default {}: a plugin predating this field sets no registry on the command line.
         registries=dict(getattr(pi, "registries", None) or {}),
+        # getattr default []: a plugin predating this field installs only into the project.
+        install_dirs=list(getattr(pi, "install_dirs", None) or []),
     )
 
 
