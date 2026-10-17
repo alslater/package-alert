@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import typer
-from rich.console import Console
+
+from packagealert.safe_output import make_console
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -198,7 +199,7 @@ async def _run_fix(cfg, root: Path, *, allow_major: frozenset[str], allow_cooldo
 
     out = app_module.console
     # JSON mode keeps stdout pure JSON: every notice goes to stderr.
-    console = Console(stderr=True) if fmt == "json" else out
+    console = make_console(stderr=True) if fmt == "json" else out
     # One spinner line naming the current step. Rich draws nothing when the
     # console is not a terminal, so piped output and logs stay clean.
     status = _Spinner(console, "Finding the lock file…")

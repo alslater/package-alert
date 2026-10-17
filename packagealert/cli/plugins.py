@@ -8,9 +8,10 @@ from pathlib import Path
 
 import tomli_w
 import typer
-from rich.console import Console
 
-console = Console()
+from packagealert.safe_output import make_console
+
+console = make_console()
 log = logging.getLogger(__name__)
 
 central_app = typer.Typer(help="Manage package-alert plugins.")

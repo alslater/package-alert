@@ -1166,12 +1166,11 @@ async def test_trials_and_the_sync_check_share_one_runner(tmp_path):
 async def test_json_plan_reaches_stdout_while_the_spinner_draws_on_a_terminal(tmp_path, capsys, monkeypatch):
     from io import StringIO
 
-    from rich.console import Console
-
     from packagealert.cli import fix_cmd
+    from packagealert.safe_output import make_console
 
     terminal = StringIO()  # stands in for an interactive stderr
-    monkeypatch.setattr(fix_cmd, "Console", lambda *a, **kw: Console(file=terminal, force_terminal=True))
+    monkeypatch.setattr(fix_cmd, "make_console", lambda *a, **kw: make_console(file=terminal, force_terminal=True))
     assert await _run(tmp_path, LOCK) == 0
     assert json.loads(capsys.readouterr().out)["commands"]
 

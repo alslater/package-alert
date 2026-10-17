@@ -13,6 +13,7 @@ from packagealert.config import DEFAULT_CONFIG_PATH as _DEFAULT_CONFIG
 from packagealert.config import load_config
 from packagealert.daemon_pid import PID_FILE as _PID_FILE
 from packagealert.daemon_pid import find_daemon_pid, is_started_by_systemd
+from packagealert.safe_output import make_console
 from packagealert.storage.db import DEFAULT_DB_PATH as _DB_PATH
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -203,10 +204,9 @@ def render_status(
         print(json.dumps(data.to_dict(), indent=2))
         return
 
-    from rich.console import Console as RichConsole
     from rich.markup import escape
     if console is None:
-        console = RichConsole()
+        console = make_console()
 
     # ── Daemon ────────────────────────────────────────────────────────────────
     console.print("[bold]Daemon[/bold]")

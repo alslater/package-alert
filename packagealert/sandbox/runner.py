@@ -37,6 +37,7 @@ from packagealert.parsers.process_args import (
     resolve_invocation_dirs,
     resolve_lockfile_dir,
 )
+from packagealert.safe_output import harden, make_console
 from packagealert.sandbox import isolation
 from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
@@ -242,7 +243,7 @@ class _GateResources:
 class SandboxRunner:
     def __init__(self, cfg: AppConfig, console: Console | None = None) -> None:
         self._cfg = cfg
-        self._console = console or Console()
+        self._console = harden(console) if console is not None else make_console()
         # Security warnings already shown by this runner. pa fix assembles a
         # sandbox per trial on one runner, and repeating the same notice for
         # every trial buries it; pa run uses a fresh runner per command.
@@ -1906,16 +1907,15 @@ class SandboxRunner:
             sandbox_env["PA_RUN_OPTS"] = f"{existing_opts} --flags {shlex.quote(flags_str)}".strip()
 
         if "ssh-keys" in shell_flags.get("python", frozenset()):
-            from rich.console import Console as _Console
             _ssh_dir = Path.home() / ".ssh"
             if _ssh_dir.exists():
-                _Console(stderr=True).print(
+                make_console(stderr=True).print(
                     "⚠  SSH keys (python:ssh-keys): ~/.ssh mounted read-only inside the sandbox.",
                     style="yellow",
                     markup=False,
                 )
             else:
-                _Console(stderr=True).print(
+                make_console(stderr=True).print(
                     "⚠  SSH keys (python:ssh-keys): ~/.ssh not found — flag has no effect.",
                     style="yellow",
                     markup=False,

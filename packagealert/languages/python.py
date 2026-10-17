@@ -41,6 +41,7 @@ from packagealert.parsers.lockfiles import (
     is_public_pypi_index,
 )
 from packagealert.parsers.wheel import parse_wheel_filename
+from packagealert.safe_output import make_console
 
 log = logging.getLogger(__name__)
 
@@ -2483,8 +2484,7 @@ class PythonLanguage:
         if ssh_granted and (Path.home() / ".ssh").exists():
             import sys
 
-            from rich.console import Console
-            _con = Console(stderr=True)
+            _con = make_console(stderr=True)
             if sys.stdin.isatty():
                 from rich.prompt import Confirm
                 _con.print(
