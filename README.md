@@ -168,7 +168,7 @@ package-alert run bash                          # interactive sandboxed shell
 
 **What it does:**
 
-1. **Pre-flight check** — identifies what will be installed (from the command arguments or the project lock file) and batch-queries OSV before anything runs. Blocks immediately if a known-malicious package is found.
+1. **Pre-flight check** — identifies what will be installed (from the command arguments or the project lock file) and batch-queries OSV before anything runs. Blocks immediately if a known-malicious package is found. Packages with ordinary known vulnerabilities are not blocked: they are listed as a warning (the first ten, then a count), with a pointer to `pa scan-project` and `pa fix`. The same applies to the post-run lock-file scan and the post-install scan.
 2. **Sandboxed execution** — runs the command inside a bubblewrap namespace with layered filesystem isolation (see below). Network access is **allowed by default** so package managers can reach their registries; use `--no-network` only when all packages are already cached locally.
 3. **Post-install scan** — diffs the install targets against a pre-run snapshot, identifies new packages by their metadata files (`.dist-info`, `package.json`, `composer.json`), and runs another OSV check on everything that appeared.
 

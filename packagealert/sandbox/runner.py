@@ -146,6 +146,8 @@ class _Assembly:
     hidden: list[Path]
 
 
+# How many known-vulnerable packages an OSV gate lists before summarising the rest.
+_VULNERABLE_SHOWN = 10
 # The one directory under which run_captured(scratch=True) accepts a cwd: each
 # scratch run gets its own fresh directory inside it (pa fix's trial copies).
 SCRATCH_ROOT = Path.home() / ".cache" / "package-alert" / "fix-scratch"
@@ -2144,6 +2146,7 @@ class SandboxRunner:
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
         unchecked: list[str] = []
+        vulnerable: list[tuple[str, str | None]] = []
 
         status = self._console.status(f"[dim]Pre-flight: {len(queries)} packages ({sources})...[/dim]")
         status.start()
@@ -2178,6 +2181,8 @@ class SandboxRunner:
                         malicious.append((r.package_name, adv_id))
                     elif r and r.degraded:
                         unchecked.append(r.package_name)
+                    if r and r.advisories and not r.has_malicious:
+                        vulnerable.append((r.package_name, r.version))
         finally:
             status.stop()
             await client.aclose()
@@ -2189,18 +2194,7 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        if unchecked:
-            # Fail open (the install still proceeds, matching this module's
-            # standing treatment of an unavailable service — see _typo_for's
-            # own fail-open), but never report an unobtained answer as clean.
-            self._console.print(
-                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
-                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
-            )
-            for name in sorted(set(unchecked)):
-                self._console.print(f"  [yellow]• {name}[/yellow]")
-        else:
-            self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
+        self._report_unblocked("Pre-flight", "Pre-flight: no known advisories", vulnerable, unchecked)
         return True
 
     def _resolve_query_packages(
@@ -2376,6 +2370,7 @@ class SandboxRunner:
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
         unchecked: list[str] = []
+        vulnerable: list[tuple[str, str | None]] = []
 
         status = self._console.status(f"[dim]Pre-flight: {source}...[/dim]")
         status.start()
@@ -2410,6 +2405,8 @@ class SandboxRunner:
                         malicious.append((r.package_name, adv_id))
                     elif r and r.degraded:
                         unchecked.append(r.package_name)
+                    if r and r.advisories and not r.has_malicious:
+                        vulnerable.append((r.package_name, r.version))
         finally:
             status.stop()
             await client.aclose()
@@ -2421,19 +2418,44 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
+        self._report_unblocked("Pre-flight", "Pre-flight: no known advisories", vulnerable, unchecked)
+        return True
+
+    def _report_unblocked(
+        self, label: str, clean: str, vulnerable: list[tuple[str, str | None]], unchecked: list[str],
+    ) -> None:
+        """Print what an OSV gate found that does not block the install.
+
+        The gates block only malicious packages, so the green line claims only what was
+        established: *clean* when every package was checked and none has an advisory, "no
+        malicious packages" when some have ordinary advisories, and nothing when a lookup
+        failed (fail open, but never report an unobtained answer as clean).
+        """
+        if vulnerable:
+            found = sorted(set(vulnerable), key=lambda nv: (nv[0], nv[1] or ""))
+            self._console.print(
+                f"! {len(found)} package(s) have known vulnerabilities "
+                "(not blocked: pa run blocks only malicious packages):",
+                style="bold yellow", markup=False,
+            )
+            for name, version in found[:_VULNERABLE_SHOWN]:
+                self._console.print(f"  • {name} {version}" if version else f"  • {name}",
+                                    style="yellow", markup=False)
+            if len(found) > _VULNERABLE_SHOWN:
+                self._console.print(f"  … and {len(found) - _VULNERABLE_SHOWN} more", style="yellow", markup=False)
+            self._console.print("  Run pa scan-project for details, or pa fix to plan upgrades.", style="dim",
+                                markup=False)
         if unchecked:
-            # Fail open (the install still proceeds, matching this module's
-            # standing treatment of an unavailable service — see _typo_for's
-            # own fail-open), but never report an unobtained answer as clean.
             self._console.print(
                 f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
                 f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
             )
             for name in sorted(set(unchecked)):
-                self._console.print(f"  [yellow]• {name}[/yellow]")
+                self._console.print(f"  • {name}", style="yellow", markup=False)
+        elif vulnerable:
+            self._console.print(f"✓ {label}: no malicious packages", style="green", markup=False)
         else:
-            self._console.print("[green]✓ Pre-flight: no known advisories[/green]")
-        return True
+            self._console.print(f"✓ {clean}", style="green", markup=False)
 
     async def _post_run_cooldown(
         self,
@@ -2575,6 +2597,7 @@ class SandboxRunner:
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
         unchecked: list[str] = []
+        vulnerable: list[tuple[str, str | None]] = []
 
         try:
             for i in range(0, len(queries), 50):
@@ -2607,6 +2630,8 @@ class SandboxRunner:
                         malicious.append((r.package_name, adv_id))
                     elif r and r.degraded:
                         unchecked.append(r.package_name)
+                    if r and r.advisories and not r.has_malicious:
+                        vulnerable.append((r.package_name, r.version))
         finally:
             await client.aclose()
             await db.close()
@@ -2619,18 +2644,7 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        if unchecked:
-            # Fail open (the install still proceeds, matching this module's
-            # standing treatment of an unavailable service — see _typo_for's
-            # own fail-open), but never report an unobtained answer as clean.
-            self._console.print(
-                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
-                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
-            )
-            for name in sorted(set(unchecked)):
-                self._console.print(f"  [yellow]• {name}[/yellow]")
-        else:
-            self._console.print("[green]✓ Lock file scan: clean[/green]")
+        self._report_unblocked("Lock file scan", "Lock file scan: clean", vulnerable, unchecked)
         return True
 
     async def _post_scan(
@@ -2653,6 +2667,7 @@ class SandboxRunner:
         cache = OsvCache(db, self._cfg.osv)
         malicious: list[tuple[str, str]] = []
         unchecked: list[str] = []
+        vulnerable: list[tuple[str, str | None]] = []
 
         # OSV queries are (ecosystem, name, version) only.
         osv_queries = list(dict.fromkeys((eco, name, ver) for eco, name, ver, root in packages
@@ -2677,6 +2692,8 @@ class SandboxRunner:
                         malicious.append((r.package_name, adv_id))
                     elif r and r.degraded:
                         unchecked.append(r.package_name)
+                    if r and r.advisories and not r.has_malicious:
+                        vulnerable.append((r.package_name, r.version))
         finally:
             await client.aclose()
             await db.close()
@@ -2687,18 +2704,7 @@ class SandboxRunner:
                 self._console.print(f"  [red]• {name}  ({adv_id})[/red]")
             return False
 
-        if unchecked:
-            # Fail open (the install still proceeds, matching this module's
-            # standing treatment of an unavailable service — see _typo_for's
-            # own fail-open), but never report an unobtained answer as clean.
-            self._console.print(
-                f"[bold yellow]! {len(unchecked)} package(s) could not be checked "
-                f"against OSV (lookup unavailable) — not a clean result:[/bold yellow]"
-            )
-            for name in sorted(set(unchecked)):
-                self._console.print(f"  [yellow]• {name}[/yellow]")
-        else:
-            self._console.print("[green]✓ Post-install: no known advisories[/green]")
+        self._report_unblocked("Post-install", "Post-install: no known advisories", vulnerable, unchecked)
         return await self._post_scan_risk(packages, non_public)
 
     async def _post_scan_risk(

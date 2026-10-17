@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import unittest.mock
+from collections.abc import Collection
 from pathlib import Path
 
 import pytest
@@ -4636,11 +4637,14 @@ class TestRunnerUsesBackendForSnapshot:
 # _scan_updated_lock_files
 # ---------------------------------------------------------------------------
 
-def _fake_osv_context(malicious_names: set[str], *, partial: bool = False):
+def _fake_osv_context(malicious_names: set[str], *, partial: bool = False,
+                      vulnerable_names: Collection[str] = (), unchecked_names: Collection[str] = ()):
     """Return (fake_open_db, FakeClient, FakeCache) that flag packages in malicious_names.
 
     With partial=True each malicious result is also degraded, modelling an OSV
     result where one vuln was malformed but the MAL- advisory beside it parsed.
+    Packages in vulnerable_names carry an ordinary (non-malicious) advisory, and
+    those in unchecked_names come back degraded with no advisories (OSV unavailable).
     """
 
     async def fake_open_db(*args, **kwargs):
@@ -4654,13 +4658,14 @@ def _fake_osv_context(malicious_names: set[str], *, partial: bool = False):
 
     class FakeAdvisory:
         def __init__(self, malicious):
-            self.id = "GHSA-fake-0001"
+            self.id = "MAL-fake-0001" if malicious else "GHSA-fake-0001"
             self.is_malicious = malicious
 
     class FakeResult:
-        def __init__(self, name, malicious, degraded=False):
+        def __init__(self, name, version, malicious, degraded=False, vulnerable=False):
             self.package_name = name
-            self.advisories = [FakeAdvisory(malicious)] if malicious else []
+            self.version = version
+            self.advisories = [FakeAdvisory(malicious)] if malicious else [FakeAdvisory(False)] if vulnerable else []
             self.has_malicious = malicious
             # Mirrors OsvResult.degraded: a real lookup result is never degraded.
             self.degraded = degraded
@@ -4670,10 +4675,11 @@ def _fake_osv_context(malicious_names: set[str], *, partial: bool = False):
         async def batch_query(self, queries):
             return [
                 FakeResult(
-                    name, name in malicious_names,
-                    degraded=partial and name in malicious_names,
+                    name, version, name in malicious_names,
+                    degraded=(partial and name in malicious_names) or name in unchecked_names,
+                    vulnerable=name in vulnerable_names,
                 )
-                for _, name, _ in queries
+                for _, name, version in queries
             ]
         async def aclose(self): pass
 
@@ -5082,6 +5088,82 @@ class TestGatesBlockOnPartialMaliciousResult:
         with a, b, c, d:
             result = asyncio.run(_make_runner()._scan_updated_lock_files(tmp_path, snapshots))
         assert result is False
+
+
+class TestGatesReportKnownVulnerabilities:
+    """pa run blocks only malicious packages, so a gate must not call a result with
+    ordinary advisories clean (#78): it says what it checked and counts the rest."""
+
+    GATES = ("preflight_shell", "preflight", "scan_updated_lock_files", "post_scan")
+
+    def _run_gate(self, gate, tmp_path, monkeypatch, packages, **osv):
+        import asyncio
+
+        import packagealert.sandbox.runner as runner_mod
+
+        fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set(), **osv)
+        scan = _fake_scan_result([("pypi", n, v) for n, v in packages])
+        runner = _make_runner()
+        lock = tmp_path / "Pipfile.lock"
+        lock.write_bytes(b"updated content")
+
+        async def risk_ok(*a, **kw):
+            return True
+
+        monkeypatch.setattr(runner, "_post_scan_risk", risk_ok)
+        with (
+            unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+            unittest.mock.patch("packagealert.osv.client.OsvClient", FakeClient),
+            unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_lockfiles", return_value=scan),
+            unittest.mock.patch("packagealert.parsers.lockfiles.scan_project", return_value=scan),
+        ):
+            if gate == "preflight_shell":
+                return asyncio.run(runner._preflight_shell(tmp_path))
+            if gate == "preflight":
+                argv = ["pipenv", "install"]
+                ctx = runner_mod._Context(argv=argv, parsed=runner_mod._try_parse(argv), cwd=tmp_path)
+                return asyncio.run(runner._preflight(ctx))
+            if gate == "scan_updated_lock_files":
+                snapshots: dict[Path, bytes | _LockUnreadable | None] = {lock: b"original content"}
+                return asyncio.run(runner._scan_updated_lock_files(tmp_path, snapshots))
+            found = [("pypi", n, v, tmp_path) for n, v in packages]
+            return asyncio.run(runner._post_scan(found))
+
+    @pytest.mark.parametrize("gate", GATES)
+    def test_vulnerable_package_is_counted_not_called_clean(self, gate, tmp_path, monkeypatch, capsys):
+        packages = [("django", "5.2.15"), ("requests", "2.32.0")]
+        assert self._run_gate(gate, tmp_path, monkeypatch, packages, vulnerable_names={"django"}) is True
+        out = capsys.readouterr().out
+        assert "no known advisories" not in out and "clean" not in out
+        assert "no malicious packages" in out
+        assert "1 package(s) have known vulnerabilities" in out
+        assert "django 5.2.15" in out and "requests" not in out
+        assert "pa scan-project" in out
+
+    @pytest.mark.parametrize("gate", GATES)
+    def test_package_without_advisories_is_still_reported_clean(self, gate, tmp_path, monkeypatch, capsys):
+        assert self._run_gate(gate, tmp_path, monkeypatch, [("requests", "2.32.0")]) is True
+        out = capsys.readouterr().out
+        assert "known vulnerabilities" not in out
+        assert "no known advisories" in out or "Lock file scan: clean" in out
+
+    @pytest.mark.parametrize("gate", GATES)
+    def test_unchecked_package_suppresses_every_green_line(self, gate, tmp_path, monkeypatch, capsys):
+        packages = [("django", "5.2.15"), ("flask", "3.0.0")]
+        result = self._run_gate(gate, tmp_path, monkeypatch, packages,
+                                vulnerable_names={"django"}, unchecked_names={"flask"})
+        assert result is True
+        out = capsys.readouterr().out
+        assert "✓" not in out
+        assert "could not be checked" in out and "known vulnerabilities" in out
+
+    def test_long_vulnerable_list_is_capped(self, tmp_path, monkeypatch, capsys):
+        packages = [(f"pkg{i:02d}", "1.0") for i in range(15)]
+        self._run_gate("preflight", tmp_path, monkeypatch, packages, vulnerable_names={n for n, _ in packages})
+        out = capsys.readouterr().out
+        assert "15 package(s) have known vulnerabilities" in out
+        assert "pkg09 1.0" in out and "pkg10 1.0" not in out and "and 5 more" in out
 
 
 class TestScanUpdatedLockFiles:
