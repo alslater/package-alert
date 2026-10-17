@@ -14,7 +14,7 @@
 | Tool | Ground truth | Generator (run with) |
 |------|--------------|----------------------|
 | pip | `parse_command()` + the install command's optparse parser | `generate_pip.py` (each pip's interpreter; currently 24.0, 25.3, 26.1.2, 26.2.1) |
-| pipenv, pipx | the tool's argparse parser, plus the execution rules around it (pipx exits after `--version`; pipenv's `-h` prints help even with a subcommand) | `generate_argparse.py pipenv|pipx` (the tool's interpreter, e.g. `uv run --isolated --no-project --with pipx python …`; currently pipenv 2026.9.1, pipx 1.17.14) |
+| pipenv, pipx | the tool's argparse parser, plus the execution rules around it (pipx exits after `--version`; pipenv's `-h` prints help even with a subcommand) | `generate_argparse.py pipenv|pipx` (the tool's interpreter, e.g. `uv run --isolated --no-project --with pipx python …`; currently pipenv 2026.9.1, pipx 1.18.2) |
 | npm | nopt with npm's definitions, and cmd-list's `deref()` | `generate_npm.js` (node) |
 | composer | Symfony `Application::find()` + `ArgvInput::bind()` | `generate_composer.php` (php) |
 | pip requirements files | `req_file.build_parser()` on option lines: whether a file sends pip to a source other than public PyPI (`_requirements_option_is_private()`, which gates yank lookups) | `generate_pip_req_file.py` (`uv run --isolated --with pip==X`; currently 26.2.1 — older pips differ only toward "private") |

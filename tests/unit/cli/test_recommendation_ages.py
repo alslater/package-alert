@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from packagealert.cli.app import _recommendation_ages, _run_scan_project
-from packagealert.config import load_config
+from packagealert.config import AppConfig
 from packagealert.osv.remediation import group_findings
 from packagealert.storage.db import (
     get_publication_date,
@@ -139,8 +139,8 @@ async def test_scan_marks_a_recommendation_inside_the_cooldown_period(capsys, tm
         patch(_FETCH, AsyncMock(return_value=time.time() - 2 * 86400)),
     ):
         await _run_scan_project(
-            load_config(None), tmp_path, scan_unpinned=False, installed=False,
-            show_details=False, fmt="text", no_risk=True,
+            AppConfig(), tmp_path, scan_unpinned=False, installed=False,
+            show_details=False, fmt="text", no_risk=True, no_yank=True,
         )
     out = capsys.readouterr().out
     assert "upgrade to 5.2.17" in out
@@ -154,8 +154,8 @@ async def test_a_failing_age_lookup_does_not_fail_the_scan(capsys, tmp_path):
         patch("packagealert.cli.app._recommendation_ages", AsyncMock(side_effect=RuntimeError("boom"))),
     ):
         await _run_scan_project(
-            load_config(None), tmp_path, scan_unpinned=False, installed=False,
-            show_details=False, fmt="json", no_risk=True,
+            AppConfig(), tmp_path, scan_unpinned=False, installed=False,
+            show_details=False, fmt="json", no_risk=True, no_yank=True,
         )
     [r] = json.loads(capsys.readouterr().out)["remediations"]
     assert r["recommended_version"] == "5.2.17"
