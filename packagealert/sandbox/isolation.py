@@ -17,10 +17,11 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from packagealert.sandbox.hidden import HiddenPathsError, hidden_home_paths
 from packagealert.sandbox.removal import remove_tree
 
 log = logging.getLogger(__name__)
@@ -321,44 +322,12 @@ def _execute(argv: list[str], env: Mapping[str, str], cwd: Path, timeout: float,
 
 
 def _hidden_home_paths() -> list[Path]:
-    """Every language plugin's sandbox_hidden_home_paths(), as Paths.
-
-    The hook's one job is hiding credentials, so it fails CLOSED: a hook that raises, returns
-    something that is not an iterable of paths (a bare str or Path included), or yields an item
-    that is neither a str nor an os.PathLike to a str raises IsolationRefused naming the plugin.
-    A plugin without the hook hides nothing.
-    """
-    from packagealert.languages import registry as lang_registry
-
-    # On an unloaded registry all_languages() is empty and nothing would be hidden. Loading here
-    # (idempotent) keeps that from depending on SandboxRunner having loaded it first.
-    lang_registry.load()
-    out: list[Path] = []
-    for lang in lang_registry.all_languages():
-        name = getattr(lang, "name", "?")
-        hook = getattr(lang, "sandbox_hidden_home_paths", None)
-        if not callable(hook):
-            continue
-        try:
-            paths = hook()
-            if isinstance(paths, (str, bytes, os.PathLike)):
-                raise TypeError(f"returned a single path ({paths!r}), not an iterable of paths")
-            if not isinstance(paths, Iterable):
-                raise TypeError(f"returned {paths!r}, not an iterable of paths")
-            items = list(paths)
-            for item in items:
-                if isinstance(item, Path):
-                    out.append(item)
-                elif isinstance(item, (str, os.PathLike)) and isinstance(os.fspath(item), str):
-                    out.append(Path(os.fspath(item)))
-                else:
-                    raise TypeError(f"returned a non-path item {item!r}")
-        except Exception as exc:
-            log.warning("sandbox_hidden_home_paths failed for lang=%s", name, exc_info=True)
-            raise IsolationRefused(f"language plugin {name!r} could not say which home paths to hide "
-                                   f"(sandbox_hidden_home_paths: {exc}); container isolation refuses "
-                                   "rather than risk exposing credentials") from exc
-    return out
+    """hidden.hidden_home_paths(), refusing container isolation when a plugin cannot answer."""
+    try:
+        return hidden_home_paths()
+    except HiddenPathsError as exc:
+        raise IsolationRefused(f"{exc}; container isolation refuses rather than risk exposing "
+                               "credentials") from exc
 
 
 def run_container(argv: list[str], write_dirs: Sequence[Path], *, env: Mapping[str, str],

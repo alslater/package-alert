@@ -62,6 +62,14 @@ from packagealert.sandbox.runner import (
 from tests.unit.dbmocks import make_mock_db
 
 
+@pytest.fixture(autouse=True)
+def _no_hidden_home_paths(monkeypatch):
+    """Hide nothing here: these tests replace subprocess.run process-wide and stand in MagicMock
+    language plugins, so the real hook (python's `uv auth dir`) or a mock's auto-created one would
+    refuse the run. test_sandbox_hidden_paths.py covers hidden paths, including the runner wiring."""
+    monkeypatch.setattr(runner_mod, "hidden_home_paths", list)
+
+
 @pytest.fixture(scope="session")
 def symlinks_supported() -> bool:
     """Session-scoped fixture: skip the test if symlink creation is not supported."""
@@ -8026,7 +8034,7 @@ async def test_scratch_run_refuses_a_writable_bind_over_the_scratch_dir(tmp_path
     runner = SandboxRunner(AppConfig())
     monkeypatch.setattr(runner, "_assemble_sandbox", lambda *a, **k: _Assembly(
         argv=["npm", "install"], write_dirs=[], env={}, home_ro=[], extra_tmpfs=[],
-        writable_binds=[(tmp_path, tmp_path.parent)]))
+        writable_binds=[(tmp_path, tmp_path.parent)], hidden=[]))
     with pytest.raises(CapturedRunError, match="overlaps the scratch"):
         await runner.run_captured(["npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit",
                                    "--no-fund"], cwd=tmp_path, scratch=True)

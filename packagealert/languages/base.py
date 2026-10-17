@@ -311,10 +311,10 @@ class LanguageBase(Protocol):
     # a sandboxed command must not see unless a flag's writable bind provides them —
     # credentials inside a directory home_ro_paths()/the runtime allowlist exposes, such
     # as uv's credential store inside ~/.local/share/uv (#83). Callers use getattr +
-    # callable (sandbox/isolation.py's _hidden_home_paths()); a plugin without it hides nothing.
+    # callable (sandbox/hidden.py's hidden_home_paths()); a plugin without it hides nothing.
     # Any iterable of Path/str is accepted. A failing hook refuses (fails closed): one that
     # raises, returns a non-iterable or a bare str/Path, or yields a non-path item makes
-    # container isolation refuse the trial, naming the plugin.
+    # the sandbox refuse the command, naming the plugin.
     #
     # fix_adapters() -> list[FixAdapter] is another optional capability, not a
     # Protocol member, for the same reasons as poll_only_cache_paths(). It
