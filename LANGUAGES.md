@@ -78,6 +78,7 @@ class ProcessInstall:
     project_dir: str | None = None   # project discovery only (uv --project); relative to the effective working dir
     lockfile_dir: str | None = None  # lock file alone (pnpm --lockfile-dir); relative to the process cwd
     install_dirs: list[str] = field(default_factory=list)  # installed into besides the project (pnpm deploy <dir>); relative to the effective working dir
+    ambiguous_dirs: bool = False     # the directories depend on which tool version runs; the sandbox refuses the command
 
 @dataclass
 class SandboxPaths:
@@ -644,7 +645,10 @@ real bypass in a built-in parser:
    command that installs into a directory besides the project (`pnpm deploy
    <dir>`) lists it in `install_dirs`. `resolve_sandbox_targets()` should then
    add that directory's install target to `scan_targets`, so it is scanned
-   after the run and snapshotted for rollback.
+   after the run and snapshotted for rollback. If the directories depend on
+   which version of the tool runs (pnpm 8-9 install `-C a --prefix b` into
+   `b`, 10+ into `a`), set `ambiguous_dirs`: the sandbox then refuses the
+   command rather than scan one directory while the tool uses another.
 5. **Mark global installs** (`global_install=True`, and `defer_to_lockfile`
    False): their lock file is not the current project's.
 6. **Mark a named package that does not come from the public registry**

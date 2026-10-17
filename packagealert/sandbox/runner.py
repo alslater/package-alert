@@ -121,6 +121,10 @@ class _Context:
     lockfile_root: Path = field(init=False)
 
     def __post_init__(self) -> None:
+        if self.parsed is not None and getattr(self.parsed, "ambiguous_dirs", False) is True:
+            raise InvalidInvocationDirectory(
+                "its directory options mean different directories to different "
+                f"{self.parsed.manager} versions; give each directory once")
         self.work_dir, self.project_dir = resolve_invocation_dirs(
             self.cwd,
             self.parsed.working_dir if self.parsed else None,
@@ -3335,6 +3339,8 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         registries=dict(getattr(pi, "registries", None) or {}),
         # getattr default []: a plugin predating this field installs only into the project.
         install_dirs=list(getattr(pi, "install_dirs", None) or []),
+        # getattr default False: a plugin predating this field reads one directory.
+        ambiguous_dirs=getattr(pi, "ambiguous_dirs", False) is True,
     )
 
 
