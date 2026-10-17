@@ -181,7 +181,6 @@ _TRANSACTION_CONTROL_ACTIONS = frozenset({
 _DENIED_PRAGMAS = frozenset({"writable_schema"})
 
 DEFAULT_DB_PATH = Path.home() / ".local" / "share" / "package-alert" / "package-alert.db"
-_DEFAULT_DB_PATH = DEFAULT_DB_PATH  # internal alias
 
 
 def _reject_core_tables(action, arg1, arg2, dbname, source):
@@ -361,10 +360,12 @@ async def _apply_plugin_migrations(conn: aiosqlite.Connection, enabled_plugins: 
 
 
 async def open_db(
-    path: Path = _DEFAULT_DB_PATH,
+    path: Path | None = None,
     *,
     enabled_plugins: set[str] | None = None,
 ) -> aiosqlite.Connection:
+    # Looked up per call rather than bound as the default, so the path follows DEFAULT_DB_PATH.
+    path = DEFAULT_DB_PATH if path is None else path
     if enabled_plugins is None:
         from packagealert.config import read_enabled_plugins
         enabled_plugins = set(read_enabled_plugins())

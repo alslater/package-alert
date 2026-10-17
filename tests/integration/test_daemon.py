@@ -2500,7 +2500,7 @@ class TestSignalHandling:
         """SIGINT should set the shutdown event and allow clean exit."""
         pid_path = tmp_path / "daemon.pid"
         monkeypatch.setattr("packagealert.daemon._PID_FILE", pid_path)
-        monkeypatch.setattr("packagealert.storage.db._DEFAULT_DB_PATH", tmp_path / "test.db")
+        monkeypatch.setattr("packagealert.storage.db.DEFAULT_DB_PATH", tmp_path / "test.db")
 
         cfg = _make_cfg(tmp_path)
         daemon = Daemon(cfg)

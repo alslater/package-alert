@@ -9,6 +9,21 @@ from packagealert.languages import registry as lang_registry
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory):
+    """Keep every test out of the developer's real home (#69): its database, logs, config and
+    scratch directories. See _home_isolation. A directory of its own, not inside tmp_path,
+    which tests own, and a MonkeyPatch of its own, so a test's monkeypatch.undo() cannot
+    lift the isolation part-way through."""
+    from tests.unit._home_isolation import redirect
+
+    with pytest.MonkeyPatch.context() as isolation:
+        violations = redirect(isolation, tmp_path_factory.mktemp("home"))
+        yield violations
+        if violations:
+            pytest.fail(f"a unit test opened the real package-alert database: {violations}")
+
+
+@pytest.fixture(autouse=True)
 def _load_language_registry():
     """Ensure built-in languages are registered for each test."""
     lang_registry.load()
