@@ -35,6 +35,24 @@ Mitigation: Process poll interval is configurable (default 1s). JS file inspecti
 **T7: package-alert executes attacker-controlled code**
 Mitigation: All package inspection is static. Archives are never executed. Paths are validated against zip-slip.
 
+## Container isolation (PA_SANDBOX_ISOLATION=container)
+
+Under bwrap each sandboxed command gets its own PID, mount and user namespace. Container isolation (see [SANDBOX.md](SANDBOX.md#container-isolation)) gives none of these, and it is an explicit opt-in for an already-isolated, disposable container. Code controlled by the scanned repository does run during `pa fix` trials: uv runs a project's own build backend to read dynamic metadata, and dependency sdists run theirs. That code runs as the same uid as `pa` and its launcher. `env -i` clears only the child's environment: same-uid code can read `/proc/<ppid>/environ` and walk up the process tree, and can read any file the uid can open, whatever `HOME` says. Using `PA_SANDBOX_ISOLATION=container` is therefore conditional on the deployment meeting these requirements.
+
+| | Requirement | Why | Checked by package-alert? |
+|---|---|---|---|
+| R1 | package-alert is started with an environment that holds no secrets, and **no process running as the same uid holds secrets** (environment, memory, open files). Run `pa` as a dedicated uid with a scrubbed environment, or use secrets only before and after `pa` runs. | Same-uid `/proc/<pid>/environ` access: there is no PID namespace to hide the launcher. | No |
+| R2 | **Nothing readable by that uid holds secrets**, apart from registry credentials deliberately granted to trials (below). This covers its home, `/tmp`, the project checkout (including credentials in `.git/config` remote URLs and key files beside the clone) and anywhere else. | No mount namespace: bwrap hides `$HOME` by allowlist, but here repository code can open any path by absolute path. The fresh home is behavioural parity, not containment. | Partly: a tripwire on `credential_dirs()` |
+| R3 | The uid is **not root**. | Root can read every other user's files and processes. | Yes: refused when `os.geteuid() == 0` |
+| R4 | The container is **disposable**. | The filesystem is not read-only, so trials can write anywhere the uid can, and repository build code is running. A process that calls `setsid` also escapes the process group killed on timeout. | No |
+
+**The granted-credential exception.** A trial against a private registry needs that registry's credential. The deployment may grant exactly one: a read-only token scoped to the registry, stored as uv's credential store in the pa user's home. It is written before pa starts (for example with `uv auth login`, run as that uid) and never placed in pa's environment (R1). Repository code running during the trial can read it, as it can under bwrap, so a leak must only be able to download packages.
+
+- **Container isolation:** `python:uv-auth` is what grants it. The store is a `sandbox_hidden_home_paths()` entry, left out of the fresh home, so without the flag trials do not see it. Deployments such as pa-central must therefore set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials. It is required, not optional.
+- **bwrap:** the store is currently visible whenever `~/.local/share/uv` exists, with or without the flag, until #83 is fixed.
+
+**What package-alert checks.** R3 (refused as root), and a tripwire that refuses to run when any `credential_dirs()` path (`~/.ssh`, `~/.aws`, `~/.gnupg`, ...) exists in `$HOME`. The tripwire misses `~/.pypirc`, `~/.cargo/credentials`, `~/.composer/auth.json`, keyrings and `.env` files. R1, the rest of R2 and R4 are the deployment's job.
+
 ## Out of Scope
 
 - Packages installed before package-alert is started (use `package-alert scan-cache` to partially address)

@@ -44,6 +44,16 @@ def _interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def _container_isolation() -> bool:
+    """Whether PA_SANDBOX_ISOLATION selects container isolation (an unknown value is refused later, by the trials)."""
+    from packagealert.sandbox import isolation
+
+    try:
+        return isolation.selected() == isolation.CONTAINER
+    except isolation.IsolationError:
+        return False
+
+
 def _apply_mode(lock_only: bool, sync: bool, *, interactive: bool, env: Mapping[str, str]) -> str:
     """``sync`` at a terminal outside CI, ``lock-only`` otherwise; either flag decides outright."""
     if lock_only:
@@ -116,6 +126,11 @@ def fix(
     interactive = _interactive()
     apply_options = (ApplyOptions(_apply_mode(lock_only, sync, interactive=interactive, env=os.environ),
                                   yes=yes, interactive=interactive) if apply else None)
+    if apply_options is not None and apply_options.mode == "sync" and _container_isolation():
+        # Installing goes through pa run, which container isolation refuses; refuse before the lock is written.
+        console.print("pa fix --apply under PA_SANDBOX_ISOLATION=container needs --lock-only "
+                      "(installing is not supported)", style="red", markup=False)
+        raise typer.Exit(2)
     cfg, _ = _load(config)
     code = asyncio.run(_run_fix(cfg, path.resolve(), allow_major=cli_allow_major,
                                 allow_cooldown=allow_cooldown, fmt=fmt,
@@ -663,7 +678,6 @@ class _FixTrialRunner:
         first that fails or times out; the copy is removed whatever happens.
         *read_back* names the files read back afterwards (default: every copied file).
         """
-        import shutil
         import tempfile
 
         from packagealert.remediate.adapter import CommandResult, CopyResult
@@ -698,7 +712,7 @@ class _FixTrialRunner:
             after = {name: read_regular_beneath(scratch, name) for name in (files if read_back is None else read_back)}
             return CopyResult(tuple(results), after)
         finally:
-            shutil.rmtree(scratch, onexc=_make_removable)
+            _remove_tree(scratch)
 
 
 def _copy_beneath(project_dir: Path, scratch: Path, files) -> None:
@@ -729,22 +743,11 @@ def _copy_beneath(project_dir: Path, scratch: Path, files) -> None:
 
 
 def _remove_tree(path: Path) -> None:
-    import shutil
+    import logging
 
-    shutil.rmtree(path, onexc=_make_removable)
+    from packagealert.sandbox.removal import remove_tree
 
-
-def _make_removable(func, path, _exc) -> None:
-    """shutil.rmtree onexc: make *path*'s directory writable and retry once; give up quietly."""
-    import os
-
-    try:
-        os.chmod(os.path.dirname(path), 0o700)
-        if os.path.isdir(path) and not os.path.islink(path):
-            os.chmod(path, 0o700)
-        func(path)
-    except OSError:
-        pass
+    remove_tree(path, what="a pa fix scratch copy", level=logging.DEBUG)
 
 
 def _captured_runner(cfg, adapter, project_dir: Path, settings, console, pause):
@@ -755,9 +758,9 @@ def _captured_runner(cfg, adapter, project_dir: Path, settings, console, pause):
     for example, asks before ~/.ssh is mounted where build code can read it.
     The spinner is paused so a prompt appears on a clean line.
     """
-    from packagealert.sandbox.runner import SandboxRunner, bwrap_available
+    from packagealert.sandbox.runner import SandboxRunner, sandbox_unavailable_reason
 
-    if settings is None or not bwrap_available():
+    if settings is None or sandbox_unavailable_reason() is not None:
         return None, None
     runner = SandboxRunner(cfg, console=console)
     try:
@@ -897,10 +900,11 @@ async def _verify(cfg, adapter, lockfile: Path, plan: FixPlan, allow_cooldown: b
     With *snap*, every trial runs on the snapshot's files (``_FixTrialRunner``);
     a project file that no longer matches it leaves the whole plan unverified.
     """
-    from packagealert.sandbox.runner import SandboxRunner, bwrap_available
+    from packagealert.sandbox.runner import SandboxRunner, sandbox_unavailable_reason
 
-    if not bwrap_available():
-        return plan, "bwrap (bubblewrap) is not installed"
+    unavailable = sandbox_unavailable_reason()
+    if unavailable is not None:
+        return plan, unavailable
 
     if settings_error is not None:
         return plan, settings_error

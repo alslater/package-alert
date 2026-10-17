@@ -3063,8 +3063,40 @@ class TestUvCredentialsDir:
 
 
 class TestConfigureSandboxWritable:
+    @pytest.fixture(autouse=True)
+    def _private_tempdir(self, tmp_path, monkeypatch):
+        """Snapshots go under pytest's tmp_path, never the real /tmp."""
+        import tempfile
+
+        scratch = tmp_path / "snapshot-tmp"
+        scratch.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
     def _lang(self):
         return PythonLanguage()
+
+    def test_snapshot_dir_is_private_even_if_credentials_dir_is_not(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        creds_dir.chmod(0o775)
+        (creds_dir / "credentials.toml").write_text("x")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        [(src, _)] = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert (src.stat().st_mode & 0o777) == 0o700
+
+    def test_snapshot_tests_do_not_touch_the_real_tempdir(self, tmp_path, monkeypatch):
+        creds_dir = tmp_path / "credentials"
+        creds_dir.mkdir()
+        (creds_dir / "credentials.toml").write_text("x")
+        monkeypatch.setattr(
+            "packagealert.languages.python.PythonLanguage._uv_credentials_dir",
+            staticmethod(lambda: creds_dir),
+        )
+        [(src, _)] = self._lang().configure_sandbox_writable(None, tmp_path, frozenset({"uv-auth"}), _targets())
+        assert src.resolve().is_relative_to((tmp_path / "snapshot-tmp").resolve())
 
     def test_no_flag_returns_empty(self, tmp_path):
         result = self._lang().configure_sandbox_writable(None, tmp_path, frozenset(), _targets())

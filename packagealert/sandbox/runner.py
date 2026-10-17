@@ -11,7 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Callable, Collection, Mapping
+import threading
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -36,6 +37,7 @@ from packagealert.parsers.process_args import (
     resolve_invocation_dirs,
     resolve_lockfile_dir,
 )
+from packagealert.sandbox import isolation
 from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
 from packagealert.sandbox.bwrap import available as bwrap_available
@@ -144,6 +146,9 @@ class _Assembly:
 # The one directory under which run_captured(scratch=True) accepts a cwd: each
 # scratch run gets its own fresh directory inside it (pa fix's trial copies).
 SCRATCH_ROOT = Path.home() / ".cache" / "package-alert" / "fix-scratch"
+# How long a cancelled container-isolation run waits for its worker to kill the command and
+# remove the fresh home (it polls every isolation._POLL seconds, so this is ample).
+_CANCEL_GRACE = 5.0
 
 
 @dataclass(frozen=True)
@@ -245,6 +250,16 @@ class SandboxRunner:
         self._backend: SandboxBackend = build_backend(cfg.sandbox)
 
     async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, flags: dict[str, frozenset[str]] | None = None, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
+        try:
+            mode = isolation.selected()
+        except isolation.IsolationError as exc:
+            self._console.print(str(exc), style="red", markup=False)
+            return 1
+        if mode == isolation.CONTAINER:
+            # pa run installs; its rollback assumes bwrap confined writes (SANDBOX.md).
+            self._console.print("pa run is not supported with PA_SANDBOX_ISOLATION=container",
+                                style="red", markup=False)
+            return 1
         if not bwrap_available():
             self._console.print("[red]bwrap not found. Install bubblewrap to use 'package-alert run'.[/red]")
             self._console.print("[dim]  Ubuntu/Debian: sudo apt install bubblewrap[/dim]")
@@ -734,8 +749,9 @@ class SandboxRunner:
         if not approved:
             kind = "scratch" if scratch else "read-only"
             raise CapturedRunError(f"not an approved {kind} command: {' '.join(argv)}")
-        if not bwrap_available():
-            raise CapturedRunError("bwrap (bubblewrap) is not installed")
+        unavailable = sandbox_unavailable_reason()
+        if unavailable is not None:
+            raise CapturedRunError(unavailable)
         if scratch:
             # Canonical, so the writable bind, the read-only binds it is
             # compared with and the directory bwrap starts in are one path.
@@ -778,10 +794,37 @@ class SandboxRunner:
                 # cannot shadow it; a writable bind is applied later still, so
                 # one at, above or inside the copy is refused.
                 for _src, dest in asm.writable_binds:
+                    dest = dest.resolve(strict=False)  # a destination is kept as written
                     if dest == cwd or dest.is_relative_to(cwd) or cwd.is_relative_to(dest):
                         raise CapturedRunError(f"a sandbox flag's writable bind overlaps the scratch directory: {dest}")
                 asm.home_ro[:] = [p for p in asm.home_ro if not p.is_relative_to(cwd)]
                 asm.write_dirs.append(cwd)
+            if isolation.selected() == isolation.CONTAINER:
+                # The command runs in its own session, so neither Ctrl-C nor cancelling this
+                # coroutine reaches it: on cancellation tell the worker thread to kill its process
+                # group, and wait (bounded) for it to do so and remove the fresh home.
+                cancel = threading.Event()
+                worker = asyncio.ensure_future(asyncio.to_thread(
+                    isolation.run_container, asm.argv, asm.write_dirs, env=asm.env,
+                    home_ro_dirs=asm.home_ro, extra_tmpfs=asm.extra_tmpfs,
+                    writable_binds=asm.writable_binds, allow_network=allow_network, cwd=cwd,
+                    timeout=timeout, exclude=(cwd, ctx.project_dir, ctx.lockfile_root), cancel=cancel,
+                ))
+                try:
+                    await asyncio.wait({worker})  # unlike awaiting it, never cancels the worker
+                except (asyncio.CancelledError, KeyboardInterrupt):
+                    cancel.set()
+                    await asyncio.wait({worker}, timeout=_CANCEL_GRACE)
+                    if worker.done() and not worker.cancelled():
+                        worker.exception()  # retrieved: it is the expected isolation.Cancelled
+                    raise
+                try:
+                    res = worker.result()
+                except isolation.IsolationRefused as exc:
+                    raise CapturedRunError(str(exc)) from exc
+                except OSError as exc:
+                    raise CapturedRunError(f"could not start the command: {exc}") from exc
+                return CapturedRun(res.returncode, res.stdout, res.stderr, res.timed_out)
             try:
                 cmd = build_cmd(
                     asm.argv, asm.write_dirs,
@@ -1069,11 +1112,17 @@ class SandboxRunner:
         pairs, warnings = _collect_writable_binds(
             lang_registry, flags_by_lang, cwd, targets, parsed_by_lang,
         )
-        for msg in warnings:
-            if msg in self._shown_warnings:
-                continue
-            self._shown_warnings.add(msg)
-            self._console.print(msg)
+        try:
+            for msg in warnings:
+                if msg in self._shown_warnings:
+                    continue
+                self._shown_warnings.add(msg)
+                self._console.print(msg)
+        except BaseException:
+            # The caller's try/finally has not been entered yet; without this
+            # an interrupt or broken pipe here would leak the snapshots.
+            _cleanup_writable_binds(pairs)
+            raise
         return pairs
 
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
@@ -3287,13 +3336,41 @@ def credential_dirs() -> tuple[Path, ...]:
     )
 
 
+def sandbox_unavailable_reason() -> str | None:
+    """Why no sandboxed command can run here under the selected isolation, or None.
+
+    bwrap keeps its own check, by its module-level name so tests that patch it still apply.
+    """
+    try:
+        mode = isolation.selected()
+    except isolation.IsolationError as exc:
+        return str(exc)
+    if mode == isolation.BWRAP:
+        return None if bwrap_available() else "bwrap (bubblewrap) is not installed"
+    return isolation.unavailable_reason()
+
+
+class WritableBinds(list[tuple[Path, Path]]):
+    """The accepted (src, dest) writable-bind pairs, which are mounted, plus *deferred*.
+
+    *deferred* holds rejected snapshots that could not be deleted at collection because they
+    contain an accepted src (deleting them would delete it). They are never mounted: only the
+    list's own items are. _cleanup_writable_binds() removes them after the pairs, so passing this
+    object (not a copy of its items) to the final cleanup is what deletes them.
+    """
+
+    def __init__(self, pairs: Iterable[tuple[Path, Path]] = (), deferred: Iterable[tuple[Path, Path]] = ()) -> None:
+        super().__init__(pairs)
+        self.deferred: list[tuple[Path, Path]] = list(deferred)
+
+
 def _collect_writable_binds(
     lang_registry: Any,
     flags_by_lang: dict[str, frozenset[str]],
     cwd: Path,
     targets: SandboxTargets,
     parsed_by_lang: Mapping[str, ParsedInstall | None],
-) -> tuple[list[tuple[Path, Path]], list[str]]:
+) -> tuple[WritableBinds, list[str]]:
     """Collect (src, dest) writable-bind pairs and security warnings from all language modules.
 
     Returns ``(pairs, warnings)`` where *warnings* is a list of Rich markup
@@ -3305,94 +3382,172 @@ def _collect_writable_binds(
     result: list[tuple[Path, Path]] = []
     seen: set[tuple[Path, Path]] = set()
     warnings: list[str] = []
-    for lang in lang_registry.all_languages():
-        name = getattr(lang, "name", "?")
-        lang_flags = flags_by_lang.get(name, frozenset())
-        parsed = parsed_by_lang.get(name)
-        _not_called = object()
-        pairs: object = _not_called
-        try:
-            fn = getattr(lang, "configure_sandbox_writable", None)
-            if callable(fn):
-                pairs = fn(parsed, cwd, lang_flags, targets)
-        except Exception:
-            log.warning(
-                "configure_sandbox_writable raised for lang=%s — skipping",
-                name,
-                exc_info=True,
-            )
-            pairs = _not_called
-        if pairs is not _not_called:
-            if not isinstance(pairs, list):
+    rejected: list[tuple[Path, Path]] = []
+    # Every snapshot the plugin being validated returned, until each is in result or rejected:
+    # an interruption mid-list must remove those already accepted (still in valid_pairs) and those
+    # not yet looked at, as well as everything before.
+    pending: list[tuple[Path, Path]] = []
+    try:
+        for lang in lang_registry.all_languages():
+            name = getattr(lang, "name", "?")
+            lang_flags = flags_by_lang.get(name, frozenset())
+            parsed = parsed_by_lang.get(name)
+            _not_called = object()
+            pairs: object = _not_called
+            try:
+                fn = getattr(lang, "configure_sandbox_writable", None)
+                if callable(fn):
+                    pairs = fn(parsed, cwd, lang_flags, targets)
+            except Exception:
                 log.warning(
-                    "configure_sandbox_writable lang=%s returned %s, expected list — skipping",
-                    name, type(pairs).__name__,
+                    "configure_sandbox_writable raised for lang=%s — skipping",
+                    name,
+                    exc_info=True,
                 )
-                continue
-            valid_pairs: list[tuple[Path, Path]] = []
-            for entry in pairs:
-                if (
-                    isinstance(entry, tuple)
-                    and len(entry) == 2
-                    and isinstance(entry[0], Path)
-                    and isinstance(entry[1], Path)
-                ):
-                    if not entry[0].is_absolute():
-                        log.warning(
-                            "configure_sandbox_writable lang=%s: src is not absolute, skipping: %s",
-                            name, entry[0],
-                        )
-                    elif not entry[1].is_absolute():
-                        log.warning(
-                            "configure_sandbox_writable lang=%s: dest is not absolute, skipping: %s",
-                            name, entry[1],
-                        )
-                    elif not _is_safe_writable_bind_src(entry[0]):
-                        log.warning(
-                            "configure_sandbox_writable lang=%s: src failed safety checks "
-                            "(must be a pa- prefixed directory under tempdir), skipping: %s",
-                            name, entry[0],
-                        )
-                    elif not _is_safe_writable_bind_dest(entry[1], cwd):
-                        log.warning(
-                            "configure_sandbox_writable lang=%s: dest failed safety checks "
-                            "(must be strictly under $HOME, not a credential dir, and not overlapping the project dir): %s",
-                            name, entry[1],
-                        )
-                    else:
-                        try:
-                            norm_key = (entry[0].resolve(strict=False), entry[1].resolve(strict=False))
-                        except (OSError, RuntimeError):
-                            norm_key = entry
-                        if norm_key in seen:
+                pairs = _not_called
+            if pairs is not _not_called:
+                if not isinstance(pairs, list):
+                    # Best effort: a tuple/set return may still carry snapshots.
+                    # Arbitrary iterables (generators) are deliberately not
+                    # consumed here; a plugin returning those is buggy.
+                    if isinstance(pairs, (tuple, set, frozenset)):
+                        _note_unrecognised(pairs, rejected)
+                        for item in pairs:
+                            _note_unrecognised(item, rejected)
+                    log.warning(
+                        "configure_sandbox_writable lang=%s returned %s, expected list — skipping",
+                        name, type(pairs).__name__,
+                    )
+                    continue
+                for item in pairs:
+                    _note_unrecognised(item, pending)
+                valid_pairs: list[tuple[Path, Path]] = []
+                for entry in pairs:
+                    if (
+                        isinstance(entry, tuple)
+                        and len(entry) == 2
+                        and isinstance(entry[0], Path)
+                        and isinstance(entry[1], Path)
+                    ):
+                        if not entry[0].is_absolute():
+                            rejected.append(entry)
                             log.warning(
-                                "configure_sandbox_writable lang=%s returned duplicate entry %r — skipping",
-                                name, entry,
+                                "configure_sandbox_writable lang=%s: src is not absolute, skipping: %s",
+                                name, entry[0],
+                            )
+                        elif not entry[1].is_absolute():
+                            rejected.append(entry)
+                            log.warning(
+                                "configure_sandbox_writable lang=%s: dest is not absolute, skipping: %s",
+                                name, entry[1],
+                            )
+                        elif not _is_safe_writable_bind_src(entry[0]):
+                            rejected.append(entry)
+                            log.warning(
+                                "configure_sandbox_writable lang=%s: src failed safety checks "
+                                "(must be a pa- prefixed directory under tempdir), skipping: %s",
+                                name, entry[0],
+                            )
+                        elif not _is_safe_writable_bind_dest(entry[1], cwd):
+                            rejected.append(entry)
+                            log.warning(
+                                "configure_sandbox_writable lang=%s: dest failed safety checks "
+                                "(must be strictly under $HOME, not a credential dir, and not overlapping the project dir): %s",
+                                name, entry[1],
                             )
                         else:
-                            seen.add(norm_key)
-                            valid_pairs.append(entry)
-                else:
-                    log.warning(
-                        "configure_sandbox_writable lang=%s returned invalid entry %r "
-                        "(expected (Path, Path) tuple) — skipping entry",
-                        name, entry,
-                    )
-            if valid_pairs:
+                            try:
+                                norm_key = (entry[0].resolve(strict=False), entry[1].resolve(strict=False))
+                            except (OSError, RuntimeError):
+                                norm_key = entry
+                            if norm_key in seen:
+                                rejected.append(entry)
+                                log.warning(
+                                    "configure_sandbox_writable lang=%s returned duplicate entry %r — skipping",
+                                    name, entry,
+                                )
+                            else:
+                                seen.add(norm_key)
+                                valid_pairs.append(entry)
+                    else:
+                        _note_unrecognised(entry, rejected)
+                        log.warning(
+                            "configure_sandbox_writable lang=%s returned invalid entry %r "
+                            "(expected (Path, Path) tuple) — skipping entry",
+                            name, entry,
+                        )
                 result.extend(valid_pairs)
-                try:
-                    warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
-                    if callable(warn_fn):
-                        msg = warn_fn(parsed, cwd, lang_flags, targets)
-                        if isinstance(msg, str) and msg:
-                            warnings.append(msg)
-                except Exception:
-                    log.warning(
-                        "configure_sandbox_writable_warning raised for lang=%s — skipping",
-                        name,
-                        exc_info=True,
-                    )
-    return result, warnings
+                pending.clear()  # each entry is now in result or rejected
+                if valid_pairs:
+                    try:
+                        warn_fn = getattr(lang, "configure_sandbox_writable_warning", None)
+                        if callable(warn_fn):
+                            msg = warn_fn(parsed, cwd, lang_flags, targets)
+                            if isinstance(msg, str) and msg:
+                                warnings.append(msg)
+                    except Exception:
+                        log.warning(
+                            "configure_sandbox_writable_warning raised for lang=%s — skipping",
+                            name,
+                            exc_info=True,
+                        )
+        # A rejected pair's src is a throwaway snapshot the plugin created and
+        # the sandbox will never mount; delete it rather than leak credentials.
+        # One that overlaps an accepted src cannot go yet (deleting an ancestor
+        # would delete the accepted snapshot): it is removed with the accepted
+        # pairs, by the caller's final _cleanup_writable_binds().
+        now = _unshared_rejected(rejected, result)
+        _cleanup_writable_binds(now)
+        deferred = [p for p in _unshared_rejected(rejected, []) if p not in now]
+    except BaseException:
+        # Interrupted part-way: nothing will reach the caller's cleanup, so
+        # delete the snapshots made so far (accepted, rejected and pending alike).
+        # The accepted ones are going too, so an overlap protects nothing: only
+        # the source safety checks apply (no accepted list to compare with).
+        _cleanup_writable_binds(result + _unshared_rejected(rejected + pending, []))
+        raise
+    return WritableBinds(result, deferred), warnings
+
+
+def _note_unrecognised(entry: object, rejected: list[tuple[Path, Path]]) -> None:
+    """Record the leading Path of a malformed entry so its snapshot can be removed.
+
+    Still subject to ``_unshared_rejected`` / ``_is_safe_writable_bind_src``.
+    """
+    if isinstance(entry, (tuple, list)) and entry and isinstance(entry[0], Path):
+        rejected.append((entry[0], entry[0]))
+
+
+def _unshared_rejected(
+    rejected: list[tuple[Path, Path]], accepted: list[tuple[Path, Path]]
+) -> list[tuple[Path, Path]]:
+    """Rejected pairs whose src is safe to delete and overlaps no accepted src.
+
+    Only a ``pa-`` prefixed directory under the temp dir qualifies
+    (``_is_safe_writable_bind_src``); a buggy plugin cannot get an arbitrary
+    path deleted by returning it in a rejected entry.
+    """
+    live: set[Path] = set()
+    for src, _ in accepted:
+        try:
+            live.add(src.resolve(strict=False))
+        except (OSError, RuntimeError):
+            live.add(src)
+    out: list[tuple[Path, Path]] = []
+    for pair in rejected:
+        src = pair[0]
+        if not src.is_absolute() or not _is_safe_writable_bind_src(src):
+            continue
+        try:
+            resolved = src.resolve(strict=False)
+        except (OSError, RuntimeError):
+            continue
+        # Overlap either way protects an accepted src: deleting a rejected ancestor would delete it,
+        # and deleting a rejected src inside it would truncate the snapshot before it is used.
+        if any(a.is_relative_to(resolved) or resolved.is_relative_to(a) for a in live):
+            continue
+        out.append(pair)
+    return out
 
 
 def _cleanup_writable_binds(writable_binds: list[tuple[Path, Path]]) -> None:
@@ -3403,7 +3558,11 @@ def _cleanup_writable_binds(writable_binds: list[tuple[Path, Path]]) -> None:
     does not cause a silent leak (shutil.rmtree on a symlink removes the link
     but leaves the underlying directory intact).
     """
-    for _wb_src, _ in writable_binds:
+    pairs = list(writable_binds)
+    if isinstance(writable_binds, WritableBinds):
+        # After the accepted pairs: a deferred src contains one of them.
+        pairs += writable_binds.deferred
+    for _wb_src, _ in pairs:
         try:
             if not os.path.lexists(_wb_src):
                 continue
@@ -3506,6 +3665,10 @@ def _is_safe_writable_bind_dest(dest: Path, cwd: Path | None = None) -> bool:
         return False
     home = Path.home().resolve()
     if resolved == home or not resolved.is_relative_to(home):
+        return False
+    # The mount goes at *dest* as written (the backends do not resolve it), so that must be under
+    # $HOME too: /tmp/link -> ~/x resolves under $HOME but would be mounted at /tmp/link.
+    if isolation.home_relative(dest, home) is None:
         return False
     for cred in credential_dirs():
         try:

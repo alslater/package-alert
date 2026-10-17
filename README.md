@@ -216,6 +216,8 @@ export PA_RUN_OPTS="--flags python:ssh-keys"      # session-level flag without a
 
 Supported tokens: `--no-change` / `-n`, `--no-network`, `--flags CAPABILITY`, `--allow-external-lockfiles`, `--expose-ssh-keys`.
 
+**`PA_SANDBOX_ISOLATION` environment variable:** set to `container` to run `pa fix` trials without bubblewrap inside a container that is already isolated and disposable (where bwrap cannot create namespaces, such as AWS Fargate). Unset or `bwrap` keeps bubblewrap; any other value is refused. It is not a config key. See [Container isolation](SANDBOX.md#container-isolation) for what it runs, refuses and requires.
+
 **Filesystem isolation:**
 
 The sandbox uses a layered mount strategy to prevent install-time scripts from reading credentials or secrets outside the project:
