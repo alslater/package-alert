@@ -7,6 +7,19 @@
 - After any Python file changes, run `.venv/bin/python -m ruff check .` and `.venv/bin/pyright` and fix all issues found before considering the task complete.
 - Do not use any git write commands in this repository. Do not run commands such as `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git tag`, `git push`, `git stash`, `git reset`, or any other command that mutates git state. The user will handle all git write operations.
 
+## Branch names
+
+Lowercase kebab-case, no slashes, branched from an up-to-date `main`:
+
+| Kind | Format | Example |
+|------|--------|---------|
+| Bug fix for a GitHub issue | `fix-<issue>-<slug>` | `fix-83-uv-credentials-sandbox` |
+| Bug fix with no issue | `fix-<slug>` | `fix-watch-overuse` |
+| Feature or other work | `<slug>` | `pa-run-backends` |
+| Release preparation | `prepare-X.Y.Z` | `prepare-0.10.0` |
+
+The slug is two to four words naming the problem, not the fix. Use one issue per branch, and put `Fixes #<issue>` in the PR description so the issue closes on merge.
+
 ## Auditing value-consuming flag lists
 
 **Every parser is checked against its tool's own parser where one can run parse-only.** `tests/unit/test_argv_oracles.py` replays fixtures recorded by generators beside them in `tests/fixtures/argv_oracles/`, each building its corpus from the tool's own option/command inventory and recording what the tool itself makes of each command line. Regenerate them whenever the tool changes, then run the test:

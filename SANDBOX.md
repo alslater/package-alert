@@ -198,7 +198,7 @@ If any are found and neither `--flags python:ssh-keys` nor `--expose-ssh-keys` i
 
 Exposes uv's credential store inside the sandbox so `uv sync`/`uv lock` can authenticate against private package indexes.
 
-**Why it is needed:** uv stores index credentials in `~/.local/share/uv/credentials/credentials.toml` and acquires a write lock on `credentials.toml.lock` before reading. The sandbox mounts `~/.local/share/uv` read-only, so the lock fails and uv returns a 401 to the private index.
+**Why it is needed:** uv stores index credentials in `~/.local/share/uv/credentials/credentials.toml` (or under `$XDG_DATA_HOME`, wherever `uv auth dir` points). The sandbox re-exposes `~/.local/share/uv` read-only for uv-managed Pythons but hides the credential store inside it with an empty tmpfs, so without this flag no sandboxed code can read it and uv returns a 401 to the private index. uv also acquires a write lock on `credentials.toml.lock` before reading, so a read-only store would not work either.
 
 **What it does:** Before the sandbox starts, package-alert copies the credentials directory to a temporary directory, mounts that copy writably inside the sandbox at the real credentials path, then deletes the copy after the sandbox exits. uv can write its lockfile freely; the real credential store is never modified.
 
@@ -332,7 +332,7 @@ A precondition that fails (running as root, a credential path in `$HOME`) is rep
 | Environment allowlist (`--clearenv` + `--setenv`) | Reproduced: the child gets exactly the allowlisted environment, with `HOME` and `XDG_*` redirected to the fresh home |
 | `$HOME` hidden, home allowlist re-exposed | Behaviour reproduced by a fresh home holding copies of the allowlisted entries. Containment is the deployment's job (R2) |
 | Writable binds (`python:uv-auth`) | Reproduced: the snapshot is copied to its destination, rebased into the fresh home |
-| Paths a plugin hides unless granted (uv's credential store) | Reproduced as intended: left out of the fresh home, provided only by the flag's writable snapshot. bwrap does not hide them yet (#83) |
+| Paths a plugin hides unless granted (uv's credential store) | Reproduced: left out of the fresh home, provided only by the flag's writable snapshot |
 | `--unshare-net` (`--no-network`) | Refused: `container isolation cannot disable the network; run with network access or use bwrap isolation` |
 | `sandbox.extra_tmpfs` | Refused: `container isolation cannot hide paths (sandbox.extra_tmpfs); remove it or use bwrap isolation` |
 | A home entry inside a credential path (for example `python:ssh-keys`) | Refused: under bwrap this grants credential access, which R2 forbids |
@@ -358,8 +358,7 @@ The fresh home gives tools the same configuration they see under bwrap. It is no
 
 `python:uv-auth` and `~/.npmrc` work as under bwrap. `~/.npmrc` is copied into the fresh home as an allowlisted entry.
 
-- **Container isolation:** uv's credential store is visible to trials only through `python:uv-auth`. It is a `sandbox_hidden_home_paths()` entry (see [LANGUAGES.md](LANGUAGES.md)): left out of the fresh home, and provided only by the flag's writable snapshot. Without the flag a trial cannot authenticate to a private uv index. Set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials.
-- **bwrap:** the store is currently visible whenever `~/.local/share/uv` exists, with or without the flag, until #83 is fixed.
+- uv's credential store is visible to trials only through `python:uv-auth`. It is a `sandbox_hidden_home_paths()` entry (see [LANGUAGES.md](LANGUAGES.md)): bwrap overlays it with an empty tmpfs and container isolation leaves it out of the fresh home, and either way only the flag's writable snapshot provides it. Without the flag a trial cannot authenticate to a private uv index. Set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials.
 - Once granted, repository code (build backends, `setup.py`) can read the credential. Use read-only tokens scoped to the registry.
 
 ### Timeouts

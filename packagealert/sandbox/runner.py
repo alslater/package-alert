@@ -42,6 +42,7 @@ from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
 from packagealert.sandbox.bwrap import available as bwrap_available
 from packagealert.sandbox.bwrap import build_cmd
+from packagealert.sandbox.hidden import HiddenPathsError, hidden_home_paths
 from packagealert.storage.db import (
     get_cooldown_cleared_at,
     get_publication_date,
@@ -141,6 +142,7 @@ class _Assembly:
     home_ro: list[Path]
     extra_tmpfs: list[Path]
     writable_binds: list[tuple[Path, Path]]
+    hidden: list[Path]
 
 
 # The one directory under which run_captured(scratch=True) accepts a cwd: each
@@ -462,10 +464,14 @@ class SandboxRunner:
                 return False
             return True
 
-        asm = self._assemble_sandbox(
-            ctx, argv, flags, extra_env,
-            on_extra_write=_snapshot_extra, read_only=False,
-        )
+        try:
+            asm = self._assemble_sandbox(
+                ctx, argv, flags, extra_env,
+                on_extra_write=_snapshot_extra, read_only=False,
+            )
+        except HiddenPathsError as exc:
+            self._refuse_unhidden(exc)
+            return 1
         if asm is None:
             return 1
         try:
@@ -477,6 +483,7 @@ class SandboxRunner:
                 extra_tmpfs=asm.extra_tmpfs,
                 post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
                 writable_binds=asm.writable_binds,
+                hidden_paths=asm.hidden,
             ), check=False)
         finally:
             _cleanup_writable_binds(asm.writable_binds)
@@ -780,10 +787,13 @@ class SandboxRunner:
         except InvalidInvocationDirectory as exc:
             raise CapturedRunError(str(exc)) from exc
         _resolve_targets(ctx, None)
-        asm = self._assemble_sandbox(
-            ctx, list(argv), flags or {}, extra_env,
-            on_extra_write=None, read_only=True,
-        )
+        try:
+            asm = self._assemble_sandbox(
+                ctx, list(argv), flags or {}, extra_env,
+                on_extra_write=None, read_only=True,
+            )
+        except HiddenPathsError as exc:
+            raise CapturedRunError(f"{exc}; refusing rather than risk exposing credentials") from exc
         if asm is None:
             raise CapturedRunError("sandbox setup was aborted")
         try:
@@ -834,6 +844,7 @@ class SandboxRunner:
                     extra_tmpfs=asm.extra_tmpfs,
                     post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
                     writable_binds=asm.writable_binds,
+                    hidden_paths=asm.hidden,
                 )
             except ValueError as exc:
                 raise CapturedRunError(str(exc)) from exc
@@ -992,6 +1003,7 @@ class SandboxRunner:
             if not self._check_extra_tmpfs(extra_tmpfs):
                 _cleanup_writable_binds(_writable_binds)
                 return None
+            hidden = hidden_home_paths()  # HiddenPathsError: the caller refuses
 
             home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
@@ -1057,7 +1069,7 @@ class SandboxRunner:
         write_dirs = [] if read_only else list(ctx.write_dirs)
         return _Assembly(
             argv=argv, write_dirs=write_dirs, env=sandbox_env, home_ro=home_ro,
-            extra_tmpfs=extra_tmpfs, writable_binds=_writable_binds,
+            extra_tmpfs=extra_tmpfs, writable_binds=_writable_binds, hidden=hidden,
         )
 
     # ------------------------------------------------------------------
@@ -1124,6 +1136,10 @@ class SandboxRunner:
             _cleanup_writable_binds(pairs)
             raise
         return pairs
+
+    def _refuse_unhidden(self, exc: HiddenPathsError) -> None:
+        self._console.print(f"✗ {exc}", style="bold red", markup=False)
+        self._console.print("Refusing to run rather than risk exposing credentials.", style="dim")
 
     def _check_extra_tmpfs(self, paths: list[Path]) -> bool:
         """Return False (and print an error) if any configured extra_tmpfs path does not exist.
@@ -2019,6 +2035,11 @@ class SandboxRunner:
             extra_tmpfs = list(self._cfg.sandbox.extra_tmpfs)
             if not self._check_extra_tmpfs(extra_tmpfs):
                 return 1
+            try:
+                hidden = hidden_home_paths()
+            except HiddenPathsError as exc:
+                self._refuse_unhidden(exc)
+                return 1
 
             home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
@@ -2030,6 +2051,7 @@ class SandboxRunner:
                 extra_tmpfs=extra_tmpfs,
                 post_ro_tmpfs=_post_ro_tmpfs_dirs(home_ro),
                 writable_binds=_writable_binds,
+                hidden_paths=hidden,
             ), check=False)
         finally:
             _cleanup_writable_binds(_writable_binds)

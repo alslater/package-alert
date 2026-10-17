@@ -22,6 +22,7 @@ def build_cmd(
     extra_tmpfs: list[Path] | None = None,
     post_ro_tmpfs: list[Path] | None = None,
     writable_binds: list[tuple[Path, Path]] | None = None,
+    hidden_paths: list[Path] | None = None,
 ) -> list[str]:
     """Return a bwrap command list that runs *argv* with *write_dirs* writable.
 
@@ -55,12 +56,24 @@ def build_cmd(
       the sandbox after *write_dirs* (i.e. after home_ro_dirs, post_ro_tmpfs,
       and write_dirs), so they take precedence over all earlier mounts.
       Both src and dest must be absolute paths.
+
+    - *hidden_paths* (language plugins' sandbox_hidden_home_paths(): uv's credential store)
+      are overlaid with an empty tmpfs after *write_dirs* and before *writable_binds*, so no
+      read-only or writable bind can expose them and only a writable bind (python:uv-auth's
+      snapshot) may provide them. Each existing directory is hidden at every name the sandbox
+      shows it under: its resolved path (the read-only root bind shows anything outside $HOME)
+      and its place inside each *home_ro_dirs* or *write_dirs* entry whose target contains it
+      (an entry is bound at its own, possibly symlinked, name). An entry that resolves to or
+      into a hidden directory is left out with a warning, since its separate bind would show
+      that content under its own name. A writable
+      bind whose dest is a hidden directory is mounted at each of those names too.
     """
     for _param, _paths in (
         ("write_dirs", write_dirs),
         ("home_ro_dirs", home_ro_dirs or []),
         ("extra_tmpfs", extra_tmpfs or []),
         ("post_ro_tmpfs", post_ro_tmpfs or []),
+        ("hidden_paths", hidden_paths or []),
     ):
         for _p in _paths:
             if not _p.is_absolute():
@@ -87,6 +100,7 @@ def build_cmd(
                 f"build_cmd: writable_binds[{_i}] dest must be absolute, got: {_dest!r}"
             )
 
+    hidden_real = _hidden_dirs(hidden_paths or [])
     home = str(Path.home())
     cmd = [
         "bwrap",
@@ -108,6 +122,8 @@ def build_cmd(
         if not p.is_symlink() and p.is_dir():
             cmd += ["--tmpfs", str(p)]
     for p in (home_ro_dirs or []):
+        if _inside_hidden(p, hidden_real):
+            continue
         # Resolve symlinks so the bind source is the real path — bwrap follows
         # the symlink anyway, and using the resolved path makes the mount
         # explicit and prevents a changed symlink target from silently altering
@@ -124,9 +140,16 @@ def build_cmd(
     for p in (post_ro_tmpfs or []):
         if not p.is_symlink() and p.is_dir():
             cmd += ["--tmpfs", str(p)]
+    bound_write_dirs: list[Path] = []
     for d in write_dirs:
         d.mkdir(parents=True, exist_ok=True)
+        if _inside_hidden(d, hidden_real):
+            continue
+        bound_write_dirs.append(d)
         cmd += ["--bind", str(d), str(d)]
+    hide_at = _hide_locations(hidden_real, [*(home_ro_dirs or []), *bound_write_dirs])
+    for p in hide_at:
+        cmd += ["--tmpfs", str(p)]
     for src, dest in (writable_binds or []):
         # Resolve src so bwrap receives the real filesystem path, not a symlink
         # that could silently redirect what is mounted.  dest is the mount point
@@ -189,6 +212,13 @@ def build_cmd(
             )
             continue
         cmd += ["--bind", str(src), str(dest)]
+        try:
+            dest_real = dest.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        for alias in hide_at:
+            if alias != dest and alias.resolve(strict=False) == dest_real:
+                cmd += ["--bind", str(src), str(alias)]
     if not allow_network:
         cmd += ["--unshare-net"]
     if env is not None:
@@ -198,3 +228,54 @@ def build_cmd(
     cmd += ["--"]
     cmd += argv
     return cmd
+
+
+def _hidden_dirs(hidden: list[Path]) -> list[Path]:
+    """The resolved, existing directories among *hidden*."""
+    out: list[Path] = []
+    for h in hidden:
+        try:
+            real = h.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue  # missing, or a symlink loop: nothing readable to hide
+        if real.is_dir() and real not in out:
+            out.append(real)
+    return out
+
+
+def _inside_hidden(entry: Path, hidden_real: list[Path]) -> bool:
+    """True, with a warning, when *entry* resolves to or into a hidden directory.
+
+    Such an entry is a separate bind of hidden content (a file or a subdirectory of uv's
+    credential store, say), which a tmpfs over the directory itself would not cover, so it is
+    left out rather than bound.
+    """
+    try:
+        real = entry.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    for h in hidden_real:
+        if real.is_relative_to(h):
+            log.warning("build_cmd: %s resolves into hidden path %s, leaving it out of the sandbox", entry, h)
+            return True
+    return False
+
+
+def _hide_locations(hidden_real: list[Path], bound: list[Path]) -> list[Path]:
+    """Every name under which the sandbox would show each hidden directory.
+
+    Its resolved path, and its place inside each *bound* entry (read-only or writable, bound at
+    its own, possibly symlinked, name) whose target contains it.
+    """
+    out: list[Path] = []
+    for real in hidden_real:
+        candidates = [real]
+        for entry in bound:
+            try:
+                entry_real = entry.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if real.is_relative_to(entry_real):
+                candidates.append(entry / real.relative_to(entry_real))
+        out.extend(c for c in candidates if c not in out)
+    return out

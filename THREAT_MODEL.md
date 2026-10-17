@@ -48,8 +48,7 @@ Under bwrap each sandboxed command gets its own PID, mount and user namespace. C
 
 **The granted-credential exception.** A trial against a private registry needs that registry's credential. The deployment may grant exactly one: a read-only token scoped to the registry, stored as uv's credential store in the pa user's home. It is written before pa starts (for example with `uv auth login`, run as that uid) and never placed in pa's environment (R1). Repository code running during the trial can read it, as it can under bwrap, so a leak must only be able to download packages.
 
-- **Container isolation:** `python:uv-auth` is what grants it. The store is a `sandbox_hidden_home_paths()` entry, left out of the fresh home, so without the flag trials do not see it. Deployments such as pa-central must therefore set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials. It is required, not optional.
-- **bwrap:** the store is currently visible whenever `~/.local/share/uv` exists, with or without the flag, until #83 is fixed.
+`python:uv-auth` is what grants it, under either isolation. The store is a `sandbox_hidden_home_paths()` entry: bwrap hides it with an empty tmpfs and container isolation leaves it out of the fresh home, so without the flag trials do not see it. Deployments such as pa-central must therefore set `PA_RUN_OPTS="--flags python:uv-auth"` for internal-index trials. It is required, not optional.
 
 **What package-alert checks.** R3 (refused as root), and a tripwire that refuses to run when any `credential_dirs()` path (`~/.ssh`, `~/.aws`, `~/.gnupg`, ...) exists in `$HOME`. The tripwire misses `~/.pypirc`, `~/.cargo/credentials`, `~/.composer/auth.json`, keyrings and `.env` files. R1, the rest of R2 and R4 are the deployment's job.
 

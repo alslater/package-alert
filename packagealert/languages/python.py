@@ -2622,8 +2622,8 @@ class PythonLanguage:
         if not creds_dir.exists():
             return []
         # Resolved: bwrap skips a bind whose destination is a symlink (a credential dir linked to
-        # ~/.auth/uv). Container isolation also places the snapshot where uv names the dir, from
-        # sandbox_hidden_home_paths().
+        # ~/.auth/uv). Both isolations also place the snapshot at the other names they hide the
+        # store under, from sandbox_hidden_home_paths().
         try:
             source = creds_dir.resolve(strict=True)
         except OSError:
