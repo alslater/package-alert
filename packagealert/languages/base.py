@@ -61,6 +61,10 @@ class PackageSpec:
     # when it did or the format does not say. Yank lookups skip it: a public
     # package of the same name is not this one.
     from_public_registry: bool = True
+    # True when where this copy came from is not known (e.g. a pnpm store id shortened
+    # past its source): it is still looked up by name, but risk-scored on its source
+    # alone, since the public package's popularity and age may not be this copy's.
+    source_unknown: bool = False
 
 
 # Describes a package that has been observed (from a cache file or installed environment).

@@ -1065,7 +1065,7 @@ def _installed_dir_resolver(root: Path):
     The site-packages lookup is done once here rather than per package.
     """
     from packagealert.languages.python import all_installed_site_packages
-    from packagealert.sandbox.runner import _resolve_installed_dir
+    from packagealert.sandbox.runner import _resolve_installed_dir, _resolves_copies
 
     # Uses the language module's own discovery so the resolver searches exactly the
     # environments detect_installed_packages found the packages in — a divergent
@@ -1105,7 +1105,10 @@ def _installed_dir_resolver(root: Path):
                 ecosystem, name, root, site_packages,
                 project_path=root, version=version,
             )
-            if resolved and resolved not in groups:
+            if resolved and _resolves_copies(ecosystem):
+                # Independent copies (pnpm's store): each is its own candidate.
+                groups.extend([d] for d in resolved if [d] not in groups)
+            elif resolved and resolved not in groups:
                 groups.append(resolved)
             # First non-None warning across environments wins — a corrupt
             # manifest anywhere is worth surfacing, and nothing distinguishes

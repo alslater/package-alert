@@ -204,6 +204,38 @@ def _dedup_occurrence(event: PackageEvent) -> object:
     return ("not-public", occurrence)
 
 
+async def _analyze_copies(risk_engine, event: PackageEvent, package_dirs: list[Path],
+                          manifest_warning: str | None, *, local_only: bool = False):
+    """Risk-score an installed package. When its language resolves independent copies
+    (resolve_package_dir_returns_copies), each copy is scored on its own and the
+    highest report kept: summing signals across copies would flag a package none of
+    whose copies reaches the threshold."""
+    from packagealert.sandbox.runner import _resolves_copies
+    from packagealert.scoring import copy_scored_locally
+
+    if package_dirs and _resolves_copies(event.ecosystem):
+        # A copy is scored with the public package's metadata only when its language
+        # says it is a registry copy: a file: copy, or one of unknown source, inside
+        # a public event must not inherit the public package's popularity and age.
+        reports = []
+        failure: Exception | None = None
+        for d in package_dirs:
+            copy_local = local_only or copy_scored_locally(event.ecosystem, event.package_name, d)
+            try:
+                reports.append(await risk_engine.analyze(event, [d], manifest_warning, local_only=copy_local))
+            except Exception as exc:
+                # One copy failing must not discard a sibling's finding.
+                log.warning("Risk scoring failed for %s at %s — trying any remaining copies",
+                            event.package_name, d, exc_info=True)
+                failure = exc
+        if not reports:
+            assert failure is not None
+            raise failure
+        return max(reports, key=lambda r: r.score)
+    kwargs = {"local_only": True} if local_only else {}
+    return await risk_engine.analyze(event, package_dirs, manifest_warning, **kwargs)
+
+
 def _resolve_package_dir(event: PackageEvent) -> tuple[list[Path], str | None]:
     """Return the on-disk directories for an installed package, or [] if unresolvable,
     alongside any manifest-integrity warning for it (see
@@ -973,7 +1005,7 @@ class Daemon:
             # are about another package of that name. Its source is still scored.
             if self._cfg.heuristics.enabled:
                 package_dirs, manifest_warning = _resolve_package_dir(event)
-                report = await risk_engine.analyze(event, package_dirs, manifest_warning, local_only=True)
+                report = await _analyze_copies(risk_engine, event, package_dirs, manifest_warning, local_only=True)
                 await self._alert_risk(event, report, db)
             return True
 
@@ -1042,7 +1074,7 @@ class Daemon:
         # Phase 2: heuristic risk scoring
         if self._cfg.heuristics.enabled:
             package_dirs, manifest_warning = _resolve_package_dir(event)
-            report = await risk_engine.analyze(event, package_dirs, manifest_warning)
+            report = await _analyze_copies(risk_engine, event, package_dirs, manifest_warning)
             await self._alert_risk(event, report, db)
 
         return authoritative
