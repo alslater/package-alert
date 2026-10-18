@@ -2130,3 +2130,420 @@ def test_a_registry_variable_left_out_of_the_sandbox_is_not_applied_there(tmp_pa
         assert _node.npm_registries(tmp_path)[0] is None                                        # npm's default
     finally:
         SANDBOX_ENV.reset(token)
+
+
+def _pnpm_isolated_layout(project: Path) -> Path:
+    """pnpm's default isolated layout (as pnpm 11.28.6 writes it): each package in the
+    virtual store under node_modules/.pnpm, a direct dependency linked from node_modules,
+    and a package's dependencies linked beside it inside the store."""
+    nm = project / "node_modules"
+    store = nm / ".pnpm"
+    evil = store / "evilpkg@1.0.0" / "node_modules" / "evilpkg"
+    dep = store / "@corp+dep@2.0.0" / "node_modules" / "@corp" / "dep"
+    local = store / "localpkg@file+..+localpkg-3.0.0.tgz" / "node_modules" / "localpkg"
+    for d, name, version in ((evil, "evilpkg", "1.0.0"), (dep, "@corp/dep", "2.0.0"), (local, "localpkg", "3.0.0")):
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": name, "version": version}))
+        (d / "index.js").write_text("module.exports = 1;\n")
+    (nm / "evilpkg").symlink_to(Path(".pnpm/evilpkg@1.0.0/node_modules/evilpkg"))
+    (nm / "localpkg").symlink_to(Path(".pnpm/localpkg@file+..+localpkg-3.0.0.tgz/node_modules/localpkg"))
+    (store / "evilpkg@1.0.0" / "node_modules" / "@corp").mkdir()
+    (store / "evilpkg@1.0.0" / "node_modules" / "@corp" / "dep").symlink_to(
+        Path("../../../@corp+dep@2.0.0/node_modules/@corp/dep"))
+    return nm
+
+
+def test_post_install_scan_finds_pnpm_virtual_store_packages(tmp_path, monkeypatch):
+    """The real collector over a real isolated layout: every package pnpm installed is
+    found, direct and transitive, and a file: dependency is scanned but not looked up."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = _pnpm_isolated_layout(tmp_path)
+    non_public: set = set()
+    found = _collect_new_packages([nm], {}, "npm", non_public=non_public)
+    assert sorted((name, version) for _eco, name, version, _root in found) == [
+        ("@corp/dep", "2.0.0"), ("evilpkg", "1.0.0"), ("localpkg", "3.0.0")]
+    assert {name for _eco, name, _v, _root in non_public} == {"localpkg"}
+
+
+def test_pnpm_virtual_store_manifest_outside_the_walk_root_is_ignored(tmp_path):
+    outside = tmp_path / "outside" / "evilpkg"
+    outside.mkdir(parents=True)
+    (outside / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+    nm = tmp_path / "proj" / "node_modules"
+    entry = nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules"
+    entry.mkdir(parents=True)
+    (entry / "evilpkg").symlink_to(outside)
+    manifest = entry / "evilpkg" / "package.json"
+    assert NodeLanguage().detect_new_packages({manifest}, nm) == []
+
+
+def test_resolve_package_dir_finds_a_transitive_pnpm_package(tmp_path):
+    """A transitive dependency has no node_modules/<name> link in the isolated layout;
+    its source is found in the virtual store by name and version."""
+    nm = _pnpm_isolated_layout(tmp_path)
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("@corp/dep", tmp_path, nm, "2.0.0") == [
+        (nm / ".pnpm" / "@corp+dep@2.0.0" / "node_modules" / "@corp" / "dep").resolve()]
+    assert lang.resolve_package_dir("evilpkg", tmp_path, nm, "1.0.0") == [
+        (nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules" / "evilpkg").resolve()]
+    assert lang.resolve_package_dir("@corp/dep", tmp_path, nm, "9.9.9") == []
+
+
+def test_resolve_package_dir_prefers_the_matching_pnpm_version(tmp_path):
+    """The top-level link is the direct dependency's version; an older copy deeper in the
+    store is a separate package, and its own source is the one to scan."""
+    nm = _pnpm_isolated_layout(tmp_path)
+    old = nm / ".pnpm" / "evilpkg@0.9.0" / "node_modules" / "evilpkg"
+    old.mkdir(parents=True)
+    (old / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "0.9.0"}))
+    assert NodeLanguage().resolve_package_dir("evilpkg", tmp_path, nm, "0.9.0") == [old.resolve()]
+
+
+def test_resolve_package_dir_ignores_a_store_entry_linking_outside(tmp_path):
+    nm = _pnpm_isolated_layout(tmp_path)
+    outside = tmp_path / "elsewhere" / "@corp" / "dep"
+    outside.mkdir(parents=True)
+    (outside / "package.json").write_text(json.dumps({"name": "@corp/dep", "version": "5.0.0"}))
+    entry = nm / ".pnpm" / "@corp+dep@5.0.0" / "node_modules"
+    entry.mkdir(parents=True)
+    (entry / "@corp").symlink_to(tmp_path / "elsewhere" / "@corp")
+    assert NodeLanguage().resolve_package_dir("@corp/dep", tmp_path, nm, "5.0.0") == []
+
+
+def test_registry_copy_beside_a_file_copy_of_the_same_version_is_looked_up(tmp_path, monkeypatch):
+    """Both copies collapse into one (name, version) entry; it is kept out of lookups
+    only when every copy is non-public, so the registry copy is still checked."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    store = tmp_path / "node_modules" / ".pnpm"
+    for store_id in ("evilpkg@file+..+evilpkg-1.0.0.tgz", "evilpkg@1.0.0"):
+        d = store / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+    non_public: set = set()
+    found = _collect_new_packages([tmp_path / "node_modules"], {}, "npm", non_public=non_public)
+    assert [(n, v) for _e, n, v, _r in found] == [("evilpkg", "1.0.0")]
+    assert non_public == set()
+
+
+def test_resolve_package_dir_returns_every_copy_of_the_version(tmp_path):
+    """Peer-context entries and a file: tarball can each hold the same version; each is
+    its own copy and is scanned. An unversioned top-level directory is no match."""
+    nm = _pnpm_isolated_layout(tmp_path)
+    copies = []
+    for store_id in ("evilpkg@1.0.0_react@18.0.0", "evilpkg@file+..+evilpkg-1.0.0.tgz"):
+        d = nm / ".pnpm" / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+        copies.append(d.resolve())
+    found = NodeLanguage().resolve_package_dir("evilpkg", tmp_path, nm, "1.0.0")
+    linked = (nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules" / "evilpkg").resolve()
+    assert sorted(found) == sorted([linked, *copies])
+
+    (nm / "unversioned").mkdir()
+    (nm / "unversioned" / "package.json").write_text(json.dumps({"name": "unversioned"}))
+    assert NodeLanguage().resolve_package_dir("unversioned", tmp_path, nm, "1.0.0") == []
+
+
+def test_resolve_package_dir_looks_in_the_store_past_a_workspace_link(tmp_path):
+    """A top-level link to a workspace outside node_modules is not this install's copy,
+    but a registry version of the same name in the store is."""
+    project = tmp_path / "proj"
+    nm = project / "node_modules"
+    workspace = tmp_path / "workspace" / "lib"
+    workspace.mkdir(parents=True)
+    (workspace / "package.json").write_text(json.dumps({"name": "lib", "version": "0.0.1"}))
+    stored = nm / ".pnpm" / "lib@2.0.0" / "node_modules" / "lib"
+    stored.mkdir(parents=True)
+    (stored / "package.json").write_text(json.dumps({"name": "lib", "version": "2.0.0"}))
+    (nm / "lib").symlink_to(workspace)
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("lib", project, nm, "2.0.0") == [stored.resolve()]
+    assert lang.resolve_package_dir("lib", project, nm, "0.0.1") == []
+
+
+def test_store_is_listed_once_and_only_matching_entries_resolved(tmp_path, monkeypatch):
+    """Post-install scoring resolves every package; listing and resolving the whole
+    store for each made a large install quadratic."""
+    nm = _pnpm_isolated_layout(tmp_path)
+    for i in range(200):
+        (nm / ".pnpm" / f"other{i}@1.0.0" / "node_modules").mkdir(parents=True)
+    _node._pnpm_store_entries.cache_clear()
+    listed = []
+    real_listdir = _node.os.listdir
+    monkeypatch.setattr(_node.os, "listdir", lambda p: listed.append(p) or real_listdir(p))
+    resolved = []
+    real_resolve = Path.resolve
+    monkeypatch.setattr(Path, "resolve", lambda self, *a, **k: resolved.append(self) or real_resolve(self, *a, **k))
+    lang = NodeLanguage()
+    for _ in range(20):
+        assert lang.resolve_package_dir("@corp/dep", tmp_path, nm, "2.0.0")
+    assert len(listed) == 1
+    assert not any("other" in str(p) for p in resolved)
+
+
+@pytest.mark.parametrize("public_first", [False, True])
+def test_a_public_copy_keeps_the_version_in_lookups(tmp_path, monkeypatch, public_first):
+    """Copies arrive in no fixed order; whichever comes first, a public copy of the same
+    (name, version) keeps it in the lookups."""
+    from packagealert.languages.base import PackageSpec
+    from packagealert.sandbox import runner
+
+    class _Lang:
+        name = "stub"
+
+        def detect_new_packages(self, new_paths, walk_root):
+            specs = [PackageSpec(name="evilpkg", version="1.0.0", ecosystem="npm", from_public_registry=public)
+                     for public in (False, True)]
+            return specs[::-1] if public_first else specs
+
+    monkeypatch.setattr(runner.lang_registry, "for_ecosystem", lambda eco: _Lang())
+    nm = tmp_path / "node_modules"
+    (nm / "x").mkdir(parents=True)
+    non_public: set = set()
+    found = runner._collect_new_packages([nm], {}, "npm", non_public=non_public)
+    assert [(n, v) for _e, n, v, _r in found] == [("evilpkg", "1.0.0")]
+    assert non_public == set()
+
+
+def test_resolve_package_dir_finds_a_store_entry_shortened_inside_the_name(tmp_path):
+    """pnpm cuts a long store id and appends a hash (depPathToFilename(): the first
+    max-33 characters, `_`, 32 hex); with a long name the cut falls inside it."""
+    name = "@corp/" + "a-very-long-package-name-" * 6
+    escaped = name.replace("/", "+")
+    store_id = f"{escaped}@1.0.0"[: 120 - 33] + "_" + "0123456789abcdef" * 2
+    assert not store_id.startswith(escaped)
+    nm = tmp_path / "node_modules"
+    pkg = nm / ".pnpm" / store_id / "node_modules" / name
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    _node._pnpm_store_entries.cache_clear()
+    assert NodeLanguage().resolve_package_dir(name, tmp_path, nm, "1.0.0") == [pkg.resolve()]
+
+
+def test_shortened_store_id_of_unknown_source_is_looked_up_but_scored_locally(tmp_path, monkeypatch):
+    """A store id pnpm shortened before the `@` after the name keeps no source: the
+    copy is still looked up by name, but not scored with public metadata."""
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    name = "a-very-long-package-name-" * 5
+    store_id = f"{name}@file+..+local.tgz"[: 120 - 33] + "_" + "0123456789abcdef" * 2
+    assert "@" not in store_id
+    nm = tmp_path / "node_modules"
+    pkg = nm / ".pnpm" / store_id / "node_modules" / name
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    [spec] = NodeLanguage().detect_new_packages({pkg / "package.json"}, nm)
+    assert spec.from_public_registry is True and spec.source_unknown is True
+    # An unshortened file: id is known to be non-public, a registry id public.
+    nm2 = _pnpm_isolated_layout(tmp_path / "p")
+    specs = NodeLanguage().detect_new_packages(
+        {p for p in (nm2 / ".pnpm").rglob("package.json")}, nm2)
+    assert {(s.name, s.from_public_registry, s.source_unknown) for s in specs} == {
+        ("evilpkg", True, False), ("@corp/dep", True, False), ("localpkg", False, False)}
+
+
+def test_resolve_package_dir_finds_an_unversioned_transitive_package(tmp_path):
+    """A file: package whose manifest has no version, with no top-level link: its store
+    copy is still found, while a supplied version still matches exactly."""
+    nm = tmp_path / "node_modules"
+    pkg = nm / ".pnpm" / "localpkg@file+..+localpkg" / "node_modules" / "localpkg"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": "localpkg"}))
+    _node._pnpm_store_entries.cache_clear()
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("localpkg", tmp_path, nm, None) == [pkg.resolve()]
+    assert lang.resolve_package_dir("localpkg", tmp_path, nm, "1.0.0") == []
+
+
+def test_registry_id_shortened_right_after_the_at_is_still_looked_up(tmp_path, monkeypatch):
+    """An 86-character name with a long peer suffix is cut at the 120-character limit
+    to `<name>@_<hash>`: no source survives, so it is unknown, never non-public, and the
+    collector still sends it to OSV."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    name = "n" * 86
+    store_id = f"{name}@1.0.0_react@18.2.0_react-dom@18.2.0"[: 120 - 33] + "_" + "0123456789abcdef" * 2
+    assert store_id.startswith(f"{name}@_")
+    nm = tmp_path / "node_modules"
+    pkg = nm / ".pnpm" / store_id / "node_modules" / name
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    [spec] = NodeLanguage().detect_new_packages({pkg / "package.json"}, nm)
+    assert spec.from_public_registry is True and spec.source_unknown is True
+    non_public: set = set()
+    scored_locally: set = set()
+    found = _collect_new_packages([nm], {}, "npm", non_public=non_public, scored_locally=scored_locally)
+    assert [(n, v) for _e, n, v, _r in found] == [(name, "1.0.0")]
+    assert non_public == set() and len(scored_locally) == 1
+
+
+def test_a_symlink_loop_in_the_store_does_not_hide_a_healthy_copy(tmp_path):
+    """A cyclic entry (Python 3.12 raises RuntimeError resolving it, 3.13+ OSError) is
+    skipped on its own; the healthy copy beside it is still found."""
+    nm = _pnpm_isolated_layout(tmp_path)
+    loop = nm / ".pnpm" / "evilpkg@0.0.0" / "node_modules"
+    loop.mkdir(parents=True)
+    (loop / "evilpkg").symlink_to(loop / "evilpkg")
+    _node._pnpm_store_entries.cache_clear()
+    healthy = (nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules" / "evilpkg").resolve()
+    assert NodeLanguage().resolve_package_dir("evilpkg", tmp_path, nm, "1.0.0") == [healthy]
+
+
+def test_a_simulated_3_12_symlink_loop_does_not_hide_a_healthy_copy(tmp_path, monkeypatch):
+    nm = _pnpm_isolated_layout(tmp_path)
+    (nm / ".pnpm" / "evilpkg@0.0.0" / "node_modules" / "evilpkg").mkdir(parents=True)
+    _node._pnpm_store_entries.cache_clear()
+    real_resolve = Path.resolve
+
+    def resolve(self, *args, **kwargs):
+        if "evilpkg@0.0.0" in str(self):
+            raise RuntimeError("Symlink loop from " + str(self))
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    healthy = real_resolve(nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules" / "evilpkg")
+    assert NodeLanguage().resolve_package_dir("evilpkg", tmp_path, nm, "1.0.0") == [healthy]
+
+
+def test_installed_scan_scores_each_pnpm_copy_on_its_own(tmp_path):
+    """`pa scan-project --scan-installed` also resolves every copy; each is its own
+    candidate group, so signals from separate copies are not summed."""
+    from packagealert.cli.app import _installed_dir_resolver
+
+    nm = tmp_path / "node_modules"
+    copies = []
+    for store_id in ("evilpkg@1.0.0", "evilpkg@file+..+evilpkg-1.0.0.tgz"):
+        d = nm / ".pnpm" / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+        copies.append(d.resolve())
+    _node._pnpm_store_entries.cache_clear()
+    resolve, _warnings = _installed_dir_resolver(tmp_path)
+    assert sorted(resolve("npm", "evilpkg", "1.0.0")) == sorted([[c] for c in copies])
+
+
+def _registry_and_file_copies(root: Path) -> tuple[Path, Path, Path]:
+    nm = root / "node_modules"
+    made = []
+    for store_id in ("evilpkg@1.0.0", "evilpkg@file+..+evilpkg-1.0.0.tgz"):
+        d = nm / ".pnpm" / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+        made.append(d)
+    _node._pnpm_store_entries.cache_clear()
+    return nm, made[0], made[1]
+
+
+class _RecordingEngine:
+    def __init__(self):
+        self.calls: dict = {}
+
+    async def analyze(self, event, package_dirs, manifest_warning=None, *, local_only=False):
+        from types import SimpleNamespace
+
+        self.calls[package_dirs[0].parent.parent.name] = local_only
+        return SimpleNamespace(score=0, level="info", signals=[])
+
+
+def test_installed_scan_scores_a_non_public_copy_on_its_source(tmp_path):
+    """`--scan-installed` passes no local_only keys; the shared scorer still asks each
+    copy's provenance, so the file: copy gets no public-metadata reduction."""
+    import asyncio
+
+    from packagealert.cli.app import _installed_dir_resolver
+    from packagealert.scoring import score_packages
+
+    _registry_and_file_copies(tmp_path)
+    resolve, warnings = _installed_dir_resolver(tmp_path)
+    engine = _RecordingEngine()
+    asyncio.run(score_packages(engine, [("npm", "evilpkg", "1.0.0")],  # type: ignore[arg-type]
+                               package_dir_resolver=resolve, manifest_warning_resolver=warnings))
+    assert engine.calls == {"evilpkg@1.0.0": False, "evilpkg@file+..+evilpkg-1.0.0.tgz": True}
+
+
+def test_incremental_install_scores_a_preexisting_file_copy_on_its_source(tmp_path, monkeypatch):
+    """The file: copy predates the run, so only the new registry copy is collected and
+    scored_locally stays empty; the resolver still returns both, and the old file: copy
+    is scored on its source."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from tests.unit.test_sandbox import _async_value, _make_runner
+
+    nm, _registry, _file = _registry_and_file_copies(tmp_path)
+    runner = _make_runner()
+    engine = _RecordingEngine()
+
+    async def resources():
+        return SimpleNamespace(engine=engine)
+
+    monkeypatch.setattr(runner, "_open_gate_resources", resources)
+    monkeypatch.setattr(runner, "_close_gate_resources", lambda res: _async_value(None))
+    assert asyncio.run(runner._post_scan_risk([("npm", "evilpkg", "1.0.0", nm)], set())) is True
+    assert engine.calls == {"evilpkg@1.0.0": False, "evilpkg@file+..+evilpkg-1.0.0.tgz": True}
+
+
+def test_resolve_package_dir_treats_an_empty_version_as_none(tmp_path):
+    """detect_new_packages() collects `"version": ""` as no version; the store lookup
+    must read it the same way, or its only copy is never scanned."""
+    nm = tmp_path / "node_modules"
+    pkg = nm / ".pnpm" / "localpkg@file+..+localpkg" / "node_modules" / "localpkg"
+    pkg.mkdir(parents=True)
+    (pkg / "package.json").write_text(json.dumps({"name": "localpkg", "version": ""}))
+    _node._pnpm_store_entries.cache_clear()
+    [spec] = NodeLanguage().detect_new_packages({pkg / "package.json"}, nm)
+    assert spec.version is None
+    assert NodeLanguage().resolve_package_dir("localpkg", tmp_path, nm, None) == [pkg.resolve()]
+
+
+def test_a_raising_provenance_descriptor_falls_back_to_local_scoring(tmp_path, monkeypatch):
+    """A plugin's copy_from_public_registry can be a descriptor that raises on access;
+    the copy is still scored, on its source alone."""
+    from packagealert import scoring
+    from packagealert.languages import registry as lang_registry
+
+    class Lang:
+        resolve_package_dir_returns_copies = True
+
+        @property
+        def copy_from_public_registry(self):
+            raise RuntimeError("plugin bug")
+
+    monkeypatch.setattr(lang_registry, "for_ecosystem", lambda eco: Lang())
+    assert scoring.copy_scored_locally("npm", "evilpkg", tmp_path) is True
+
+
+def test_a_raising_copies_descriptor_keeps_source_scoring(tmp_path, monkeypatch):
+    """A broken resolve_package_dir_returns_copies falls back to the default grouping in
+    the runner, the installed scan and the daemon, so the directories are still scanned."""
+    import asyncio
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from packagealert.daemon import _analyze_copies
+    from packagealert.languages import registry as lang_registry
+    from packagealert.models.events import PackageEvent
+    from packagealert.sandbox.runner import _resolves_copies
+
+    class Lang:
+        @property
+        def resolve_package_dir_returns_copies(self):
+            raise RuntimeError("plugin bug")
+
+    monkeypatch.setattr(lang_registry, "for_ecosystem", lambda eco: Lang())
+    assert _resolves_copies("npm") is False
+    seen: list = []
+
+    class Engine:
+        async def analyze(self, event, package_dirs, manifest_warning=None, *, local_only=False):
+            seen.append(list(package_dirs))
+            return SimpleNamespace(score=0)
+
+    event = PackageEvent(ecosystem="npm", package_name="evilpkg", version="1.0.0", source="process",
+                         manager="pnpm", project_path=tmp_path, timestamp=datetime.now(UTC))
+    asyncio.run(_analyze_copies(Engine(), event, [tmp_path], None))
+    assert seen == [[tmp_path]]

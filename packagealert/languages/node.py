@@ -1,6 +1,7 @@
 """Node.js/npm language module implementing the LanguageBase contract."""
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -362,6 +363,86 @@ def _from_configured_registry(name: str, registries: tuple[str | None, dict[str,
     return url is None or from_public_npm_registry(url)
 
 
+def _pnpm_store_id(rel: Path) -> str | None:
+    """The virtual-store entry of a manifest at .pnpm/<id>/node_modules/<name>/package.json
+    (or @scope/<name>) relative to node_modules, or None for any other path."""
+    parts = rel.parts
+    if len(parts) not in (5, 6) or parts[0] != ".pnpm" or parts[2] != "node_modules" or parts[-1] != "package.json":
+        return None
+    if (len(parts) == 6) != parts[3].startswith("@") or any(x.startswith(".") for x in parts[1:-1]):
+        return None
+    return parts[1]
+
+
+def _pnpm_store_id_source(store_id: str, name: str) -> bool | None:
+    """Whether a virtual-store entry holds a registry version (True), another source
+    (False), or cannot say (None). pnpm names an entry `<name>@<version>[_<peers>]`
+    with `/` in a scoped name escaped as `+`, while a file:, link:, git or tarball
+    source puts that source there (`localpkg@file+..`). A shortened entry is read
+    without its hash; if pnpm cut it before any of the source survived (before the
+    `@` after the name, or right after it), the source is unknown."""
+    hashed = _PNPM_HASHED_ID.fullmatch(store_id)
+    kept = hashed.group(1) if hashed else store_id
+    prefix = name.replace("/", "+") + "@"
+    if not kept.startswith(prefix) or len(kept) == len(prefix):
+        return None
+    return kept[len(prefix):][:1].isdigit()
+
+
+def _manifest_version(package_dir: Path) -> str | None:
+    try:
+        version = json.loads((package_dir / "package.json").read_text()).get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return version if isinstance(version, str) and version else None  # "" is no version
+
+
+# A virtual-store id pnpm shortened: what it kept, then `_` and a 32-hex hash.
+_PNPM_HASHED_ID = re.compile(r"(.*)_[0-9a-f]{32}\Z")
+
+
+@functools.lru_cache(maxsize=8)
+def _pnpm_store_entries(store: str, mtime_ns: int) -> tuple[str, ...]:
+    """The virtual store's entry names, listed once per scan (keyed on the store's
+    mtime, which changes whenever an entry is added or removed)."""
+    try:
+        return tuple(sorted(os.listdir(store)))
+    except OSError:
+        return ()
+
+
+def _pnpm_store_dirs(store: Path, node_modules: Path, name: str, version: str | None) -> list[Path]:
+    """The package directories of *name* at *version* in pnpm's virtual store, each
+    resolved and inside node_modules.
+
+    pnpm names an entry after the package (`<name>@<version>`, `/` escaped as `+`).
+    A long one it cuts and suffixes with a hash (depPathToFilename():
+    `<filename cut short>_<32 hex>`), and the cut can fall inside the name. So an
+    entry is resolved only when it starts with the escaped name, or is hashed and its
+    cut prefix starts the escaped name."""
+    found: list[Path] = []
+    try:
+        mtime_ns = store.stat().st_mtime_ns
+    except OSError:
+        return []
+    escaped = name.replace("/", "+")
+    for entry_name in _pnpm_store_entries(str(store), mtime_ns):
+        if not entry_name.startswith(escaped):
+            hashed = _PNPM_HASHED_ID.fullmatch(entry_name)
+            if hashed is None or not hashed.group(1) or not escaped.startswith(hashed.group(1)):
+                continue
+        entry = store / entry_name
+        try:
+            package_dir = (entry / "node_modules" / name).resolve()
+            if not package_dir.is_relative_to(node_modules) or not package_dir.is_dir():
+                continue
+        except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python 3.12
+            continue
+        if _manifest_version(package_dir) == version and package_dir not in found:
+            found.append(package_dir)
+    return found
+
+
 def _non_registry_version(version: object) -> bool:
     """Whether a locked version names a non-registry source (a file, link, git repository or URL)."""
     return isinstance(version, str) and (
@@ -520,6 +601,10 @@ class NodeLanguage:
     ecosystems = ["npm"]  # noqa: RUF012
     process_names = ["npm", "yarn", "pnpm", "pn", "node", "nodejs"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
+    # resolve_package_dir() can return several copies of one name and version (pnpm's
+    # store: peer contexts, a file: tarball beside a registry copy). Each is its own
+    # package, so each is risk-scored on its own rather than their signals summed.
+    resolve_package_dir_returns_copies: bool = True
     author: str = "builtin"
     repository: str = "builtin"
 
@@ -1341,10 +1426,19 @@ class NodeLanguage:
                 continue
             # Regular pkg: pkg/package.json (2 parts)
             # Scoped pkg:  @scope/pkg/package.json (3 parts)
-            if len(rel.parts) not in (2, 3):
+            # pnpm's isolated layout keeps the package itself in its virtual store,
+            # linked from node_modules: .pnpm/<id>/node_modules/<name>/package.json
+            # (5 parts, 6 when scoped).
+            store_id = _pnpm_store_id(rel)
+            if len(rel.parts) not in (2, 3) and store_id is None:
                 continue
             if p.is_symlink():
                 continue  # skip symlinks — could point outside the install target
+            try:
+                if not p.resolve(strict=True).is_relative_to(walk_root.resolve(strict=True)):
+                    continue
+            except (OSError, RuntimeError):
+                continue
             try:
                 data = json.loads(p.read_text())
                 name = data.get("name")
@@ -1354,9 +1448,13 @@ class NodeLanguage:
                         provenance = _installed_provenance(walk_root)
                     by_path, registries = provenance
                     key = "node_modules/" + "/".join(rel.parts[:-1])
-                    public = by_path[key] if key in by_path else _from_configured_registry(name, registries)
+                    source = _pnpm_store_id_source(store_id, name) if store_id is not None else True
+                    if source is False:
+                        public = False  # file:, link:, git or a tarball URL, not the registry
+                    else:
+                        public = by_path[key] if key in by_path else _from_configured_registry(name, registries)
                     results.append(PackageSpec(name=name, version=version, ecosystem="npm",
-                                               from_public_registry=public))
+                                               from_public_registry=public, source_unknown=source is None))
             except Exception:
                 log.debug("Failed to read/parse %s", p, exc_info=True)
         return results
@@ -1550,14 +1648,44 @@ class NodeLanguage:
                 return []
         node_modules = (project_path / "node_modules").resolve()
         try:
-            candidate = (project_path / "node_modules" / package_name).resolve()
-            if not candidate.is_relative_to(node_modules):
-                return []
-        except OSError:
-            return []
-        if not candidate.is_dir():
+            candidate: Path | None = (project_path / "node_modules" / package_name).resolve()
+        except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python 3.12
+            candidate = None
+        if candidate is not None and not candidate.is_relative_to(node_modules):
+            candidate = None  # e.g. a workspace link: not this install's copy
+        store = node_modules / ".pnpm"
+        if version is None and store.is_dir():
+            # An unversioned package (a file: manifest without one): the top-level
+            # copy as before, and each store copy whose manifest has no version.
+            found = _pnpm_store_dirs(store, node_modules, package_name, None)
+            if candidate is not None and candidate.is_dir() and candidate not in found:
+                found.insert(0, candidate)
+            return found
+        if version is not None and store.is_dir():
+            # pnpm's isolated layout: node_modules/<name> links only a direct dependency,
+            # and the store can hold several copies of one version (peer contexts, a
+            # file: tarball), so every contained copy at that version is scanned.
+            found = _pnpm_store_dirs(store, node_modules, package_name, version)
+            if candidate is not None and candidate.is_dir() and _manifest_version(candidate) == version \
+                    and candidate not in found:
+                found.insert(0, candidate)
+            return found
+        if candidate is None or not candidate.is_dir():
             return []
         return [candidate]
+
+    def copy_from_public_registry(self, package_name: str, package_dir: Path) -> bool | None:
+        """Whether a directory resolve_package_dir() returned is a registry copy: False
+        for a pnpm store entry from a file:, link:, git or tarball source, None when its
+        store id was shortened past the source, and True for a registry entry or any
+        directory outside the store (whose provenance is the event's own)."""
+        parts = package_dir.parts
+        if ".pnpm" not in parts:
+            return True
+        i = len(parts) - 1 - parts[::-1].index(".pnpm")
+        if i + 2 >= len(parts) or parts[i + 2] != "node_modules":
+            return True
+        return _pnpm_store_id_source(parts[i + 1], package_name)
 
     def resolve_package_dir_manifest_warning(
         self,

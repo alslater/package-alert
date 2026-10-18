@@ -8675,3 +8675,104 @@ class TestPnpmDeployDestination:
         asyncio.run(_make_runner().run(["pnpm", "deploy", "out"], no_change=True))
         assert tmp_path / "out" / "node_modules" in scanned
         assert not deployed.exists()
+
+
+def test_mixed_source_copies_are_looked_up_but_scored_on_their_source(tmp_path, monkeypatch):
+    """A registry copy and a file: copy of one version share a walk root: the version is
+    still looked up (for the registry copy), but scored on source alone, so the file
+    copy does not inherit the public package's popularity and age."""
+    import asyncio
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    store = tmp_path / "node_modules" / ".pnpm"
+    for store_id in ("evilpkg@1.0.0", "evilpkg@file+..+evilpkg-1.0.0.tgz"):
+        d = store / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+    non_public: set = set()
+    scored_locally: set = set()
+    found = _collect_new_packages([tmp_path / "node_modules"], {}, "npm",
+                                  non_public=non_public, scored_locally=scored_locally)
+    assert non_public == set()
+    assert {name for _eco, name, _ver, _root in scored_locally} == {"evilpkg"}
+
+    asked: list = []
+    fake_open_db, FakeClient, FakeCache = _fake_osv_context(malicious_names=set())
+
+    class Recording(FakeClient):
+        async def batch_query(self, queries):
+            asked.extend(name for _eco, name, _ver in queries)
+            return await super().batch_query(queries)
+
+    scored: dict = {"local_only": set()}
+
+    async def fake_score(engine, keys, **kw):
+        from types import SimpleNamespace
+        scored["local_only"] |= set(kw.get("local_only", ()))
+        return SimpleNamespace(reports={}, failures=0)
+
+    runner = _make_runner()
+
+    async def resources():
+        from types import SimpleNamespace
+        return SimpleNamespace(engine=object())
+
+    monkeypatch.setattr(runner, "_open_gate_resources", resources)
+    monkeypatch.setattr(runner, "_close_gate_resources", lambda res: _async_value(None))
+    with (
+        unittest.mock.patch("packagealert.storage.db.open_db", fake_open_db),
+        unittest.mock.patch("packagealert.osv.client.OsvClient", Recording),
+        unittest.mock.patch("packagealert.osv.cache.OsvCache", FakeCache),
+        unittest.mock.patch("packagealert.scoring.score_packages", fake_score),
+    ):
+        assert asyncio.run(runner._post_scan(found, non_public, scored_locally)) is True
+    assert asked == ["evilpkg"]
+    assert {k[1] for k in scored["local_only"]} == {"evilpkg"}
+
+
+def test_independent_copies_are_risk_scored_one_at_a_time(tmp_path, monkeypatch):
+    """Real heuristics over two copies of one version in pnpm's store: an install script
+    in one (20) and eval in the other (25) are separate packages, so the version
+    scores 25, not their sum, 45, over the default threshold of 30."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from packagealert import scoring
+    from packagealert.analyzers.risk import RiskEngine
+    from packagealert.config import HeuristicsConfig
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    store = tmp_path / "node_modules" / ".pnpm"
+    files = {
+        "evilpkg@1.0.0": ({"scripts": {"postinstall": "node setup.js"}}, "setup.js", "console.log(1)\n"),
+        "evilpkg@file+..+evilpkg-1.0.0.tgz": ({}, "index.js",
+                                             "eval(Buffer.from('Y29uc29sZS5sb2coMSk=','base64').toString())\n"),
+    }
+    for store_id, (extra, filename, source) in files.items():
+        d = store / store_id / "node_modules" / "evilpkg"
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0", **extra}))
+        (d / filename).write_text(source)
+    non_public: set = set()
+    scored_locally: set = set()
+    found = _collect_new_packages([tmp_path / "node_modules"], {}, "npm",
+                                  non_public=non_public, scored_locally=scored_locally)
+    runner = _make_runner()
+
+    async def resources():
+        return SimpleNamespace(engine=RiskEngine(HeuristicsConfig()))
+
+    outcomes = []
+    real_score = scoring.score_packages
+
+    async def recording(*args, **kwargs):
+        outcome = await real_score(*args, **kwargs)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(runner, "_open_gate_resources", resources)
+    monkeypatch.setattr(runner, "_close_gate_resources", lambda res: _async_value(None))
+    with unittest.mock.patch("packagealert.scoring.score_packages", recording):
+        assert asyncio.run(runner._post_scan_risk(found, scored_locally)) is True
+    [report] = [r for o in outcomes for r in o.reports.values()]
+    assert report.score == 25

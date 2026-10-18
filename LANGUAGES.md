@@ -204,9 +204,26 @@ class LanguageBase(Protocol):
         cannot hold two versions at one path, so the signature matches the contract
         version you declare.
 
+        The directories are scored together, as one distribution's footprint. If
+        yours are instead independent *copies* of the package (pnpm's store can hold
+        one version in several peer contexts, or as a ``file:`` tarball beside the
+        registry copy), set the class attribute
+        ``resolve_package_dir_returns_copies = True``: each directory is then scored
+        on its own and the highest report kept, since summing signals across copies
+        flags a package none of whose copies reaches the threshold. Copies can also
+        differ in source, so also implement the optional
+        ``copy_from_public_registry(package_name, package_dir) -> bool | None``:
+        ``True`` for a registry copy (or one whose provenance is the event's own),
+        ``False`` for a file:, git or other non-registry copy, ``None`` when it
+        cannot tell. A copy is scored with the public package's popularity and age
+        only when it returns ``True``; without the hook every copy keeps the
+        event's provenance.
+
         Typical implementations:
         - npm: ``return [project_path / "node_modules" / package_name]`` (one
-          version per path, so *version* needs no check; ``[]`` if it doesn't exist)
+          version per path, so *version* needs no check; ``[]`` if it doesn't exist).
+          pnpm's isolated layout also keeps copies in ``node_modules/.pnpm``, so the
+          in-tree Node module matches *version* there and returns every copy.
         - PyPI: find the ``.dist-info`` dir whose name **and version** match, read
           ``RECORD``/``top_level.txt``, return every importable directory this
           distribution's own files occupy — never a shared namespace root another
@@ -655,7 +672,12 @@ real bypass in a built-in parser:
    (`PackageSpec.from_public_registry=False`): a git, URL or local-path spec
    is not the registry package of that name, and is not looked up there.
    Registry settings given on the command line (npm's `--registry`) go in
-   `ProcessInstall.registries`.
+   `ProcessInstall.registries`. When where an installed copy came from cannot
+   be told (`detect_new_packages()` reading a pnpm store id shortened past its
+   source), set `PackageSpec.source_unknown=True` and leave
+   `from_public_registry` True: it is still looked up by name, but risk-scored
+   on its source alone, since the public package's popularity and age may not
+   be that copy's.
 
 See the example plugin's `parse_process_install()` for the first five applied
 to cargo.

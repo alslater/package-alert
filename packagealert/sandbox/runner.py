@@ -565,12 +565,14 @@ class SandboxRunner:
 
         ecosystem = parsed.ecosystem if parsed else None
         non_public: set[tuple[str, str, str | None, Path]] = set()
+        scored_locally: set[tuple[str, str, str | None, Path]] = set()
         try:
             new_pkgs = _collect_new_packages(
                 ctx.scan_targets,
                 snapshots,
                 ecosystem,
                 non_public=non_public,
+                scored_locally=scored_locally,
             )
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
@@ -580,7 +582,7 @@ class SandboxRunner:
 
         if new_pkgs:
             self._console.print(f"[dim]Post-install scan: {len(new_pkgs)} new package(s)...[/dim]")
-            post_ok = await self._post_scan(new_pkgs, non_public)
+            post_ok = await self._post_scan(new_pkgs, non_public, scored_locally)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
@@ -2082,12 +2084,14 @@ class SandboxRunner:
             return 1
 
         non_public: set[tuple[str, str, str | None, Path]] = set()
+        scored_locally: set[tuple[str, str, str | None, Path]] = set()
         try:
             new_pkgs = _collect_new_packages(
                 scan_targets,
                 snapshots,
                 None,
                 non_public=non_public,
+                scored_locally=scored_locally,
             )
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
@@ -2097,7 +2101,7 @@ class SandboxRunner:
 
         if new_pkgs:
             self._console.print(f"[dim]Post-shell scan: {len(new_pkgs)} new package(s)...[/dim]")
-            post_ok = await self._post_scan(new_pkgs, non_public)
+            post_ok = await self._post_scan(new_pkgs, non_public, scored_locally)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
                 _restore_install_targets(self._backend, snapshots, self._console)
@@ -2657,13 +2661,15 @@ class SandboxRunner:
     async def _post_scan(
         self, packages: list[tuple[str, str, str | None, Path]],
         non_public: Collection[tuple[str, str, str | None, Path]] = frozenset(),
+        scored_locally: Collection[tuple[str, str, str | None, Path]] | None = None,
     ) -> bool:
         """OSV-check newly installed packages, then risk-score them.
 
         *packages* carries a fourth element — the scan root the package was
         detected under — which OSV does not need but the risk pass does.
         Entries in *non_public* (from a private registry, git or a local path)
-        are not sent to OSV and are risk-scored on their source alone.
+        are not sent to OSV; those in *scored_locally* (any copy non-public or of
+        unknown source; defaults to *non_public*) are risk-scored on their source alone.
         """
         from packagealert.osv.cache import OsvCache
         from packagealert.osv.client import OsvClient
@@ -2712,7 +2718,7 @@ class SandboxRunner:
             return False
 
         self._report_unblocked("Post-install", "Post-install: no known advisories", vulnerable, unchecked)
-        return await self._post_scan_risk(packages, non_public)
+        return await self._post_scan_risk(packages, non_public if scored_locally is None else scored_locally)
 
     async def _post_scan_risk(
         self, packages: list[tuple[str, str, str | None, Path]],
@@ -2815,7 +2821,10 @@ class SandboxRunner:
                                 ecosystem, name, scan_root,
                             )
                         if resolved:
-                            groups.append(resolved)
+                            if _resolves_copies(ecosystem):
+                                groups.extend([d] for d in resolved)  # each copy scored alone
+                            else:
+                                groups.append(resolved)
                         # First non-None warning across scan_roots wins — a corrupt
                         # manifest anywhere is worth surfacing, and nothing
                         # distinguishes which scan_root's warning matters more.
@@ -3009,6 +3018,21 @@ def call_resolve_package_dir(
         elif style == "positional":
             args = (name, project_path, site_packages_dir, version)
     return method(*args, **kwargs)
+
+
+def _resolves_copies(ecosystem: str) -> bool:
+    """Whether the language's resolve_package_dir() returns independent copies of a
+    package (NodeLanguage.resolve_package_dir_returns_copies) rather than the
+    directories of one distribution, which are scored together."""
+    try:
+        lang = lang_registry.for_ecosystem(ecosystem)
+        return getattr(lang, "resolve_package_dir_returns_copies", False) is True
+    except Exception:
+        # A plugin attribute can be a descriptor that raises; keep the default grouping
+        # rather than losing the resolved directories.
+        log.warning("resolve_package_dir_returns_copies failed for %s — scoring its directories together",
+                    ecosystem, exc_info=True)
+        return False
 
 
 def _resolve_installed_dir(
@@ -4190,6 +4214,7 @@ def _collect_new_packages(
     ecosystem: str | None,
     *,
     non_public: set[tuple[str, str, str | None, Path]] | None = None,
+    scored_locally: set[tuple[str, str, str | None, Path]] | None = None,
 ) -> list[tuple[str, str, str | None, Path]]:
     """Return (ecosystem, name, version, scan_root) for packages that appeared
     since the snapshot.
@@ -4197,6 +4222,11 @@ def _collect_new_packages(
     Those the language marks as not from the public registry
     (``PackageSpec.from_public_registry``) are also added to *non_public*:
     their source is still scanned, but nothing is looked up by their name.
+    Copies of one (ecosystem, name, version) collapse into one entry, so it is kept
+    out of lookups only when every copy is non-public. Risk scoring is decided
+    separately: an entry is added to *scored_locally* when any copy is non-public or
+    of unknown source (``PackageSpec.source_unknown``), and is then scored on its
+    source alone, since public popularity and age may not be that copy's.
 
     *scan_root* is the directory whose walk detected the package — site-packages
     for Python, node_modules for Node. It is retained because post-install source
@@ -4205,6 +4235,7 @@ def _collect_new_packages(
     returns None and every source-code signal is unreachable.
     """
     new: list[tuple[str, str, str | None, Path]] = []
+    seen_public: set[tuple[str, str, str | None, Path]] = set()
     for target in scan_targets:
         snap = snapshots.get(target)
         before: set[Path] = snap.path_set() if snap is not None else set()
@@ -4281,8 +4312,17 @@ def _collect_new_packages(
                         entry = (ps.ecosystem, ps.name, ps.version, walk_root)
                         # One from a private registry, git or a local path is not the public
                         # package of that name: its source is scanned, its name not looked up.
-                        if getattr(ps, "from_public_registry", True) is False and non_public is not None:
-                            non_public.add(entry)
+                        if scored_locally is not None and (
+                                getattr(ps, "from_public_registry", True) is False
+                                or getattr(ps, "source_unknown", False) is True):
+                            scored_locally.add(entry)
+                        if getattr(ps, "from_public_registry", True) is False:
+                            if non_public is not None and entry not in seen_public:
+                                non_public.add(entry)
+                        else:
+                            seen_public.add(entry)
+                            if non_public is not None:
+                                non_public.discard(entry)
                         new.append(entry)
             except Exception:
                 log.warning("detect_new_packages raised for lang=%s — skipping",

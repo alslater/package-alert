@@ -71,6 +71,27 @@ def _dedupe_keys(packages: list[PackageKey]) -> list[PackageKey]:
     return list(dict.fromkeys(packages))
 
 
+def copy_scored_locally(ecosystem: str, name: str, package_dir: Path) -> bool:
+    """Whether an independent copy of a package must be scored on its source alone:
+    its language resolves copies (resolve_package_dir_returns_copies) and its
+    copy_from_public_registry() hook does not say it is a registry copy. A language
+    without the hook keeps the caller's provenance; a hook that raises scores locally."""
+    from packagealert.languages import registry as lang_registry
+
+    try:
+        # Looked up inside the try: a plugin attribute can be a descriptor that raises.
+        lang = lang_registry.for_ecosystem(ecosystem)
+        if getattr(lang, "resolve_package_dir_returns_copies", False) is not True:
+            return False
+        hook = getattr(lang, "copy_from_public_registry", None)
+        if not callable(hook):
+            return False
+        return hook(name, package_dir) is not True
+    except Exception:
+        log.warning("copy_from_public_registry failed for %s — scoring %s locally", name, package_dir, exc_info=True)
+        return True
+
+
 async def score_packages(
     engine: RiskEngine,
     packages: list[PackageKey],
@@ -347,8 +368,12 @@ async def score_packages(
                 errors = 0
                 for group in candidates:
                     try:
+                        # A copy is scored with public metadata only when its language
+                        # says it is a registry copy: a file: copy or one of unknown
+                        # source beside the registry copy must not inherit its trust.
+                        local = key in local_only or (len(group) == 1 and copy_scored_locally(ecosystem, name, group[0]))
                         current = (await engine.analyze(event, group, manifest_warning, local_only=True)
-                                   if key in local_only else await engine.analyze(event, group, manifest_warning))
+                                   if local else await engine.analyze(event, group, manifest_warning))
                     except Exception:
                         # One unreadable tree must not discard a sibling's finding.
                         errors += 1
