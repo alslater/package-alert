@@ -7803,6 +7803,21 @@ def test_run_refuses_a_real_symlink_loop(tmp_path, monkeypatch, capsys):
     assert "cannot be resolved" in capsys.readouterr().out
 
 
+def test_run_refuses_directories_that_depend_on_the_pnpm_version(tmp_path, monkeypatch, capsys):
+    # pnpm 8-9 install `-C a --prefix b` into b, pnpm 10+ into a: pre-flight and the
+    # sandbox cannot both be pointed at the directory the running pnpm will use.
+    import asyncio
+
+    import packagealert.sandbox.runner as runner_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(runner_mod, "bwrap_available", lambda: True)
+
+    rc = asyncio.run(_make_runner().run(["pnpm", "-C", "a", "--prefix", "b", "install"]))
+    assert rc == 1
+    assert "different pnpm versions" in capsys.readouterr().out
+
+
 _CAPTURED_EXPORT = ("uv", "export", "--frozen", "--offline", "--no-hashes", "--no-header", "--no-annotate",
                     "--no-emit-project", "--format", "requirements.txt")
 

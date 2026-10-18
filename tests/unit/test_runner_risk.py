@@ -3306,8 +3306,8 @@ def test_composer_global_does_not_scan_the_cwd_lockfile():
     [
         ["pnpm", "--lockfile-dir", "locks", "install"],
         ["pnpm", "install", "--lockfile-dir=locks"],
-        # relative to the PROCESS cwd, not to -C (measured against pnpm 7)
-        ["pnpm", "-C", "sub", "install", "--lockfile-dir", "locks"],
+        # With -C as well, pnpm 8-11 read it against the cwd and pnpm 12 against -C, so
+        # that command is refused as ambiguous (test_pnpm_lockfile_dir_under_dir_depends_on_the_version).
     ],
 )
 def test_pnpm_lockfile_dir_is_the_lockfile_scanned(tmp_path, argv):

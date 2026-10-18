@@ -57,31 +57,30 @@ def abbrev(words: list[str] | tuple[str, ...]) -> dict[str, str]:
     return out
 
 
-@cache
-def _key_abbrevs() -> dict[str, str]:
-    return abbrev(tuple(NPM_TYPES))
+Types = dict[str, tuple[str, tuple[str, ...]]]
+Shorthands = dict[str, tuple[str, ...]]
 
 
 @cache
-def _shorthand_abbrevs() -> dict[str, str]:
-    return abbrev(tuple(NPM_SHORTHANDS))
+def _abbrevs_of(words: tuple[str, ...]) -> dict[str, str]:
+    return abbrev(words)
 
 
-def _resolve_short(arg: str) -> list[str] | None:
+def _resolve_short(arg: str, types: Types, shorthands: Shorthands) -> list[str] | None:
     """Port of nopt's resolveShort()."""
-    abbrevs = _key_abbrevs()
+    abbrevs = _abbrevs_of(tuple(sorted(types)))
     arg = re.sub(r"^-+", "", arg)
     if abbrevs.get(arg) == arg:  # an exact known option
         return None
-    if arg in NPM_SHORTHANDS:  # an exact shorthand
-        return list(NPM_SHORTHANDS[arg])
-    singles = [c for c in arg if len(c) == 1 and c in NPM_SHORTHANDS]
+    if arg in shorthands:  # an exact shorthand
+        return list(shorthands[arg])
+    singles = [c for c in arg if len(c) == 1 and c in shorthands]
     if "".join(singles) == arg:  # single-char shorthands glommed together
-        return [part for c in singles for part in NPM_SHORTHANDS[c]]
-    if arg in abbrevs and arg not in NPM_SHORTHANDS:  # prefer an option abbrev
+        return [part for c in singles for part in shorthands[c]]
+    if arg in abbrevs and arg not in shorthands:  # prefer an option abbrev
         return None
-    arg = _shorthand_abbrevs().get(arg, arg)
-    parts = NPM_SHORTHANDS.get(arg)
+    arg = _abbrevs_of(tuple(sorted(shorthands))).get(arg, arg)
+    parts = shorthands.get(arg)
     return list(parts) if parts is not None else None
 
 
@@ -98,16 +97,30 @@ def _js_is_number(s: str) -> bool:
 
 
 def parse(argv: list[str]) -> tuple[dict[str, _Value], list[str]]:
-    """Port of nopt's parse(): (config values, remaining positionals)."""
+    """Port of nopt's parse() over npm's tables: (config values, remaining positionals)."""
+    return parse_with(argv, NPM_TYPES, NPM_SHORTHANDS)
+
+
+def parse_with(
+    argv: list[str], types: Types, shorthands: Shorthands, escape_args: frozenset[str] = frozenset(),
+) -> tuple[dict[str, _Value], list[str]]:
+    """Port of nopt's parse() over the given tables.
+
+    *escape_args* is @pnpm/nopt's addition: an argument in it ends option
+    parsing, and it and everything after it are positionals.
+    """
     args = list(argv)
     data: dict[str, _Value] = {}
     remain: list[str] = []
-    abbrevs = _key_abbrevs()
+    abbrevs = _abbrevs_of(tuple(sorted(types)))
     i = 0
     while i < len(args):
         arg = args[i]
         if re.fullmatch(r"-{2,}", arg):
             remain.extend(args[i + 1:])
+            break
+        if arg in escape_args:
+            remain.extend(args[i:])
             break
         if arg.startswith("-") and len(arg) > 1:
             had_eq = False
@@ -117,7 +130,7 @@ def parse(argv: list[str]) -> tuple[dict[str, _Value], list[str]]:
                 value = arg[at + 1:]
                 arg = arg[:at]
                 args[i:i + 1] = [arg, value]
-            sh_res = _resolve_short(arg)
+            sh_res = _resolve_short(arg, types, shorthands)
             if sh_res is not None:
                 args[i:i + 1] = sh_res
                 if arg != sh_res[0]:
@@ -131,7 +144,7 @@ def parse(argv: list[str]) -> tuple[dict[str, _Value], list[str]]:
                 arg = abbrevs[arg]
             kind: str | None
             names: tuple[str, ...]
-            kind, names = NPM_TYPES.get(arg, (None, ()))
+            kind, names = types.get(arg, (None, ()))
             has_type = kind is not None
             is_type_array = kind == "list" and len(names) != 1
             single = names[0] if names and (kind == "single" or len(names) == 1) else None

@@ -584,6 +584,7 @@ class NodeLanguage:
             install_dirs=list(result.install_dirs),
             # npm's `--registry`/`--@scope:registry`: where the named packages come from.
             registries=result.registries,
+            ambiguous_dirs=result.ambiguous_dirs,
         )
 
     # ------------------------------------------------------------------

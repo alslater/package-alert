@@ -1235,7 +1235,9 @@ async def test_deferred_pnpm_scan_reads_the_lockfile_dir(tmp_path):
         proc = MagicMock()
         proc.info = {
             "pid": 8181, "ppid": 1,
-            "cmdline": ["pnpm", "-C", "sub", "install", "--lockfile-dir", "locks"],
+            # Absolute: pnpm 8-11 resolve a relative --lockfile-dir against the cwd and
+            # pnpm 12 against -C, so only an absolute one names one lock file for all.
+            "cmdline": ["pnpm", "-C", "sub", "install", "--lockfile-dir", str(tmp_path / "locks")],
             "cwd": str(tmp_path), "create_time": 100.0,
         }
         return [proc]

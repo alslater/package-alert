@@ -195,3 +195,110 @@ def test_requirements_source_options_match_pip_itself():
     wrong = [(line, private) for line, private in _PIP_REQ_FILE["cases"]
              if _requirements_option_is_private(line) != private]
     assert wrong == [], f"{len(wrong)} of {len(_PIP_REQ_FILE['cases'])} lines differ from pip {_PIP_REQ_FILE['pip']}"
+
+
+_PNPM = json.loads((_FIXTURES / "pnpm.json").read_text())
+_PNPM_INSTALLING = frozenset({"add", "install", "update", "dedupe", "fetch", "deploy", "ci", "install-test",
+                              "unlink", "remove", "import", "self-update", "recursive", "with"})
+_PNPM_KEEP = ("global", "dir", "lockfile-dir", "registry", "check", "recursive", "workspace-root")
+
+
+def _pnpm_truths(by_version: dict) -> dict[str, list]:
+    return {v: t for vs, t in by_version.items() for v in vs.split(",")}
+
+
+def _pnpm_norm(t: list | None) -> list | None:
+    import os
+
+    if t is None:
+        return None
+    cmd, params, opts = t
+    # With --workspace-root pnpm installs in the workspace root it finds, which the
+    # fixture does not record (it depends on the machine).
+    workspace_root = bool(opts.get("workspace-root"))
+    return [cmd, params, {k: (os.path.normpath(v or ".") if k in ("dir", "lockfile-dir") and isinstance(v, str) else v)
+                          for k, v in opts.items() if not (workspace_root and k == "dir")}]
+
+
+def test_pnpm_fixture_records_lines_no_version_installs():
+    """A line every version runs as a script or refuses must still be in the fixture,
+    or the exact per-version test cannot catch a parser that starts gating it."""
+    cases = {tuple(argv): by_version for argv, by_version in _PNPM["cases"]}
+    assert cases[("run", "install")] == {}
+    assert cases[("exec", "install", "x")] == {}
+
+
+def test_pnpm_table_serialiser_keeps_string_contents():
+    import ast
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("generate_pnpm", _FIXTURES / "generate_pnpm.py")
+    assert spec is not None and spec.loader is not None
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    data = {"legacy": ["--config.force-legacy-deploy=true", "false", "null"], "on": True, "off": None}
+    assert ast.literal_eval(gen._py(data)) == data
+
+
+def test_pnpm_port_matches_each_pnpm_version():
+    """Each pnpm 8-11 version's own parseCliArgs() is the ground truth (generate_pnpm.py),
+    including where it installs nothing (an unknown option, a script, help)."""
+    from packagealert.parsers import pnpm_argv
+
+    mismatches = []
+    total = 0
+    for argv, by_version in _PNPM["cases"]:
+        truths = _pnpm_truths(by_version)
+        for version in _PNPM["pnpm"]:
+            total += 1
+            r = pnpm_argv.parse_cli_args(version, argv)
+            ours = None if r is None or r.fallback or r.rejected or r.cmd not in _PNPM_INSTALLING else [
+                r.cmd, r.params,
+                {k: v for k, v in r.options.items() if k in _PNPM_KEEP or (k.startswith("@") and k.endswith(":registry"))},
+            ]
+            if _pnpm_norm(ours) != _pnpm_norm(truths.get(version)):
+                mismatches.append(f"pnpm {version} {' '.join(argv)}\n    pnpm: {truths.get(version)}\n    ours: {ours}")
+    assert not mismatches, (
+        f"{len(mismatches)} of {total} command lines parse differently from pnpm:\n" + "\n".join(mismatches[:20])
+    )
+
+
+def _pnpm_expected(t: list) -> tuple[list[str], bool, bool]:
+    """(packages, lock-file install, global) of one version's parse."""
+    cmd, params, opts = t
+    is_global = opts.get("global") is True
+    if cmd in ("add", "update") or (cmd == "install" and params):
+        return params, not params and not is_global, is_global
+    if cmd in ("install", "install-test", "ci", "dedupe", "fetch", "deploy", "unlink", "recursive"):
+        return [], not (is_global and cmd == "install"), is_global and cmd == "install"
+    if cmd == "self-update":
+        return [f"pnpm@{params[0]}" if params else "pnpm"], False, True
+    return [], False, False
+
+
+def test_pnpm_merged_parse_fails_closed():
+    """Which pnpm runs is unknown, so parse_pnpm_args() merges every version's reading:
+    a command any version installs is gated with all its packages, the lock file is
+    scanned if any version installs it, and it is global only if every one agrees."""
+    from packagealert.parsers.process_args import parse_pnpm_args
+
+    failures = []
+    for argv, by_version in _PNPM["cases"]:
+        expected = [_pnpm_expected(t) for t in _pnpm_truths(by_version).values() if t[0] != "with"]
+        if not expected:
+            continue
+        r = parse_pnpm_args(["pnpm", *argv])
+        problems = []
+        if r is None:
+            problems.append("not gated")
+        else:
+            missing = {p for pkgs, _l, _g in expected for p in pkgs} - set(r.packages)
+            if missing:
+                problems.append(f"packages missing {sorted(missing)}")
+            if any(lock for _p, lock, _g in expected) and not r.is_lockfile_install:
+                problems.append("lock file not scanned")
+            if r.global_install and not all(g for _p, _l, g in expected):
+                problems.append("global although a version installs locally")
+        if problems:
+            failures.append(f"pnpm {' '.join(argv)}: {', '.join(problems)}")
+    assert not failures, f"{len(failures)} command lines:\n" + "\n".join(failures[:20])

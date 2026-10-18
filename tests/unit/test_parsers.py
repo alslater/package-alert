@@ -3258,7 +3258,7 @@ def test_uv_global_options_between_command_levels(argv, packages, req_files, wor
     ("argv", "working_dir", "lockfile_dir"),
     [
         (["pnpm", "--lockfile-dir", "locks", "install"], None, "locks"),
-        (["pnpm", "-C", "sub", "install", "--lockfile-dir=../l"], "sub", "../l"),
+        (["pnpm", "-C", "sub", "install", "--lockfile-dir=/abs/l"], "sub", "/abs/l"),
         (["pnpm", "install"], None, None),
     ],
 )
@@ -3268,6 +3268,20 @@ def test_pnpm_lockfile_dir_is_recorded(argv, working_dir, lockfile_dir):
     result = parse_pnpm_args(argv)
     assert result is not None
     assert (result.working_dir, result.lockfile_dir) == (working_dir, lockfile_dir)
+    assert not result.ambiguous_dirs
+
+
+def test_pnpm_lockfile_dir_under_dir_depends_on_the_version():
+    # pnpm 8-11 resolve a relative --lockfile-dir against the cwd (measured against
+    # pnpm 7); pnpm 12 against --dir (LockfileDirArg::apply_to: dir.join(lockfile_dir)).
+    from packagealert.parsers.process_args import parse_pnpm_args
+
+    result = parse_pnpm_args(["pnpm", "-C", "sub", "install", "--lockfile-dir", "locks"])
+    assert result is not None and result.ambiguous_dirs
+    # Only pnpm 12 accepts --auto-dedupe, so its reading alone decides: sub/locks.
+    result = parse_pnpm_args(["pnpm", "-C", "sub", "install", "--auto-dedupe", "--lockfile-dir", "locks"])
+    assert result is not None and not result.ambiguous_dirs
+    assert (result.working_dir, result.lockfile_dir) == ("sub", "sub/locks")
 
 
 @pytest.mark.parametrize(
@@ -3543,24 +3557,8 @@ def test_npm_registry_options_are_recorded(argv, registries):
     assert parsed is not None and parsed.registries == registries
 
 
-# Every pnpm option that consumes the next argument, across pnpm 8.15.9, 9.15.9, 10.34.7,
-# 11.28.6 and 12.14.0, as each version's own parser reported it (#87): pnpm 8-11 by running
-# their parseCliArgs() on every candidate option before and after every install-type command,
-# pnpm 12 (clap) by a value-less probe. Options whose type can be Boolean are excluded (nopt
-# leaves a following argument alone for them), as are those pnpm 8-11 read as an abbreviation
-# or a run of shorthands of a Boolean (--repo in pnpm 11 is -r -e -p -o).
-_PNPM_AUDITED_VALUE_OPTIONS = ['--allow-build', '--cache-dir', '--changed-files-ignore-pattern', '--child-concurrency', '--cpu', '--depth', '--dir', '--fetch-min-speed-ki-bps', '--fetch-retries', '--fetch-retry-factor', '--fetch-retry-maxtimeout', '--fetch-retry-mintimeout', '--fetch-timeout', '--fetch-warn-timeout-ms', '--filter', '--filter-prod', '--global-bin-dir', '--global-dir', '--global-pnpmfile', '--hoist-pattern', '--hoisting-limits', '--http-proxy', '--https-proxy', '--libc', '--lockfile-dir', '--loglevel', '--merge-git-branch-lockfiles-branch-pattern', '--modules-dir', '--network-concurrency', '--node-linker', '--node-package-map-type', '--noproxy', '--npm-path', '--npmrc-auth-file', '--only', '--os', '--package-import-method', '--pm-on-fail', '--pnpm', '--pnpmfile', '--pnpr-server', '--public-hoist-pattern', '--registry', '--reporter', '--resume-from', '--save-catalog-name', '--save-prefix', '--scripts-prepend-node-path', '--state-dir', '--store-dir', '--test-pattern', '--trust-policy', '--trust-policy-exclude', '--trust-policy-ignore-after', '--user-agent', '--userconfig', '--verify-deps-before-run', '--virtual-store-dir', '--workspace-concurrency', '--workspace-packages', '-C', '-F']
-
-
 class TestPnpmAudit:
     """pnpm 8-12 (#87): options, commands and executable names, from pnpm's own parsers."""
-
-    @pytest.mark.parametrize("opt", _PNPM_AUDITED_VALUE_OPTIONS)
-    def test_value_option_is_not_read_as_a_package(self, opt):
-        after = parse_pnpm_args(["pnpm", "add", opt, "VAL", "lodash"])
-        before = parse_pnpm_args(["pnpm", opt, "VAL", "add", "lodash"])
-        assert after is not None and after.packages == ["lodash"]
-        assert before is not None and before.packages == ["lodash"]
 
     @pytest.mark.parametrize("opt", ["--color", "--link-workspace-packages", "--repo", "--save-dev", "-r", "-g"])
     def test_boolean_option_does_not_swallow_the_next_argument(self, opt):
@@ -3679,14 +3677,15 @@ class TestPnpmAudit:
     ])
     def test_explicit_boolean_values(self, argv, packages, lockfile):
         result = parse_pnpm_args(argv)
-        assert result is not None and result.packages == packages and result.is_lockfile_install == lockfile
+        assert result is not None and sorted(result.packages) == sorted(packages)
+        assert result.is_lockfile_install == lockfile
 
     @pytest.mark.parametrize(("argv", "registries"), [
         (["pnpm", "add", "@corp/pkg", "--registry", "https://npm.corp.example/"],
          {"registry": "https://npm.corp.example/"}),
         (["node", "/p/pnpm.cjs", "add", "@corp/pkg", "--@corp:registry=https://npm.corp.example/"],
          {"@corp:registry": "https://npm.corp.example/"}),
-        (["pnpm", "--@corp:registry", "https://npm.corp.example/", "add", "@corp/pkg"],
+        (["pnpm", "--@corp:registry=https://npm.corp.example/", "add", "@corp/pkg"],
          {"@corp:registry": "https://npm.corp.example/"}),
         (["pnpm", "with", "10", "add", "x", "--registry=https://r.example/"], {"registry": "https://r.example/"}),
     ])
@@ -3707,7 +3706,6 @@ class TestPnpmAudit:
 
     @pytest.mark.parametrize("argv", [
         ["pnpm", "--prod", "false", "with", "current", "install"],
-        ["pnpm", "--prod", "false", "with", "10", "install"],
         ["pnpm", "--frozen-lockfile", "true", "recursive", "install"],
     ])
     def test_boolean_value_before_a_proxy(self, argv):
@@ -3720,7 +3718,7 @@ class TestPnpmAudit:
     ])
     def test_deploy_destination_after_a_boolean_value(self, argv, dirs):
         result = parse_pnpm_args(argv)
-        assert result is not None and result.install_dirs == dirs
+        assert result is not None and sorted(result.install_dirs) == sorted(dirs)
 
     @pytest.mark.parametrize(("argv", "registry"), [
         (["pnpm", "add", "@corp/pkg", "--registry=https://private.example/", "--hoist-pattern",
@@ -3814,7 +3812,7 @@ class TestPnpmAudit:
 
     @pytest.mark.parametrize("argv", [
         ["pnpm", "install", "--hoist-pattern", "--global=evilpkg"],
-        ["node", "/p/pnpm.cjs", "update", "--hoist-pattern", "--global=evilpkg"],
+        ["node", "/p/pnpm.cjs", "install", "--hoist-pattern", "--global=evilpkg"],
     ])
     def test_a_consumed_global_equals_is_not_a_package(self, argv):
         # pnpm 8-11 take `--global=evilpkg` as --hoist-pattern's value and install the lock file.
@@ -3828,6 +3826,28 @@ class TestPnpmAudit:
     def test_end_of_options_before_the_command(self, argv):
         result = parse_pnpm_args(argv)
         assert result is not None and result.packages == ["lodash"]
+
+    @pytest.mark.parametrize("argv", [
+        # A value option given an option-like value: refused by every version, even read leniently.
+        ["pnpm", "update", "--hoist-pattern", "--global=evilpkg"],
+    ])
+    def test_commands_pnpm_refuses_are_not_installs(self, argv):
+        assert parse_pnpm_args(argv) is None
+
+    @pytest.mark.parametrize(("argv", "packages"), [
+        # Every version refuses these (an option the command does not declare; a
+        # scoped-registry value read as the command by 8-11 and refused by 12), but
+        # the lenient pnpm 12 reading still gates them: over-gating is the safe side
+        # of a rewrite the tables might miss.
+        (["pnpm", "add", "--depth", "VAL", "lodash"], ["VAL", "lodash"]),
+        (["pnpm", "--@corp:registry", "https://npm.corp.example/", "add", "@corp/pkg"], ["@corp/pkg"]),
+        # pnpm 11 rejects --production for `with` and 8-10 run a script named with;
+        # the lenient reading's `with` child is still checked.
+        (["pnpm", "--prod", "false", "with", "10", "add", "evilpkg"], ["evilpkg"]),
+    ])
+    def test_commands_no_version_accepts_are_still_gated(self, argv, packages):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages
 
     def test_with_current_keeps_the_outer_options(self):
         # `with current` is reparsed in the same process, so outer options still apply.
@@ -3846,3 +3866,391 @@ class TestPnpmAudit:
     def test_unrecognised_commands_stay_unrecognised(self):
         for argv in (["pnpm", "run", "build"], ["pnpm", "dlx", "cowsay"], ["pnpm", "with", "10"], ["pn", "audit"]):
             assert parse_pnpm_args(argv) is None
+
+    @pytest.mark.parametrize(("argv", "options"), [
+        # Measured against pnpm 12.14.0: clap expands a cluster of shorts, and the
+        # first value-taking one takes the rest of the cluster or the next argument.
+        (["install", "-rC", "sub"], {"recursive": True, "dir": "sub"}),
+        (["install", "-rCsub"], {"recursive": True, "dir": "sub"}),
+        (["install", "-C=sub"], {"dir": "sub"}),
+        (["-rF", "web", "install", "--auto-dedupe"], {"recursive": True, "filter": "web", "auto-dedupe": True}),
+    ])
+    def test_native_expands_short_option_clusters(self, argv, options):
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(argv)
+        assert result is not None and result.cmd == "install" and result.options == options
+
+    @pytest.mark.parametrize("argv", [
+        ["install", "-rC="], ["install", "--auto-dedupe=maybe"], ["bogus"], ["install", "-rq"],
+        ["--lockfile-directory", "l", "install"], ["add", "--depth", "VAL", "lodash"],
+        ["--package-import-method", "zz", "install"], ["--hoist=maybe", "install"],
+    ])
+    def test_native_rejects_what_clap_rejects(self, argv):
+        # Each measured against pnpm 12.14.0: a value required or refused, an
+        # unrecognised subcommand or option, a setting value it does not take.
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        assert parse_native(argv) is None
+
+    @pytest.mark.parametrize(("argv", "options"), [
+        # Measured against pnpm 12.14.0, each valid: pnpm takes these out or rewrites
+        # them before clap (pnpm/crates/cli/src/lib.rs).
+        (["install", "--auto-dedupe", "--config.ignore-scripts=true"], {"auto-dedupe": True}),
+        (["--config.registry=https://private.example/", "install"], {"registry": "https://private.example/"}),
+        (["install", "--frozen-lockfile=false"], {"frozen-lockfile": False}),
+        # Settings install does not declare, taken out with the value each claims.
+        (["--no-hoist", "install"], {}),
+        (["--hoist", "false", "install"], {}),
+        (["--global-dir", "/x", "install"], {}),
+        (["--child-concurrency", "-1", "install"], {}),
+        (["--package-import-method", "copy", "install"], {}),
+        # A hidden alias, and a renamed option dropped beside its canonical one.
+        (["--prefix", "sub", "install"], {"dir": "sub"}),
+        (["--prefix", "sub", "-C", "other", "install"], {"dir": "other"}),
+        (["--dir", "other", "--prefix", "sub", "install"], {"dir": "other"}),
+        # An option before the command, moved after it.
+        (["-r", "--frozen-lockfile", "install"], {"recursive": True, "frozen-lockfile": True}),
+    ])
+    def test_native_follows_pnpm_rewrites_before_clap(self, argv, options):
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(argv)
+        assert result is not None and result.cmd == "install" and result.params == [] and result.options == options
+
+    @pytest.mark.parametrize(("argv", "expected"), [
+        # Each accepted by pnpm 12.14.0 (and --auto-dedupe/--save-types by no older
+        # version, so pnpm 12's reading alone decides whether these are gated).
+        (["-rF", "web", "--auto-dedupe", "install"],
+         ("install", [], {"recursive": True, "filter": "web", "auto-dedupe": True})),
+        # The C is part of the filter, so --prefix is not shadowed.
+        (["-FwebC", "--prefix", "sub", "install", "--auto-dedupe"],
+         ("install", [], {"filter": "webC", "dir": "sub", "auto-dedupe": True})),
+        (["install", "lodash", "--save-types"], ("add", ["lodash"], {"save-types": True})),
+        (["i", "lodash", "--save-types"], ("add", ["lodash"], {"save-types": True})),
+        (["--dir", "--config.ignore-scripts=true", "sub", "install", "--auto-dedupe"],
+         ("install", [], {"dir": "sub", "auto-dedupe": True})),
+        (["install", "--auto-dedupe", "--silent"], ("install", [], {"auto-dedupe": True, "reporter": "silent"})),
+        (["install", "--auto-dedupe", "-s"], ("install", [], {"auto-dedupe": True, "reporter": "silent"})),
+        (["add", "--auto-dedupe", "--no-lockfile-only", "lodash"],
+         ("add", ["lodash"], {"auto-dedupe": True, "lockfile-only": False})),
+        (["add", "--no-global", "lodash"], ("add", ["lodash"], {"global": False})),
+        (["install", "--auto-dedupe", "--store", "cache"], ("install", [], {"auto-dedupe": True, "store-dir": "cache"})),
+        # --cpu is moved after install before it takes its values.
+        (["--cpu", "x64", "install", "--auto-dedupe"], ("install", [], {"cpu": ["x64"], "auto-dedupe": True})),
+        # An optional value is taken only when attached.
+        (["install", "--auto-dedupe", "--color=auto"], ("install", [], {"auto-dedupe": True, "color": "auto"})),
+        (["install", "--auto-dedupe", "--color", "auto"], ("add", ["auto"], {"auto-dedupe": True, "color": True})),
+        # clap's error lists auto/always/never, but pnpm 12 also takes true/false.
+        (["install", "--auto-dedupe", "--color=true"], ("install", [], {"auto-dedupe": True, "color": "true"})),
+        (["install", "--auto-dedupe", "--color=false"], ("install", [], {"auto-dedupe": True, "color": "false"})),
+        # `with current`'s settings are taken out before the wrapper is removed.
+        (["with", "current", "install", "--auto-dedupe", "--ignore-scripts", "false"],
+         ("install", [], {"auto-dedupe": True})),
+        (["add", "--auto-dedupe", "--no-global=false", "lodash"],
+         ("add", ["lodash"], {"auto-dedupe": True, "global": True})),
+    ])
+    def test_native_follows_pnpm_12_argv_passes(self, argv, expected):
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(argv)
+        assert result is not None and (result.cmd, result.params, result.options) == expected
+        merged = parse_pnpm_args(["pnpm", *argv])
+        assert merged is not None and merged.packages == [p for p in expected[1]]
+
+    @pytest.mark.parametrize("argv", [
+        ["install", "--save-types"], ["--no-help", "install"],
+        ["install", "--color=bogus"], ["add", "--no-global=maybe", "x"],
+    ])
+    def test_native_refuses_what_pnpm_12_refuses_after_its_passes(self, argv):
+        # add's options apply only when install names a package; help has no negation.
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        assert parse_native(argv) is None
+
+    def test_pnpm_12_only_readings_keep_registry_provenance(self, tmp_path, monkeypatch):
+        # Only pnpm 12 accepts these (--auto-dedupe, --save-types), so its reading alone
+        # decides whether the package is looked up.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig", "npm_config_@corp:registry"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("registry=https://private.example/\n@corp:registry=https://private.example/\n")
+        lang = NodeLanguage()
+        # A registry override taken out before `with current` is removed still applies.
+        public = parse_pnpm_args(["pnpm", "--config.registry=https://registry.npmjs.org/",
+                                  "with", "current", "add", "lodash", "--save-types"])
+        assert public is not None and lang.explicit_package_public("lodash", public, tmp_path)
+        # `--no-global=false` is a global install, which ignores the project's .npmrc.
+        glob = parse_pnpm_args(["pnpm", "add", "--auto-dedupe", "--no-global=false", "@corp/pkg"])
+        assert glob is not None and glob.global_install
+        assert lang.explicit_package_public("@corp/pkg", glob, tmp_path)
+        # A nested versioned child keeps its own override, and it is that child's command.
+        nested = parse_pnpm_args(["pnpm", "--no-progress", "with", "current", "with", "12.14.0", "add", "lodash",
+                                  "--save-types", "--config.registry=https://registry.npmjs.org/"])
+        assert nested is not None and lang.explicit_package_public("lodash", nested, tmp_path)
+        # A Boolean setting before `with <version>` takes its true/false, so the
+        # command found is `with` and the child's override stays with the child.
+        # Before extraction, --dir takes the --config token as its value, so `sub` is a
+        # script name and everything after it is forwarded untouched (parse_boundary.rs).
+        # The same for run/exec/dlx (after their next positional) and the test/start/stop shortcuts.
+        for wrapper in ([], ["with", "current"]):
+            for forwarder in ("sub", "exec", "test"):
+                forwarded = parse_pnpm_args(["pnpm", *wrapper, "--dir", "--config.ignore-scripts=true", forwarder,
+                                             "with", "12.14.0", "add", "lodash", "--save-types",
+                                             "--config.registry=https://registry.npmjs.org/"])
+                assert forwarded is not None, (wrapper, forwarder)
+                assert forwarded.registries == {"registry": "https://registry.npmjs.org/"}, (wrapper, forwarder)
+        for wrapper in ([], ["with", "current"]):
+            forwarded = parse_pnpm_args(["pnpm", *wrapper, "--dir", "--config.ignore-scripts=true", "sub",
+                                         "with", "12.14.0", "add", "lodash", "--save-types",
+                                         "--config.registry=https://registry.npmjs.org/"])
+            assert forwarded is not None and forwarded.registries == {"registry": "https://registry.npmjs.org/"}
+            assert lang.explicit_package_public("lodash", forwarded, tmp_path)
+        for prefix in (["--ignore-scripts", "false"], ["--lockfile", "true"]):
+            child = parse_pnpm_args(["pnpm", *prefix, "with", "12.14.0", "add", "lodash", "--save-types",
+                                     "--config.registry=https://registry.npmjs.org/"])
+            assert child is not None and child.registries == {"registry": "https://registry.npmjs.org/"}
+            assert lang.explicit_package_public("lodash", child, tmp_path)
+
+    def test_dotted_global_override_is_global(self, tmp_path, monkeypatch):
+        # A dotted override reaches `global` (nopt's clean() makes "true" a Boolean, and
+        # pnpm's config reader tests truthiness); pnpm 12 refuses --stor, so 8-11 decide.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig", "npm_config_@corp:registry"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("@corp:registry=https://private.example/\n")
+        result = parse_pnpm_args(["pnpm", "add", "-g", "@corp/pkg", "--stor", "cache", "--config.global=true"])
+        assert result is not None and result.global_install
+        assert NodeLanguage().explicit_package_public("@corp/pkg", result, tmp_path)
+
+    @pytest.mark.parametrize("argv", [
+        # nopt's clean() trims the value.
+        ["pnpm", "add", "lodash", "--stor", "cache", "--registry= https://registry.npmjs.org/ "],
+        # pnpm's config reader camel-cases `Registry`; the later entry wins (pnpm 11
+        # merges dotted args after its parse, so there the dotted one is later).
+        ["pnpm", "add", "lodash", "--stor", "cache", "--config.Registry=https://registry.npmjs.org/"],
+        ["pnpm", "add", "lodash", "--stor", "cache", "--registry=https://private.example/",
+         "--config.Registry=https://registry.npmjs.org/"],
+        ["pnpm", "add", "lodash", "--stor", "cache", "--config.Registry=https://registry.npmjs.org/",
+         "--registry=https://private.example/"],
+        # A URL nopt's validator drops here but pnpm's URL parser may canonicalise
+        # (pnpm 11: https://registry.npmjs.org/), so it counts as public.
+        ["pnpm", "add", "lodash", "--stor", "cache", "--registry=https:registry.npmjs.org"],
+        # camelcase() keeps the `!`, so this is not pnpm's registry; another spelling
+        # of the name never counts as private.
+        ["pnpm", "add", "lodash", "--stor", "cache", "--config.registry!=https://private.example/"],
+        # A host pnpm's URL parser canonicalises is not taken as written.
+        ["pnpm", "add", "lodash", "--stor", "cache", "--registry=https://%72egistry.npmjs.org/"],
+        ["pnpm", "add", "lodash", "--stor", "cache", "--registry=https:\\\\registry.npmjs.org\\"],
+    ])
+    def test_pnpm_8_to_11_registry_spellings_count(self, argv, tmp_path, monkeypatch):
+        # pnpm 12 refuses --stor, so only pnpm 8-11 read these.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("registry=https://private.example/\n")
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.registries == {"registry": "https://registry.npmjs.org/"}
+        assert NodeLanguage().explicit_package_public("lodash", result, tmp_path)
+
+    @pytest.mark.parametrize(("argv", "expected"), [
+        # drop_shadowed_aliases() removes a trailing --prefix beside -C before clap
+        # validates it, so its missing value is no error (measured: pnpm 12 installs in sub).
+        (["install", "--auto-dedupe", "-C", "sub", "--prefix"], ("install", [], {"auto-dedupe": True, "dir": "sub"})),
+        # A cluster moves after the command as a whole, so -g follows --no-global.
+        (["--no-global", "-yg", "add", "@corp/pkg", "--save-types"],
+         ("add", ["@corp/pkg"], {"global": True, "yes": True, "save-types": True})),
+    ])
+    def test_native_drops_shadowed_aliases_and_moves_whole_clusters(self, argv, expected):
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(argv)
+        assert result is not None and (result.cmd, result.params, result.options) == expected
+
+    def test_uncertain_global_or_check_spelling_grants_no_exemption(self, tmp_path, monkeypatch):
+        # pnpm's config reader camel-cases `Global`/`Check`, the later entry winning, so
+        # these may override the canonical options; pnpm 12 refuses --stor.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig", "npm_config_@corp:registry"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("@corp:registry=https://private.example/\n")
+        result = parse_pnpm_args(["pnpm", "add", "-g", "@corp/pkg", "--stor", "cache", "--config.Global=false"])
+        assert result is not None and not result.global_install  # sandboxed, not exec'd unsandboxed
+        assert NodeLanguage().explicit_package_public("@corp/pkg", result, tmp_path)
+        result = parse_pnpm_args(["pnpm", "dedupe", "--check", "--stor", "cache", "--config.Check=false"])
+        assert result is not None and result.should_gate and result.is_lockfile_install
+
+    def test_lone_dash_is_a_multi_value(self):
+        # Measured against pnpm 12.14.0: clap takes `-` as a value of --cpu.
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(["install", "--auto-dedupe", "--cpu", "-"])
+        assert result is not None and result.options == {"auto-dedupe": True, "cpu": ["-"]}
+        merged = parse_pnpm_args(["pnpm", "install", "--auto-dedupe", "--cpu", "-"])
+        assert merged is not None and merged.is_lockfile_install
+
+    @pytest.mark.parametrize("argv", [
+        # pnpm 12 hands a dotted override to its config loader (ConfigOverrides.unported),
+        # with a precedence not modelled: the lock-file directory is not known.
+        ["pnpm", "install", "--auto-dedupe", "--config.lockfile-dir=locks"],
+        ["pnpm", "install", "--auto-dedupe", "--config.lockfileDir=locks"],
+        ["pnpm", "install", "--auto-dedupe", "--lockfile-dir", "a", "--config.lockfile-dir=b"],
+    ])
+    def test_pnpm_12_dotted_directory_override_is_refused(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.ambiguous_dirs
+
+    def test_pnpm_12_dotted_global_override_grants_no_exemption(self):
+        result = parse_pnpm_args(["pnpm", "add", "-g", "x", "--auto-dedupe", "--config.global=false"])
+        assert result is not None and not result.global_install
+        assert result.registries == {"registry": "https://registry.npmjs.org/"}
+
+    def test_no_prefix_is_the_directory_false(self):
+        # nopt's validatePath stringifies false (recorded by pnpm 8-11 in pnpm.json).
+        result = parse_pnpm_args(["pnpm", "--no-prefix", "install", "--stor", "cache"])
+        assert result is not None and result.working_dir == "false"
+
+    @pytest.mark.parametrize("argv", [
+        # nopt expands `~/` against $HOME; pnpm 12 keeps it literal, under the cwd.
+        ["pnpm", "--prefix=~/project", "install"],
+        # pnpm's config reader camel-cases names, so this is lockfile-dir to it; any
+        # spelling of a directory setting but its own key leaves the directory unknown.
+        ["pnpm", "install", "--stor", "cache", "--config.lockfileDir=locks"],
+    ])
+    def test_uncertain_directories_are_refused(self, argv):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.ambiguous_dirs
+
+    def test_kebab_case_registry_override_counts(self, tmp_path, monkeypatch):
+        # pnpm 12's ConfigOverrides::set() matches settings in kebab case, so
+        # `--config.Registry=` is the registry; only pnpm 12 accepts --save-types.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("registry=https://private.example/\n")
+        result = parse_pnpm_args(["pnpm", "add", "lodash", "--save-types", "--config.Registry=https://registry.npmjs.org/"])
+        assert result is not None and result.registries == {"registry": "https://registry.npmjs.org/"}
+        assert NodeLanguage().explicit_package_public("lodash", result, tmp_path)
+
+    @pytest.mark.parametrize(("argv", "packages", "lockfile"), [
+        # with's version is its next positional, past options and setting values.
+        (["pnpm", "--no-progress", "with", "--ignore-scripts", "false", "12.14.0", "install"], [], True),
+        # --no-color is a separate hidden option, beside the optional-valued --color.
+        (["pnpm", "--no-progress", "--no-color", "with", "12.14.0", "add", "lodash"], ["lodash"], False),
+    ])
+    def test_with_wrappers_pnpm_12_alone_accepts_are_gated(self, argv, packages, lockfile):
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.packages == packages and result.is_lockfile_install is lockfile
+
+    @pytest.mark.parametrize(("argv", "expected"), [
+        (["--no-progress", "with", "--ignore-scripts", "false", "12.14.0", "install"],
+         ("with", ["12.14.0", "install"], {"no-progress": True})),
+        (["--no-progress", "--no-color", "with", "12.14.0", "add", "lodash"],
+         ("with", ["12.14.0", "add", "lodash"], {"no-progress": True, "no-color": True})),
+    ])
+    def test_native_reads_with_wrappers_strictly(self, argv, expected):
+        # The strict reading, not just the lenient fallback, accepts these.
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        result = parse_native(argv)
+        assert result is not None and (result.cmd, result.params, result.options) == expected
+
+    def test_dotted_setting_takes_a_value_its_bare_spelling_does_not(self):
+        # pnpm 12 takes `--config.save-workspace-protocol=rolling` but not the bare
+        # `--save-workspace-protocol=rolling` (classify_dotted vs classify_valued_flag).
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        assert parse_native(["--save-workspace-protocol=rolling", "install"]) is None
+        result = parse_pnpm_args(["pnpm", "--no-progress", "--config.save-workspace-protocol=rolling",
+                                  "with", "12.14.0", "add", "lodash"])
+        assert result is not None and result.packages == ["lodash"]
+
+    def test_config_registry_override_counts_in_pnpm_8_to_11(self, tmp_path, monkeypatch):
+        # pnpm 12 refuses the abbreviated --stor, so only pnpm 8-11 read this; each keeps
+        # `--config.registry` (pnpm 11 merges it back after its parse; normalizeOptions()
+        # strips the prefix), so lodash comes from the public registry.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("registry=https://private.example/\n")
+        result = parse_pnpm_args(["pnpm", "add", "lodash", "--stor", "cache",
+                                  "--config.registry=https://registry.npmjs.org/"])
+        assert result is not None and result.registries == {"registry": "https://registry.npmjs.org/"}
+        assert NodeLanguage().explicit_package_public("lodash", result, tmp_path)
+
+    def test_config_override_beside_a_native_only_option_is_gated(self):
+        # pnpm 8-11 refuse --auto-dedupe, so only pnpm 12's reading installs.
+        result = parse_pnpm_args(["pnpm", "install", "--auto-dedupe", "--config.ignore-scripts=true"])
+        assert result is not None and result.is_lockfile_install
+
+    def test_short_option_cluster_is_gated_with_its_directory(self):
+        # pnpm 8-11 refuse --auto-dedupe, so only pnpm 12's reading installs here.
+        result = parse_pnpm_args(["pnpm", "-rF", "web", "install", "--auto-dedupe"])
+        assert result is not None and result.is_lockfile_install
+        result = parse_pnpm_args(["pnpm", "install", "-rC", "sub"])
+        assert result is not None and result.working_dir == "sub"
+
+    def test_nested_with_wrappers_parse_each_child_once(self, monkeypatch):
+        from packagealert.parsers import pnpm_argv
+
+        calls = 0
+        real = pnpm_argv.parse_native
+
+        def counting(argv):
+            nonlocal calls
+            calls += 1
+            return real(argv)
+
+        monkeypatch.setattr(pnpm_argv, "parse_native", counting)
+        result = parse_pnpm_args(["pnpm", *["with", "11"] * 12, "add", "x"])
+        assert result is not None and result.packages == ["x"]
+        assert calls == 13  # once per level, not 2**13 - 1
+
+    def test_registry_only_some_versions_apply_is_treated_as_public(self):
+        # pnpm 8-10 escape everything after `exec` and use the configured registry;
+        # pnpm 11 applies the abbreviated --registry. The package must still be looked up.
+        result = parse_pnpm_args(["pnpm", "add", "lodash", "exec", "--registr=https://private.example/"])
+        assert result is not None and result.registries == {"registry": "https://registry.npmjs.org/"}
+        result = parse_pnpm_args(["pnpm", "add", "lodash", "--registry=https://private.example/"])
+        assert result is not None and result.registries == {"registry": "https://private.example/"}
+
+    def test_version_dependent_directories_are_ambiguous(self):
+        # pnpm 8-9 install into b (the renamed --prefix wins); 10+ into a.
+        result = parse_pnpm_args(["pnpm", "-C", "a", "--prefix", "b", "install"])
+        assert result is not None and result.ambiguous_dirs
+        result = parse_pnpm_args(["pnpm", "-C", "a", "install"])
+        assert result is not None and not result.ambiguous_dirs and result.working_dir == "a"
+
+    @pytest.mark.parametrize(("argv", "ambiguous"), [
+        (["-C", "./sub", "--prefix", "sub", "install"], False),  # one directory, two spellings
+        (["-C", "sub/", "--prefix", "sub", "install"], False),
+        (["-C", "../x", "--prefix", "x", "install"], True),     # `..` is not collapsed
+    ])
+    def test_equivalent_directory_spellings_are_not_ambiguous(self, argv, ambiguous):
+        result = parse_pnpm_args(["pnpm", *argv])
+        assert result is not None and result.ambiguous_dirs is ambiguous
+
+    def test_global_disagreement_still_looks_up_a_project_private_scope(self, tmp_path, monkeypatch):
+        # pnpm 8-11 read `--global false` as a local install, pnpm 12 as a global one
+        # ("false" becomes a package). A global install ignores the project's .npmrc,
+        # so the private @corp registry there cannot excuse the lookup.
+        from packagealert.languages.node import NodeLanguage
+
+        for var in ("npm_config_registry", "NPM_CONFIG_REGISTRY", "npm_config_userconfig", "npm_config_@corp:registry"):
+            monkeypatch.delenv(var, raising=False)
+        (tmp_path / ".npmrc").write_text("@corp:registry=https://private.example/\n")
+        lang = NodeLanguage()
+        local = parse_pnpm_args(["pnpm", "add", "@corp/pkg"])
+        assert local is not None and not lang.explicit_package_public("@corp/pkg", local, tmp_path)
+        mixed = parse_pnpm_args(["pnpm", "add", "--global", "false", "@corp/pkg"])
+        assert mixed is not None and not mixed.global_install  # sandboxed as the local readings say
+        assert lang.explicit_package_public("@corp/pkg", mixed, tmp_path)
+        # An alias names two scopes; the target's is the one fetched.
+        alias = parse_pnpm_args(["pnpm", "add", "--global", "false", "@alias/x@npm:@corp/pkg@1"])
+        assert alias is not None and lang.explicit_package_public("@alias/x@npm:@corp/pkg@1", alias, tmp_path)

@@ -236,6 +236,9 @@ class ProcessInstall:
     # Registry settings given on the command line, keyed as the manager names
     # them (npm: "registry", "@scope:registry"); see ParsedInstall.registries.
     registries: dict[str, str] = field(default_factory=dict)
+    # The directories depend on which version of the manager runs; see
+    # ParsedInstall.ambiguous_dirs. The sandbox refuses such a command.
+    ambiguous_dirs: bool = False
 
 
 @runtime_checkable
