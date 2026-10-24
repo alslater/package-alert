@@ -1,21 +1,10 @@
-# uv 0.13.1 rc=1
+# uv 0.13.5 rc=1
 Using CPython 3.13.13
 error: No solution found when resolving dependencies
   cause: Because requests>=2.33.0 depends on urllib3>=1.26,<3 and all of:
              requests==2.31.0
              requests>=2.32.2
-         depend on urllib3==9.9.9, we can conclude that requests>=2.33.0 cannot be used.
-         And because requests==2.32.0 was yanked (reason: Yanked due to conflicts with CVE-2024-35195 mitigation), we can conclude that all of:
-             requests==2.32.0
-             requests>=2.33.0
-          cannot be used.
-         And because only the following versions of requests are available:
-             requests<=2.32.0
-             requests>=2.32.1
-         and requests==2.32.1 was yanked (reason: Yanked due to conflicts with CVE-2024-35195 mitigation), we can conclude that all of:
-             requests>=2.32.0,<=2.32.1
-             requests>=2.33.0
-          cannot be used. (1)
+         depend on urllib3==9.9.9, we can conclude that requests>=2.33.0 cannot be used. (1)
 
          Because all of:
              requests==2.31.0
@@ -29,16 +18,29 @@ error: No solution found when resolving dependencies
              requests>=2.32.2,<=2.32.5
           cannot be used.
          And because only the following versions of requests are available:
-             requests<=2.31.0
-             requests>=2.32.0,<=2.32.1
-             requests>=2.32.2,<=2.32.5
+             requests<=2.32.5
              requests>=2.33.0
          we can conclude that all of:
-             requests>=2.31.0,<2.32.0
-             requests>2.32.1,<2.33.0
+             requests==2.31.0
+             requests>=2.32.2,<2.33.0
           cannot be used.
-         And because we know from (1) that all of:
-             requests>=2.32.0,<=2.32.1
-             requests>=2.33.0
-          cannot be used, we can conclude that requests>=2.31.0 cannot be used.
-         And because your project depends on requests>=2.31, we can conclude that your project's requirements are unsatisfiable.
+         And because we know from (1) that requests>=2.33.0 cannot be used, we can conclude that all of:
+             requests==2.31.0
+             requests>=2.32.2
+          cannot be used.
+         And because only the following versions of requests are available:
+             requests<=2.31.0
+             requests>=2.32.0
+         we can conclude that all of:
+             requests>=2.31.0,<2.32.0
+             requests>=2.32.2
+          cannot be used.
+         And because requests==2.32.0 was yanked (reason: Yanked due to conflicts with CVE-2024-35195 mitigation) and only the following versions of requests are available:
+             requests<=2.32.0
+             requests==2.32.1
+             requests>=2.32.2
+         we can conclude that all of:
+             requests>=2.31.0,<2.32.1
+             requests>2.32.1
+          cannot be used.
+         And because requests==2.32.1 was yanked (reason: Yanked due to conflicts with CVE-2024-35195 mitigation) and your project depends on requests>=2.31, we can conclude that your project's requirements are unsatisfiable.

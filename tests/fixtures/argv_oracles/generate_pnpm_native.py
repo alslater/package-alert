@@ -18,7 +18,10 @@ flag X; another accepted name is a Boolean setting (which also claims a
 following `true`/`false`); and a rejected one is a value setting if it claims
 the token after it — free text, a number, or one of pnpm 8-11's enum values.
 
-    python tests/fixtures/argv_oracles/generate_pnpm_native.py <dir>/node_modules/pnpm
+    python tests/fixtures/argv_oracles/generate_pnpm_native.py <dir>/node_modules/pnpm ...
+
+Give every pnpm 12+ release whose table differs (the latest, and the last release
+before each parse change); parse_pnpm_args() reads them all.
 
 writes packagealert/parsers/_pnpm_native_tables.py.
 """
@@ -221,7 +224,8 @@ def _setting(pnpm: Path, name: str, values: list[str], env: dict[str, str], cwd:
     return ["enum", taken, [v for v in values if accepted(f"--config.{name}={v}")]] if taken else None
 
 
-def generate(pkg: Path) -> None:
+def probe(pkg: Path) -> tuple[str, dict]:
+    """(pnpm's version, its table) for the pnpm in *pkg*."""
     pnpm = pkg / "pnpm"
     version = json.loads((pkg / "package.json").read_text())["version"]
     with tempfile.TemporaryDirectory(prefix="pa-pnpm-native-") as tmp_s:
@@ -285,47 +289,58 @@ def generate(pkg: Path) -> None:
                 if found_setting is not None:
                     settings[name] = found_setting
         print(f"pnpm {version}: {len(settings)} settings taken out before clap")
+    return version, {
+        "commands": dict(sorted(commands.items())),
+        "options": {k: dict(sorted(v.items())) for k, v in sorted(per_command.items())},
+        "shorts": {k: dict(sorted(v.items())) for k, v in sorted(shorts.items())},
+        "aliases": {k: dict(sorted(v.items())) for k, v in sorted(aliases.items())},
+        "optional_values": dict(sorted(optional_values.items())),
+        "renamed": dict(sorted(renamed.items())),
+        "settings": dict(sorted(settings.items())),
+    }
+
+
+def generate(pkgs: list[Path]) -> None:
+    tables = dict(probe(pkg) for pkg in pkgs)
+    versions = sorted(tables, key=lambda v: [int(x) for x in v.split(".")])
     lines = [
         '"""pnpm 12+ (native, clap) argv-parsing data, GENERATED — do not edit by hand.',
         "",
-        f"Generated from pnpm {version} by tests/fixtures/argv_oracles/generate_pnpm_native.py;",
+        f"Generated from pnpm {', '.join(versions)} by tests/fixtures/argv_oracles/generate_pnpm_native.py;",
         "see packagealert/parsers/pnpm_argv.py.",
+        "",
+        "Per pnpm version: 'commands', every command name (aliases included) -> its full",
+        "name. 'options', per installing command ('' = global, accepted anywhere): 'value'",
+        "takes one value, 'multi' every value that follows, 'optional' one only when",
+        "attached (`--color=auto`), 'flag' none. 'shorts' and 'aliases', short forms and",
+        "long aliases per command ('' = before the command). 'optional_values', an",
+        "'optional' option's accepted attached values (empty: any). 'renamed', an alias",
+        "pnpm drops when its canonical option is also given. 'settings', those pnpm takes",
+        "out of argv before clap unless the command declares the name itself: [kind,",
+        "values, dotted values]. 'bool' (also `--no-<name>`, `--<name>=<bool>`, and a",
+        "following true/false/1/0; values: keywords `--<name>=` also takes), 'text' (a",
+        "following token not starting with `-`), 'int'/'uint', or 'enum' (one of values).",
+        "Dotted values: what `--config.<name>=` takes besides.",
         '"""',
         "",
-        f"PNPM_NATIVE_VERSION = {version!r}",
-        "# Every command name (aliases included) -> its full name.",
-        f"PNPM_NATIVE_COMMANDS: dict[str, str] = {dict(sorted(commands.items()))!r}",
-        "# Options per installing command ('' = global, accepted anywhere): 'value' takes one",
-        "# value, 'multi' every value that follows, 'optional' one only when attached",
-        "# (`--color=auto`), 'flag' none.",
-        "PNPM_NATIVE_OPTIONS: dict[str, dict[str, str]] = {",
-        *(f"    {k!r}: {dict(sorted(v.items()))!r}," for k, v in sorted(per_command.items())),
-        "}",
-        "# Short forms and long aliases per command ('' = before the command).",
-        "PNPM_NATIVE_SHORTS: dict[str, dict[str, str]] = {",
-        *(f"    {k!r}: {dict(sorted(v.items()))!r}," for k, v in sorted(shorts.items())),
-        "}",
-        "PNPM_NATIVE_ALIASES: dict[str, dict[str, str]] = {",
-        *(f"    {k!r}: {dict(sorted(v.items()))!r}," for k, v in sorted(aliases.items())),
-        "}",
-        "# Settings pnpm takes out of argv before clap, unless the command declares the",
-        "# name itself: [kind, values, dotted values]. 'bool' (also `--no-<name>`,",
-        "# `--<name>=<bool>`, and a following true/false/1/0; values: keywords `--<name>=`",
-        "# also takes), 'text' (a following token not starting with `-`), 'int'/'uint',",
-        "# or 'enum' (one of values). Dotted values: what `--config.<name>=` takes besides.",
-        "# An 'optional' option's accepted attached values (empty: any).",
-        f"PNPM_NATIVE_OPTIONAL_VALUES: dict[str, list[str]] = {dict(sorted(optional_values.items()))!r}",
-        "# Renamed options: an alias pnpm drops when its canonical option is also given.",
-        f"PNPM_NATIVE_RENAMED: dict[str, str] = {dict(sorted(renamed.items()))!r}",
-        "PNPM_NATIVE_SETTINGS: dict[str, list] = {",
-        *(f"    {k!r}: {v!r}," for k, v in sorted(settings.items())),
-        "}",
+        "PNPM_NATIVE_TABLES: dict[str, dict] = {",
     ]
+    for version in versions:
+        lines.append(f"    {version!r}: {{")
+        for key, value in tables[version].items():
+            if isinstance(value, dict) and value and all(isinstance(v, dict) for v in value.values()):
+                lines.append(f"        {key!r}: {{")
+                lines.extend(f"            {k!r}: {v!r}," for k, v in value.items())
+                lines.append("        },")
+            else:
+                lines.append(f"        {key!r}: {value!r},")
+        lines.append("    },")
+    lines.append("}")
     OUT.write_text("\n".join(lines) + "\n")
     print(f"wrote {OUT.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) < 2:
         raise SystemExit(__doc__)
-    generate(Path(sys.argv[1]).resolve())
+    generate([Path(p).resolve() for p in sys.argv[1:]])

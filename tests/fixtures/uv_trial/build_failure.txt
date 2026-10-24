@@ -1,4 +1,4 @@
-# uv 0.13.1 rc=1
+# uv 0.13.5 rc=1
 error: Failed to build `causal-conv1d==1.5.0.post8`
   cause: The build backend returned an error
   cause: Call to `setuptools.build_meta:__legacy__.prepare_metadata_for_build_wheel` failed (exit status: 1)
