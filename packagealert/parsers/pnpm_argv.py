@@ -46,9 +46,9 @@ class PnpmParse:
     # reading lacks them (a registry URL our validator cannot canonicalise as
     # pnpm's URL parser would, for one).
     dropped: list[str] = field(default_factory=list)
-    # pnpm 12: the `--config.<key>` settings taken out before clap besides the
-    # registries, which pnpm hands to its config loader (ConfigOverrides.unported)
-    # with a precedence package-alert does not model.
+    # pnpm 12: the settings taken out before clap besides the registries, as
+    # `--config.<key>` or a bare flag, whose effect (precedence, the directory a
+    # relative path is anchored to) package-alert does not model.
     overrides: list[str] = field(default_factory=list)
 
     @property
@@ -60,6 +60,9 @@ class PnpmParse:
 @dataclass(frozen=True)
 class _Tables:
     major: int
+    # pnpm 11.28.7+ types `--config.<key>` as the command declares <key>, in both
+    # nopt passes (configDotTypes).
+    typed_config_dot: bool
     universal: Types
     universal_shorthands: Shorthands
     renamed: dict[str, str]
@@ -93,6 +96,7 @@ def _tables(version: str) -> _Tables:
     t = PNPM_TABLES[version]
     return _Tables(
         major=int(version.split(".")[0]),
+        typed_config_dot=tuple(int(x) for x in version.split(".")) >= (11, 28, 7),
         universal=t["universal"],
         universal_shorthands=_shorthands(t["universal_shorthands"]),
         renamed=t["renamed"],
@@ -200,13 +204,18 @@ def _parse(t: _Tables, input_argv: list[str]) -> PnpmParse | None:
     else:
         escape = t.escape_args
     shorthands: Shorthands = {**t.universal_shorthands, **t.shorthands_for(command_name)}
-    parsed, remain = parse_with(argv, {"recursive": _BOOL, **types}, shorthands, frozenset(escape))
+    # pnpm 11.28.7+ also declares each `config.<key>`, so `--con` no longer abbreviates
+    # `--config`, and a `--config.<key>` value is cleaned as <key>'s type.
+    config_types: Types = {f"config.{k}": v for k, v in types.items()} if t.typed_config_dot else {}
+    main_types: Types = {"recursive": _BOOL, **types, **config_types}
+    parsed, remain = parse_with(argv, main_types, shorthands, frozenset(escape))
     options: dict[str, object] = dict(parsed)
-    dropped = _clean(options, {"recursive": _BOOL, **types})  # inside nopt, before pnpm's renames
+    dropped = _clean(options, main_types)  # inside nopt, before pnpm's renames
     if config_dot:
-        merged: dict[str, object] = dict(parse_with(config_dot, {}, {})[0])
-        _clean(merged, {})  # nopt({}, {}, ...) cleans with its default types too
+        merged: dict[str, object] = dict(parse_with(config_dot, config_types, {})[0])
+        dropped += _clean(merged, config_types)  # untyped keys get nopt's default types
         options.update(merged)
+    dropped = [k.removeprefix("config.") for k in dropped]
     for key in list(options):
         target = t.renamed.get(key)
         if target:
@@ -311,18 +320,22 @@ def _clean(options: dict[str, object], types: Types) -> list[str]:
     return dropped
 
 
-def _native_tables() -> tuple[dict, dict, dict, dict, dict, dict]:
-    from packagealert.parsers._pnpm_native_tables import (
-        PNPM_NATIVE_ALIASES,
-        PNPM_NATIVE_COMMANDS,
-        PNPM_NATIVE_OPTIONS,
-        PNPM_NATIVE_RENAMED,
-        PNPM_NATIVE_SETTINGS,
-        PNPM_NATIVE_SHORTS,
-    )
+def native_versions() -> list[str]:
+    """The pnpm 12+ versions with a table, oldest first."""
+    from packagealert.parsers._pnpm_native_tables import PNPM_NATIVE_TABLES
 
-    return (PNPM_NATIVE_COMMANDS, PNPM_NATIVE_OPTIONS, PNPM_NATIVE_SHORTS, PNPM_NATIVE_ALIASES,
-            PNPM_NATIVE_RENAMED, PNPM_NATIVE_SETTINGS)
+    return sorted(PNPM_NATIVE_TABLES, key=lambda v: [int(x) for x in v.split(".")])
+
+
+def _native_table(version: str) -> dict:
+    from packagealert.parsers._pnpm_native_tables import PNPM_NATIVE_TABLES
+
+    return PNPM_NATIVE_TABLES[version]
+
+
+def _native_tables(version: str) -> tuple[dict, dict, dict, dict, dict, dict]:
+    t = _native_table(version)
+    return t["commands"], t["options"], t["shorts"], t["aliases"], t["renamed"], t["settings"]
 
 
 def _parse_bool(value: str) -> bool | None:
@@ -388,8 +401,8 @@ class _NativeArity:
     and not another counts as a flag, so a command name is never taken as a
     value (flag_relocation.rs)."""
 
-    def __init__(self) -> None:
-        _commands, options, shorts_by_scope, aliases_by_scope, _renamed, self.settings = _native_tables()
+    def __init__(self, version: str) -> None:
+        self.commands, options, shorts_by_scope, aliases_by_scope, _renamed, self.settings = _native_tables(version)
         self.kinds: dict[str, str] = {}
         for table in options.values():
             for name, kind in table.items():
@@ -428,7 +441,7 @@ def _native_command(argv: list[str], arity: _NativeArity, *, setting_first: bool
     `install` naming a package is `add` (install_as_add.rs): that is the
     grammar its options are checked against.
     """
-    commands = _native_tables()[0]
+    commands = arity.commands
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -478,7 +491,8 @@ def _native_extract(argv: list[str], end: int, claimed: set[str], settings: dict
     each `--config.<key>=<value>`, and each setting spelled as a bare flag that
     the command does not declare, with the value it claims. Every token before
     *end* is looked at on its own, so one between an option and its value goes
-    too. A registry setting is recorded in *options*."""
+    too. A registry setting is recorded in *options*, every other one taken out
+    in *overrides*."""
     out: list[str] = []
     i = 0
     while i < len(argv):
@@ -516,12 +530,16 @@ def _native_extract(argv: list[str], end: int, claimed: set[str], settings: dict
             out.append(arg)
             i += 1
         elif eq:
-            if not _setting_takes(setting, value):
+            if _setting_takes(setting, value):
+                overrides.append(name)
+            else:
                 out.append(arg)
             i += 1
         elif setting[0] == "bool":
+            overrides.append(name)
             i += 2 if following is not None and _parse_bool(following) is not None else 1
         elif _setting_claims(setting, following):
+            overrides.append(name)
             i += 2
         else:
             out.append(arg)  # its value is missing: left for clap
@@ -596,15 +614,9 @@ def _native_shadowed(argv: list[str], renamed: dict[str, str], arity: _NativeAri
     return {alias for alias, canonical in renamed.items() if alias in given and canonical in given}
 
 
-def native_version() -> str:
-    from packagealert.parsers._pnpm_native_tables import PNPM_NATIVE_VERSION
-
-    return PNPM_NATIVE_VERSION
-
-
-def parse_native(argv: list[str], *, lenient: bool = False) -> PnpmParse | None:
+def parse_native(argv: list[str], *, lenient: bool = False, pnpm_version: str | None = None) -> PnpmParse | None:
     """pnpm 12+'s parse of *argv*: its pre-clap rewrites, then clap's rules
-    over the generated table.
+    over the generated table for *pnpm_version* (default: the newest).
 
     The rewrites (pnpm/crates/cli/src/lib.rs), in pnpm's order: `pm` is
     stripped; `--config.<key>=<value>` and the settings given as bare flags
@@ -625,10 +637,10 @@ def parse_native(argv: list[str], *, lenient: bool = False) -> PnpmParse | None:
     a best guess at a command no reading accepts, used only to gate one that
     pnpm 12 might run (see parse_pnpm_args()).
     """
-    from packagealert.parsers._pnpm_native_tables import PNPM_NATIVE_OPTIONAL_VALUES
-
-    commands, options_by_scope, shorts_by_scope, aliases_by_scope, renamed, settings = _native_tables()
-    arity = _NativeArity()
+    pnpm_version = pnpm_version or native_versions()[-1]
+    optional_values: dict[str, list[str]] = _native_table(pnpm_version)["optional_values"]
+    commands, options_by_scope, shorts_by_scope, aliases_by_scope, renamed, settings = _native_tables(pnpm_version)
+    arity = _NativeArity(pnpm_version)
     options: dict[str, object] = {}
     target, at = _native_command(argv, arity, setting_first=True)
     end = argv.index("--") if "--" in argv else len(argv)
@@ -733,7 +745,7 @@ def parse_native(argv: list[str], *, lenient: bool = False) -> PnpmParse | None:
                 continue
             store = {} if drop else options
             if kind == "optional":
-                allowed = PNPM_NATIVE_OPTIONAL_VALUES.get(name)
+                allowed = optional_values.get(name)
                 if eq and allowed and value not in allowed:
                     return None  # clap: invalid value
                 store[name[2:]] = value if eq else True
@@ -778,7 +790,8 @@ def parse_native(argv: list[str], *, lenient: bool = False) -> PnpmParse | None:
                 if version is None or argv[version] == "--":
                     return None
                 if argv[version] == "current":  # reparsed here, outer options kept
-                    inner = parse_native([*argv[:i], *argv[i + 1:version], *argv[version + 1:]], lenient=lenient)
+                    inner = parse_native([*argv[:i], *argv[i + 1:version], *argv[version + 1:]], lenient=lenient,
+                                         pnpm_version=pnpm_version)
                     if inner is not None:
                         for key, value in options.items():  # what extraction took out
                             inner.options.setdefault(key, value)

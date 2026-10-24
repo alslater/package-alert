@@ -1,5 +1,5 @@
 {
- "pip": "26.2.1",
+ "pip": "26.2.2",
  "long_options": {
   "--index-url": true,
   "--pypi-url": true,

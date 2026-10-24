@@ -3944,9 +3944,10 @@ class TestPnpmAudit:
         # clap's error lists auto/always/never, but pnpm 12 also takes true/false.
         (["install", "--auto-dedupe", "--color=true"], ("install", [], {"auto-dedupe": True, "color": "true"})),
         (["install", "--auto-dedupe", "--color=false"], ("install", [], {"auto-dedupe": True, "color": "false"})),
-        # `with current`'s settings are taken out before the wrapper is removed.
+        # `with current`'s settings are taken out before the wrapper is removed, checked
+        # against `with`'s options, so pnpm 12.15's --auto-dedupe setting goes too.
         (["with", "current", "install", "--auto-dedupe", "--ignore-scripts", "false"],
-         ("install", [], {"auto-dedupe": True})),
+         ("install", [], {})),
         (["add", "--auto-dedupe", "--no-global=false", "lodash"],
          ("add", ["lodash"], {"auto-dedupe": True, "global": True})),
     ])
@@ -4104,6 +4105,71 @@ class TestPnpmAudit:
         result = parse_pnpm_args(argv)
         assert result is not None and result.ambiguous_dirs
 
+    @pytest.mark.parametrize("argv", [
+        # fetch declares neither, so pnpm 12.15 takes both out as settings (and pnpm
+        # 8-11 refuse --auto-dedupe): its config loader places the lock file.
+        ["pnpm", "fetch", "--auto-dedupe", "--lockfile-dir", "locks"],
+        ["pnpm", "fetch", "--auto-dedupe", "--lockfile-dir=locks"],
+    ])
+    def test_pnpm_12_bare_directory_setting_is_refused(self, argv):
+        from packagealert.parsers.pnpm_argv import parse_native
+
+        native = parse_native(argv[1:])
+        assert native is not None and "lockfile-dir" in native.overrides
+        result = parse_pnpm_args(argv)
+        assert result is not None and result.is_lockfile_install and result.ambiguous_dirs
+
+    def test_pnpm_11_types_config_dot_values(self):
+        # pnpm 11.28.7+ (configDotTypes): `--config.<key>` takes <key>'s type, so a key
+        # abbreviates and an invalid URL is dropped, and `--con` no longer abbreviates
+        # `--config`.
+        from packagealert.parsers import pnpm_argv
+
+        t = next(t for t in map(pnpm_argv._tables, pnpm_argv.versions()) if t.typed_config_dot)
+        abbreviated = pnpm_argv._parse(t, ["add", "x", "--config.reg=http://corp.example/"])
+        assert abbreviated is not None and abbreviated.options.get("registry") == "http://corp.example/"
+        invalid = pnpm_argv._parse(t, ["add", "x", "--config.registry=notaurl"])
+        assert invalid is not None and "registry" not in invalid.options and invalid.dropped == ["registry"]
+        refused = pnpm_argv._parse(t, ["--con", "add", "x"])
+        assert refused is None or refused.rejected
+
+    def test_pnpm_11_untyped_and_typed_config_dot_are_both_read(self):
+        # pnpm 11.28.6 reads `--config.global=` as '' (local), 11.28.7+ as true; `pm`
+        # rules out pnpm 8-10 and `--stor` pnpm 12, so only the pnpm 11 readings install.
+        from packagealert.parsers import pnpm_argv
+
+        typed = {t.typed_config_dot for t in map(pnpm_argv._tables, pnpm_argv.versions()) if t.major == 11}
+        assert typed == {False, True}
+        result = parse_pnpm_args(["pnpm", "pm", "add", "lodash", "--stor", "cache", "--config.global="])
+        assert result is not None and result.packages == ["lodash"] and not result.global_install
+
+    def test_pnpm_12_readings_before_and_after_new_settings_are_merged(self):
+        # pnpm 12.15 takes --auto-dedupe out as a setting, claiming `false`; 12.14 reads
+        # it as add's flag, so `false` is a package. Both pnpm 12 tables are read.
+        from packagealert.parsers import pnpm_argv
+
+        argv = ["with", "current", "add", "--auto-dedupe", "false", "lodash"]
+        params = {v: (r.params if (r := pnpm_argv.parse_native(argv, pnpm_version=v)) else None)
+                  for v in pnpm_argv.native_versions()}
+        assert ["false", "lodash"] in params.values() and ["lodash"] in params.values()
+        result = parse_pnpm_args(["pnpm", *argv])
+        assert result is not None and sorted(result.packages) == ["false", "lodash"]
+
+    def test_dropped_registry_override_counts_as_public(self):
+        # pnpm 11.28.7+ canonicalises `https:registry.npmjs.org` to the public registry,
+        # overriding --registry; our validator drops it, which must not leave the private one.
+        from packagealert.parsers import pnpm_argv
+        from packagealert.parsers.process_args import _pnpm_registries
+
+        args = ["pm", "add", "lodash", "--stor", "cache", "--registry=https://private.example/",
+                "--config.registry=https:registry.npmjs.org"]
+        typed = next(v for v in pnpm_argv.versions() if pnpm_argv._tables(v).typed_config_dot)
+        reading = pnpm_argv.parse_cli_args(typed, args)
+        assert reading is not None and reading.dropped == ["registry"]
+        assert _pnpm_registries(reading.options, reading.dropped) == {"registry": "https://registry.npmjs.org/"}
+        result = parse_pnpm_args(["pnpm", *args])
+        assert result is not None and result.registries == {"registry": "https://registry.npmjs.org/"}
+
     def test_pnpm_12_dotted_global_override_grants_no_exemption(self):
         result = parse_pnpm_args(["pnpm", "add", "-g", "x", "--auto-dedupe", "--config.global=false"])
         assert result is not None and not result.global_install
@@ -4202,15 +4268,15 @@ class TestPnpmAudit:
         calls = 0
         real = pnpm_argv.parse_native
 
-        def counting(argv):
+        def counting(argv, **kwargs):
             nonlocal calls
             calls += 1
-            return real(argv)
+            return real(argv, **kwargs)
 
         monkeypatch.setattr(pnpm_argv, "parse_native", counting)
         result = parse_pnpm_args(["pnpm", *["with", "11"] * 12, "add", "x"])
         assert result is not None and result.packages == ["x"]
-        assert calls == 13  # once per level, not 2**13 - 1
+        assert calls == 13 * len(pnpm_argv.native_versions())  # once per table per level
 
     def test_registry_only_some_versions_apply_is_treated_as_public(self):
         # pnpm 8-10 escape everything after `exec` and use the configured registry;

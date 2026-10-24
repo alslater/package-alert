@@ -1,4 +1,4 @@
-# uv 0.13.1 rc=0
+# uv 0.13.5 rc=0
 Using CPython 3.13.13
-Resolved 26 packages in 333ms
+Resolved 6 packages in 131ms
 Update urllib3 v2.2.1 -> v2.8.0

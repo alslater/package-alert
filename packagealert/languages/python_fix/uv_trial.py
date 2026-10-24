@@ -7,7 +7,7 @@ uv writes all of a dry run's output to stderr. On success (exit 0) it prints
 ", "-joined set of `v<version>` tokens; several versions mean the package is
 locked once per marker fork. When no resolution exists (exit 1) it prints `No solution found
 when resolving dependencies` and an explanation naming each constraint. This
-format is not a documented interface (audited against uv 0.13.1 — see the uv
+format is not a documented interface (audited against uv 0.13.5 — see the uv
 audit in .claude/CLAUDE.md), so anything unrecognised makes the trial
 inconclusive rather than being guessed at.
 """
