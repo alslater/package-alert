@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import re
+import stat
 import subprocess
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -374,6 +376,98 @@ def _pnpm_store_id(rel: Path) -> str | None:
     return parts[1]
 
 
+def _nested_manifest(rel: Path) -> bool:
+    """Whether *rel* (relative to node_modules) is the manifest of a nested copy:
+    <pkg>/node_modules/<pkg>/.../package.json, each <pkg> a name or @scope/name, as
+    npm and yarn 1 nest a second version of a package beneath its dependent."""
+    parts = rel.parts
+    if not parts or parts[-1] != "package.json":
+        return False
+    i, packages, segments = 0, 0, parts[:-1]
+    while i < len(segments):
+        width = 2 if segments[i].startswith("@") else 1
+        name = segments[i:i + width]
+        if len(name) != width or any(not x or x.startswith(".") or x == "node_modules" for x in name):
+            return False
+        packages += 1
+        i += width
+        if i < len(segments):
+            if segments[i] != "node_modules":
+                return False
+            i += 1
+            if i == len(segments):
+                return False
+    return packages >= 2
+
+
+def _nested_copy_dirs(node_modules: Path) -> dict[str, tuple[Path, ...]]:
+    """The package directories under *node_modules* (not pnpm's store) beyond
+    node_modules/<name>, by the name their manifest declares: every nested one, and
+    any installed under an alias (`"x": "npm:ms@2.1.2"` installs ms as x). One whose
+    manifest declares no name is indexed by the name it is installed under. Each is a
+    real directory inside node_modules. The index is cached per install (see
+    _nested_index_key())."""
+    return _nested_index(str(node_modules), _nested_index_key(node_modules))
+
+
+def _nested_index_key(node_modules: Path) -> tuple:
+    """What identifies one state of a node_modules tree for the index: its own mtime
+    and that of the hidden lock npm (`.package-lock.json`) or yarn 1 (`.yarn-integrity`)
+    rewrites on every install that changes the tree, plus a minute, so a change no
+    install recorded is picked up within one."""
+    stamps = []
+    for path in (node_modules, node_modules / ".package-lock.json", node_modules / ".yarn-integrity"):
+        try:
+            stamps.append(path.stat().st_mtime_ns)
+        except OSError:
+            stamps.append(None)
+    return (*stamps, int(time.monotonic() // 60))
+
+
+@functools.lru_cache(maxsize=8)
+def _nested_index(node_modules: str, _key: tuple) -> dict[str, tuple[Path, ...]]:
+    found: dict[str, list[Path]] = {}
+
+    def packages(directory: str) -> list[tuple[str, str]]:
+        """(name, path) of each package directory directly in a node_modules."""
+        out: list[tuple[str, str]] = []
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            return out
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+                continue
+            if not entry.name.startswith("@"):
+                out.append((entry.name, entry.path))
+                continue
+            try:
+                scoped = list(os.scandir(entry.path))
+            except OSError:
+                continue
+            out += [(f"{entry.name}/{s.name}", s.path) for s in scoped
+                    if not s.name.startswith(".") and s.is_dir(follow_symlinks=False)]
+        return out
+
+    def add(name: str, path: str, nested: bool) -> None:
+        declared = _manifest_field(Path(path), "name") or name
+        if nested or declared != name:
+            found.setdefault(declared, []).append(Path(path))
+
+    pending = []
+    for name, path in packages(node_modules):
+        add(name, path, nested=False)
+        pending.append(path)
+    while pending:
+        sub = os.path.join(pending.pop(), "node_modules")
+        if os.path.islink(sub) or not os.path.isdir(sub):
+            continue
+        for name, path in packages(sub):
+            add(name, path, nested=True)
+            pending.append(path)
+    return {name: tuple(dirs) for name, dirs in found.items()}
+
+
 def _pnpm_store_id_source(store_id: str, name: str) -> bool | None:
     """Whether a virtual-store entry holds a registry version (True), another source
     (False), or cannot say (None). pnpm names an entry `<name>@<version>[_<peers>]`
@@ -389,12 +483,36 @@ def _pnpm_store_id_source(store_id: str, name: str) -> bool | None:
     return kept[len(prefix):][:1].isdigit()
 
 
-def _manifest_version(package_dir: Path) -> str | None:
+def _read_manifest(path: Path) -> dict | None:
+    """The JSON object in the manifest at *path*, or None. Only a regular file is read,
+    never through a symlink: an install can leave anything at that path, and a FIFO
+    there would block the read forever."""
     try:
-        version = json.loads((package_dir / "package.json").read_text()).get("version")
-    except (OSError, ValueError, AttributeError):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
         return None
-    return version if isinstance(version, str) and version else None  # "" is no version
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb") as f:
+            fd = -1
+            data = json.loads(f.read())
+    except (OSError, ValueError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    return data if isinstance(data, dict) else None
+
+
+def _manifest_field(package_dir: Path, key: str) -> str | None:
+    """A non-empty string field of the manifest in *package_dir*, or None."""
+    value = (_read_manifest(package_dir / "package.json") or {}).get(key)
+    return value if isinstance(value, str) and value else None  # "" is no value
+
+
+def _manifest_version(package_dir: Path) -> str | None:
+    return _manifest_field(package_dir, "version")
 
 
 # A virtual-store id pnpm shortened: what it kept, then `_` and a 32-hex hash.
@@ -573,6 +691,26 @@ def _installed_provenance(node_modules: Path) -> tuple[dict[str, bool], tuple[st
     return package_lock_provenance(packages, registries), registries
 
 
+def _copy_provenance(node_modules: Path) -> dict[str, bool]:
+    """_installed_provenance()'s lock path -> from the public registry, cached while the
+    locks, package.json and the configured registries are unchanged: it is consulted
+    once per copy scored, and a large tree's lock is slow to parse."""
+    project = node_modules.parent
+    default, scopes = npm_registries(project)
+    stamps = []
+    for path in (node_modules / ".package-lock.json", project / "package-lock.json", project / "package.json"):
+        try:
+            stamps.append(path.stat().st_mtime_ns)
+        except OSError:
+            stamps.append(None)
+    return _cached_copy_provenance(str(node_modules), (*stamps, default, tuple(sorted(scopes.items()))))
+
+
+@functools.lru_cache(maxsize=8)
+def _cached_copy_provenance(node_modules: str, _key: tuple) -> dict[str, bool]:
+    return _installed_provenance(Path(node_modules))[0]
+
+
 def _lock_packages(lock: Path) -> dict | None:
     """A lock file's ``packages`` map, or None when it cannot be read."""
     data = _read_json_object(lock)
@@ -602,7 +740,8 @@ class NodeLanguage:
     process_names = ["npm", "yarn", "pnpm", "pn", "node", "nodejs"]  # noqa: RUF012
     contract_version: int = CURRENT_CONTRACT_VERSION
     # resolve_package_dir() can return several copies of one name and version (pnpm's
-    # store: peer contexts, a file: tarball beside a registry copy). Each is its own
+    # store: peer contexts, a file: tarball beside a registry copy; npm and yarn 1:
+    # the same version nested beneath several dependents). Each is its own
     # package, so each is risk-scored on its own rather than their signals summed.
     resolve_package_dir_returns_copies: bool = True
     author: str = "builtin"
@@ -1428,9 +1567,10 @@ class NodeLanguage:
             # Scoped pkg:  @scope/pkg/package.json (3 parts)
             # pnpm's isolated layout keeps the package itself in its virtual store,
             # linked from node_modules: .pnpm/<id>/node_modules/<name>/package.json
-            # (5 parts, 6 when scoped).
+            # (5 parts, 6 when scoped). npm and yarn 1 nest a second version beneath
+            # its dependent: a/node_modules/b/package.json, scoped names included.
             store_id = _pnpm_store_id(rel)
-            if len(rel.parts) not in (2, 3) and store_id is None:
+            if len(rel.parts) not in (2, 3) and store_id is None and not _nested_manifest(rel):
                 continue
             if p.is_symlink():
                 continue  # skip symlinks — could point outside the install target
@@ -1440,7 +1580,9 @@ class NodeLanguage:
             except (OSError, RuntimeError):
                 continue
             try:
-                data = json.loads(p.read_text())
+                data = _read_manifest(p)
+                if data is None:
+                    continue
                 name = data.get("name")
                 version = data.get("version") or None
                 if name:
@@ -1625,9 +1767,6 @@ class NodeLanguage:
         site_packages_dir: Path | None,
         version: str | None = None,
     ) -> list[Path]:
-        # *version* is accepted for signature compatibility but not used:
-        # node_modules holds exactly one version per package name at a given
-        # path, so the name alone identifies the tree unambiguously.
         if project_path is None:
             return []
         # Validate: scoped packages have exactly one '/' (e.g. @scope/name);
@@ -1653,35 +1792,47 @@ class NodeLanguage:
             candidate = None
         if candidate is not None and not candidate.is_relative_to(node_modules):
             candidate = None  # e.g. a workspace link: not this install's copy
+        top = candidate if candidate is not None and candidate.is_dir() else None
+        if top is not None and _manifest_field(top, "name") not in (None, package_name):
+            top = None  # an alias: another package installed under this name
+        # pnpm's isolated layout links only a direct dependency from node_modules/<name>,
+        # and its store can hold several copies of one version (peer contexts, a file:
+        # tarball). npm and yarn 1 hoist one version to node_modules/<name> and nest any
+        # other beneath its dependent (a/node_modules/<name>). Every contained copy at
+        # *version* is scanned (with no version: each copy whose manifest has none), from
+        # whichever layouts are present.
         store = node_modules / ".pnpm"
-        if version is None and store.is_dir():
-            # An unversioned package (a file: manifest without one): the top-level
-            # copy as before, and each store copy whose manifest has no version.
-            found = _pnpm_store_dirs(store, node_modules, package_name, None)
-            if candidate is not None and candidate.is_dir() and candidate not in found:
-                found.insert(0, candidate)
-            return found
-        if version is not None and store.is_dir():
-            # pnpm's isolated layout: node_modules/<name> links only a direct dependency,
-            # and the store can hold several copies of one version (peer contexts, a
-            # file: tarball), so every contained copy at that version is scanned.
-            found = _pnpm_store_dirs(store, node_modules, package_name, version)
-            if candidate is not None and candidate.is_dir() and _manifest_version(candidate) == version \
-                    and candidate not in found:
-                found.insert(0, candidate)
-            return found
-        if candidate is None or not candidate.is_dir():
-            return []
-        return [candidate]
+        copies = _pnpm_store_dirs(store, node_modules, package_name, version) if store.is_dir() else []
+        for nested in _nested_copy_dirs(node_modules).get(package_name, ()):
+            try:
+                package_dir = nested.resolve()
+            except (OSError, RuntimeError):  # RuntimeError: a symlink loop on Python 3.12
+                continue
+            if package_dir.is_relative_to(node_modules) and _manifest_version(package_dir) == version \
+                    and package_dir not in copies:
+                copies.append(package_dir)
+        # The top-level copy: always for an unversioned package, else at *version*.
+        if top is not None and (version is None or _manifest_version(top) == version) and top not in copies:
+            copies.insert(0, top)
+        if copies or store.is_dir():
+            return copies
+        # No copy at *version* (one that is a range rather than what was installed):
+        # the top-level copy, as before.
+        return [top] if top is not None else []
 
     def copy_from_public_registry(self, package_name: str, package_dir: Path) -> bool | None:
         """Whether a directory resolve_package_dir() returned is a registry copy: False
         for a pnpm store entry from a file:, link:, git or tarball source, None when its
-        store id was shortened past the source, and True for a registry entry or any
-        directory outside the store (whose provenance is the event's own)."""
+        store id was shortened past the source, and True for a registry entry. Outside
+        the store, a copy the lock npm wrote records (node_modules/a/node_modules/<name>)
+        is judged by its lock entry; any other's provenance is the event's own."""
         parts = package_dir.parts
         if ".pnpm" not in parts:
-            return True
+            if "node_modules" not in parts:
+                return True
+            root = parts.index("node_modules")
+            key = "/".join(parts[root:])
+            return _copy_provenance(Path(*parts[:root + 1])).get(key, True)
         i = len(parts) - 1 - parts[::-1].index(".pnpm")
         if i + 2 >= len(parts) or parts[i + 2] != "node_modules":
             return True

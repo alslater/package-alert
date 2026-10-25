@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
@@ -2547,3 +2548,249 @@ def test_a_raising_copies_descriptor_keeps_source_scoring(tmp_path, monkeypatch)
                          manager="pnpm", project_path=tmp_path, timestamp=datetime.now(UTC))
     asyncio.run(_analyze_copies(Engine(), event, [tmp_path], None))
     assert seen == [[tmp_path]]
+
+
+def _nested_layout(project: Path) -> Path:
+    """npm's and yarn 1's nested layout (as npm 11.21.1 and yarn 1.22.22 write it): one
+    version hoisted to node_modules/<name>, another nested beneath its dependent,
+    scoped names included, and nesting below a nested copy."""
+    nm = project / "node_modules"
+    for rel, name, version in (
+            ("ms", "ms", "2.0.0"),
+            ("debug", "debug", "4.3.4"),
+            ("debug/node_modules/ms", "ms", "2.1.2"),
+            ("@babel/highlight", "@babel/highlight", "7.24.7"),
+            ("@babel/code-frame", "@babel/code-frame", "7.0.0"),
+            ("@babel/code-frame/node_modules/@babel/highlight", "@babel/highlight", "7.0.0"),
+            ("a", "a", "1.0.0"),
+            ("a/node_modules/b", "b", "1.0.0"),
+            ("a/node_modules/b/node_modules/ms", "ms", "2.1.3"),
+            ("c", "c", "1.0.0"),
+            ("c/node_modules/ms", "ms", "2.1.2"),
+    ):
+        (nm / rel).mkdir(parents=True)
+        (nm / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+        (nm / rel / "index.js").write_text("module.exports = 1;\n")
+    return nm
+
+
+def test_post_install_scan_finds_nested_copies(tmp_path, monkeypatch):
+    """The real collector over a nested layout: every copy npm or yarn 1 installed is
+    found, the nested ones included (#99)."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = _nested_layout(tmp_path)
+    found = _collect_new_packages([nm], {}, "npm", non_public=set())
+    assert sorted((name, version) for _eco, name, version, _root in found) == [
+        ("@babel/code-frame", "7.0.0"), ("@babel/highlight", "7.0.0"), ("@babel/highlight", "7.24.7"),
+        ("a", "1.0.0"), ("b", "1.0.0"), ("c", "1.0.0"), ("debug", "4.3.4"),
+        ("ms", "2.0.0"), ("ms", "2.1.2"), ("ms", "2.1.3")]
+
+
+@pytest.mark.parametrize(("rel", "nested"), [
+    ("a/node_modules/b/package.json", True),
+    ("@s/a/node_modules/@t/b/package.json", True),
+    ("a/node_modules/@t/b/node_modules/c/package.json", True),
+    ("a/package.json", False),                               # top level: accepted on its own
+    ("a/lib/package.json", False),                           # a file inside a package
+    ("a/node_modules/b/test/package.json", False),
+    ("a/node_modules/.bin/package.json", False),
+    ("a/node_modules/package.json", False),
+    ("a/node_modules/@t/package.json", False),               # a scope is not a package
+    ("a/node_modules/node_modules/b/package.json", False),
+    ("a/node_modules/b/index.js", False),
+])
+def test_nested_manifest_paths(rel, nested):
+    assert _node._nested_manifest(Path(rel)) is nested
+
+
+def test_resolve_package_dir_returns_the_nested_copy_at_its_version(tmp_path):
+    nm = _nested_layout(tmp_path)
+    lang = NodeLanguage()
+
+    def resolved(name, version):
+        return sorted(str(p.relative_to(nm.resolve())) for p in lang.resolve_package_dir(name, tmp_path, None, version))
+
+    assert resolved("ms", "2.0.0") == ["ms"]
+    assert resolved("ms", "2.1.2") == ["c/node_modules/ms", "debug/node_modules/ms"]   # every copy
+    assert resolved("ms", "2.1.3") == ["a/node_modules/b/node_modules/ms"]
+    assert resolved("@babel/highlight", "7.0.0") == ["@babel/code-frame/node_modules/@babel/highlight"]
+    assert resolved("b", "1.0.0") == ["a/node_modules/b"]                              # nested only
+    assert resolved("ms", "^2.0.0") == ["ms"]          # no copy at that version: the top level, as before
+
+
+def test_nested_copy_behind_a_symlink_is_not_resolved(tmp_path):
+    """A node_modules or package directory that is a symlink is not walked: it could lead
+    outside the install."""
+    nm = _nested_layout(tmp_path / "proj")
+    outside = tmp_path / "outside" / "ms"
+    outside.mkdir(parents=True)
+    (outside / "package.json").write_text(json.dumps({"name": "ms", "version": "9.0.0"}))
+    (nm / "a" / "node_modules" / "b" / "node_modules" / "evil").symlink_to(outside)
+    (nm / "debug" / "node_modules" / "ms").rename(tmp_path / "moved")
+    (nm / "debug" / "node_modules").rmdir()
+    (nm / "debug" / "node_modules").symlink_to(tmp_path / "outside")
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("ms", tmp_path / "proj", None, "9.0.0") == [(nm / "ms").resolve()]
+    assert lang.resolve_package_dir("evil", tmp_path / "proj", None, "9.0.0") == []
+
+
+def test_nested_index_follows_a_new_install(tmp_path):
+    """The index is rebuilt when an install rewrites npm's hidden lock, so a copy nested
+    by a later install is found."""
+    nm = _nested_layout(tmp_path)
+    (nm / ".package-lock.json").write_text("{}")
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("b", tmp_path, None, "2.0.0") == []
+    later = nm / "c" / "node_modules" / "b"
+    later.mkdir()
+    (later / "package.json").write_text(json.dumps({"name": "b", "version": "2.0.0"}))
+    lock = nm / ".package-lock.json"
+    lock.write_text('{"lockfileVersion": 3}')
+    stat = lock.stat()
+    os.utime(lock, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert lang.resolve_package_dir("b", tmp_path, None, "2.0.0") == [later.resolve()]
+
+
+def test_nested_index_does_not_follow_a_symlink_inside_the_tree(tmp_path):
+    """A linked package (a workspace or link: dependency) is not a nested copy, and following
+    links could walk a loop forever."""
+    nm = _nested_layout(tmp_path)
+    (nm / "c" / "node_modules" / "linked").symlink_to(Path("../../a"))
+    (nm / "a" / "node_modules" / "loop").symlink_to(Path(".."))
+    index = _node._nested_copy_dirs(nm)
+    assert "linked" not in index and "loop" not in index
+    assert sorted(index) == ["@babel/highlight", "b", "ms"]
+
+
+def test_nested_index_does_not_walk_a_linked_node_modules(tmp_path, monkeypatch):
+    """A nested node_modules that links back up the tree would make the walk endless."""
+    nm = _nested_layout(tmp_path)
+    (nm / "c" / "node_modules" / "ms").rename(tmp_path / "moved")
+    (nm / "c" / "node_modules").rmdir()
+    (nm / "c" / "node_modules").symlink_to(Path(".."))
+    real_scandir, calls = os.scandir, []
+
+    def bounded_scandir(path):
+        calls.append(path)
+        if len(calls) > 500:
+            raise RuntimeError("the walk did not terminate")
+        return real_scandir(path)
+
+    monkeypatch.setattr(_node.os, "scandir", bounded_scandir)
+    assert sorted(_node._nested_copy_dirs(nm)) == ["@babel/highlight", "b", "ms"]
+
+
+def test_nested_copies_are_found_beside_a_pnpm_store(tmp_path):
+    """A node_modules/.pnpm (left by an earlier pnpm, or beside npm-style nesting) does
+    not hide nested copies: both layouts are searched."""
+    nm = _nested_layout(tmp_path)
+    (nm / ".pnpm").mkdir()
+    lang = NodeLanguage()
+    assert lang.resolve_package_dir("ms", tmp_path, None, "2.1.3") == [
+        (nm / "a" / "node_modules" / "b" / "node_modules" / "ms").resolve()]
+    store_copy = nm / ".pnpm" / "ms@2.1.3" / "node_modules" / "ms"
+    store_copy.mkdir(parents=True)
+    (store_copy / "package.json").write_text(json.dumps({"name": "ms", "version": "2.1.3"}))
+    assert sorted(lang.resolve_package_dir("ms", tmp_path, None, "2.1.3")) == sorted([
+        store_copy.resolve(), (nm / "a" / "node_modules" / "b" / "node_modules" / "ms").resolve()])
+
+
+def test_each_nested_copy_is_judged_by_its_own_lock_entry(tmp_path, monkeypatch):
+    """A nested copy npm's lock records from a file: tarball is scored on its source
+    alone, even when a registry copy of the same version was just installed beside it."""
+    from packagealert.languages import registry
+    from packagealert.scoring import copy_scored_locally
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    registry.load()
+    nm = _nested_layout(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "proj", "dependencies": {"c": "1.0.0"}}))
+    reg = "https://registry.npmjs.org/"
+    (nm / ".package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "node_modules/c": {"version": "1.0.0", "resolved": reg + "c/-/c-1.0.0.tgz",
+                           "dependencies": {"ms": "file:../vendor/ms-2.1.2.tgz"}},
+        "node_modules/c/node_modules/ms": {"version": "2.1.2", "resolved": "file:../vendor/ms-2.1.2.tgz"},
+        "node_modules/debug/node_modules/ms": {"version": "2.1.2", "resolved": reg + "ms/-/ms-2.1.2.tgz"},
+    }}))
+    copies = {str(d.relative_to(nm.resolve())): copy_scored_locally("npm", "ms", d)
+              for d in NodeLanguage().resolve_package_dir("ms", tmp_path, None, "2.1.2")}
+    assert copies == {"c/node_modules/ms": True, "debug/node_modules/ms": False}
+    # A copy the lock does not record keeps the event's provenance.
+    assert copy_scored_locally("npm", "ms", (nm / "a" / "node_modules" / "b" / "node_modules" / "ms").resolve()) is False
+
+
+def test_aliased_copies_resolve_by_their_manifest_name(tmp_path, monkeypatch):
+    """npm installs an alias (`"ms-new": "npm:ms@2.1.2"`) under the alias's name, and the
+    collector reports the manifest's: each copy it reports resolves to itself, not to
+    the hoisted copy of another version (as npm 11.21.1 lays it out)."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = tmp_path / "node_modules"
+    for rel, name, version in (("ms", "ms", "2.0.0"), ("ms-new", "ms", "2.1.2"),
+                               ("debug", "debug", "4.3.4"), ("debug/node_modules/ms-alt", "ms", "2.1.3")):
+        (nm / rel).mkdir(parents=True)
+        (nm / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+    found = _collect_new_packages([nm], {}, "npm", non_public=set())
+    lang = NodeLanguage()
+    resolved = {(name, version): [str(p.relative_to(nm.resolve())) for p in
+                                  lang.resolve_package_dir(name, tmp_path, None, version)]
+                for _eco, name, version, _root in found}
+    assert resolved == {("debug", "4.3.4"): ["debug"], ("ms", "2.0.0"): ["ms"],
+                        ("ms", "2.1.2"): ["ms-new"], ("ms", "2.1.3"): ["debug/node_modules/ms-alt"]}
+
+
+def _bounded(fn, timeout: float = 5.0):
+    """fn()'s result, failing rather than hanging if it blocks (a FIFO read never returns)."""
+    import threading
+
+    box: list = []
+    worker = threading.Thread(target=lambda: box.append(fn()), daemon=True)
+    worker.start()
+    worker.join(timeout)
+    assert box, "blocked reading a manifest"
+    return box[0]
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_a_fifo_manifest_does_not_block_resolution_or_collection(tmp_path, monkeypatch, linked):
+    """An install can leave a FIFO where a package.json belongs, directly or through a
+    symlink: it is skipped, never read."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = _nested_layout(tmp_path / "proj")
+    evil = nm / "debug" / "node_modules" / "evil"
+    evil.mkdir()
+    if linked:
+        os.mkfifo(tmp_path / "pipe")
+        (evil / "package.json").symlink_to(tmp_path / "pipe")
+    else:
+        os.mkfifo(evil / "package.json")
+    lang = NodeLanguage()
+    assert _bounded(lambda: lang.resolve_package_dir("ms", tmp_path / "proj", None, "2.0.0")) == [(nm / "ms").resolve()]
+    found = _bounded(lambda: _collect_new_packages([nm], {}, "npm", non_public=set()))
+    assert ("ms", "2.1.2") in {(name, version) for _eco, name, version, _root in found}
+
+
+def test_an_alias_is_not_resolved_under_the_name_it_is_installed_as(tmp_path):
+    """A directory named debug whose manifest declares ms@2.1.2 (an alias) is ms's copy,
+    not debug's, at the top level or nested."""
+    nm = tmp_path / "node_modules"
+    for rel, name, version in (("debug", "debug", "2.1.2"), ("parent", "parent", "1.0.0"),
+                               ("parent/node_modules/debug", "ms", "2.1.2"),
+                               ("other", "other", "1.0.0"), ("other/node_modules/ms", "debug", "3.0.0")):
+        (nm / rel).mkdir(parents=True)
+        (nm / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+    lang = NodeLanguage()
+
+    def resolved(name, version):
+        return [str(p.relative_to(nm.resolve())) for p in lang.resolve_package_dir(name, tmp_path, None, version)]
+
+    assert resolved("debug", "2.1.2") == ["debug"]
+    assert resolved("ms", "2.1.2") == ["parent/node_modules/debug"]
+    assert resolved("debug", "3.0.0") == ["other/node_modules/ms"]
+    (nm / "debug" / "package.json").write_text(json.dumps({"name": "ms", "version": "2.1.2"}))
+    assert resolved("debug", "2.1.2") == []                     # the top-level debug is ms

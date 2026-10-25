@@ -220,10 +220,11 @@ class LanguageBase(Protocol):
         event's provenance.
 
         Typical implementations:
-        - npm: ``return [project_path / "node_modules" / package_name]`` (one
-          version per path, so *version* needs no check; ``[]`` if it doesn't exist).
-          pnpm's isolated layout also keeps copies in ``node_modules/.pnpm``, so the
-          in-tree Node module matches *version* there and returns every copy.
+        - npm: ``node_modules/<name>`` holds one version, but npm and yarn 1 nest
+          any other beneath its dependent (``node_modules/a/node_modules/<name>``),
+          and pnpm's isolated layout keeps copies in ``node_modules/.pnpm``. So the
+          in-tree Node module matches *version* against every contained copy and
+          returns each one, falling back to ``node_modules/<name>`` when none matches.
         - PyPI: find the ``.dist-info`` dir whose name **and version** match, read
           ``RECORD``/``top_level.txt``, return every importable directory this
           distribution's own files occupy — never a shared namespace root another
