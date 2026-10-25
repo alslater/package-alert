@@ -783,3 +783,44 @@ def test_build_scan_payload_clean_scan_has_no_remediations():
     scan = ScanResult(project_path="/p", scan_type="project", finding_count=0, findings=[],
                       sources=[], scanned_at=datetime(2026, 1, 1, tzinfo=UTC))
     assert build_scan_payload("host", scan)["remediations"] == []
+
+
+_FETCHES = [
+    ("ingest/cooldown", lambda c: c.fetch_cooldowns("host"), "Fleet cooldown fetch error"),
+    ("scans", lambda c: c.list_scans("host", None, 20), "Fleet list_scans error"),
+    ("scans/42", lambda c: c.get_scan(42), "Fleet get_scan error"),
+]
+
+
+@pytest.mark.parametrize(("path", "call", "message"), _FETCHES)
+@pytest.mark.parametrize(("error", "detail"), [
+    (httpx.ConnectError("All connection attempts failed"), "All connection attempts failed"),
+    (httpx.ReadTimeout(""), "ReadTimeout"),            # no message: the error's type
+])
+@respx.mock
+async def test_an_unreachable_server_logs_one_line(caplog, path, call, message, error, detail):
+    """A refused, timed-out or unresolvable request is expected while the server is down
+    and recurs every cycle: one line naming the failure, no traceback (#108)."""
+    from packagealert.plugins.central.client import CentralClient
+
+    respx.get(f"https://fleet.example.com/api/{path}").mock(side_effect=error)
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    with caplog.at_level("WARNING", logger="packagealert.plugins.central.client"):
+        assert await call(client) is None
+    await client.aclose()
+    [record] = caplog.records
+    assert record.getMessage() == f"{message}: {detail}" and record.exc_info is None
+
+
+@pytest.mark.parametrize(("path", "call", "message"), _FETCHES)
+@respx.mock
+async def test_an_unexpected_fetch_failure_keeps_its_traceback(caplog, path, call, message):
+    from packagealert.plugins.central.client import CentralClient
+
+    respx.get(f"https://fleet.example.com/api/{path}").mock(return_value=httpx.Response(200, text="not json"))
+    client = CentralClient(server_url="https://fleet.example.com", api_key="sk-test")
+    with caplog.at_level("WARNING", logger="packagealert.plugins.central.client"):
+        assert await call(client) is None
+    await client.aclose()
+    [record] = caplog.records
+    assert record.getMessage() == message and record.exc_info is not None

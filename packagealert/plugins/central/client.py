@@ -198,6 +198,11 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
     }
 
 
+def _request_error(e: httpx.RequestError) -> str:
+    """A one-line description of a failed request (some carry no message)."""
+    return str(e)[:120] or type(e).__name__
+
+
 class CentralClient:
     def __init__(self, server_url: str, api_key: str, allow_http: bool = False) -> None:
         url = server_url.rstrip("/")
@@ -327,6 +332,9 @@ class CentralClient:
         except httpx.HTTPStatusError as e:
             log.warning("Fleet list_scans failed: HTTP %s", e.response.status_code)
             return None
+        except httpx.RequestError as e:
+            log.warning("Fleet list_scans error: %s", _request_error(e))
+            return None
         except Exception:
             log.warning("Fleet list_scans error", exc_info=True)
             return None
@@ -343,6 +351,9 @@ class CentralClient:
             raise
         except httpx.HTTPStatusError as e:
             log.warning("Fleet get_scan failed: HTTP %s", e.response.status_code)
+            return None
+        except httpx.RequestError as e:
+            log.warning("Fleet get_scan error: %s", _request_error(e))
             return None
         except Exception:
             log.warning("Fleet get_scan error", exc_info=True)
@@ -376,6 +387,10 @@ class CentralClient:
             return r.json()
         except httpx.HTTPStatusError as e:
             log.warning("Fleet cooldown fetch failed: HTTP %s", e.response.status_code)
+            return None
+        except httpx.RequestError as e:
+            # An unreachable server is expected and recurs every cycle: one line, no traceback.
+            log.warning("Fleet cooldown fetch error: %s", _request_error(e))
             return None
         except Exception:
             log.warning("Fleet cooldown fetch error", exc_info=True)
