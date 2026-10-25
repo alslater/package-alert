@@ -262,8 +262,13 @@ class LanguageBase(Protocol):
 
     # ── Installed-package scanning ─────────────────────────────────────────
     def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
-        """Enumerate packages installed in the environment rooted at root.
-        May call subprocesses or walk the filesystem.  Must return [] on any error."""
+        """Enumerate packages installed in the environment rooted at root: every one,
+        transitive dependencies included (the in-tree Node module walks node_modules,
+        nested copies and pnpm's store), once per name and version. May call
+        subprocesses or walk the filesystem. Set ``from_public_registry=False`` on a
+        package that did not come from the public registry (a private registry, git or
+        a local path): scan-project then does not look its name up. Must return [] on
+        any error."""
 
     # ── Sandbox ────────────────────────────────────────────────────────────
     def sandbox_paths(self) -> SandboxPaths:

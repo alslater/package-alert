@@ -7,7 +7,6 @@ import logging
 import os
 import re
 import stat
-import subprocess
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -294,11 +293,13 @@ def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, di
 def _npmrc_registry_lines(rc: Path) -> list[tuple[str, str]]:
     """(key, value as written) for each ``registry`` / ``@scope:registry`` line of *rc*, in order.
 
-    An unreadable file has none.
+    An unreadable file has none, and so does anything but a regular file (a FIFO would
+    block the read forever); a symlinked config is read.
     """
+    raw = _read_regular(rc, follow_symlinks=True)
     try:
-        lines = rc.read_text().splitlines()
-    except (OSError, UnicodeDecodeError):
+        lines = raw.decode().splitlines() if raw is not None else []
+    except UnicodeDecodeError:
         return []
     found = []
     for line in lines:
@@ -401,9 +402,9 @@ def _nested_manifest(rel: Path) -> bool:
 
 
 def _nested_copy_dirs(node_modules: Path) -> dict[str, tuple[Path, ...]]:
-    """The package directories under *node_modules* (not pnpm's store) beyond
-    node_modules/<name>, by the name their manifest declares: every nested one, and
-    any installed under an alias (`"x": "npm:ms@2.1.2"` installs ms as x). One whose
+    """The package directories under *node_modules* beyond node_modules/<name> and
+    pnpm's store entries themselves, by the name their manifest declares: every nested
+    one (a store package's bundled dependencies included), and any installed under an alias (`"x": "npm:ms@2.1.2"` installs ms as x). One whose
     manifest declares no name is indexed by the name it is installed under. Each is a
     real directory inside node_modules. The index is cached per install (see
     _nested_index_key())."""
@@ -413,10 +414,12 @@ def _nested_copy_dirs(node_modules: Path) -> dict[str, tuple[Path, ...]]:
 def _nested_index_key(node_modules: Path) -> tuple:
     """What identifies one state of a node_modules tree for the index: its own mtime
     and that of the hidden lock npm (`.package-lock.json`) or yarn 1 (`.yarn-integrity`)
-    rewrites on every install that changes the tree, plus a minute, so a change no
+    rewrites on every install that changes the tree (pnpm: its `.modules.yaml` and its
+    store, which gains an entry per new package), plus a minute, so a change no
     install recorded is picked up within one."""
     stamps = []
-    for path in (node_modules, node_modules / ".package-lock.json", node_modules / ".yarn-integrity"):
+    for path in (node_modules, node_modules / ".package-lock.json", node_modules / ".yarn-integrity",
+                 node_modules / ".modules.yaml", node_modules / ".pnpm"):
         try:
             stamps.append(path.stat().st_mtime_ns)
         except OSError:
@@ -424,30 +427,33 @@ def _nested_index_key(node_modules: Path) -> tuple:
     return (*stamps, int(time.monotonic() // 60))
 
 
+def _package_entries(directory: str) -> list[tuple[str, str]]:
+    """(installed name, path) of each package directory directly in a node_modules,
+    scoped ones included. Symlinks (workspace and link: dependencies, pnpm's links
+    into its store) and dot entries are not packages installed there."""
+    out: list[tuple[str, str]] = []
+    try:
+        entries = list(os.scandir(directory))
+    except OSError:
+        return out
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
+            continue
+        if not entry.name.startswith("@"):
+            out.append((entry.name, entry.path))
+            continue
+        try:
+            scoped = list(os.scandir(entry.path))
+        except OSError:
+            continue
+        out += [(f"{entry.name}/{s.name}", s.path) for s in scoped
+                if not s.name.startswith(".") and s.is_dir(follow_symlinks=False)]
+    return out
+
+
 @functools.lru_cache(maxsize=8)
 def _nested_index(node_modules: str, _key: tuple) -> dict[str, tuple[Path, ...]]:
     found: dict[str, list[Path]] = {}
-
-    def packages(directory: str) -> list[tuple[str, str]]:
-        """(name, path) of each package directory directly in a node_modules."""
-        out: list[tuple[str, str]] = []
-        try:
-            entries = list(os.scandir(directory))
-        except OSError:
-            return out
-        for entry in entries:
-            if entry.name.startswith(".") or not entry.is_dir(follow_symlinks=False):
-                continue
-            if not entry.name.startswith("@"):
-                out.append((entry.name, entry.path))
-                continue
-            try:
-                scoped = list(os.scandir(entry.path))
-            except OSError:
-                continue
-            out += [(f"{entry.name}/{s.name}", s.path) for s in scoped
-                    if not s.name.startswith(".") and s.is_dir(follow_symlinks=False)]
-        return out
 
     def add(name: str, path: str, nested: bool) -> None:
         declared = _manifest_field(Path(path), "name") or name
@@ -455,14 +461,27 @@ def _nested_index(node_modules: str, _key: tuple) -> dict[str, tuple[Path, ...]]
             found.setdefault(declared, []).append(Path(path))
 
     pending = []
-    for name, path in packages(node_modules):
+    for name, path in _package_entries(node_modules):
         add(name, path, nested=False)
         pending.append(path)
+    # A pnpm store package itself is resolved by _pnpm_store_dirs(); what it bundles is
+    # nested inside it.
+    store = os.path.join(node_modules, ".pnpm")
+    if os.path.isdir(store) and not os.path.islink(store):
+        try:
+            entries = [e.path for e in os.scandir(store) if not e.name.startswith(".")
+                       and e.name != "node_modules" and e.is_dir(follow_symlinks=False)]
+        except OSError:
+            entries = []
+        for entry in entries:
+            sub = os.path.join(entry, "node_modules")
+            if not os.path.islink(sub) and os.path.isdir(sub):
+                pending += [path for _name, path in _package_entries(sub)]
     while pending:
         sub = os.path.join(pending.pop(), "node_modules")
         if os.path.islink(sub) or not os.path.isdir(sub):
             continue
-        for name, path in packages(sub):
+        for name, path in _package_entries(sub):
             add(name, path, nested=True)
             pending.append(path)
     return {name: tuple(dirs) for name, dirs in found.items()}
@@ -487,8 +506,24 @@ def _read_manifest(path: Path) -> dict | None:
     """The JSON object in the manifest at *path*, or None. Only a regular file is read,
     never through a symlink: an install can leave anything at that path, and a FIFO
     there would block the read forever."""
+    return _read_json_regular(path, follow_symlinks=False)
+
+
+def _read_json_regular(path: Path, *, follow_symlinks: bool) -> dict | None:
+    """The JSON object in the regular file at *path*, or None (see _read_regular())."""
+    raw = _read_regular(path, follow_symlinks=follow_symlinks)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        data = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_regular(path: Path, *, follow_symlinks: bool) -> bytes | None:
+    """The contents of the regular file at *path*, or None; anything else (a FIFO
+    would block the read forever) is not read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow_symlinks else os.O_NOFOLLOW))
     except OSError:
         return None
     try:
@@ -496,13 +531,12 @@ def _read_manifest(path: Path) -> dict | None:
             return None
         with os.fdopen(fd, "rb") as f:
             fd = -1
-            data = json.loads(f.read())
-    except (OSError, ValueError):
+            return f.read()
+    except OSError:
         return None
     finally:
         if fd >= 0:
             os.close(fd)
-    return data if isinstance(data, dict) else None
 
 
 def _manifest_field(package_dir: Path, key: str) -> str | None:
@@ -643,7 +677,11 @@ def package_lock_provenance(packages: dict, registries: tuple[str | None, dict[s
     dependent declares from a file, git or URL (``npm_spec_non_registry()``)
     is never public: its resolved URL can look exactly like a registry
     tarball. That copy is found by npm's nested lookup, so a registry copy of
-    the same name elsewhere in the tree is unaffected.
+    the same name elsewhere in the tree is unaffected. A bundled entry
+    (``inBundle``) shipped in its containing package's tarball: with no resolved
+    URL of its own, the configured registry says nothing about it, so it takes that
+    package's verdict (a link, a non-registry version or declaration still makes it
+    local); with one, it is public only if both are.
     """
     from packagealert.languages.node_fix.npm_lock import resolve
 
@@ -659,8 +697,24 @@ def package_lock_provenance(packages: dict, registries: tuple[str | None, dict[s
             for dep, spec in deps.items():
                 if isinstance(dep, str) and npm_spec_non_registry(spec) and (found := resolve(lock, path, dep)):
                     declared.add(found)
-    return {path: path not in declared and package_lock_entry_public(path, info, registries)
-            for path, info in packages.items() if path and isinstance(path, str) and isinstance(info, dict)}
+    public = {path: path not in declared and package_lock_entry_public(path, info, registries)
+              for path, info in packages.items() if path and isinstance(path, str) and isinstance(info, dict)}
+    # Shallowest first, so each bundled entry's container already has its final verdict
+    # and a non-public bundle carries over to what it bundles in turn.
+    bundled = sorted((path for path, info in packages.items() if path in public and info.get("inBundle") is True),
+                     key=lambda path: path.count("/node_modules/"))
+    for path in bundled:
+        container = path.rsplit("/node_modules/", 1)[0]
+        if container not in public:
+            continue
+        info = packages[path]
+        resolved = info.get("resolved")
+        if isinstance(resolved, str) and resolved:
+            public[path] = public[path] and public[container]
+        else:
+            local = path in declared or bool(info.get("link")) or _non_registry_version(info.get("version"))
+            public[path] = not local and public[container]
+    return public
 
 
 def _installed_provenance(node_modules: Path) -> tuple[dict[str, bool], tuple[str | None, dict[str, str]]]:
@@ -719,11 +773,9 @@ def _lock_packages(lock: Path) -> dict | None:
 
 
 def _read_json_object(path: Path) -> dict | None:
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
+    # A lock file may be a symlink (a monorepo's shared lock); it must still be a
+    # regular file, since a FIFO in its place would block the read forever.
+    return _read_json_regular(path, follow_symlinks=True)
 
 
 class NodeLanguage:
@@ -1320,59 +1372,74 @@ class NodeLanguage:
     # ------------------------------------------------------------------
 
     def detect_installed_packages(self, root: Path) -> list[PackageMetadata]:
-        """Return installed packages under root by querying npm ls or scanning node_modules."""
+        """Every package installed under root/node_modules, once per name and version.
+
+        The tree is walked rather than asked of `npm ls`, whose answer depends on
+        whether it succeeds (`--depth=0` lists only direct dependencies): hoisted
+        copies, those nested beneath their dependents (a/node_modules/<name>) and those
+        in pnpm's store. Each is named as its manifest declares, so an alias is the
+        package it installs. A name and version counts as from the public registry
+        unless every copy is not, judged as the post-install collector judges a copy:
+        by its lock entry, or a store entry's id, else the configured registries."""
         node_modules = root / "node_modules"
-        if not node_modules.exists():
+        if not node_modules.is_dir():
             return []
+        by_path, registries = _installed_provenance(node_modules)
+        public: dict[tuple[str, str | None], bool] = {}
 
-        # Primary: ask npm ls for a JSON list
-        try:
-            raw = subprocess.check_output(
-                ["npm", "ls", "--json", "--depth=0"],
-                cwd=root,
-                stderr=subprocess.DEVNULL,
-                timeout=30,
-            )
-            data = json.loads(raw)
-            deps = data.get("dependencies", {})
-            return [
-                PackageMetadata(
-                    name=name,
-                    version=info.get("version") or None,
-                    ecosystem="npm",
-                )
-                for name, info in deps.items()
-                if name
-            ]
-        except Exception:
-            log.debug("npm ls failed at %s, falling back to node_modules scan", root, exc_info=True)
+        def add(package_dir: str, lock_key: str | None, store_id: str | None, inherited: bool | None) -> bool | None:
+            """Record one copy; its verdict (None when it is not a package)."""
+            manifest = _read_manifest(Path(package_dir, "package.json")) or {}
+            name, version = manifest.get("name"), manifest.get("version") or None
+            if not isinstance(name, str) or not name or not (version is None or isinstance(version, str)):
+                return None
+            source = _pnpm_store_id_source(store_id, name) if store_id is not None else True
+            if inherited is not None:
+                copy_public = inherited  # bundled inside a store package: its source is the parent's
+            elif source is False:
+                copy_public = False  # file:, link:, git or a tarball URL, not the registry
+            elif lock_key is not None and lock_key in by_path:
+                copy_public = by_path[lock_key]
+            else:
+                copy_public = _from_configured_registry(name, registries)
+            public[(name, version)] = public.get((name, version), False) or copy_public
+            return copy_public
 
-        # Fallback: walk node_modules/*/package.json and node_modules/@*/*/package.json
-        results: list[PackageMetadata] = []
+        def children(package_dir: str) -> list[tuple[str, str]]:
+            sub = os.path.join(package_dir, "node_modules")
+            return [] if os.path.islink(sub) or not os.path.isdir(sub) else _package_entries(sub)
+
+        # The tree: hoisted copies and those nested beneath their dependents, each with
+        # its own lock entry.
+        pending = [(path, "node_modules/" + name) for name, path in _package_entries(str(node_modules))]
+        while pending:
+            package_dir, lock_key = pending.pop()
+            add(package_dir, lock_key, None, None)
+            pending += [(path, f"{lock_key}/node_modules/{name}") for name, path in children(package_dir)]
+        # pnpm's store: an entry's own package is the real directory beside its
+        # dependencies' links, and any dependency it bundles is nested inside it.
+        store = node_modules / ".pnpm"
         try:
-            # Non-scoped packages
-            for pkg_json in node_modules.glob("*/package.json"):
-                try:
-                    data = json.loads(pkg_json.read_bytes())
-                    name = data.get("name", "")
-                    version = data.get("version") or None
-                    if name:
-                        results.append(PackageMetadata(name=name, version=version, ecosystem="npm"))
-                except Exception:
-                    log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
-            # Scoped packages (@scope/package)
-            for pkg_json in node_modules.glob("@*/*/package.json"):
-                try:
-                    data = json.loads(pkg_json.read_bytes())
-                    name = data.get("name", "")
-                    version = data.get("version") or None
-                    if name:
-                        results.append(PackageMetadata(name=name, version=version, ecosystem="npm"))
-                except Exception:
-                    log.debug("Failed to read/parse %s", pkg_json, exc_info=True)
-        except Exception:
-            log.debug("node_modules scan failed at %s", root, exc_info=True)
-        return results
+            entries = [e for e in os.scandir(store) if not e.name.startswith(".") and e.name != "node_modules"
+                       and e.is_dir(follow_symlinks=False)] if store.is_dir() and not store.is_symlink() else []
+        except OSError:
+            entries = []
+        for entry in entries:
+            bundled: list[tuple[str, bool | None]] = []
+            for name, path in children(entry.path):
+                verdict = add(path, None, entry.name, None)
+                if verdict is None:
+                    # No readable manifest: judge the owner by its store id and the name
+                    # it is installed under, for what it bundles.
+                    verdict = (False if _pnpm_store_id_source(entry.name, name) is False
+                               else _from_configured_registry(name, registries))
+                bundled += [(child, verdict) for _n, child in children(path)]
+            while bundled:
+                package_dir, inherited = bundled.pop()
+                verdict = add(package_dir, None, None, inherited)
+                bundled += [(child, inherited if verdict is None else verdict) for _n, child in children(package_dir)]
+        return [PackageMetadata(name=name, version=version, ecosystem="npm", from_public_registry=is_public)
+                for (name, version), is_public in public.items()]
 
     # ------------------------------------------------------------------
     # sandbox_paths
@@ -1825,18 +1892,32 @@ class NodeLanguage:
         for a pnpm store entry from a file:, link:, git or tarball source, None when its
         store id was shortened past the source, and True for a registry entry. Outside
         the store, a copy the lock npm wrote records (node_modules/a/node_modules/<name>)
-        is judged by its lock entry; any other's provenance is the event's own."""
+        is judged by its lock entry, and one it does not by the configured registries;
+        a directory outside any node_modules has the event's provenance."""
         parts = package_dir.parts
         if ".pnpm" not in parts:
             if "node_modules" not in parts:
                 return True
             root = parts.index("node_modules")
             key = "/".join(parts[root:])
-            return _copy_provenance(Path(*parts[:root + 1])).get(key, True)
+            recorded = _copy_provenance(Path(*parts[:root + 1])).get(key)
+            if recorded is not None:
+                return recorded
+            # Not in the lock: the configured registries decide, as discovery judges it.
+            return _from_configured_registry(package_name, npm_registries(Path(*parts[:root])))
         i = len(parts) - 1 - parts[::-1].index(".pnpm")
-        if i + 2 >= len(parts) or parts[i + 2] != "node_modules":
+        if i + 3 >= len(parts) or parts[i + 2] != "node_modules":
             return True
-        return _pnpm_store_id_source(parts[i + 1], package_name)
+        # A dependency bundled inside a store package shipped in that package's tarball,
+        # so it is judged by the entry's own package (.pnpm/<id>/node_modules/<pkg>/...).
+        width = 2 if parts[i + 3].startswith("@") else 1
+        owner = "/".join(parts[i + 3:i + 3 + width]) if len(parts) > i + 3 + width else package_name
+        source = _pnpm_store_id_source(parts[i + 1], owner)
+        if source is not True or i < 1 or parts[i - 1] != "node_modules":
+            return source
+        # A registry entry: public only if the project's configuration fetches that
+        # package from the public registry (a scope can name a private one).
+        return _from_configured_registry(owner, npm_registries(Path(*parts[:i - 1])))
 
     def resolve_package_dir_manifest_warning(
         self,

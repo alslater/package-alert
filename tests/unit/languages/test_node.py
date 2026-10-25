@@ -807,53 +807,16 @@ def test_lockfile_patterns(lang: NodeLanguage) -> None:
 # detect_installed_packages
 # ---------------------------------------------------------------------------
 
-def test_detect_installed_mocked_npm_ls(lang: NodeLanguage, tmp_path: Path) -> None:
-    # Create node_modules so the guard passes
-    (tmp_path / "node_modules").mkdir()
-
-    fake_output = json.dumps({
-        "dependencies": {
-            "express": {"version": "4.18.0"},
-            "lodash": {"version": "4.17.21"},
-        }
-    }).encode()
-
-    with patch("subprocess.check_output", return_value=fake_output):
-        result = lang.detect_installed_packages(tmp_path)
-
-    names = {p.name for p in result}
-    assert "express" in names
-    assert "lodash" in names
-    versions = {p.name: p.version for p in result}
-    assert versions["express"] == "4.18.0"
-
-
-def test_detect_installed_fallback_node_modules(lang: NodeLanguage, tmp_path: Path) -> None:
+def test_detect_installed_reads_top_level_and_scoped_packages(lang: NodeLanguage, tmp_path: Path) -> None:
     node_modules = tmp_path / "node_modules"
-    node_modules.mkdir()
+    for rel, name in (("express", "express"), ("@babel/core", "@babel/core")):
+        (node_modules / rel).mkdir(parents=True)
+        (node_modules / rel / "package.json").write_text(json.dumps({"name": name, "version": "4.18.0"}))
 
-    # Create a non-scoped package
-    express_dir = node_modules / "express"
-    express_dir.mkdir()
-    (express_dir / "package.json").write_text(
-        json.dumps({"name": "express", "version": "4.18.0"})
-    )
+    result = lang.detect_installed_packages(tmp_path)
 
-    # Create a scoped package
-    babel_scope = node_modules / "@babel"
-    babel_scope.mkdir()
-    babel_core = babel_scope / "core"
-    babel_core.mkdir()
-    (babel_core / "package.json").write_text(
-        json.dumps({"name": "@babel/core", "version": "7.22.0"})
-    )
-
-    with patch("subprocess.check_output", side_effect=Exception("npm not found")):
-        result = lang.detect_installed_packages(tmp_path)
-
-    names = {p.name for p in result}
-    assert "express" in names
-    assert "@babel/core" in names
+    assert sorted((p.name, p.version, p.ecosystem) for p in result) == [
+        ("@babel/core", "4.18.0", "npm"), ("express", "4.18.0", "npm")]
 
 
 def test_detect_installed_empty_if_no_node_modules(lang: NodeLanguage, tmp_path: Path) -> None:
@@ -861,16 +824,61 @@ def test_detect_installed_empty_if_no_node_modules(lang: NodeLanguage, tmp_path:
     assert result == []
 
 
-def test_detect_installed_ecosystem_is_npm(lang: NodeLanguage, tmp_path: Path) -> None:
-    (tmp_path / "node_modules").mkdir()
-    fake_output = json.dumps({
-        "dependencies": {"express": {"version": "4.18.0"}}
-    }).encode()
+def test_detect_installed_walks_every_copy_without_asking_npm(lang: NodeLanguage, tmp_path: Path) -> None:
+    """Hoisted, nested and pnpm store copies, each name and version once, named as the
+    manifest declares (an alias is its package); a linked workspace is not installed (#106)."""
+    nm = _nested_layout(tmp_path)
+    (nm / "ms-new").mkdir()
+    (nm / "ms-new" / "package.json").write_text(json.dumps({"name": "ms", "version": "2.2.0"}))
+    store = nm / ".pnpm" / "evilpkg@1.0.0" / "node_modules"
+    (store / "evilpkg").mkdir(parents=True)
+    (store / "evilpkg" / "package.json").write_text(json.dumps({"name": "evilpkg", "version": "1.0.0"}))
+    (store / "ms").symlink_to(nm / "ms")                       # a store entry's dependency is a link
+    (tmp_path / "ws").mkdir()
+    (tmp_path / "ws" / "package.json").write_text(json.dumps({"name": "ws", "version": "0.0.1"}))
+    (nm / "ws").symlink_to(tmp_path / "ws")
 
-    with patch("subprocess.check_output", return_value=fake_output):
+    with patch("subprocess.check_output", side_effect=AssertionError("npm ls must not be run")):
         result = lang.detect_installed_packages(tmp_path)
 
-    assert all(p.ecosystem == "npm" for p in result)
+    assert sorted((p.name, p.version) for p in result) == [
+        ("@babel/code-frame", "7.0.0"), ("@babel/highlight", "7.0.0"), ("@babel/highlight", "7.24.7"),
+        ("a", "1.0.0"), ("b", "1.0.0"), ("c", "1.0.0"), ("debug", "4.3.4"), ("evilpkg", "1.0.0"),
+        ("ms", "2.0.0"), ("ms", "2.1.2"), ("ms", "2.1.3"), ("ms", "2.2.0")]
+
+
+def test_detect_installed_judges_each_copy_by_its_lock_entry(lang: NodeLanguage, tmp_path: Path, monkeypatch) -> None:
+    """A version only installed from a file: tarball (npm's lock) or a file: store entry is
+    not looked up by name; one also installed from the registry is."""
+    from packagealert.parsers.lockfiles import scan_installed
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = _nested_layout(tmp_path)
+    (tmp_path / "package.json").write_text(json.dumps({"name": "proj", "dependencies": {"a": "1.0.0", "c": "1.0.0"}}))
+    reg = "https://registry.npmjs.org/"
+    (nm / ".package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "node_modules/a/node_modules/b/node_modules/ms": {"version": "2.1.3", "resolved": "file:../vendor/ms-2.1.3.tgz"},
+        "node_modules/c/node_modules/ms": {"version": "2.1.2", "resolved": "file:../vendor/ms-2.1.2.tgz"},
+        "node_modules/debug/node_modules/ms": {"version": "2.1.2", "resolved": reg + "ms/-/ms-2.1.2.tgz"},
+    }}))
+    local = nm / ".pnpm" / "localpkg@file+..+localpkg-3.0.0.tgz" / "node_modules" / "localpkg"
+    local.mkdir(parents=True)
+    (local / "package.json").write_text(json.dumps({"name": "localpkg", "version": "3.0.0"}))
+
+    public = {(p.name, p.version): p.from_public_registry for p in lang.detect_installed_packages(tmp_path)}
+    assert public[("ms", "2.1.3")] is False and public[("localpkg", "3.0.0")] is False
+    assert public[("ms", "2.1.2")] is True            # one copy is the registry's
+    assert public[("ms", "2.0.0")] is True            # no lock entry: the configured (public) registry
+    pinned = {(p.name, p.version): p.from_public_registry for p in scan_installed(tmp_path).pinned}
+    assert pinned[("ms", "2.1.3")] is False and pinned[("ms", "2.1.2")] is True
+
+
+def test_detect_installed_skips_a_fifo_manifest(lang: NodeLanguage, tmp_path: Path) -> None:
+    nm = _nested_layout(tmp_path)
+    (nm / "evil").mkdir()
+    os.mkfifo(nm / "evil" / "package.json")
+    result = _bounded(lambda: lang.detect_installed_packages(tmp_path))
+    assert ("ms", "2.1.3") in {(p.name, p.version) for p in result}
 
 
 # ---------------------------------------------------------------------------
@@ -2794,3 +2802,219 @@ def test_an_alias_is_not_resolved_under_the_name_it_is_installed_as(tmp_path):
     assert resolved("debug", "3.0.0") == ["other/node_modules/ms"]
     (nm / "debug" / "package.json").write_text(json.dumps({"name": "ms", "version": "2.1.2"}))
     assert resolved("debug", "2.1.2") == []                     # the top-level debug is ms
+
+
+def test_detect_installed_does_not_follow_a_linked_store_entry(lang: NodeLanguage, tmp_path: Path) -> None:
+    """A store entry whose node_modules links outside the install holds nothing installed."""
+    outside = tmp_path / "outside" / "node_modules" / "external"
+    outside.mkdir(parents=True)
+    (outside / "package.json").write_text(json.dumps({"name": "external", "version": "9.9.9"}))
+    entry = tmp_path / "proj" / "node_modules" / ".pnpm" / "x@1.0.0"
+    entry.mkdir(parents=True)
+    (entry / "node_modules").symlink_to(tmp_path / "outside" / "node_modules")
+    assert lang.detect_installed_packages(tmp_path / "proj") == []
+
+
+def test_detect_installed_finds_dependencies_bundled_in_a_store_package(lang: NodeLanguage, tmp_path: Path,
+                                                                          monkeypatch) -> None:
+    """pnpm unpacks a package's bundled dependencies inside it; each has its parent's source."""
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    store = tmp_path / "node_modules" / ".pnpm"
+    for rel, name, version in (
+            ("parent@1.0.0/node_modules/parent", "parent", "1.0.0"),
+            ("parent@1.0.0/node_modules/parent/node_modules/child", "child", "2.0.0"),
+            ("parent@1.0.0/node_modules/parent/node_modules/child/node_modules/grandchild", "grandchild", "3.0.0"),
+            ("local@file+..+local-1.0.0.tgz/node_modules/local", "local", "1.0.0"),
+            ("local@file+..+local-1.0.0.tgz/node_modules/local/node_modules/vendored", "vendored", "4.0.0"),
+    ):
+        (store / rel).mkdir(parents=True)
+        (store / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+    public = {(p.name, p.version): p.from_public_registry for p in lang.detect_installed_packages(tmp_path)}
+    assert public == {("parent", "1.0.0"): True, ("child", "2.0.0"): True, ("grandchild", "3.0.0"): True,
+                      ("local", "1.0.0"): False, ("vendored", "4.0.0"): False}
+
+
+def test_bundled_store_copies_resolve_with_their_parents_provenance(lang: NodeLanguage, tmp_path: Path,
+                                                                    monkeypatch) -> None:
+    """Each bundled copy discovery reports resolves to its own directory, and is a registry
+    copy exactly when the store package it shipped in is."""
+    from packagealert.languages import registry
+    from packagealert.scoring import copy_scored_locally
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    registry.load()
+    store = tmp_path / "node_modules" / ".pnpm"
+    for rel, name, version in (
+            ("parent@1.0.0/node_modules/parent", "parent", "1.0.0"),
+            ("parent@1.0.0/node_modules/parent/node_modules/child", "child", "2.0.0"),
+            ("local@file+..+local-1.0.0.tgz/node_modules/local", "local", "1.0.0"),
+            ("local@file+..+local-1.0.0.tgz/node_modules/local/node_modules/@v/vendored", "@v/vendored", "4.0.0"),
+    ):
+        (store / rel).mkdir(parents=True)
+        (store / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+    scored_locally = {}
+    for p in lang.detect_installed_packages(tmp_path):
+        dirs = lang.resolve_package_dir(p.name, tmp_path, None, p.version)
+        assert len(dirs) == 1, (p.name, dirs)
+        assert (dirs[0] / "package.json").exists()
+        scored_locally[p.name] = copy_scored_locally("npm", p.name, dirs[0])
+    assert scored_locally == {"parent": False, "child": False, "local": True, "@v/vendored": True}
+
+
+def test_npm_bundled_entries_inherit_their_containing_packages_provenance(lang: NodeLanguage, tmp_path: Path,
+                                                                          monkeypatch) -> None:
+    """A bundled lock entry (inBundle, no resolved URL) shipped in its container's tarball:
+    public only if that is, through a chain of bundles. A dependency fetched on its own,
+    nested in the same parent, keeps its own entry's verdict."""
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    reg = "https://registry.npmjs.org/"
+    public = _node.package_lock_provenance({
+        "": {"dependencies": {"parent": "file:vendor/parent-1.0.0.tgz", "pub": "1.0.0"}},
+        "node_modules/parent": {"version": "1.0.0", "resolved": "file:vendor/parent-1.0.0.tgz"},
+        # Listed before its container, so the verdict cannot depend on key order.
+        "node_modules/parent/node_modules/child/node_modules/grandchild": {"version": "3.0.0", "inBundle": True},
+        "node_modules/parent/node_modules/child": {"version": "2.0.0", "inBundle": True},
+        "node_modules/parent/node_modules/fetched": {"version": "4.0.0", "resolved": reg + "fetched/-/fetched-4.0.0.tgz"},
+        "node_modules/pub": {"version": "1.0.0", "resolved": reg + "pub/-/pub-1.0.0.tgz"},
+        "node_modules/pub/node_modules/kept": {"version": "5.0.0", "inBundle": True},
+    }, (None, {}))
+    assert public == {
+        "node_modules/parent": False,
+        "node_modules/parent/node_modules/child": False,
+        "node_modules/parent/node_modules/child/node_modules/grandchild": False,
+        "node_modules/parent/node_modules/fetched": True,
+        "node_modules/pub": True,
+        "node_modules/pub/node_modules/kept": True,
+    }
+
+
+def test_store_copy_from_a_private_scope_is_not_scored_as_public(lang: NodeLanguage, tmp_path: Path,
+                                                                 monkeypatch) -> None:
+    """A store copy from a private scoped registry, and what it bundles, is scored on its
+    source alone even when a public copy of the same version is installed beside it."""
+    from packagealert.languages import registry
+    from packagealert.scoring import copy_scored_locally
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    registry.load()
+    (tmp_path / ".npmrc").write_text("@corp:registry=https://npm.corp.example/\n")
+    store = tmp_path / "node_modules" / ".pnpm"
+    for rel, name in (("@corp+lib@1.0.0/node_modules/@corp/lib", "@corp/lib"),
+                      ("@corp+lib@1.0.0/node_modules/@corp/lib/node_modules/child", "child"),
+                      ("child@1.0.0/node_modules/child", "child")):
+        (store / rel).mkdir(parents=True)
+        (store / rel / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    copies = {str(d.relative_to(store.resolve())): copy_scored_locally("npm", "child", d)
+              for d in lang.resolve_package_dir("child", tmp_path, None, "1.0.0")}
+    assert copies == {"child@1.0.0/node_modules/child": False,
+                      "@corp+lib@1.0.0/node_modules/@corp/lib/node_modules/child": True}
+    lib = lang.resolve_package_dir("@corp/lib", tmp_path, None, "1.0.0")
+    assert [copy_scored_locally("npm", "@corp/lib", d) for d in lib] == [True]
+
+
+def test_bundled_children_of_a_manifestless_store_owner_keep_its_verdict(lang: NodeLanguage, tmp_path: Path,
+                                                                         monkeypatch) -> None:
+    """An owner whose manifest is missing is still judged by its store id and installed
+    name, so what it bundles does not fall back to its own registry verdict."""
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    (tmp_path / ".npmrc").write_text("@corp:registry=https://npm.corp.example/\n")
+    store = tmp_path / "node_modules" / ".pnpm"
+    for owner, child in (("local@file+..+local-1.0.0.tgz/node_modules/local", "a"),
+                         ("@corp+lib@1.0.0/node_modules/@corp/lib", "b"),
+                         ("pub@1.0.0/node_modules/pub", "c")):
+        (store / owner / "node_modules" / child).mkdir(parents=True)
+        (store / owner / "node_modules" / child / "package.json").write_text(
+            json.dumps({"name": child, "version": "1.0.0"}))
+    public = {p.name: p.from_public_registry for p in lang.detect_installed_packages(tmp_path)}
+    assert public == {"a": False, "b": False, "c": True}
+
+
+def test_a_non_public_bundle_carries_over_to_what_it_bundles(lang: NodeLanguage, tmp_path: Path, monkeypatch) -> None:
+    """A bundled entry is judged against its immediate container's final verdict, so a
+    non-public bundle inside a public package keeps what it bundles out of lookups."""
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    reg = "https://registry.npmjs.org/"
+    public = _node.package_lock_provenance({
+        "node_modules/pub": {"version": "1.0.0", "resolved": reg + "pub/-/pub-1.0.0.tgz"},
+        "node_modules/pub/node_modules/child/node_modules/grand": {"version": "3.0.0", "inBundle": True},
+        "node_modules/pub/node_modules/child": {"version": "2.0.0", "inBundle": True,
+                                                "resolved": "https://npm.corp.example/child/-/child-2.0.0.tgz"},
+    }, (None, {}))
+    assert public == {"node_modules/pub": True, "node_modules/pub/node_modules/child": False,
+                      "node_modules/pub/node_modules/child/node_modules/grand": False}
+
+
+def test_a_fifo_lock_does_not_block_discovery_and_a_linked_lock_is_read(lang: NodeLanguage, tmp_path: Path,
+                                                                        monkeypatch) -> None:
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = tmp_path / "node_modules"
+    (nm / "evil").mkdir(parents=True)
+    (nm / "evil" / "package.json").write_text(json.dumps({"name": "evil", "version": "1.0.0"}))
+    os.mkfifo(nm / ".package-lock.json")
+    found = _bounded(lambda: lang.detect_installed_packages(tmp_path))
+    assert [(p.name, p.from_public_registry) for p in found] == [("evil", True)]
+    # A symlinked lock (a monorepo's shared one) is still read.
+    (nm / ".package-lock.json").unlink()
+    shared = tmp_path / "shared-lock.json"
+    shared.write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app"},
+        "node_modules/evil": {"version": "1.0.0", "resolved": "https://npm.corp.example/evil/-/evil-1.0.0.tgz"}}}))
+    (tmp_path / "package-lock.json").symlink_to(shared)
+    assert [(p.name, p.from_public_registry) for p in lang.detect_installed_packages(tmp_path)] == [("evil", False)]
+
+
+def test_a_fifo_npmrc_does_not_block_discovery_and_a_linked_one_applies(lang: NodeLanguage, tmp_path: Path,
+                                                                         monkeypatch) -> None:
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    monkeypatch.setattr(_node, "_user_npmrc", lambda: tmp_path / "no-user-npmrc")
+    nm = tmp_path / "node_modules"
+    (nm / "@corp" / "lib").mkdir(parents=True)
+    (nm / "@corp" / "lib" / "package.json").write_text(json.dumps({"name": "@corp/lib", "version": "1.0.0"}))
+    os.mkfifo(tmp_path / ".npmrc")
+    found = _bounded(lambda: lang.detect_installed_packages(tmp_path))
+    assert [(p.name, p.from_public_registry) for p in found] == [("@corp/lib", True)]
+    # A symlinked config is read, so a private scope there applies.
+    (tmp_path / ".npmrc").unlink()
+    shared = tmp_path / "shared-npmrc"
+    shared.write_text("@corp:registry=https://npm.corp.example/\n")
+    (tmp_path / ".npmrc").symlink_to(shared)
+    assert [(p.name, p.from_public_registry) for p in lang.detect_installed_packages(tmp_path)] == [("@corp/lib", False)]
+
+
+def test_an_unrecorded_nested_copy_follows_the_configured_registry(lang: NodeLanguage, tmp_path: Path,
+                                                                   monkeypatch) -> None:
+    """A copy the lock does not record is judged by the configured registries, so under a
+    private default registry it is scored on its source alone beside a public copy."""
+    from packagealert.languages import registry
+    from packagealert.scoring import copy_scored_locally
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    monkeypatch.setattr(_node, "_user_npmrc", lambda: tmp_path / "no-user-npmrc")
+    registry.load()
+    nm = tmp_path / "node_modules"
+    for rel, name in (("ms", "ms"), ("a", "a"), ("a/node_modules/ms", "ms")):
+        (nm / rel).mkdir(parents=True)
+        (nm / rel / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    (tmp_path / ".npmrc").write_text("registry=https://npm.corp.example/\n")
+    (nm / ".package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "node_modules/ms": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/ms/-/ms-1.0.0.tgz"}}}))
+    copies = {str(d.relative_to(nm.resolve())): copy_scored_locally("npm", "ms", d)
+              for d in lang.resolve_package_dir("ms", tmp_path, None, "1.0.0")}
+    assert copies == {"ms": False, "a/node_modules/ms": True}
+    assert {p.name: p.from_public_registry for p in lang.detect_installed_packages(tmp_path)}["ms"] is True
+
+
+def test_a_url_less_bundle_takes_its_public_containers_verdict(lang: NodeLanguage, tmp_path: Path) -> None:
+    """Under a private default registry, a bundled entry with no resolved URL shipped in a
+    public package's tarball is public with it: the configured registry says nothing about
+    it. Its own non-registry version still makes it local."""
+    reg = "https://registry.npmjs.org/"
+    public = _node.package_lock_provenance({
+        "node_modules/pub": {"version": "1.0.0", "resolved": reg + "pub/-/pub-1.0.0.tgz"},
+        "node_modules/pub/node_modules/child": {"version": "2.0.0", "inBundle": True},
+        "node_modules/pub/node_modules/child/node_modules/grand": {"version": "3.0.0", "inBundle": True},
+        "node_modules/pub/node_modules/vendored": {"version": "file:vendored", "inBundle": True},
+    }, ("https://npm.corp.example/", {}))
+    assert public == {"node_modules/pub": True, "node_modules/pub/node_modules/child": True,
+                      "node_modules/pub/node_modules/child/node_modules/grand": True,
+                      "node_modules/pub/node_modules/vendored": False}

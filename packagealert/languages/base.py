@@ -74,6 +74,9 @@ class PackageMetadata:
     version: str | None
     ecosystem: str
     extras: dict[str, str] = field(default_factory=dict)
+    # From detect_installed_packages(): False when the package did not come from the
+    # public registry (see PackageSpec.from_public_registry), so its name is not looked up.
+    from_public_registry: bool = True
 
 
 @dataclass
