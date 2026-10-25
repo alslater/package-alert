@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Collection
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import cast
@@ -1132,8 +1133,11 @@ async def _risk_pass(
     skip: bool = False,
     root: Path | None = None,
     installed: bool = False,
+    local_only: Collection[tuple[str, str, str | None]] = (),
 ) -> tuple[list[dict], int]:
-    """Score *to_query* with the heuristic risk engine.
+    """Score *to_query* with the heuristic risk engine. Packages whose
+    (ecosystem, name, version) is in *local_only* are scored on their source alone,
+    with nothing looked up by their name.
 
     Returns (risk rows sorted by descending score, failure count).
 
@@ -1197,6 +1201,7 @@ async def _risk_pass(
                 progress_cb=lambda: progress.advance(task),
                 package_dir_resolver=resolver,
                 manifest_warning_resolver=manifest_warning_resolver,
+                local_only=frozenset(local_only),
             )
     except Exception:
         log.warning("Risk scoring pass failed — continuing without scores", exc_info=True)
@@ -1410,8 +1415,12 @@ async def _run_scan_project(
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
     findings, osv_failures = await _query_osv_findings(cfg, db, public)
 
+    # An installed package's source is on disk, so a non-public one is still scored
+    # on that source alone; a locked one has nothing to score without its name.
     risks, risk_failures = await _risk_pass(
-        cfg, db, public, skip=no_risk, root=root, installed=installed
+        cfg, db, to_query if installed else public, skip=no_risk, root=root, installed=installed,
+        local_only=[(p.ecosystem.lower(), p.name, p.version) for p in to_query
+                    if installed and getattr(p, "from_public_registry", True) is False],
     )
 
     yanked: list = []

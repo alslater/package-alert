@@ -240,7 +240,8 @@ def scan_installed(root: Path) -> ProjectScan:
         if pkgs:
             for pkg in pkgs:
                 if pkg.version:
-                    pinned.append(LockedPackage(name=pkg.name, version=pkg.version, ecosystem=pkg.ecosystem.lower()))
+                    pinned.append(LockedPackage(name=pkg.name, version=pkg.version, ecosystem=pkg.ecosystem.lower(),
+                                                from_public_registry=getattr(pkg, "from_public_registry", True) is not False))
             sources.append(f"{lang.name} (installed)")
 
     return ProjectScan(sources=sources, pinned=pinned, unpinned=[])

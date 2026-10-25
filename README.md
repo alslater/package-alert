@@ -342,7 +342,7 @@ package-alert scan-project [PATH] [OPTIONS]
 |--------|---------|-------------|
 | `PATH` | `.` | Project directory |
 | `--scan-unpinned` | off | Also query OSV for unpinned/range-constrained dependencies |
-| `--scan-installed` | off | Scan `venv/.venv` site-packages or `node_modules` instead of lock files |
+| `--scan-installed` | off | Scan `venv/.venv` site-packages or `node_modules` instead of lock files: every installed package, transitive ones included |
 | `--prod-only` | off | Exclude dev dependencies from the scan (lock file scanning only; mutually exclusive with `--scan-installed`) |
 | `--requirements` / `-r` | — | Explicit requirements file to scan instead of auto-detecting lock files (mutually exclusive with `--scan-installed`) |
 | `--details` / `-d` | off | Show full advisory details and URL; also reveals suppressed low-signal risk rows |
@@ -930,7 +930,7 @@ max_scan_history = 5    # completed scan records to keep per project per scan ty
 **Scan types:**
 
 - `project` (default) — scans lock files (`requirements.txt`, `uv.lock`, `package-lock.json`, `composer.lock`). Reproducible; works offline with cached OSV results.
-- `installed` — enumerates packages actually installed in the project's virtual environment (`pip list`, `npm ls`, `composer show`). Catches drift between lock file and real environment.
+- `installed` — enumerates packages actually installed in the project's environment (site-packages, every package under `node_modules` including nested copies and pnpm's store, `composer show`). Catches drift between lock file and real environment.
 
 ## Data Storage
 
