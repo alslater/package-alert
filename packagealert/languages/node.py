@@ -381,24 +381,32 @@ def _nested_manifest(rel: Path) -> bool:
     """Whether *rel* (relative to node_modules) is the manifest of a nested copy:
     <pkg>/node_modules/<pkg>/.../package.json, each <pkg> a name or @scope/name, as
     npm and yarn 1 nest a second version of a package beneath its dependent."""
+    return _manifest_depth(rel) >= 2
+
+
+def _manifest_depth(rel: Path) -> int:
+    """How many packages deep the manifest at *rel* (relative to node_modules) is: 1 for
+    <pkg>/package.json, 2 for <pkg>/node_modules/<pkg>/package.json, and so on, each
+    <pkg> a name or @scope/name; 0 for any other path, such as a manifest a package
+    ships in a subdirectory of its own (dom-helpers/activeElement/package.json)."""
     parts = rel.parts
     if not parts or parts[-1] != "package.json":
-        return False
+        return 0
     i, packages, segments = 0, 0, parts[:-1]
     while i < len(segments):
         width = 2 if segments[i].startswith("@") else 1
         name = segments[i:i + width]
         if len(name) != width or any(not x or x.startswith(".") or x == "node_modules" for x in name):
-            return False
+            return 0
         packages += 1
         i += width
         if i < len(segments):
             if segments[i] != "node_modules":
-                return False
+                return 0
             i += 1
             if i == len(segments):
-                return False
-    return packages >= 2
+                return 0
+    return packages
 
 
 def _nested_copy_dirs(node_modules: Path) -> dict[str, tuple[Path, ...]]:
@@ -1630,14 +1638,14 @@ class NodeLanguage:
                 rel = p.relative_to(walk_root)
             except ValueError:
                 continue
-            # Regular pkg: pkg/package.json (2 parts)
-            # Scoped pkg:  @scope/pkg/package.json (3 parts)
+            # A package's own manifest: <pkg>/package.json or @scope/<pkg>/package.json,
+            # and nested beneath its dependent as npm and yarn 1 nest a second version
+            # (a/node_modules/b/package.json, scoped names included) — never one a package
+            # ships in a subdirectory of its own (dom-helpers/activeElement/package.json).
             # pnpm's isolated layout keeps the package itself in its virtual store,
-            # linked from node_modules: .pnpm/<id>/node_modules/<name>/package.json
-            # (5 parts, 6 when scoped). npm and yarn 1 nest a second version beneath
-            # its dependent: a/node_modules/b/package.json, scoped names included.
+            # linked from node_modules: .pnpm/<id>/node_modules/<name>/package.json.
             store_id = _pnpm_store_id(rel)
-            if len(rel.parts) not in (2, 3) and store_id is None and not _nested_manifest(rel):
+            if store_id is None and not _manifest_depth(rel):
                 continue
             if p.is_symlink():
                 continue  # skip symlinks — could point outside the install target
