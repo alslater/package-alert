@@ -3018,3 +3018,42 @@ def test_a_url_less_bundle_takes_its_public_containers_verdict(lang: NodeLanguag
     assert public == {"node_modules/pub": True, "node_modules/pub/node_modules/child": True,
                       "node_modules/pub/node_modules/child/node_modules/grand": True,
                       "node_modules/pub/node_modules/vendored": False}
+
+
+def test_post_install_scan_ignores_a_packages_own_sub_entry_manifests(tmp_path, monkeypatch):
+    """A manifest a package ships in a subdirectory of its own (dom-helpers/activeElement,
+    which can declare any name) is not an installed package; a scoped package is (#110)."""
+    from packagealert.sandbox.runner import _collect_new_packages
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    nm = tmp_path / "node_modules"
+    for rel, name, version in (
+            ("dom-helpers", "dom-helpers", "5.2.1"),
+            ("dom-helpers/activeElement", "evilpkg", "6.6.6"),
+            ("@babel/core", "@babel/core", "7.0.0"),
+            ("@babel/core/lib/sub", "evil-scoped-sub", "1.0.0"),
+            (".cache/x", "cached", "1.0.0"),
+            ("a", "a", "1.0.0"),
+            ("a/node_modules/b", "b", "1.0.0"),
+            ("a/node_modules/b/esm", "evil-nested-sub", "1.0.0"),
+    ):
+        (nm / rel).mkdir(parents=True)
+        (nm / rel / "package.json").write_text(json.dumps({"name": name, "version": version}))
+    found = _collect_new_packages([nm], {}, "npm", non_public=set())
+    assert sorted((name, version) for _eco, name, version, _root in found) == [
+        ("@babel/core", "7.0.0"), ("a", "1.0.0"), ("b", "1.0.0"), ("dom-helpers", "5.2.1")]
+    assert sorted((p.name, p.version) for p in NodeLanguage().detect_installed_packages(tmp_path)) == sorted(
+        (name, version) for _eco, name, version, _root in found)
+
+
+@pytest.mark.parametrize(("rel", "depth"), [
+    ("a/package.json", 1),
+    ("@s/a/package.json", 1),
+    ("a/node_modules/@t/b/package.json", 2),
+    ("a/sub/package.json", 0),
+    ("@s/package.json", 0),
+    (".cache/x/package.json", 0),
+    ("@s/a/lib/package.json", 0),
+])
+def test_manifest_depth(rel, depth):
+    assert _node._manifest_depth(Path(rel)) == depth
