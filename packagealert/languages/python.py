@@ -17,6 +17,7 @@ from typing import Any
 
 import httpx
 
+from packagealert import safe_read
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
@@ -186,7 +187,7 @@ class _PythonHeuristic(AbstractHeuristic):
         setup_py = package_dir / "setup.py"
         if setup_py.exists() and setup_py.stat().st_size < _MAX_FILE_SIZE:
             try:
-                code = setup_py.read_text(errors="replace")
+                code = safe_read.read_text(setup_py, errors="replace")
                 signals.extend(_analyze_setup_py(code))
             except OSError:
                 pass
@@ -195,7 +196,7 @@ class _PythonHeuristic(AbstractHeuristic):
                 continue
             if p.suffix in ("", ".so", ".exe", ".dll", ".dylib"):
                 try:
-                    with p.open("rb") as _fh:
+                    with safe_read.open_regular(p) as _fh:
                         magic = _fh.read(4)
                     if magic[:2] in (b"MZ", b"\x7fE") or magic == b"\xca\xfe\xba\xbe":
                         signals.append(
@@ -277,7 +278,7 @@ def _parse_requirements_txt(
 
     results: list[PackageSpec] = []
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = safe_read.read_text(path, errors="replace").splitlines()
     except OSError:
         return results
 
@@ -474,7 +475,7 @@ def _is_uv_lock_root(src: object) -> bool:
 def _parse_uv_lock(path: Path) -> list[PackageSpec]:
     """Parse a uv.lock TOML file into PackageSpec objects."""
     try:
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(safe_read.read_text(path))
         packages = data.get("package", [])
 
         deps_of, deps_of_unfiltered = _uv_lock_adjacency(packages)
@@ -576,7 +577,7 @@ def _parse_pipfile_lock(path: Path) -> list[PackageSpec]:
     from (its ``index``, else pipenv's default, the first source) is public PyPI.
     """
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(safe_read.read_text(path))
         meta = data.get("_meta")
         sources = meta.get("sources") if isinstance(meta, dict) else None
         sources = [s for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
@@ -815,7 +816,7 @@ def _record_paths_by_top_level(
     if not record.exists():
         return None
     try:
-        text = record.read_text(errors="replace")
+        text = safe_read.read_text(record, errors="replace")
     except OSError:
         return None
 
@@ -1447,7 +1448,7 @@ def venv_site_packages(venv_root: Path) -> Path | None:
     cfg = venv_root / "pyvenv.cfg"
     if cfg.exists():
         try:
-            for line in cfg.read_text(errors="replace").splitlines():
+            for line in safe_read.read_text(cfg, errors="replace").splitlines():
                 key, _, value = line.partition("=")
                 if key.strip().lower() == "version":
                     parts = value.strip().split(".")[:2]
@@ -1496,7 +1497,7 @@ def _req_file_has_ssh(path: Path, visited: set[Path]) -> bool:
         return False
     visited.add(path)
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = safe_read.read_text(path, errors="replace").splitlines()
     except OSError:
         return False
     from packagealert.parsers.lockfiles import _req_include
@@ -1522,7 +1523,7 @@ def _has_ssh_vcs_deps(parsed: Any, cwd: Path) -> bool:
         candidates: list[Path] = [cwd / "Pipfile.lock"]
         for path in candidates:
             try:
-                if _is_ssh_vcs_url(path.read_text(errors="replace")):
+                if _is_ssh_vcs_url(safe_read.read_text(path, errors="replace")):
                     return True
             except OSError:
                 pass
@@ -1617,7 +1618,7 @@ def _looks_like_venv(resolved: Path) -> bool:
     """
     cfg = resolved / "pyvenv.cfg"
     try:
-        text = cfg.read_text(encoding="utf-8", errors="replace")
+        text = safe_read.read_text(cfg, errors="replace")
     except OSError:
         return False
     has_home = any(
@@ -3036,7 +3037,7 @@ class PythonLanguage:
             top_level = entry / "top_level.txt"
             if top_level.exists():
                 try:
-                    for line in top_level.read_text().splitlines():
+                    for line in safe_read.read_text(top_level).splitlines():
                         name = line.strip()
                         if name and name not in top_names:
                             top_names.append(name)

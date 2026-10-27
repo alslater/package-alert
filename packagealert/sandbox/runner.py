@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 
+from packagealert import safe_read
 from packagealert.languages import registry as lang_registry
 from packagealert.languages.base import (
     PackageSpec,
@@ -317,7 +318,7 @@ class SandboxRunner:
                 real_sibling = tool_resolved.parent / f"{tool_resolved.name}{_PA_REAL_SUFFIX}"
                 if not real_sibling.exists():
                     try:
-                        content = Path(tool_path).read_text(errors="strict")
+                        content = safe_read.read_text(tool_path)
                         if "# __pa_shim__" in content:
                             self._console.print(
                                 f"[red]✗ {tool_resolved} is a package-alert shim but "
@@ -3995,7 +3996,7 @@ def _assert_scannable_lock_files_contained(cwd: Path) -> str | None:
 def _snapshot_npmrc(root: Path) -> bytes | None:
     """The project's .npmrc as it is now (None when absent or unreadable), for reading pre-run lock snapshots."""
     try:
-        return (root / ".npmrc").read_bytes()
+        return safe_read.read_bytes(root / ".npmrc")
     except OSError:
         return None
 
@@ -4055,7 +4056,7 @@ def _snapshot_lock_files(
                 result[p] = _LOCK_UNREADABLE
                 continue
         try:
-            result[p] = p.read_bytes()
+            result[p] = safe_read.read_bytes(p)
         except OSError:
             result[p] = _LOCK_UNREADABLE
     return result
@@ -4117,7 +4118,7 @@ def _changed_lock_files(
                     changed.append(p)
                     continue
             try:
-                if p.read_bytes() != before:
+                if safe_read.read_bytes(p) != before:
                     changed.append(p)
             except OSError:
                 log.warning("Could not read lock file after sandbox run: %s", p)

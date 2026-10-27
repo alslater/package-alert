@@ -6,6 +6,8 @@ import tarfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from packagealert import safe_read
+
 log = logging.getLogger(__name__)
 
 
@@ -26,7 +28,7 @@ def inspect_npm_tarball(path: Path) -> NpmPackageInfo | None:
     if not path.exists():
         return None
     try:
-        with tarfile.open(path, "r:gz") as tf:
+        with safe_read.open_regular(path) as fh, tarfile.open(fileobj=fh, mode="r:gz") as tf:
             for member in tf.getmembers():
                 # Zip-slip protection: reject absolute paths and parent traversal
                 if ".." in member.name or member.name.startswith("/"):
@@ -48,7 +50,7 @@ def inspect_npm_tarball(path: Path) -> NpmPackageInfo | None:
 def parse_package_json_file(path: Path) -> NpmPackageInfo | None:
     """Parse a standalone package.json from disk."""
     try:
-        data = json.loads(path.read_bytes())
+        data = json.loads(safe_read.read_bytes(path))
         return _parse_package_json(data, path)
     except Exception:
         log.debug("Failed to parse package.json at %s", path, exc_info=True)

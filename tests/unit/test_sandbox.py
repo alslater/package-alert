@@ -4401,12 +4401,13 @@ class TestSnapshotLockFiles:
     def test_handles_oserror_gracefully(self, tmp_path, monkeypatch):
         lock = tmp_path / "uv.lock"
         lock.write_bytes(b"content")
-        original_rb = Path.read_bytes
-        def patched(self):
-            if self.name == "uv.lock":
+        from packagealert import safe_read
+        original_rb = safe_read.read_bytes
+        def patched(path, **kw):
+            if Path(path).name == "uv.lock":
                 raise OSError("permission denied")
-            return original_rb(self)
-        monkeypatch.setattr(Path, "read_bytes", patched)
+            return original_rb(path, **kw)
+        monkeypatch.setattr(safe_read, "read_bytes", patched)
         # Should not raise; unreadable file is stored as _LOCK_UNREADABLE (not None)
         # so restore does not mistakenly delete it.
         result = _snapshot_lock_files(tmp_path)
@@ -5962,21 +5963,22 @@ class TestFileSystemBackendSnapshot:
         assert content == b"a"
 
     def test_unreadable_file_recorded_in_large_files_not_dropped(self, tmp_path, monkeypatch):
-        # If read_bytes() fails, the file must be recorded in large_files (not dropped)
+        # If the read fails, the file must be recorded in large_files (not dropped)
         # so restore won't treat it as "added during the run" and delete it.
         target = tmp_path / "pkg"
         target.mkdir()
         f = target / "locked.py"
         f.write_bytes(b"content")
 
-        original = Path.read_bytes
+        from packagealert import safe_read
+        original = safe_read.read_bytes
 
-        def fail_if_locked(self_path):
-            if self_path == f:
+        def fail_if_locked(path, **kw):
+            if Path(path) == f:
                 raise OSError("permission denied")
-            return original(self_path)
+            return original(path, **kw)
 
-        monkeypatch.setattr(Path, "read_bytes", fail_if_locked)
+        monkeypatch.setattr(safe_read, "read_bytes", fail_if_locked)
 
         snap = self._backend().snapshot_install_target(target, self._console())
         assert f not in snap.files

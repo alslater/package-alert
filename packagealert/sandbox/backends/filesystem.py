@@ -12,6 +12,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from packagealert import safe_read
 from packagealert.sandbox.backend import InstallSnapshot
 
 log = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ class FileSystemBackend:
                     snap.large_files[full] = (size, st.st_mtime_ns)
                     continue
                 try:
-                    snap.files[full] = (full.read_bytes(), st.st_mode)
+                    snap.files[full] = (safe_read.read_bytes(full), st.st_mode)
                 except OSError:
                     # Content unreadable — record metadata only so restore won't
                     # treat the file as "added during the run" and delete it.
@@ -439,7 +440,7 @@ class FileSystemBackend:
                             warn("Cannot restore file (was symlink): %s", full)
                     else:
                         try:
-                            current = full.read_bytes()
+                            current = safe_read.read_bytes(full)
                         except OSError:
                             current = None
                         if current != file_content:
