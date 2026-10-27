@@ -185,3 +185,99 @@ async def test_a_private_packages_event_waits_for_the_install_to_finish(tmp_path
         with patch("packagealert.monitors.process.psutil.process_iter", return_value=[]):
             await monitor._scan_processes()
         assert [(e.package_name, e.from_public_registry) for e in drain()] == [("evil", False)]
+
+
+async def test_the_npm_an_observed_command_ran_is_carried_to_its_provenance(tmp_path):
+    """An observed npm is `node /…/npm-cli.js`: which npm that is (its builtin npmrc) reaches
+    both the explicit-package check and the lock scan after the process exits."""
+    from packagealert.languages.node import NodeLanguage
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    lang_registry.load()
+    cmdline = ["node", "tools/npm/bin/npm-cli.js", "install"]
+    expected = ("/opt/node/bin/node", str(tmp_path / "tools/npm/bin/npm-cli.js"))
+    seen: list = []
+
+    def explicit(self, raw, parsed, project_dir):
+        seen.append(COMMAND_ARGV.get())
+        return True
+
+    def parse_lockfile(self, path):
+        seen.append(COMMAND_ARGV.get())
+        return []
+
+    (tmp_path / "package-lock.json").write_text("{}")
+    for parsed in (ProcessInstall(manager="npm", packages=[PackageSpec(name="a", version="1.0.0", ecosystem="npm")]),
+                   ProcessInstall(manager="npm", packages=[], defer_to_lockfile=True, lockfile_hint="package-lock.json")):
+        monitor = ProcessMonitor(WatchConfig(process_poll_interval_seconds=1))
+        proc = _proc(tmp_path, cmdline)
+        proc.info["exe"] = "/opt/node/bin/node"
+
+        def process_iter(attrs, proc=proc):
+            assert "exe" in attrs
+            return [proc]
+
+        with (
+            patch("packagealert.monitors.process.psutil.process_iter", process_iter),
+            patch.object(monitor, "_pm_names", frozenset(["npm", "node"])),
+            patch.object(monitor, "_try_parse", return_value=parsed),
+            patch.object(NodeLanguage, "explicit_package_public", explicit),
+            patch.object(NodeLanguage, "parse_lockfile", parse_lockfile),
+        ):
+            await monitor._scan_processes()
+            with patch("packagealert.monitors.process.psutil.process_iter", return_value=[]):
+                await monitor._scan_processes()
+    assert seen == [expected, expected]
+
+
+def test_an_observed_runtime_is_named_by_its_executable(tmp_path):
+    """A bare `node` would be looked up on the daemon's PATH; the process's own executable is the one that ran."""
+    from packagealert.monitors.process import _command_argv
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    script = "/opt/public/lib/node_modules/npm/bin/npm-cli.js"
+    assert _command_argv(["node", script, "install"], str(tmp_path), "/opt/public/bin/node") == \
+        ("/opt/public/bin/node", script)
+    # Unread, a bare node is not the daemon's on PATH but unknown; a node named by path is kept.
+    assert _command_argv(["node", script], str(tmp_path), None) == (UNKNOWN_SCRIPT, script)
+    assert _command_argv(["/opt/x/bin/node", script], str(tmp_path), None) == ("/opt/x/bin/node", script)
+    assert _command_argv(["pip", "install"], str(tmp_path), "/usr/bin/python3") == ("pip", "install")
+
+
+def test_a_bare_node_script_is_resolved_against_the_observed_cwd(tmp_path):
+    """Node resolves `node npm-cli.js` against its own cwd, not the daemon's PATH or cwd."""
+    from packagealert.monitors.process import _command_argv
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    assert _command_argv(["node", "npm-cli.js", "install"], str(tmp_path), "/usr/bin/node") == \
+        ("/usr/bin/node", str(tmp_path / "npm-cli.js"))
+    # npm runs under node: a bare npm with its executable unread is a rewritten title, so
+    # which node and npm ran is unknown rather than the daemon's own.
+    assert _command_argv(["npm", "install"], str(tmp_path), None) == (UNKNOWN_SCRIPT, UNKNOWN_SCRIPT)
+    assert _command_argv(["/opt/x/bin/npm", "install"], str(tmp_path), None) == ("/opt/x/bin/npm", "install")
+    # A title npm packed into one argument, as parse_npm_args() reads it.
+    assert _command_argv(["npm install demo", "", ""], str(tmp_path), None) == (UNKNOWN_SCRIPT, UNKNOWN_SCRIPT)
+
+
+def test_a_rewritten_process_title_keeps_the_runtime_and_not_the_tool_name(tmp_path):
+    """npm rewrites its title to `npm install x`: the node that ran is kept, and which npm
+    script it ran is unknown rather than the daemon's npm on PATH."""
+    from packagealert.monitors.process import _command_argv
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    assert _command_argv(["npm", "install", "x"], str(tmp_path), "/opt/node/bin/node") == \
+        ("/opt/node/bin/node", UNKNOWN_SCRIPT)
+
+
+def test_a_renamed_node_runtime_is_still_node(tmp_path):
+    """`setup project` renames node to node.__pa_real behind its shim: that executable is
+    still the runtime, kept whether or not npm rewrote the process title."""
+    from packagealert.monitors.process import _command_argv
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    real = "/proj/.venv/bin/node.__pa_real"
+    assert _command_argv(["npm", "install", "x"], str(tmp_path), real) == (real, UNKNOWN_SCRIPT)
+    versioned = "/opt/node/bin/node-20"                               # named as parse_npm_args() names it
+    assert _command_argv(["npm", "install", "x"], str(tmp_path), versioned) == (versioned, UNKNOWN_SCRIPT)
+    assert _command_argv([real, "npm-cli.js", "install"], str(tmp_path), real) == \
+        (real, str(tmp_path / "npm-cli.js"))

@@ -19,6 +19,7 @@ from rich.console import Console
 
 import packagealert.sandbox.runner as runner_mod
 from packagealert.config import AppConfig
+from packagealert.languages import node as _node_mod
 from packagealert.languages.base import SandboxTargets, ShellEnvironment
 from packagealert.languages.python import (
     _find_pipenv_venv,
@@ -8778,3 +8779,281 @@ def test_independent_copies_are_risk_scored_one_at_a_time(tmp_path, monkeypatch)
         assert asyncio.run(runner._post_scan_risk(found, scored_locally)) is True
     [report] = [r for o in outcomes for r in o.reports.values()]
     assert report.score == 25
+
+
+_REAL_BUILTIN_NPMRC = _node_mod._npm_builtin_npmrc   # before conftest's isolation replaces it
+
+
+class TestTheRunningCommandsArgv:
+    def test_the_lock_scans_know_which_npm_runs(self, tmp_path, monkeypatch):
+        """npm's builtin npmrc is the invoked installation's, so its argv is visible to the scans."""
+        import asyncio
+
+        from packagealert.parsers.process_args import COMMAND_ARGV
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        seen: list = []
+
+        async def _record(*a, **kw):
+            seen.append(COMMAND_ARGV.get())
+            return True
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _record)
+        monkeypatch.setattr(runner, "_post_run_cooldown", _record)
+        asyncio.run(runner.run(["/opt/public/bin/npm", "install"]))
+        assert seen == [("/opt/public/bin/npm", "install")] * 2
+
+    @pytest.mark.parametrize("on_path", [True, False])
+    def test_the_sandbox_env_carries_the_invoked_npms_registry_variables(self, tmp_path, tmp_path_factory, monkeypatch, on_path):
+        """A registry variable only the invoked npm's builtin npmrc refers to is passed when
+        that npm is the one on PATH (named by path, as a shim names it), so the scans and npm
+        in the sandbox agree; another npm's builtin npmrc could refer to any variable, so it
+        is not (npm then refuses the unexpanded URL)."""
+        import asyncio
+        import json as _json
+
+        from packagealert.parsers.process_args import SANDBOX_ENV
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        public = tmp_path_factory.mktemp("public-npm")           # an installation outside the project
+        package = public / "lib" / "node_modules" / "npm"
+        (package / "bin").mkdir(parents=True)
+        (package / "package.json").write_text(_json.dumps({"name": "npm", "version": "11.8.0"}))
+        (package / "bin" / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+        (package / "bin" / "npm-cli.js").chmod(0o755)
+        (package / "npmrc").write_text("registry=${PUBLIC_REGISTRY}\n")
+        (public / "bin").mkdir()
+        (public / "bin" / "npm").symlink_to(package / "bin" / "npm-cli.js")
+        if on_path:
+            monkeypatch.setenv("PATH", f"{public / 'bin'}:{os.environ['PATH']}")
+        monkeypatch.setattr(_node_mod, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+        monkeypatch.setenv("PUBLIC_REGISTRY", "https://registry.npmjs.org/")
+        (tmp_path / "proj").mkdir()
+        monkeypatch.chdir(tmp_path / "proj")
+        runner = _make_runner()
+        seen: list = []
+
+        async def _record(*a, **kw):
+            seen.append(dict(SANDBOX_ENV.get() or {}).get("PUBLIC_REGISTRY"))
+            return True
+
+        monkeypatch.setattr(runner, "_scan_updated_lock_files", _record)
+        monkeypatch.setattr(runner, "_post_run_cooldown", _record)
+        asyncio.run(runner.run([str(public / "bin" / "npm"), "install"]))
+        assert seen == ["https://registry.npmjs.org/" if on_path else None] * 2
+
+    def test_the_environment_is_settled_with_the_hidden_directories(self, tmp_path, monkeypatch):
+        """sandbox.extra_tmpfs decides which config files npm reads, and so which variables the
+        settled environment passes: it is in place before the environment is settled."""
+        import asyncio
+
+        from packagealert.parsers.process_args import (
+            SANDBOX_TMPFS,
+            SANDBOX_WRITABLE,
+        )
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        (tmp_path / "hidden").mkdir()                                  # bwrap mounts over a directory only
+        runner._cfg.sandbox.extra_tmpfs = [tmp_path / "hidden"]
+        seen: list = []
+        visible: list = []
+        real = runner_mod._settled_sandbox_env
+
+        def _settle(extra):
+            seen.append(SANDBOX_TMPFS.get())
+            visible.append(SANDBOX_WRITABLE.get())
+            return real(extra)
+
+        monkeypatch.setattr(runner_mod, "_settled_sandbox_env", _settle)
+        monkeypatch.setattr(runner_mod.SandboxRunner, "_check_extra_tmpfs", lambda self, paths: True)
+        asyncio.run(runner.run(["npm", "install"]))
+        assert seen and all(hidden[0] == tmp_path / "hidden" for hidden in seen)
+        assert all(shown == (tmp_path,) for shown in visible)          # the command runs in this directory, bound writable
+
+    def test_published_visibility_is_the_runtime_directories_not_config_binds(self, tmp_path, monkeypatch):
+        """The config files languages bind depend on the environment still being settled, so
+        only the runtime installations are published as visible; npm's own binds are judged
+        where they are made (node._npm_home_bind())."""
+        from packagealert.languages.node import NodeLanguage
+
+        (tmp_path / "runtime").mkdir()
+        (tmp_path / "selector.npmrc").write_text("")
+        monkeypatch.setattr(runner_mod, "_runtime_home_dirs", lambda: [tmp_path / "runtime"])
+        monkeypatch.setattr(NodeLanguage, "home_ro_paths", lambda self: [tmp_path / "selector.npmrc"])
+        assert tmp_path / "selector.npmrc" in runner_mod._home_ro_dirs()            # still bound
+        assert runner_mod._sandbox_visibility([])[2] == (tmp_path / "runtime",)      # not published
+
+    def test_only_extra_tmpfs_entries_bwrap_mounts_are_hidden(self, tmp_path, monkeypatch):
+        """bwrap lays a tmpfs only over an extra_tmpfs entry that is a directory and not a
+        symlink: a symlinked entry, a file and a missing path hide nothing."""
+        monkeypatch.setattr(runner_mod, "hidden_home_paths", list)
+        (tmp_path / "real").mkdir()
+        (tmp_path / "link").symlink_to(tmp_path / "real")
+        (tmp_path / "file").write_text("")
+        tmpfs, _hidden, _visible = runner_mod._sandbox_visibility(
+            [tmp_path / "real", tmp_path / "link", tmp_path / "file", tmp_path / "missing"])
+        assert tmpfs == (tmp_path / "real",)
+
+    def test_configured_read_only_binds_are_published(self, tmp_path, monkeypatch):
+        """sandbox.extra_ro_paths are read-only binds, published by pa run and pa fix alike."""
+        import asyncio
+
+        from packagealert.parsers.process_args import SANDBOX_HOME_VISIBLE
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        (tmp_path / "company.npmrc").write_text("")
+        monkeypatch.setattr(runner_mod, "_runtime_home_dirs", list)
+        monkeypatch.setattr(runner_mod, "_settled_sandbox_env", lambda extra: {})
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        runner._cfg.sandbox.extra_ro_paths = [tmp_path / "company.npmrc", tmp_path / "missing"]
+        seen: list = []
+
+        async def _preflight(*a, **kw):
+            seen.append(SANDBOX_HOME_VISIBLE.get())
+            return False
+
+        monkeypatch.setattr(runner, "_preflight", _preflight)
+        asyncio.run(runner.run(["npm", "install", "x"]))
+        assert seen == [(tmp_path / "company.npmrc",)]
+        with runner_mod.sandbox_config_context([], [], extra_ro=[tmp_path / "company.npmrc"]):
+            assert SANDBOX_HOME_VISIBLE.get() == (tmp_path / "company.npmrc",)
+
+    def test_run_publishes_the_runtime_log_overlays(self, tmp_path, monkeypatch):
+        """The tmpfs bwrap lays over a read-only tool directory's logs/ is published in its
+        mount-order place, so provenance judges a config there as npm will."""
+        import asyncio
+
+        from packagealert.parsers.process_args import SANDBOX_POST_RO_TMPFS
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        (tmp_path / "nvm" / "logs").mkdir(parents=True)
+        monkeypatch.setattr(runner_mod, "_runtime_home_dirs", lambda: [tmp_path / "nvm"])
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        seen: list = []
+
+        async def _preflight(*a, **kw):
+            seen.append(SANDBOX_POST_RO_TMPFS.get())
+            return False
+
+        monkeypatch.setattr(runner, "_preflight", _preflight)
+        asyncio.run(runner.run(["npm", "install", "x"]))
+        assert seen == [(tmp_path / "nvm" / "logs",)]
+
+    def test_a_linked_plugin_hidden_path_is_hidden_where_it_resolves_too(self, tmp_path, monkeypatch):
+        """~/.local/share/uv/credentials -> /opt/credentials: bwrap hides the resolved
+        directory, so a config read at /opt/credentials/npmrc is hidden as well."""
+        (tmp_path / "opt" / "credentials").mkdir(parents=True)
+        (tmp_path / "creds-link").symlink_to(tmp_path / "opt" / "credentials")
+        monkeypatch.setattr(runner_mod, "hidden_home_paths", lambda: [tmp_path / "creds-link"])
+        (tmp_path / "srv" / "company" / "config").mkdir(parents=True)
+        (tmp_path / "opt" / "company").symlink_to(tmp_path / "srv" / "company")    # extra_tmpfs under a linked parent
+        tmpfs, hidden, _visible = runner_mod._sandbox_visibility([tmp_path / "opt" / "company" / "config"])
+        assert tmpfs == (tmp_path / "opt" / "company" / "config", (tmp_path / "srv" / "company" / "config").resolve())
+        assert hidden == (tmp_path / "creds-link", (tmp_path / "opt" / "credentials").resolve())
+
+    def test_sandbox_config_context_settles_under_its_tmpfs_and_restores_on_failure(self, tmp_path, monkeypatch):
+        """pa fix's verification context: the hidden directories are set before the environment
+        is settled, and both are restored even when settling raises."""
+        from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_TMPFS
+
+        seen: list = []
+        (tmp_path / "hidden").mkdir()
+        monkeypatch.setattr(runner_mod, "_settled_sandbox_env", lambda extra: seen.append(SANDBOX_TMPFS.get()) or {})
+        with runner_mod.sandbox_config_context([], [tmp_path / "hidden"]):
+            assert SANDBOX_ENV.get() == {}
+        assert seen == [(tmp_path / "hidden",)]
+
+        def _raise(extra):
+            raise RuntimeError("settling failed")
+
+        monkeypatch.setattr(runner_mod, "_settled_sandbox_env", _raise)
+        with pytest.raises(RuntimeError), runner_mod.sandbox_config_context([], [tmp_path / "hidden"]):
+            pass
+        assert SANDBOX_TMPFS.get() == () and SANDBOX_ENV.get() is None
+
+    @pytest.mark.parametrize(("argv", "sandboxed"), [(["npm", "install", "-g", "x"], False),
+                                                     (["npm", "install", "x"], True)])
+    def test_a_global_install_is_judged_by_the_hosts_config(self, tmp_path, monkeypatch, argv, sandboxed):
+        """A global install runs unsandboxed: npm there reads a global npmrc under /tmp."""
+        import asyncio
+
+        from packagealert.parsers.process_args import SANDBOX_ENV
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        runner = _make_runner()
+        seen: list = []
+
+        async def _preflight(*a, **kw):
+            seen.append(SANDBOX_ENV.get() is not None)
+            return False
+
+        monkeypatch.setattr(runner, "_preflight", _preflight)
+        asyncio.run(runner.run(argv))
+        assert seen == [sandboxed]
+
+    def test_a_command_moved_to_another_project_judges_trust_there(self, tmp_path, monkeypatch):
+        """pa run npm --prefix /srv/repo install from elsewhere: /srv/repo's own npm on PATH is
+        that project's, so its builtin npmrc is not trusted."""
+        import asyncio
+        import json as _json
+
+        from packagealert.languages import node as node_mod
+        from packagealert.parsers.process_args import COMMAND_PROJECT
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        repo = tmp_path / "srv" / "repo"
+        (repo / ".git").mkdir(parents=True)
+        package = repo / "node_modules" / ".tools" / "lib" / "node_modules" / "npm"
+        (package / "bin").mkdir(parents=True)
+        (package / "package.json").write_text(_json.dumps({"name": "npm", "version": "11.8.0"}))
+        (package / "bin" / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+        (package / "bin" / "npm-cli.js").chmod(0o755)
+        (package / "npmrc").write_text("")
+        (repo / "node_modules" / ".tools" / "bin").mkdir()
+        (repo / "node_modules" / ".tools" / "bin" / "npm").symlink_to(package / "bin" / "npm-cli.js")
+        monkeypatch.setenv("PATH", f"{repo / 'node_modules' / '.tools' / 'bin'}:{os.environ['PATH']}")
+        monkeypatch.setattr(_node_mod, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+        elsewhere = tmp_path / "elsewhere"
+        (elsewhere / ".git").mkdir(parents=True)
+        monkeypatch.chdir(elsewhere)
+        runner = _make_runner()
+        seen: list = []
+
+        async def _preflight(*a, **kw):
+            seen.append((COMMAND_PROJECT.get(), node_mod._npm_builtin_trusted(package.resolve() / "npmrc")))
+            return False
+
+        monkeypatch.setattr(runner, "_preflight", _preflight)
+        asyncio.run(runner.run(["npm", "--prefix", str(repo), "install"]))
+        assert seen == [(repo.resolve(), False)]
+
+    def test_a_global_install_resolves_relative_config_locations(self, tmp_path, monkeypatch):
+        """pa run npm install -g runs unsandboxed, but in this working directory: a relative
+        npm_config_globalconfig there is this directory's file, as npm reads it."""
+        import asyncio
+
+        from packagealert.languages import node as node_mod
+        from packagealert.parsers.process_args import COMMAND_CWD_KNOWN
+        TestInstallTargetRestoreIntegration._setup(TestInstallTargetRestoreIntegration(), monkeypatch, returncode=0,
+                                                   tmp_path=tmp_path)
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "cfg").mkdir()
+        (tmp_path / "cfg" / "npmrc").write_text("registry=https://npm.corp.example/\n")
+        monkeypatch.setenv("npm_config_globalconfig", "cfg/npmrc")
+        runner = _make_runner()
+        seen: list = []
+
+        async def _preflight(*a, **kw):
+            seen.append((COMMAND_CWD_KNOWN.get(), node_mod._npm_global_npmrc()))
+            return False
+
+        monkeypatch.setattr(runner, "_preflight", _preflight)
+        asyncio.run(runner.run(["npm", "install", "-g", "x"]))
+        assert seen == [(True, tmp_path / "cfg" / "npmrc")]

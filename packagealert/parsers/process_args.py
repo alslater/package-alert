@@ -605,11 +605,50 @@ def derive_site_packages(exe_path: str) -> Path | None:
 COMMAND_LINE_REGISTRIES: ContextVar[Mapping[str, str]] = ContextVar(
     "COMMAND_LINE_REGISTRIES", default=MappingProxyType({}))
 
+# The running command's argv (set by the sandbox runner, and by the process
+# monitor for a command it observed), which says which installation of a tool
+# runs it (npm's builtin npmrc is that installation's). None everywhere else
+# (scans, the daemon's own lookups) means the one on PATH.
+COMMAND_ARGV: ContextVar[tuple[str, ...] | None] = ContextVar("COMMAND_ARGV", default=None)
+
+# COMMAND_ARGV's script after a node runtime when the command line no longer shows it
+# (npm rewrites its process title to ``npm install …``).
+UNKNOWN_SCRIPT = ""
+
 # The environment the running command's sandbox gets (set by the sandbox
 # runner). A project config file's ${VAR} references (npm's .npmrc) are
 # expanded from it, as the tool in the sandbox will expand them; None (scans,
 # the daemon) means this process's own environment.
 SANDBOX_ENV: ContextVar[Mapping[str, str] | None] = ContextVar("SANDBOX_ENV", default=None)
+
+# The directories besides /tmp and $HOME that the running command's sandbox lays an
+# empty tmpfs over before its binds (``sandbox.extra_tmpfs``): a config file there is
+# read only where a later bind shows it again.
+SANDBOX_TMPFS: ContextVar[tuple[Path, ...]] = ContextVar("SANDBOX_TMPFS", default=())
+
+# The language plugins' hidden home paths (sandbox_hidden_home_paths()), which the
+# running command's sandbox hides after every bind: nothing there is read in it.
+SANDBOX_HIDDEN: ContextVar[tuple[Path, ...]] = ContextVar("SANDBOX_HIDDEN", default=())
+
+# The directories under $HOME the running command's sandbox binds read-only (runtime
+# installations such as ~/.nvm): a config file there is read.
+SANDBOX_HOME_VISIBLE: ContextVar[tuple[Path, ...]] = ContextVar("SANDBOX_HOME_VISIBLE", default=())
+
+# The log directories inside those that the sandbox then lays an empty tmpfs over.
+SANDBOX_POST_RO_TMPFS: ContextVar[tuple[Path, ...]] = ContextVar("SANDBOX_POST_RO_TMPFS", default=())
+
+# The directories the running command's sandbox binds writable, last but for the hidden
+# paths (the working directory it runs in).
+SANDBOX_WRITABLE: ContextVar[tuple[Path, ...]] = ContextVar("SANDBOX_WRITABLE", default=())
+
+# Whether the running command runs in this process's working directory (pa run, pa fix),
+# so a relative path in its configuration means the same here; not for the daemon's
+# observed processes, whose working directory it does not see.
+COMMAND_CWD_KNOWN: ContextVar[bool] = ContextVar("COMMAND_CWD_KNOWN", default=False)
+
+# The project package-alert acts on when it is not this process's working directory
+# (``pa fix /srv/repo``): its repository's tools are not trusted either.
+COMMAND_PROJECT: ContextVar[Path | None] = ContextVar("COMMAND_PROJECT", default=None)
 
 
 def parse_package_spec(spec: str, ecosystem: str) -> tuple[str, str | None]:
@@ -2209,9 +2248,11 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
     # `--prefix`/`-C` sets the directory npm installs into and reads
     # package.json / package-lock.json from.
     working_dir = prefix if isinstance(prefix, str) and prefix else None
-    # `--registry` and `--@scope:registry` choose where the named packages come from.
+    # `--registry` and `--@scope:registry` choose where the named packages come from;
+    # `--userconfig`, `--globalconfig` and `--prefix` move the config files that can.
     registries = {k: v for k, v in config.items() if isinstance(v, str) and v
                   and (k == "registry" or (k.startswith("@") and k.endswith(":registry")))}
+    registries.update({k: str(config[k]) for k in ("userconfig", "globalconfig", "prefix") if k in config})
 
     def result(packages: list[str], lockfile: bool) -> ParsedInstall:
         return ParsedInstall(
@@ -2240,7 +2281,8 @@ def parse_npm_args(argv: list[str]) -> ParsedInstall | None:
         # Removal mutates package-lock.json, but removes a package rather than
         # installing one — scanning the lock file here would gate the very
         # dependency being removed. Not a lockfile-install case.
-        return ParsedInstall(manager="npm", packages=[], ecosystem="npm", working_dir=working_dir)
+        return ParsedInstall(manager="npm", packages=[], ecosystem="npm", working_dir=working_dir,
+                             registries=registries)
     if command == "audit" and rest[:1] == ["fix"]:
         # Rewrites package-lock.json to non-vulnerable versions — an install
         # of (updated) dependencies, not a removal.

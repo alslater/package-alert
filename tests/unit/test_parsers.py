@@ -647,6 +647,14 @@ def test_npm_uninstall_defers_to_lockfile():
         assert result.packages == []
 
 
+def test_npm_uninstall_keeps_the_registry_settings_it_was_given():
+    """The post-run lock scan of `npm uninstall --globalconfig=/dev/null x` judges entries by
+    the registry npm used, not by the displaced global config."""
+    result = parse_npm_args(["npm", "uninstall", "--globalconfig=/dev/null", "--registry", "https://r.example/", "x"])
+    assert result is not None
+    assert result.registries == {"globalconfig": "/dev/null", "registry": "https://r.example/"}
+
+
 def test_npm_audit_fix_defers_to_lockfile():
     # `npm audit fix` can modify package-lock.json, so it must trigger lockfile scanning.
     result = parse_npm_args(["npm", "audit", "fix"])

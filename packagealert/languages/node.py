@@ -6,8 +6,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
@@ -193,10 +194,12 @@ def _npm_config_env() -> dict[str, str]:
 def _npm_registry_env_names() -> list[str]:
     """The environment variables (as spelled) that npm's registry settings come from.
 
-    That is ``npm_config_registry``, ``npm_config_@scope:registry`` and
-    ``npm_config_userconfig`` in any letter case, and a variable that is the
-    whole value of a registry line in the user's .npmrc and holds a
-    credential-free URL (``_npmrc_registry_refs``). These are what
+    That is ``npm_config_registry``, ``npm_config_@scope:registry`` and the
+    ones locating config files (``npm_config_userconfig``,
+    ``npm_config_globalconfig``, ``npm_config_prefix``) in any letter case, and a
+    variable that is the whole value of a registry line in the user's, the
+    global or npm's builtin npmrc and holds a credential-free URL
+    (``_npmrc_registry_refs``). These are what
     ``_npm_registries()`` reads, so the sandbox passes them on
     and npm there fetches from the registry the provenance check assumed.
     Credentials (``npm_config_//host/:_authToken``) are not among them.
@@ -210,15 +213,17 @@ def _npm_registry_env_names() -> list[str]:
         if not value or key is None:
             continue
         # A registry address only when it carries no credentials (https://user:pass@host/
-        # would hand them to install code); userconfig is a file path.
-        if key == "userconfig" or (
+        # would hand them to install code); the others are file paths.
+        if key in ("userconfig", "globalconfig", "prefix") or (
                 (key == "registry" or (key.startswith("@") and key.endswith(":registry")))
                 and _credential_free_url(value)):
             names.append(name)
-    # Registry-address variables of the user's own .npmrc (never one that may carry a
-    # credential). A project's .npmrc is the repository's, so its references are not
-    # passed at all; --env or sandbox.extra_env passes one deliberately.
-    names.extend(_npmrc_registry_refs(_user_npmrc()))
+    # Registry-address variables of the user's own and the machine's config files (never
+    # one that may carry a credential). A project's .npmrc is the repository's, so its
+    # references are not passed at all; --env or sandbox.extra_env passes one deliberately.
+    trusted = [rc for rc, ok in _npm_system_npmrc_entries() if ok]
+    for rc in (_user_npmrc(), *trusted):
+        names.extend(name for name in _npmrc_registry_refs(rc) if name not in names)
     return names
 
 
@@ -250,18 +255,59 @@ def _user_npmrc() -> Path:
     npm resolves a relative userconfig against its working directory, which
     for the host's command is this process's.
     """
-    moved = _npm_config_env().get("userconfig")
-    return Path(moved).expanduser().absolute() if moved else Path.home() / ".npmrc"
+    return _npm_env_path("userconfig") or Path.home() / ".npmrc"
 
 
-def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, dict[str, str]]:
+def _user_npmrc_visible() -> bool:
+    """Whether npm in a sandboxed command (``SANDBOX_ENV``) sees the user's config file: it
+    is bound wherever it is, after any tmpfs, but not into a plugin's hidden path
+    (``SANDBOX_HIDDEN``), which is laid over every bind, as written or along its links.
+    Outside a sandbox, always."""
+    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_HIDDEN
+
+    if SANDBOX_ENV.get() is None:
+        return True
+    return not _passes_through(_user_npmrc(), SANDBOX_HIDDEN.get())
+
+
+# The settings that locate npm's user and global config files.
+_NPM_CONFIG_LOCATORS = ("userconfig", "globalconfig", "prefix")
+
+
+def _npm_env_path(key: str, env: Mapping[str, str] | None = None, *, relative: bool = True) -> Path | None:
+    """The path-typed npm setting *key* from the environment (``npm_config_<key>``, in
+    *env*, default _npm_environ()) as npm reads it: ``${VAR}`` expanded, then as
+    _npm_path(). Without *relative*, None for a relative one.
+
+    The ``${VAR}``s come from this process's environment, where the user set them:
+    the sandbox is given the setting as this absolute path (prepare_sandbox_env()),
+    not the variables.
+    """
+    env = _npm_environ() if env is None else env
+    values = [_expand_npmrc_env(v) for k, v in env.items() if k.lower() == f"npm_config_{key}" and v]
+    if not values or not (relative or values[-1].startswith(("/", "~/"))):
+        return None
+    return _npm_path(values[-1], env)
+
+
+def _npm_registries(root: Path, *, project: bool = True, command_line: Mapping[str, str] | None = None,
+                    npm: bool = True) -> tuple[str | None, dict[str, str]]:
     """(default registry, {"@scope": registry}) as npm resolves them.
 
     npm's precedence: the command line (the running command's, from
     ``COMMAND_LINE_REGISTRIES``), the environment (``npm_config_registry``,
     ``npm_config_@scope:registry``), then the project's .npmrc, then the
-    user's. Without *project* the project's file is skipped, as npm does in
-    global mode. Unreadable files are skipped. This reads the environment of the
+    user's, then the global npmrc and npm's builtin one (_npm_global_npmrc(),
+    _npm_builtin_npmrc()), which only npm reads: with *npm* false (for pnpm, whose
+    version 11 on reads neither, and yarn) they are skipped. Without *project* the project's file is skipped, as
+    npm does in global mode. Unreadable files are skipped. *command_line*
+    (default ``COMMAND_LINE_REGISTRIES``) is the running command's settings.
+
+    npm also lets the command line and the project's .npmrc move the user and
+    global config files (``userconfig``, ``globalconfig``, ``prefix``). Where
+    they lead is not followed: a file moved that way is left out (see
+    _npm_global_npmrc()), so its registries are never assumed for a command
+    whose npm does not read them. This reads the environment of the
     process parsing the lock file, which is the user's for ``package-alert``
     commands.
     """
@@ -270,7 +316,11 @@ def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, di
     from packagealert.parsers.process_args import COMMAND_LINE_REGISTRIES, SANDBOX_ENV
 
     # The environment, then the running command's own --registry/--@scope:registry over it.
-    for key, value in (*_npm_config_env().items(), *COMMAND_LINE_REGISTRIES.get().items()):
+    command_line = COMMAND_LINE_REGISTRIES.get() if command_line is None else command_line
+    # npm's own shebang can change the environment it runs with (env -i, -u, VAR=…), so
+    # where its configuration comes from is not known: only its command line is assumed.
+    environment_known = not npm or _npm_runtime(_npm_environ()) != _UNKNOWN_RUNTIME
+    for key, value in (*(_npm_config_env().items() if environment_known else ()), *command_line.items()):
         if key == "registry":
             default = value
         elif key.startswith("@") and key.endswith(":registry"):
@@ -279,7 +329,19 @@ def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, di
     # the sandbox gets (SANDBOX_ENV, inside pa run and pa fix trials); elsewhere from
     # this process's. The sandbox is given only some of them (_npmrc_registry_refs).
     sandbox_env = SANDBOX_ENV.get()
-    for rc in [*([root / ".npmrc"] if project else []), _user_npmrc()]:
+    moved = {key for key in _NPM_CONFIG_LOCATORS if key in command_line}
+    if project:  # the environment's setting of a locator overrides the project's
+        moved.update(key for key, _ in _npmrc_lines(root / ".npmrc")
+                     if key in _NPM_CONFIG_LOCATORS and key not in _npm_config_env())
+    if npm:
+        builtin = _npm_builtin_npmrc(_npm_environ())
+        if builtin is not None and _npm_sandbox_can_read(builtin, None) and \
+                _npm_builtin_moves_userconfig(builtin, _npm_config_env()):
+            moved.add("userconfig")
+    files = [*([root / ".npmrc"] if project else []),
+             *([] if "userconfig" in moved or not _user_npmrc_visible() else [_user_npmrc()]),
+             *(_npm_system_npmrcs(moved) if npm else [])] if environment_known else []
+    for rc in files:
         # Within one file the last assignment of a key wins, as in npm's INI parser;
         # between sources the earlier (higher-precedence) one does.
         file_default, file_scopes = _npmrc_registries(rc, sandbox_env)
@@ -290,8 +352,10 @@ def _npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, di
     return default, scopes
 
 
-def _npmrc_registry_lines(rc: Path) -> list[tuple[str, str]]:
-    """(key, value as written) for each ``registry`` / ``@scope:registry`` line of *rc*, in order.
+def _npmrc_lines(rc: Path) -> list[tuple[str, str]]:
+    """(key, value) for each top-level setting line of *rc*, in order, decoded as npm's INI
+    parser decodes them (_ini_unsafe()): quotes removed, an inline ``;``/``#`` comment
+    cut. A ``[section]``'s settings are not top-level, so none after one is read.
 
     An unreadable file has none, and so does anything but a regular file (a FIFO would
     block the read forever); a symlinked config is read.
@@ -303,13 +367,590 @@ def _npmrc_registry_lines(rc: Path) -> list[tuple[str, str]]:
         return []
     found = []
     for line in lines:
-        key, sep, value = line.strip().partition("=")
-        key, value = key.strip(), value.strip().strip('"')
-        if not sep or key.startswith(("#", ";")):
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
             continue
-        if key == "registry" or (key.startswith("@") and key.endswith(":registry")):
-            found.append((key, value))
+        if _INI_SECTION_RE.match(stripped):
+            break
+        key, sep, value = line.partition("=")
+        if sep:
+            found.append((_ini_unsafe(key), _ini_unsafe(value)))
     return found
+
+
+_INI_SECTION_RE = re.compile(r"^\[([^\]]*)\]\s*$")
+
+
+def _ini_unsafe(value: str) -> str:
+    """A key or value as npm's ``ini`` package decodes it (its ``unsafe()``): a quoted one
+    ('…' or "…") is unquoted, and JSON-decoded when it parses; otherwise it ends at the
+    first unescaped ``;`` or ``#``, ``\\;``, ``\\#`` and ``\\\\`` standing for the character."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        if value[0] == "'":
+            value = value[1:-1]
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return value
+        return decoded if isinstance(decoded, str) else value
+    out = []
+    escaped = False
+    for char in value:
+        if escaped:
+            out.append(char if char in "\\;#" else "\\" + char)
+            escaped = False
+        elif char in ";#":
+            break
+        elif char == "\\":
+            escaped = True
+        else:
+            out.append(char)
+    if escaped:
+        out.append("\\")
+    return "".join(out).strip()
+
+
+def _npmrc_registry_lines(rc: Path) -> list[tuple[str, str]]:
+    """(key, value as written) for each ``registry`` / ``@scope:registry`` line of *rc*, in order."""
+    return [(key, value) for key, value in _npmrc_lines(rc)
+            if key == "registry" or (key.startswith("@") and key.endswith(":registry"))]
+
+
+def _npm_environ() -> Mapping[str, str]:
+    """The environment npm runs with: the sandbox's inside a sandboxed command, else this process's."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    source = SANDBOX_ENV.get()
+    return os.environ if source is None else source
+
+
+def _npm_path(value: str, env: Mapping[str, str]) -> Path | None:
+    """A path-typed npm setting as npm reads it: ``~/`` from $HOME, relative to the working
+    directory."""
+    if not value:
+        return None
+    if value.startswith("~/"):
+        value = os.path.join(env.get("HOME") or str(Path.home()), value[2:])
+    return Path(os.path.abspath(value))
+
+
+def _real_executable(found: str) -> Path:
+    """The executable *found* on PATH runs, resolved: the original a package-alert
+    shim replaced (its ``.__pa_real`` sibling) when there is one. Raises OSError or
+    RuntimeError when it cannot be resolved."""
+    resolved = Path(found).resolve()
+    original = resolved.with_name(f"{resolved.name}.__pa_real")
+    return original.resolve() if original.exists() else resolved
+
+
+def _command_npm() -> tuple[str | None, str | None]:
+    """(the npm script, the node named to run it) of the running command (COMMAND_ARGV):
+    ``npm …`` or ``/opt/x/bin/npm …`` gives (that npm, None), ``node /…/npm-cli.js …``
+    (as the process monitor sees every npm) gives both, and (UNKNOWN_SCRIPT, that node)
+    when node runs a script the command line no longer shows (npm rewrites its process
+    title). (None, None) when it is not npm."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, UNKNOWN_SCRIPT
+
+    argv = list(COMMAND_ARGV.get() or ())
+    if not argv:
+        return None, None
+    node: str | None = None
+    if argv[0] == UNKNOWN_SCRIPT and (len(argv) < 2 or argv[1] == UNKNOWN_SCRIPT):
+        return UNKNOWN_SCRIPT, UNKNOWN_SCRIPT  # neither the runtime nor the script is known
+    if (argv[0] == UNKNOWN_SCRIPT or _runtime_name(argv[0]) in ("node", "nodejs")) and len(argv) > 1:
+        node = argv.pop(0)  # UNKNOWN_SCRIPT: a node the monitor could not see
+        if argv[0] == UNKNOWN_SCRIPT:
+            return UNKNOWN_SCRIPT, node
+        argv[0] = os.path.abspath(argv[0])  # node resolves its script against the working directory
+    script = argv[0]
+    if _runtime_name(script) != "npm":
+        return None, None
+    return script, node
+
+
+def _runtime_name(path: str) -> str:
+    """*path*'s command name as the npm parser normalises it (``/opt/x/bin/npm-11`` and
+    ``npm-cli.js`` are npm, ``node20`` is node), a package-alert shim's renamed original
+    (``node.__pa_real``) included, and without a script extension (``pnpm.cjs``), as
+    the pnpm parser reads it."""
+    from packagealert.parsers.process_args import _cmd
+
+    name = _cmd(Path(path).name.removesuffix(".__pa_real"))
+    for suffix in (".cjs", ".mjs", ".js"):
+        name = name.removesuffix(suffix)
+    return name
+
+
+def _which(name: str, env: Mapping[str, str]) -> str | None:
+    """*name* as a shell finds it: a path as written, else looked up on the environment's PATH."""
+    return _kernel_absolute(name) if os.sep in name else shutil.which(name, path=env.get("PATH"))
+
+
+def _kernel_absolute(path: str | Path) -> str:
+    """*path* made absolute against the working directory as the kernel reads it when it
+    runs or opens it: ``..`` is left in place, to apply after any symlink before it
+    (``/opt/selector/../bin/node`` with ``selector -> /srv/node/lib`` is /srv/node/bin/node),
+    unlike os.path.abspath(), which drops it lexically."""
+    path = os.fspath(path)
+    return path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+
+
+def _npm_builtin_npmrc(env: Mapping[str, str]) -> Path | None:
+    """npm's builtin config file (``<npm's package>/npmrc``) for the npm the running
+    command invokes (_command_npm()), else the one on PATH, and None when the npm node
+    runs is not known: distribution packages set ``globalconfig``/``prefix`` there
+    (Debian: /etc/npmrc)."""
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    script = _command_npm()[0]
+    found = None if script == UNKNOWN_SCRIPT else _which(script or "npm", env)
+    if found is None:
+        return None
+    try:
+        real = _real_executable(found)
+    except (OSError, RuntimeError):
+        return None
+    for directory in list(real.parents)[:3]:
+        manifest = _read_json_object(directory / "package.json")
+        if manifest is not None and manifest.get("name") == "npm":
+            return directory / "npmrc"
+    return None
+
+
+def _npm_default_prefix(env: Mapping[str, str]) -> Path | None:
+    """npm's default global prefix: $PREFIX, else the installation of the node running npm
+    (the one the running command names, else the one on PATH: /usr/local/bin/node ->
+    /usr/local), under $DESTDIR when set."""
+    if env.get("PREFIX"):
+        # A relative one is npm's working directory's, which is not known here (an observed
+        # process, a scratch trial) and is not made absolute for the command.
+        return Path(env["PREFIX"]) if os.path.isabs(env["PREFIX"]) else None
+    runtime = _npm_runtime(env)
+    if runtime in (_UNKNOWN_RUNTIME, _UNSEEN_RUNTIME):
+        return None
+    found = _which(runtime or "node", env)
+    if found is None:
+        return None
+    try:
+        prefix = _real_executable(found).parent.parent  # process.execPath is the real binary
+    except (OSError, RuntimeError):
+        return None
+    if env.get("DESTDIR"):
+        if not os.path.isabs(env["DESTDIR"]):
+            return None  # npm's working directory's, as $PREFIX
+        prefix = Path(env["DESTDIR"]) / prefix.relative_to(prefix.anchor)
+    return prefix
+
+
+def _npm_global_npmrc(moved: Collection[str] = ()) -> Path | None:
+    """npm's global config file (see _npm_global_npmrc_located())."""
+    return _npm_global_npmrc_located(moved)[0]
+
+
+def _npm_global_npmrc_located(moved: Collection[str] = ()) -> tuple[Path | None, bool]:
+    """(npm's global config file, whether the repository cannot have chosen it).
+
+    npm locates it as the ``globalconfig`` setting from the environment, the user's
+    .npmrc or the builtin one, in that order; else ``<prefix>/etc/npmrc``, with
+    ``prefix`` looked up the same way and defaulting to _npm_default_prefix().
+
+    npm also takes either setting from the command line and the project's .npmrc,
+    and *moved* names the locators (_NPM_CONFIG_LOCATORS) set there. Where they
+    point is not followed: the sandbox could not be made to read a file the
+    repository names. So None is returned wherever such a setting decides the
+    location (a moved ``userconfig`` hides the user's file, which could), and the
+    global file's registries are then not assumed, which only adds lookups. The file
+    is not trusted when an npm or node the repository may have chosen located it: an
+    untrusted builtin npmrc (_npm_builtin_trusted()) or, for the default prefix, an
+    untrusted node (_npm_node_trusted()).
+    """
+    from packagealert.parsers.process_args import COMMAND_CWD_KNOWN, UNKNOWN_SCRIPT
+
+    env = _npm_environ()
+    environment = _npm_config_env()
+    builtin = _npm_builtin_npmrc(env)
+    if builtin is not None and not _npm_sandbox_can_read(builtin, None):
+        builtin = None  # npm in the sandbox does not see what it would choose either
+    files = [*([_user_npmrc()] if _user_npmrc_visible() else []), *([builtin] if builtin else [])]
+
+    def setting(key: str) -> tuple[bool, Path | None, bool]:
+        """(whether *key* is set, the path it names, whether the builtin npmrc set it)."""
+        if key in environment:
+            # A relative one is npm's working directory's: this process's for a command
+            # package-alert runs (prepare_sandbox_env() gives a sandboxed npm that absolute
+            # path), unknown to the daemon for an observed process, where it is not followed.
+            return True, _npm_env_path(key, env, relative=COMMAND_CWD_KNOWN.get()), False
+        for rc in files:
+            values = [value for name, value in _npmrc_lines(rc) if name == key]
+            if values:  # the last assignment in a file wins; an unset ${VAR} stays as written
+                value = _expand_npmrc_env(values[-1], env)
+                # npm resolves a relative one against its working directory, which for a
+                # trial is the scratch copy, so where it leads is not followed.
+                return True, _npm_path(value, env) if value.startswith(("/", "~/")) else None, rc == builtin
+        return False, None, False
+
+    def trusted(by_builtin: bool) -> bool:
+        return not by_builtin or builtin is None or _npm_builtin_trusted(builtin)
+
+    if "globalconfig" in moved:
+        return None, True
+    if "globalconfig" in environment:
+        return setting("globalconfig")[1], True
+    if "userconfig" in moved or _npm_builtin_moves_userconfig(builtin, environment):
+        return None, True
+    found, globalconfig, by_builtin = setting("globalconfig")
+    if found:
+        # One the builtin npmrc chose is trusted only if no hop of its own chain is the repository's.
+        chain_ok = not by_builtin or globalconfig is None or _outside_project(globalconfig)
+        return globalconfig, trusted(by_builtin) and chain_ok
+    if _command_npm()[0] == UNKNOWN_SCRIPT:
+        return None, True  # the unknown npm's builtin npmrc may choose it (globalconfig, prefix)
+    if "prefix" in moved:
+        return None, True
+    found, prefix, by_builtin = setting("prefix")
+    if found:
+        located_trusted = trusted(by_builtin)
+    else:
+        prefix = _npm_default_prefix(env)
+        located_trusted = bool(env.get("PREFIX")) or _npm_node_trusted()
+    rc = prefix / "etc" / "npmrc" if prefix is not None else None
+    if rc is not None and (by_builtin or not found):
+        # Found by npm rather than named by the user: trusted only if no hop of its own
+        # chain is the repository's (<prefix>/etc/npmrc -> <repo>/selector -> …).
+        located_trusted = located_trusted and _outside_project(rc)
+    return rc, located_trusted
+
+
+def _npm_builtin_moves_userconfig(builtin: Path | None, environment: Mapping[str, str]) -> bool:
+    """Whether npm's builtin npmrc *builtin* sets ``userconfig``, which then replaces the
+    user's file unless the environment sets it. Where it leads is not followed, as for a
+    moved locator (_npm_global_npmrc_located())."""
+    if builtin is None or "userconfig" in environment:
+        return False
+    return any(key == "userconfig" for key, _ in _npmrc_lines(builtin))
+
+
+# The directory the sandbox replaces with an empty tmpfs.
+_SANDBOX_TMP = Path("/tmp")
+
+
+def _passes_through(rc: Path, directories: Collection[Path]) -> bool:
+    """Whether resolving *rc* visits any of *directories* (_resolution_paths()); True when
+    it cannot be resolved."""
+    try:
+        traversed = _resolution_paths(rc)
+    except (OSError, RuntimeError):
+        return True
+    return any(path.is_relative_to(d) for path in traversed for d in directories)
+
+
+def _resolution_paths(path: Path) -> list[Path]:
+    """Every path resolving *path* visits, component by component: each symlink and what it
+    names, through to the end. A missing component ends the walk; more than 40 links
+    (the kernel's limit) raise OSError."""
+    pending = list(Path(_kernel_absolute(path)).parts[1:])
+    current = Path("/")
+    visited = [Path(_kernel_absolute(path))]
+    links = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        visited.append(candidate)
+        if not candidate.is_symlink():
+            current = candidate
+            continue
+        links += 1
+        if links > 40:
+            raise OSError(f"too many levels of symbolic links: {path}")
+        target = Path(os.readlink(candidate))
+        if target.is_absolute():
+            current = Path("/")
+            pending[:0] = list(target.parts[1:])
+        else:
+            pending[:0] = list(target.parts)
+    visited.append(current)
+    return visited
+
+
+def _npm_builtin_trusted(builtin: Path) -> bool:
+    """Whether *builtin* belongs to an npm the repository cannot have chosen: the one on
+    PATH (not one the command names by path), installed outside the project (_project_boundaries())
+    and reached without passing through it: the PATH entry, the original behind a
+    package-alert shim, and every link on the way (``<repo>/node_modules/.bin/npm ->
+    /opt/npm/bin/npm-cli.js`` is the repository's choice of npm).
+
+    The builtin npmrc of any other npm (``node tools/npm/bin/npm-cli.js``) is read like
+    any config npm reads, but it could name or link to any file and refer to any
+    variable, so it and a global npmrc it chose are never bound into the sandbox and
+    their variables are not passed (_npm_system_npmrc_entries()).
+    """
+    script = _command_npm()[0]
+    if not _on_path(script, "npm") or not _outside_project(builtin):
+        return False
+    found = _which(script or "npm", _npm_environ())
+    return found is not None and _executable_outside_project(found)
+
+
+def _npm_node_trusted() -> bool:
+    """Whether the node whose installation gives npm's default prefix is one the
+    repository cannot have chosen: the one on PATH (not one the command names by path,
+    ``./runtime/bin/node npm-cli.js``), installed outside the project (_project_boundaries()). A
+    global npmrc it locates is otherwise treated like an untrusted builtin npmrc."""
+    node = _npm_runtime(_npm_environ())
+    if node in (_UNKNOWN_RUNTIME, _UNSEEN_RUNTIME):
+        return False
+    found = _which(node or "node", _npm_environ())
+    # The original behind a package-alert shim counts too, as the default prefix follows it.
+    return found is not None and _on_path(node, "node") and _executable_outside_project(found)
+
+
+def _npm_runtime(env: Mapping[str, str]) -> str | None:
+    """The node that runs npm when the running command names one (``node npm-cli.js``),
+    else the interpreter npm's own shebang names (``#!/opt/x/bin/node``, or
+    ``#!/usr/bin/env node-20`` on PATH; _UNKNOWN_RUNTIME when ``env``'s arguments cannot
+    be read or the interpreter is not node, such as a shell launcher), else None: the
+    node on PATH (``#!/usr/bin/env node``)."""
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    script, node = _command_npm()
+    if node == UNKNOWN_SCRIPT:
+        return _UNSEEN_RUNTIME
+    if node is not None:
+        return node
+    found = None if script == UNKNOWN_SCRIPT else _which(script or "npm", env)
+    if found is None:
+        return None
+    try:
+        with safe_read.open_regular(_real_executable(found)) as fh:
+            first = fh.readline(4096)
+    except (OSError, RuntimeError):
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    words = first[2:].decode(errors="replace").split()
+    if not words:
+        return None
+    if Path(words[0]).name == "env":
+        return _env_command(words[1:])  # looked up on PATH
+    if os.path.isabs(words[0]) and _runtime_name(words[0]) in ("node", "nodejs"):
+        return words[0]
+    return _UNKNOWN_RUNTIME  # a launcher (#!/bin/sh) runs some node it chooses
+
+
+# A runtime that cannot be established, such as a launcher or an ``env`` that changes
+# npm's environment: the config it would locate is not assumed, nor the environment's.
+_UNKNOWN_RUNTIME = "\0unknown"
+# A runtime the daemon did not see (an observed process's executable was unreadable):
+# the config it would locate is not assumed, but npm's environment is the usual one.
+_UNSEEN_RUNTIME = "\0unseen"
+
+
+def _env_command(args: list[str]) -> str | None:
+    """The command ``env`` runs from a shebang's arguments (``-S node --flag``): None for
+    ``node``, the one on PATH, else that node (``node-20``). _UNKNOWN_RUNTIME when ``env``
+    changes the environment or directory npm runs with (``-i``, ``-u``, ``-C``, ``VAR=…``:
+    its PATH, $PREFIX and npm_config_* settings are then not the caller's), uses an option
+    not known here or a quoted, escaped or ``$``-expanded word, or runs something but node."""
+    for word in args:
+        if word in ("-S", "--split-string", "--"):
+            continue
+        if word.startswith("-") or "=" in word:
+            return _UNKNOWN_RUNTIME  # an option or an assignment
+        if _runtime_name(word) not in ("node", "nodejs"):
+            return _UNKNOWN_RUNTIME  # not node (a launcher, which may set any environment), or a word env -S unquotes or expands
+        return None if word == "node" else word
+    return _UNKNOWN_RUNTIME
+
+
+def _on_path(named: str | None, name: str) -> bool:
+    """Whether *named*, the executable a command names (None: none), is the *name* on PATH."""
+    if named is None or os.sep not in named:
+        return True
+    on_path = _which(name, _npm_environ())
+    try:
+        return on_path is not None and _real_executable(named) == _real_executable(on_path)
+    except (OSError, RuntimeError):
+        return False
+
+
+def _outside_project(path: Path) -> bool:
+    """Whether resolving *path* stays outside the project (_project_boundaries()): as written,
+    at every symlink on the way (``npmrc -> <repo>/selector -> ~/.ssh/id_rsa``) and where it
+    ends. False when it cannot be resolved."""
+    boundaries = _project_boundaries()
+    try:
+        traversed = _resolution_paths(path)
+    except (OSError, RuntimeError):
+        return False
+    return not any(p.is_relative_to(b) for p in traversed for b in boundaries)
+
+
+def _executable_outside_project(found: str) -> bool:
+    """Whether the executable *found* on PATH is reached without passing through the
+    project: its own chain, and that of the original behind a package-alert shim (its
+    ``.__pa_real`` sibling, followed hop by hop rather than resolved first, so a link
+    through the repository on the way counts). False when it cannot be resolved."""
+    try:
+        resolved = Path(found).resolve()
+    except (OSError, RuntimeError):
+        return False
+    original = resolved.with_name(f"{resolved.name}.__pa_real")
+    chains = [Path(found), *([original] if os.path.lexists(original) else [])]
+    return all(_outside_project(path) for path in chains)
+
+
+# Directories that mark a repository's root.
+_VCS_MARKERS = (".git", ".hg")
+
+
+def _project_boundaries() -> list[Path]:
+    """The directories whose contents a repository may have chosen: the project of the
+    working directory and, when package-alert acts on another one (``pa fix /srv/repo``,
+    ``COMMAND_PROJECT``), that one's too (_project_boundary())."""
+    from packagealert.parsers.process_args import COMMAND_PROJECT
+
+    starts = [Path.cwd(), *([target] if (target := COMMAND_PROJECT.get()) is not None else [])]
+    return list(dict.fromkeys(_project_boundary(start) for start in starts))
+
+
+def _project_boundary(start: Path) -> Path:
+    """The project *start* lies in: the outermost directory at or above it that is a
+    repository root (``.git``, ``.hg``) or has a package.json (a workspace root, whose
+    ``node_modules/.bin`` may be on PATH), else *start* itself.
+
+    The outermost, since a repository can check in a marker of its own lower down
+    (``packages/app/.hg``). Only below $HOME when *start* is (a home directory kept in
+    git is not the project), and never the filesystem root."""
+    start = Path(os.path.abspath(start))
+    home = Path.home()
+    chain = [d for d in (start, *start.parents) if d != d.parent]
+    if start.is_relative_to(home):
+        chain = [d for d in chain if d != home and d.is_relative_to(home)]
+    marked = [d for d in chain
+              if (d / "package.json").is_file() or any((d / marker).exists() for marker in _VCS_MARKERS)]
+    return marked[-1] if marked else start
+
+
+def _npm_system_npmrc_entries(moved: Collection[str] = ()) -> list[tuple[Path, bool]]:
+    """(file, trusted) for the global npmrc (_npm_global_npmrc_located(*moved*)) then npm's
+    builtin one: trusted unless an npm or node the repository may have chosen is the
+    file or located it (_npm_global_npmrc_located())."""
+    builtin = _npm_builtin_npmrc(_npm_environ())
+    trusted = builtin is None or _npm_builtin_trusted(builtin)
+    global_rc, global_trusted = _npm_global_npmrc_located(moved)
+    return [(rc, ok) for rc, ok in ((global_rc, global_trusted), (builtin, trusted)) if rc is not None]
+
+
+def _npm_home_bind(rc: Path) -> Path | None:
+    """Where NodeLanguage.home_ro_paths() binds the global or builtin npmrc *rc* (when it is
+    trusted): at its own name when that is under $HOME, else at its real one when that
+    is, else nowhere (it is visible already, or not at all)."""
+    home = Path.home()
+    if Path(os.path.abspath(rc)).is_relative_to(home):
+        return Path(os.path.abspath(rc))
+    try:
+        real = rc.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return real if real.is_relative_to(home) else None
+
+
+def _sandbox_breaks(rc: Path, bound: Path | None) -> bool:
+    """Whether npm in the sandbox cannot follow *rc* to its file, given *bound* (where the
+    file is bound in: NodeLanguage.home_ro_paths(), None: nowhere). True when it cannot
+    be resolved.
+
+    Every path resolving it visits (_resolution_paths()) must be shown, as the sandbox
+    mounts them in order (packagealert.sandbox.bwrap.build_cmd()): the host read-only,
+    then empty tmpfs over /tmp, $HOME and ``sandbox.extra_tmpfs`` (``SANDBOX_TMPFS``),
+    then the read-only binds that show parts of these again (the runtime installations,
+    ``SANDBOX_HOME_VISIBLE``, and the file's own bind), then empty tmpfs over their log
+    directories (``SANDBOX_POST_RO_TMPFS``), then the writable binds (the working
+    directory, ``SANDBOX_WRITABLE``; outside a sandboxed command, this process's working
+    directory as well), each bind with the directories leading to it, and last the
+    plugins' hidden paths (``SANDBOX_HIDDEN``), which nothing shows. A bind at *rc*'s
+    own name replaces the chain behind it.
+    """
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+        SANDBOX_HOME_VISIBLE,
+        SANDBOX_POST_RO_TMPFS,
+        SANDBOX_TMPFS,
+        SANDBOX_WRITABLE,
+    )
+
+    hidden = SANDBOX_HIDDEN.get()
+    writable = SANDBOX_WRITABLE.get() if SANDBOX_ENV.get() is not None else (Path.cwd(), *SANDBOX_WRITABLE.get())
+    read_only = (*SANDBOX_HOME_VISIBLE.get(), *([bound] if bound is not None else []))
+    covered = (_SANDBOX_TMP, Path.home(), *SANDBOX_TMPFS.get())
+    written = Path(os.path.abspath(rc))
+    if bound is not None and bound == written:
+        # Its bind replaces the chain behind it, but what is mounted after the bind still
+        # applies: a log-directory tmpfs over it, unless a writable bind shows it again.
+        if _passes_through(rc, hidden):
+            return True
+        return not any(written.is_relative_to(d) for d in writable) and \
+            any(written.is_relative_to(d) and written != d for d in SANDBOX_POST_RO_TMPFS.get())
+    try:
+        traversed = _resolution_paths(rc)
+    except (OSError, RuntimeError):
+        return True
+
+    def shown_by(binds: Collection[Path], path: Path) -> bool:  # bound in, or a directory leading to one
+        return any(path.is_relative_to(d) or d.is_relative_to(path) for d in binds)
+
+    def inside(dirs: Collection[Path], path: Path) -> bool:
+        return any(path.is_relative_to(d) and path != d for d in dirs)
+
+    # Last mount first: the hidden paths, the writable binds, the tmpfs over the read-only
+    # binds' log directories, the read-only binds, then the tmpfs they are laid over.
+    for path in traversed:
+        if any(path.is_relative_to(d) for d in hidden):
+            return True
+        if shown_by(writable, path):
+            continue
+        if inside(SANDBOX_POST_RO_TMPFS.get(), path):
+            return True
+        if shown_by(read_only, path):
+            continue
+        if inside(covered, path):
+            return True
+    return False
+
+
+def _npm_system_npmrcs(moved: Collection[str] = ()) -> list[Path]:
+    """The global npmrc then npm's builtin one (_npm_system_npmrc_entries()), the
+    lowest-precedence config files.
+
+    Inside a sandboxed command (``SANDBOX_ENV``) one npm there cannot read is left
+    out: under /tmp or linking there (the sandbox mounts a fresh /tmp), one that
+    cannot be resolved, and an untrusted one that only a bind would make visible
+    (it is not bound, see NodeLanguage.home_ro_paths()).
+    """
+
+    return [rc for rc, ok in _npm_system_npmrc_entries(moved) if _npm_sandbox_can_read(rc, ok)]
+
+
+def _npm_sandbox_can_read(rc: Path, trusted: bool | None) -> bool:
+    """Whether npm can read the global or builtin npmrc *rc* where the running command
+    runs: anywhere outside a sandboxed command (``SANDBOX_ENV``); inside one, when the
+    sandbox shows every path its resolution visits (_sandbox_breaks()), counting the bind
+    a *trusted* one gets (None: the builtin npmrc, whose trust is looked up)."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    if SANDBOX_ENV.get() is None:
+        return True
+    if trusted is None:
+        trusted = _npm_builtin_trusted(rc)
+    # Only a trusted file is bound in (NodeLanguage.home_ro_paths()).
+    return not _sandbox_breaks(rc, _npm_home_bind(rc) if trusted else None)
 
 
 def _npmrc_registries(rc: Path, env: Mapping[str, str] | None = None) -> tuple[str | None, dict[str, str]]:
@@ -647,9 +1288,11 @@ def _lock_entry_public(name: str, resolved: object, registries: tuple[str | None
     return _from_configured_registry(name, registries)
 
 
-def npm_registries(root: Path, *, project: bool = True) -> tuple[str | None, dict[str, str]]:
-    """The registries npm uses for a project at *root* (see ``_npm_registries``)."""
-    return _npm_registries(root, project=project)
+def npm_registries(root: Path, *, project: bool = True, command_line: Mapping[str, str] | None = None,
+                   npm: bool = True) -> tuple[str | None, dict[str, str]]:
+    """The registries npm (or with *npm* false, pnpm or yarn) uses for a project at *root*
+    (see ``_npm_registries``)."""
+    return _npm_registries(root, project=project, command_line=command_line, npm=npm)
 
 
 def package_lock_entry_public(key: str, info: dict, registries: tuple[str | None, dict[str, str]]) -> bool:
@@ -721,10 +1364,11 @@ def _installed_provenance(node_modules: Path) -> tuple[dict[str, bool], tuple[st
     package-lock.json, judged as ``package_lock_provenance()`` judges any lock.
     The hidden lock has no root entry, so the root's declarations are taken
     from the project lock or package.json. A package with no entry follows the
-    configured registries.
+    configured registries, npm's own config files included only when an npm lock
+    shows npm wrote the tree (_npm_wrote()).
     """
     project = node_modules.parent
-    registries = npm_registries(project)
+    registries = npm_registries(project, npm=_npm_wrote(node_modules))
     hidden, full = (_lock_packages(node_modules / ".package-lock.json"),
                     _lock_packages(project / "package-lock.json"))
     packages = hidden if hidden is not None else full
@@ -741,12 +1385,36 @@ def _installed_provenance(node_modules: Path) -> tuple[dict[str, bool], tuple[st
     return package_lock_provenance(packages, registries), registries
 
 
+# What pnpm and yarn leave in a node_modules they wrote.
+_OTHER_MANAGER_MARKERS = (".modules.yaml", ".yarn-integrity", ".yarn-state.yml")
+
+
+def _npm_wrote(node_modules: Path) -> bool:
+    """Whether npm wrote *node_modules*, so npm's global and builtin npmrc apply (pnpm and
+    yarn read neither): the running command's manager when it is known; else not when
+    pnpm's or yarn's state file is there (a project lock npm left behind proves nothing
+    then), else when it has npm's hidden lock or its project an npm lock."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    argv = COMMAND_ARGV.get()
+    if argv:
+        first, *rest = argv
+        tool = _runtime_name(rest[0]) if rest and _runtime_name(first) in ("node", "nodejs") else _runtime_name(first)
+        if tool in ("yarn", "pnpm", "pn"):
+            return False
+        if tool == "npm":
+            return True
+    if any((node_modules / marker).exists() for marker in _OTHER_MANAGER_MARKERS):
+        return False
+    return (node_modules / ".package-lock.json").is_file() or (node_modules.parent / "package-lock.json").is_file()
+
+
 def _copy_provenance(node_modules: Path) -> dict[str, bool]:
     """_installed_provenance()'s lock path -> from the public registry, cached while the
     locks, package.json and the configured registries are unchanged: it is consulted
     once per copy scored, and a large tree's lock is slow to parse."""
     project = node_modules.parent
-    default, scopes = npm_registries(project)
+    default, scopes = npm_registries(project, npm=_npm_wrote(node_modules))
     stamps = []
     for path in (node_modules / ".package-lock.json", project / "package-lock.json", project / "package.json"):
         try:
@@ -905,7 +1573,7 @@ class NodeLanguage:
             return []
 
     def _parse_yarn_lock(self, path: Path) -> list[PackageSpec]:
-        registries = _npm_registries(path.parent)
+        registries = _npm_registries(path.parent, npm=False)
         # yarn.lock custom format: header line(s) of comma-separated selectors
         # like `name@range:` or `"@scope/name@range":`, followed by indented fields.
         # Each block resolves to one version; we extract the name from the first selector.
@@ -1052,7 +1720,7 @@ class NodeLanguage:
         return result
 
     def _parse_pnpm_lock(self, path: Path) -> list[PackageSpec]:
-        registries = _npm_registries(path.parent)
+        registries = _npm_registries(path.parent, npm=False)
 
         def public(name: str, version: str) -> bool:
             # pnpm-lock.yaml records no registry URL; a non-registry source shows in the version.
@@ -1381,6 +2049,8 @@ class NodeLanguage:
         if not node_modules.is_dir():
             return []
         by_path, registries = _installed_provenance(node_modules)
+        # pnpm installed a store entry, and pnpm does not read npm's global or builtin npmrc.
+        store_registries = npm_registries(root, npm=False)
         public: dict[tuple[str, str | None], bool] = {}
 
         def add(package_dir: str, lock_key: str | None, store_id: str | None, inherited: bool | None) -> bool | None:
@@ -1397,7 +2067,7 @@ class NodeLanguage:
             elif lock_key is not None and lock_key in by_path:
                 copy_public = by_path[lock_key]
             else:
-                copy_public = _from_configured_registry(name, registries)
+                copy_public = _from_configured_registry(name, registries if store_id is None else store_registries)
             public[(name, version)] = public.get((name, version), False) or copy_public
             return copy_public
 
@@ -1428,7 +2098,7 @@ class NodeLanguage:
                     # No readable manifest: judge the owner by its store id and the name
                     # it is installed under, for what it bundles.
                     verdict = (False if _pnpm_store_id_source(entry.name, name) is False
-                               else _from_configured_registry(name, registries))
+                               else _from_configured_registry(name, store_registries))
                 bundled += [(child, verdict) for _n, child in children(path)]
             while bundled:
                 package_dir, inherited = bundled.pop()
@@ -1558,15 +2228,18 @@ class NodeLanguage:
         cwd: Path,
         env: dict[str, str],
     ) -> list[Path]:
-        """Give npm an absolute userconfig.
+        """Give npm absolute config-file locations.
 
         npm in the sandbox may run elsewhere than this process (a trial's
-        scratch copy), so a relative ``npm_config_userconfig`` is replaced by
-        the file it names here. Variables a project's .npmrc refers to are not
-        passed: that file is the repository's.
+        scratch copy), so ``npm_config_userconfig``, ``npm_config_globalconfig``
+        and ``npm_config_prefix`` are replaced by the paths they name here, as
+        the provenance check read them. Variables a project's .npmrc refers to
+        are not passed: that file is the repository's.
         """
-        for name in [n for n, v in env.items() if n.lower() == "npm_config_userconfig" and v]:
-            env[name] = str(_user_npmrc())
+        for key in _NPM_CONFIG_LOCATORS:
+            resolved = _npm_env_path(key, env)
+            for name in [n for n, v in env.items() if n.lower() == f"npm_config_{key}" and v]:
+                env[name] = str(resolved)
         return []
 
     def explicit_package_public(self, raw: str, parsed: Any, project_dir: Path) -> bool:
@@ -1584,13 +2257,11 @@ class NodeLanguage:
         at = raw.find("@", 1)            # past a scope's leading @
         name = raw[:at] if at > 0 else raw
         # npm ignores the project's .npmrc in global mode.
-        default, scopes = npm_registries(project_dir, project=not getattr(parsed, "global_install", False))
         given = getattr(parsed, "registries", None) or {}
-        if isinstance(given.get("registry"), str):
-            default = given["registry"]
-        scopes = {**scopes, **{k[: -len(":registry")]: v for k, v in given.items()
-                               if k.startswith("@") and k.endswith(":registry") and isinstance(v, str)}}
-        return _from_configured_registry(name, (default, scopes))
+        given = {k: v for k, v in given.items() if isinstance(v, str)}
+        return _from_configured_registry(name, npm_registries(
+            project_dir, project=not getattr(parsed, "global_install", False), command_line=given,
+            npm=getattr(parsed, "manager", "npm") == "npm"))
 
     def interpreter_shim_script(self, real: Path, pa: Path) -> str | None:
         return None
@@ -1619,6 +2290,7 @@ class NodeLanguage:
     ) -> list[PackageSpec]:
         results = []
         provenance: tuple[dict[str, bool], tuple[str | None, dict[str, str]]] | None = None
+        store_registries: tuple[str | None, dict[str, str]] | None = None
         for p in new_paths:
             if p.name != "package.json":
                 continue
@@ -1656,6 +2328,10 @@ class NodeLanguage:
                     source = _pnpm_store_id_source(store_id, name) if store_id is not None else True
                     if source is False:
                         public = False  # file:, link:, git or a tarball URL, not the registry
+                    elif store_id is not None:  # pnpm's, which does not read npm's own config files
+                        if store_registries is None:
+                            store_registries = npm_registries(walk_root.parent, npm=False)
+                        public = _from_configured_registry(name, store_registries)
                     else:
                         public = by_path[key] if key in by_path else _from_configured_registry(name, registries)
                     results.append(PackageSpec(name=name, version=version, ecosystem="npm",
@@ -1665,9 +2341,31 @@ class NodeLanguage:
         return results
 
     def home_ro_paths(self) -> list[Path]:
-        # The user's config wherever npm_config_userconfig moves it, which the sandbox passes on.
-        candidates = list(dict.fromkeys([Path.home() / ".npmrc", _user_npmrc()]))
-        return [p for p in candidates if p.exists()]
+        # The user's config wherever npm_config_userconfig moves it, and the global and
+        # builtin npmrc when they live under $HOME (a prefix such as ~/.npm-global), all
+        # of which npm in the sandbox reads; elsewhere they are visible already.
+        # A file only (a setting naming a directory such as $HOME must not expose it). The
+        # user's is bound wherever it is (/tmp is replaced too); the others at their own
+        # name when that is under $HOME, else at their real one when that is (a /etc/npmrc
+        # linking into $HOME).
+        home = Path.home()
+        user = [home / ".npmrc", _user_npmrc()]
+        # Only trusted ones: a repository's own npm could name or link to any file.
+        system = [rc for rc, ok in _npm_system_npmrc_entries() if ok]
+        found: list[Path] = []
+        for rc in dict.fromkeys([*user, *system]):
+            try:
+                real = rc.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if not real.is_file():
+                continue
+            bind = rc if rc in user else _npm_home_bind(rc)
+            if rc not in user and _sandbox_breaks(rc, bind):
+                continue  # npm in the sandbox cannot follow it, so it is not exposed either
+            if bind is not None and bind not in found:
+                found.append(bind)
+        return found
 
     def top_packages_url(self) -> str | None:
         # ecosyste.ms ranks by actual download count with no keyword/text
@@ -1899,8 +2597,10 @@ class NodeLanguage:
             recorded = _copy_provenance(Path(*parts[:root + 1])).get(key)
             if recorded is not None:
                 return recorded
-            # Not in the lock: the configured registries decide, as discovery judges it.
-            return _from_configured_registry(package_name, npm_registries(Path(*parts[:root])))
+            # Not in the lock: the configured registries decide, as discovery judges it, with
+            # npm's own config files only for a tree npm wrote.
+            return _from_configured_registry(package_name, npm_registries(
+                Path(*parts[:root]), npm=_npm_wrote(Path(*parts[:root + 1]))))
         i = len(parts) - 1 - parts[::-1].index(".pnpm")
         if i + 3 >= len(parts) or parts[i + 2] != "node_modules":
             return True
@@ -1913,7 +2613,7 @@ class NodeLanguage:
             return source
         # A registry entry: public only if the project's configuration fetches that
         # package from the public registry (a scope can name a private one).
-        return _from_configured_registry(owner, npm_registries(Path(*parts[:i - 1])))
+        return _from_configured_registry(owner, npm_registries(Path(*parts[:i - 1]), npm=False))
 
     def resolve_package_dir_manifest_warning(
         self,

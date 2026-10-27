@@ -65,12 +65,14 @@ def _no_npm_registry_lookups(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_user_npmrc(monkeypatch, tmp_path):
-    """The Node plugin reads the user's ~/.npmrc and npm_config_* variables for registry provenance;
-    tests must not depend on either."""
+    """The Node plugin reads the user's ~/.npmrc, the machine's global and builtin npmrc and
+    npm_config_* variables for registry provenance; tests must not depend on any of them."""
     import os
 
     from packagealert.languages import node
 
     monkeypatch.setattr(node, "_user_npmrc", lambda: tmp_path / "no-user-npmrc")
-    for key in [k for k in os.environ if k.lower().startswith("npm_config_")]:
+    monkeypatch.setattr(node, "_npm_builtin_npmrc", lambda env: None)
+    monkeypatch.setattr(node, "_npm_default_prefix", lambda env: tmp_path / "no-npm-prefix")
+    for key in [k for k in os.environ if k.lower().startswith("npm_config_") or k in ("PREFIX", "DESTDIR")]:
         monkeypatch.delenv(key)
