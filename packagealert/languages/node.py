@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import re
-import stat
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -15,6 +14,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
+from packagealert import safe_read
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
@@ -66,7 +66,7 @@ class _NpmHeuristic(AbstractHeuristic):
             return signals
 
         try:
-            pkg = json.loads(pkg_json_path.read_bytes())
+            pkg = json.loads(safe_read.read_bytes(pkg_json_path))
         except Exception:  # noqa: BLE001 — malformed/unreadable package.json, no signals to extract
             return signals
 
@@ -111,7 +111,7 @@ class _NpmHeuristic(AbstractHeuristic):
         combined_js = ""
         for js_file in js_files:
             try:
-                combined_js += js_file.read_text(errors="replace") + "\n"
+                combined_js += safe_read.read_text(js_file, errors="replace") + "\n"
             except OSError:
                 pass
 
@@ -528,23 +528,11 @@ def _read_json_regular(path: Path, *, follow_symlinks: bool) -> dict | None:
 
 
 def _read_regular(path: Path, *, follow_symlinks: bool) -> bytes | None:
-    """The contents of the regular file at *path*, or None; anything else (a FIFO
-    would block the read forever) is not read."""
+    """The contents of the regular file at *path*, or None (see packagealert.safe_read)."""
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | (0 if follow_symlinks else os.O_NOFOLLOW))
+        return safe_read.read_bytes(path, follow_symlinks=follow_symlinks)
     except OSError:
         return None
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        with os.fdopen(fd, "rb") as f:
-            fd = -1
-            return f.read()
-    except OSError:
-        return None
-    finally:
-        if fd >= 0:
-            os.close(fd)
 
 
 def _manifest_field(package_dir: Path, key: str) -> str | None:
@@ -887,7 +875,7 @@ class NodeLanguage:
     def _parse_package_lock(self, path: Path) -> list[PackageSpec]:
         registries = _npm_registries(path.parent)
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(safe_read.read_text(path))
             result = []
             # v2/v3 format uses "packages"
             if "packages" in data:
@@ -928,7 +916,7 @@ class NodeLanguage:
         #   lodash "^4.17.0"  or  "@babel/core" "^7.0.0"
         _DEP_ENTRY_RE = re.compile(r'^\s+"?(@?[^@"\s][^@"]*?)"?\s+"([^"]+)"')
         try:
-            text = path.read_text()
+            text = safe_read.read_text(path)
         except Exception:  # noqa: BLE001 — unreadable lockfile, best-effort parse
             log.debug("Failed to read yarn.lock at %s", path)
             return []
@@ -939,7 +927,7 @@ class NodeLanguage:
         pkg_json_available = False
         pkg_json = path.parent / "package.json"
         try:
-            pkg_data = json.loads(pkg_json.read_text())
+            pkg_data = json.loads(safe_read.read_text(pkg_json))
             prod_direct = dict(pkg_data.get("dependencies", {}))
             dev_direct = dict(pkg_data.get("devDependencies", {}))
             pkg_json_available = True
@@ -1088,7 +1076,7 @@ class NodeLanguage:
             r"^  '?/?(@?[^@'/\s][^@']*?)@([^':(]+)[^':]*'?\s*:"
         )
         try:
-            text = path.read_text()
+            text = safe_read.read_text(path)
         except Exception:  # noqa: BLE001 — unreadable lockfile, best-effort parse
             log.debug("Failed to read pnpm-lock.yaml at %s", path)
             return []
@@ -1331,7 +1319,7 @@ class NodeLanguage:
         # a "key" field with the package URL. Only the last line is needed, so
         # tail-read to avoid loading the full file.
         try:
-            with path.open("rb") as fh:
+            with safe_read.open_regular(path) as fh:
                 fh.seek(0, 2)
                 size = fh.tell()
                 fh.seek(max(0, size - self._TAIL_BYTES))
@@ -1963,7 +1951,7 @@ class NodeLanguage:
         for pkg_json in node_modules.glob("*/package.json"):
             pkg_dir = pkg_json.parent
             try:
-                pkg_data = json.loads(pkg_json.read_bytes())
+                pkg_data = json.loads(safe_read.read_bytes(pkg_json))
                 version = pkg_data.get("version") or ""
                 data[str(pkg_dir)] = version
             except Exception:
@@ -1972,7 +1960,7 @@ class NodeLanguage:
         for pkg_json in node_modules.glob("@*/*/package.json"):
             pkg_dir = pkg_json.parent
             try:
-                pkg_data = json.loads(pkg_json.read_bytes())
+                pkg_data = json.loads(safe_read.read_bytes(pkg_json))
                 version = pkg_data.get("version") or ""
                 data[str(pkg_dir)] = version
             except Exception:
@@ -1991,7 +1979,7 @@ class NodeLanguage:
         for path_str in new_paths:
             pkg_json = Path(path_str) / "package.json"
             try:
-                data = json.loads(pkg_json.read_bytes())
+                data = json.loads(safe_read.read_bytes(pkg_json))
                 name = data.get("name", "")
                 version = data.get("version") or None
                 if name:

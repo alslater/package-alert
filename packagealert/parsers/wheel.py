@@ -6,6 +6,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from packagealert import safe_read
+
 log = logging.getLogger(__name__)
 
 # PEP 427 wheel filename: {distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl
@@ -65,10 +67,8 @@ def parse_wheel_filename(path: Path) -> WheelInfo | None:
 
 def read_wheel_metadata(path: Path) -> dict[str, str]:
     """Read METADATA from a wheel (zip) file. Returns key->value dict. Never executes code."""
-    if not path.exists() or not zipfile.is_zipfile(path):
-        return {}
     try:
-        with zipfile.ZipFile(path, "r") as zf:
+        with safe_read.open_regular(path) as fh, zipfile.ZipFile(fh, "r") as zf:
             for name in zf.namelist():
                 if name.endswith("/METADATA") and name.count("/") == 1:
                     with zf.open(name) as f:

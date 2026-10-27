@@ -899,6 +899,10 @@ In-tree modules live in [`packagealert/languages/`](packagealert/languages/). Us
 3. Register it in `registry.load()` in [`registry.py`](packagealert/languages/registry.py).
 4. Write tests in `tests/unit/languages/test_<name>.py` covering every method.
 
+### Reading files an install controls
+
+Lock files, a package's own manifests and source, cache entries and environment metadata (`pyvenv.cfg`, `RECORD`, `installed.json`) can all be rewritten by the install or the code it runs, and a FIFO left at such a path blocks a plain `read_text()` / `open()` forever: the daemon, `pa run`'s post-install stage or `scan-project` would hang. Read them through `packagealert.safe_read` (`read_bytes()`, `read_text()`, `open_regular()`), which opens with `O_NONBLOCK` and reads only a regular file, raising `NotARegularFile` (an `OSError`) for anything else, so a handler that already treats `OSError` as "unreadable" needs no change. Pass `follow_symlinks=False` for a path inside an install tree that must not lead elsewhere. In-tree, `tests/unit/test_safe_read.py` fails on any raw read in the language modules, the lock and archive parsers, the cache monitor and the sandbox runner.
+
 ---
 
 ## Writing an External Plugin

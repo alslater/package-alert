@@ -8,6 +8,8 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from packagealert import safe_read
+
 log = logging.getLogger(__name__)
 
 _DISTINFO_RE = re.compile(r"^(.+)-(\d[^-]*)\.dist-info$")
@@ -343,7 +345,7 @@ def _read_pyvenv_python_version(venv_root: Path) -> str | None:
     """
     cfg = venv_root / "pyvenv.cfg"
     try:
-        text = cfg.read_text(errors="replace")
+        text = safe_read.read_text(cfg, errors="replace")
     except OSError:
         return None
     for line in text.splitlines():
@@ -381,7 +383,7 @@ def _read_conda_python_version(env_root: Path) -> str | None:
         return None
     for candidate in candidates:
         try:
-            data = json.loads(candidate.read_text(errors="replace"))
+            data = json.loads(safe_read.read_text(candidate, errors="replace"))
         except (OSError, ValueError):
             continue
         if not isinstance(data, dict):
@@ -570,7 +572,7 @@ def _collect_pylock_packages(
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     try:
-        with path.open("rb") as f:
+        with safe_read.open_regular(path) as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError):
         return pinned, unpinned
@@ -700,7 +702,7 @@ def collect_requirements_packages(
     pinned: list[LockedPackage] = []
     unpinned: list[LockedPackage] = []
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = safe_read.read_text(path, errors="replace").splitlines()
     except OSError:
         return pinned, unpinned
 

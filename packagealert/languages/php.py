@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from packagealert import safe_read
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
@@ -105,7 +106,7 @@ class PhpLanguage:
         if path.name != "composer.lock":
             return []
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(safe_read.read_text(path))
             result = []
             for section in ("packages", "packages-dev"):
                 is_dev = section == "packages-dev"
@@ -161,7 +162,7 @@ class PhpLanguage:
         installed_json = vendor / "composer" / "installed.json"
         if installed_json.exists():
             try:
-                data = json.loads(installed_json.read_text())
+                data = json.loads(safe_read.read_text(installed_json))
                 # Composer v2 wraps in {"packages": [...]}, v1 is a bare list
                 packages = data.get("packages", data) if isinstance(data, dict) else data
                 return [
@@ -313,7 +314,7 @@ class PhpLanguage:
             if p.is_symlink():
                 continue  # skip symlinks — could point outside the install target
             try:
-                data = json.loads(p.read_text())
+                data = json.loads(safe_read.read_text(p))
                 name = data.get("name", "")
                 version = data.get("version", "").lstrip("v") or None
                 if name and "/" in name:
@@ -472,7 +473,7 @@ class PhpLanguage:
         if vendor.is_dir():
             for composer_json in vendor.glob("*/*/composer.json"):
                 try:
-                    d = json.loads(composer_json.read_text())
+                    d = json.loads(safe_read.read_text(composer_json))
                     data[str(composer_json.parent)] = (_normalise_version(d.get("version")) or "")
                 except Exception:
                     log.debug("Failed to read/parse %s", composer_json, exc_info=True)
@@ -484,7 +485,7 @@ class PhpLanguage:
         for path_str in new_paths:
             composer_json = Path(path_str) / "composer.json"
             try:
-                data = json.loads(composer_json.read_text())
+                data = json.loads(safe_read.read_text(composer_json))
                 name = data.get("name")
                 version = _normalise_version(data.get("version"))
                 if name:
