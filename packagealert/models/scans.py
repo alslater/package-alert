@@ -36,3 +36,13 @@ class ScanResult:
     # json` emits it (packagealert.osv.remediation.remediations_json). None when
     # the producer did not compute it; consumers may derive it from `findings`.
     remediations: list[dict] | None = None
+    # Fields below were added after `remediations`, and stay after it: plugins may build a
+    # ScanResult positionally.
+    # Whether the yank check ran at all. It does not for scheduled scans, --scan-installed or
+    # --no-yank, and then an empty `yanked` with 0 failures means "not checked", not "none
+    # yanked". False by default, so a scan built without it claims no check.
+    yank_checked: bool = False
+    # Packages deliberately not looked up publicly: from a private registry, git or a local
+    # path, whose names are not sent to OSV or the risk lookups (a public package of the same
+    # name is a different one). Without it a scan of private packages looks fully checked.
+    not_public: int = 0
