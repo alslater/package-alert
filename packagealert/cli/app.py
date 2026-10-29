@@ -46,20 +46,17 @@ _atexit_registered = False
 
 
 def _pipx_venvs_candidates() -> list[Path]:
-    pipx_home = os.environ.get("PIPX_HOME")
-    if pipx_home:
-        return [Path(pipx_home).expanduser() / "venvs"]
-    return [
-        Path("~/.local/pipx/venvs").expanduser(),
-        Path("~/.local/share/pipx/venvs").expanduser(),
-    ]
+    """pipx's venvs directory, wherever pipx itself puts it (_pipx_home_exact())."""
+    from packagealert.parsers.process_args import _pipx_home_exact
+
+    return [_pipx_home_exact() / "venvs"]
 
 
 def _uv_tool_dirs_candidates() -> list[Path]:
-    uv_tool_dir = os.environ.get("UV_TOOL_DIR")
-    if uv_tool_dir:
-        return [Path(uv_tool_dir).expanduser()]
-    return [Path("~/.local/share/uv/tools").expanduser()]
+    """uv's tool directory, wherever uv itself puts it (_uv_tool_dir_exact())."""
+    from packagealert.parsers.process_args import _uv_tool_dir_exact
+
+    return [_uv_tool_dir_exact()]
 
 
 def _exe_is_under(candidates: list[Path]) -> bool:

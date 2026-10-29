@@ -1158,3 +1158,40 @@ def test_apply_sync_is_unchanged_under_bwrap(monkeypatch, tmp_path):
     res, seen = _invoke_fix([str(tmp_path), "--apply", "--sync", "--yes"], monkeypatch)
     assert res.exit_code == 0, res.output
     assert seen["apply"].mode == "sync"
+
+
+def test_an_entry_inside_another_is_copied_once(tmp_path):
+    """~/.local/share/uv/tools inside ~/.local/share/uv: one copy, counted once against the
+    limit, so a tree that fits once is not refused for fitting only twice."""
+    real, fresh, deny = _homes(tmp_path)
+    tools = real / ".local" / "share" / "uv" / "tools" / "cowsay"
+    tools.mkdir(parents=True)
+    (tools / "big").write_bytes(b"x" * 600)
+    entries = [real / ".local" / "share" / "uv" / "tools", real / ".local" / "share" / "uv"]
+    isolation.populate_home(fresh, entries, [], exclude=[], real_home=real, deny=deny, limit=1000)
+    assert (fresh / ".local" / "share" / "uv" / "tools" / "cowsay" / "big").stat().st_size == 600
+
+
+def test_an_entry_the_outer_copy_left_out_is_still_copied(tmp_path):
+    """~/tools and ~/tools/bin with bin -> . : the outer copy prunes bin as a loop, so the
+    bin entry, which the command is shown, is copied on its own."""
+    real, fresh, deny = _homes(tmp_path)
+    (real / "tools").mkdir()
+    (real / "tools" / "launcher").write_text("#!/bin/sh\n")
+    (real / "tools" / "bin").symlink_to(".")
+    isolation.populate_home(fresh, [real / "tools", real / "tools" / "bin"], [], exclude=[], real_home=real,
+                            deny=deny)
+    assert (fresh / "tools" / "launcher").exists()
+    assert (fresh / "tools" / "bin" / "launcher").exists()
+
+
+def test_an_inner_entry_restores_what_the_outer_copy_pruned_without_recounting(tmp_path):
+    """~/tools and ~/tools/bin with bin/up -> .. : the outer copy creates bin but prunes up as a
+    loop; bin's own copy restores bin/up/launcher, and tools/launcher counts once."""
+    real, fresh, deny = _homes(tmp_path)
+    (real / "tools" / "bin").mkdir(parents=True)
+    (real / "tools" / "launcher").write_bytes(b"x" * 600)
+    (real / "tools" / "bin" / "up").symlink_to("..")
+    isolation.populate_home(fresh, [real / "tools", real / "tools" / "bin"], [], exclude=[], real_home=real,
+                            deny=deny, limit=1300)
+    assert (fresh / "tools" / "bin" / "up" / "launcher").exists()

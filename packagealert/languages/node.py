@@ -261,13 +261,27 @@ def _user_npmrc() -> Path:
 def _user_npmrc_visible() -> bool:
     """Whether npm in a sandboxed command (``SANDBOX_ENV``) sees the user's config file: it
     is bound wherever it is, after any tmpfs, but not into a plugin's hidden path
-    (``SANDBOX_HIDDEN``), which is laid over every bind, as written or along its links.
-    Outside a sandbox, always."""
-    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_HIDDEN
+    (``SANDBOX_HIDDEN``), which is laid over every bind, as written or along its links, nor
+    when it is, lies in or holds a credential directory, unless the name npm opens is
+    reachable through the published mounts (_sandbox_breaks()). Outside a sandbox, always."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+    )
+    from packagealert.sandbox.runner import _exposes_credentials
 
     if SANDBOX_ENV.get() is None:
         return True
-    return not _passes_through(_user_npmrc(), SANDBOX_HIDDEN.get())
+    user = _user_npmrc()
+    if _passes_through(user, SANDBOX_HIDDEN.get()):
+        return False
+    if not _exposes_credentials(user):
+        return True
+    # The runner does not bind it, being, lying in or holding a credential directory, so npm
+    # reads it only if the name it opens is reachable through the mounts there are (a
+    # configured one, sandbox.extra_ro_paths: ~/.aws, say), hop by hop: ~/.npmrc linking
+    # into a mounted ~/.aws is still a hidden link.
+    return not _sandbox_breaks(user, None)
 
 
 # The settings that locate npm's user and global config files.
@@ -850,8 +864,13 @@ def _npm_system_npmrc_entries(moved: Collection[str] = ()) -> list[tuple[Path, b
 def _npm_home_bind(rc: Path) -> Path | None:
     """Where NodeLanguage.home_ro_paths() binds the global or builtin npmrc *rc* (when it is
     trusted): at its own name when that is under $HOME, else at its real one when that
-    is, else nowhere (it is visible already, or not at all)."""
+    is, else nowhere (it is visible already, or not at all, or it is, lies in or holds a
+    credential directory, which the runner never mounts)."""
+    from packagealert.sandbox.runner import _exposes_credentials
+
     home = Path.home()
+    if _exposes_credentials(rc):
+        return None  # the runner never mounts it (_home_ro_dirs())
     if Path(os.path.abspath(rc)).is_relative_to(home):
         return Path(os.path.abspath(rc))
     try:

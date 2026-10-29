@@ -1078,6 +1078,11 @@ def parse_uv_args(argv: list[str]) -> ParsedInstall | None:
         result.working_dir = _last_flag_value(args, frozenset({"--directory"}))
         if args[i:i + 1] != ["pip"]:
             result.project_dir = _last_flag_value(args, frozenset({"--project"}))
+        if result.extra_write_home_dirs and result.working_dir:
+            # `uv tool`: uv resolves a relative UV_TOOL_DIR / UV_TOOL_BIN_DIR after
+            # --directory moved it (--project does not move it).
+            moved = Path(os.path.join(os.getcwd(), result.working_dir))
+            result.extra_write_home_dirs = [_uv_tool_dir(cwd=moved), _uv_tool_bin_dir(cwd=moved)]
     return result
 
 
@@ -1242,13 +1247,12 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
             from_spec = _last_flag_value(args[2:], frozenset({"--from"}))
             spec = from_spec or tool_name
             packages = [spec] if spec else []
-            home = Path.home()
+            # Where uv puts the tool and links its executables, as configure_sandbox() then
+            # tells the sandboxed uv. Read from this process's environment, which is the
+            # command's for pa run, the only consumer of these directories.
             return ParsedInstall(
                 manager="uv", packages=packages, ecosystem="pypi", venv_exe=venv_exe,
-                extra_write_home_dirs=[
-                    home / ".local" / "share" / "uv" / "tools",
-                    home / ".local" / "bin",
-                ],
+                extra_write_home_dirs=[_uv_tool_dir(), _uv_tool_bin_dir()],
             )
         if tool_subcmd == "run":
             # Executes an already-installed tool — not installing anything.
@@ -1461,90 +1465,156 @@ def _pip_expand_install(token: str) -> str:
     )
 
 
+def _home_tool_dir(candidate: Path | None, default: Path, name: str) -> Path:
+    """*candidate* (a tool's own choice of directory, already absolute) when it resolves under
+    $HOME, not $HOME itself, and neither is, lies in nor contains a credential directory
+    (~/.config holds ~/.config/gcloud): the only places the sandbox can bind writable, by
+    the runner's own rule (_is_safe_sandbox_path()). Else *default*, with a warning naming
+    *name*, since the tool there would install somewhere else."""
+    from packagealert.sandbox.runner import credential_dirs
+
+    if candidate is None:
+        return default
+    try:
+        # Symlinks first, then "..", as the kernel applies them; $HOME and the credential
+        # directories too, so a symlinked $HOME compares like for like.
+        resolved = candidate.resolve(strict=False)
+        home = Path.home().resolve(strict=False)
+        credentials = [c.resolve(strict=False) for c in credential_dirs()]
+    except (OSError, RuntimeError):
+        resolved = None
+    if (resolved is not None and resolved != home and resolved.is_relative_to(home)
+            and not any(resolved == c or resolved.is_relative_to(c) or c.is_relative_to(resolved)
+                        for c in credentials)):
+        # The path as written when it can be mounted there (under $HOME, no ".." that only
+        # the kernel resolves): a symlinked alias (~/tool-bin -> real-bin) is what PATH
+        # names, so the sandbox must show it at that name.
+        if ".." not in candidate.parts and candidate.is_relative_to(Path.home()):
+            return candidate
+        return resolved
+    import logging
+    logging.getLogger(__name__).warning(
+        "%s=%s is not a directory under $HOME that the sandbox can write; using %s", name, candidate, default)
+    return default
+
+
+def _xdg_dir(env: Mapping[str, str], name: str) -> Path | None:
+    """An XDG base directory variable as the XDG spec reads it: an absolute path, else unset."""
+    value = env.get(name)
+    return Path(value) if value and os.path.isabs(value) else None
+
+
+def _uv_tool_dir_chosen(env: Mapping[str, str] | None = None, cwd: Path | None = None,
+                        ) -> tuple[Path, str | None]:
+    """(uv's tool directory, the variable that chose it, None for the default), exactly as uv
+    resolves it (uv-tool's InstalledTools::from_settings at 0.13.5): $UV_TOOL_DIR, made
+    absolute against uv's working directory (*cwd*, default this process's; ``uv --directory``
+    moves it, ``--project`` does not) with ``~`` and ``..`` left as written; else
+    $XDG_DATA_HOME/uv/tools; else ~/.local/share/uv/tools."""
+    env = os.environ if env is None else env
+    if value := env.get("UV_TOOL_DIR"):
+        return Path(os.path.join(cwd or os.getcwd(), value)), "UV_TOOL_DIR"
+    if (xdg := _xdg_dir(env, "XDG_DATA_HOME")) is not None:
+        return xdg / "uv" / "tools", "XDG_DATA_HOME"
+    return Path.home() / ".local" / "share" / "uv" / "tools", None
+
+
+def _uv_tool_dir_exact(env: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
+    """uv's tool directory wherever it is (_uv_tool_dir_chosen()), for reading it."""
+    return _uv_tool_dir_chosen(env, cwd)[0]
+
+
+def _uv_tool_dir(env: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
+    """uv's tool directory for a sandboxed command, which may write it: _uv_tool_dir_exact(),
+    bounded by _home_tool_dir()."""
+    chosen, name = _uv_tool_dir_chosen(env, cwd)
+    default = Path.home() / ".local" / "share" / "uv" / "tools"
+    return default if name is None else _home_tool_dir(chosen, default, name)
+
+
+def _uv_tool_bin_dir(env: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
+    """The directory uv links tool executables into, as uv resolves it (uv-dirs'
+    user_executable_directory at 0.13.5): $UV_TOOL_BIN_DIR (relative to uv's working
+    directory, *cwd*, as for _uv_tool_dir_chosen()); else $XDG_BIN_HOME; else
+    $XDG_DATA_HOME/../bin; else ~/.local/bin. Bounded by _home_tool_dir()."""
+    env = os.environ if env is None else env
+    default = Path.home() / ".local" / "bin"
+    if value := env.get("UV_TOOL_BIN_DIR"):
+        return _home_tool_dir(Path(os.path.join(cwd or os.getcwd(), value)), default, "UV_TOOL_BIN_DIR")
+    if (xdg := _xdg_dir(env, "XDG_BIN_HOME")) is not None:
+        return _home_tool_dir(xdg, default, "XDG_BIN_HOME")
+    if (xdg := _xdg_dir(env, "XDG_DATA_HOME")) is not None:
+        return _home_tool_dir(xdg / ".." / "bin", default, "XDG_DATA_HOME")
+    return default
+
+
+def _uv_state_dir(env: Mapping[str, str] | None = None) -> Path:
+    """uv's state directory (its managed Pythons, tools and credentials by default), as uv
+    resolves it (uv-dirs' user_state_dir at 0.13.5): $XDG_DATA_HOME/uv, else
+    ~/.local/share/uv. Bounded by _home_tool_dir(); read-only, its credential store is
+    hidden by the Python plugin."""
+    env = os.environ if env is None else env
+    default = Path.home() / ".local" / "share" / "uv"
+    if (xdg := _xdg_dir(env, "XDG_DATA_HOME")) is not None:
+        return _home_tool_dir(xdg / "uv", default, "XDG_DATA_HOME")
+    return default
+
+
+def _uv_python_dir(env: Mapping[str, str] | None = None) -> Path | None:
+    """$UV_PYTHON_INSTALL_DIR, where uv keeps its managed Pythons when set (relative to the
+    working directory, ``~`` left as written: measured with `uv python dir`), bounded by
+    _home_tool_dir(); None when unset, as they are then under _uv_state_dir()."""
+    env = os.environ if env is None else env
+    if value := env.get("UV_PYTHON_INSTALL_DIR"):
+        default = _uv_state_dir(env) / "python"
+        return _home_tool_dir(Path(os.path.join(os.getcwd(), value)), default, "UV_PYTHON_INSTALL_DIR")
+    return None
+
+
+def _pipx_bin_dir(env: Mapping[str, str] | None = None) -> Path:
+    """The directory pipx links app executables into, as pipx resolves it (pipx.paths at
+    1.18.4): $PIPX_BIN_DIR with ``~`` expanded, made absolute; else ~/.local/bin. Bounded by
+    _home_tool_dir()."""
+    env = os.environ if env is None else env
+    default = Path.home() / ".local" / "bin"
+    if value := env.get("PIPX_BIN_DIR"):
+        return _home_tool_dir(Path(value).expanduser().absolute(), default, "PIPX_BIN_DIR")
+    return default
+
+
+def _pipx_home_exact(env: Mapping[str, str] | None = None) -> Path:
+    """pipx's home wherever it is, exactly as pipx resolves it (pipx.paths at 1.18.4), for
+    reading it: $PIPX_HOME with ``~`` expanded, made absolute; else the legacy ~/.local/pipx
+    when it exists; else $XDG_DATA_HOME/pipx when absolute (platformdirs' user_data_path); else
+    ~/.local/share/pipx. Linux only, as the sandbox is. _pipx_home() is the bounded form a
+    sandboxed command may write."""
+    env = os.environ if env is None else env
+    if value := env.get("PIPX_HOME"):
+        return Path(value).expanduser().absolute()
+    legacy = Path.home() / ".local" / "pipx"
+    if legacy.exists():
+        return legacy
+    return (_xdg_dir(env, "XDG_DATA_HOME") or Path.home() / ".local" / "share") / "pipx"
+
+
 def _pipx_home() -> Path:
-    """Return the pipx home directory, mirroring pipx's own resolution order.
-
-    Resolution (matches pipx ≥ 1.4 on each platform):
-      1. $PIPX_HOME if set
-      2. Legacy ~/.local/pipx if it exists (migration fallback on Linux/macOS)
-      3. Platform default: ~/.local/share/pipx on Linux (XDG user_data_dir),
-         ~/pipx on Windows, ~/.local/pipx on macOS/other
-
-    The result is validated against credential dirs and unsafe system paths.
-    If PIPX_HOME points at something dangerous, fall back to the platform
-    default so we fail safe rather than exposing sensitive directories.
-    """
-    import os
+    """pipx's home for a sandboxed command, which may write it: where pipx itself puts it
+    (_pipx_home_exact()), bounded by _home_tool_dir() like the other tool directories, else
+    pipx's default (the legacy ~/.local/pipx when it exists, else ~/.local/share/pipx).
+    Elsewhere than Linux, without $PIPX_HOME, the platform default (~/pipx on Windows,
+    ~/.local/pipx otherwise)."""
     import sys
 
     home = Path.home()
-
-    # Use the same credential-dir list as the sandbox runner so both enforce a
-    # consistent boundary.  Imported lazily to avoid a circular dependency.
-    from packagealert.sandbox.runner import credential_dirs
-
-    def is_credential_dir(p: Path) -> bool:
-        return any(p == c or p.is_relative_to(c) for c in credential_dirs())
-
-    override = os.environ.get("PIPX_HOME")
-    if override:
-        candidate = Path(override).expanduser()
-        # resolve(strict=False) normalises ".." without requiring the path to exist,
-        # preventing traversal bypasses like ~/.local/../.ssh/pipx passing a prefix check.
-        resolved = candidate.resolve(strict=False)
-        # Reject paths that land inside system dirs or credential dirs.
-        _SAFE_PREFIXES = (home / ".local", home / "pipx", home / ".local" / "pipx")
-        safe = any(
-            resolved == p or resolved.is_relative_to(p)
-            for p in _SAFE_PREFIXES
-        )
-        if safe and not is_credential_dir(resolved):
-            return resolved
-        # Fall through to platform default — log at debug level to avoid noise.
-        import logging
-        logging.getLogger(__name__).debug(
-            "PIPX_HOME=%r is outside expected locations; using platform default", override
-        )
-
-    # Legacy path (created by older pipx or explicit prior install).
     legacy = home / ".local" / "pipx"
-    if legacy.exists():
-        return legacy
-
-    # Platform default matching pipx's own logic (platformdirs user_data_dir).
-    if sys.platform.startswith("linux"):
-        _xdg_raw = os.environ.get("XDG_DATA_HOME", "")
-        _xdg_default = home / ".local" / "share"
-        if _xdg_raw:
-            _xdg_candidate = Path(_xdg_raw)
-            # Check is_absolute() on the raw value before resolve() — resolve(strict=False)
-            # makes relative paths absolute (relative to cwd), which would bypass this check
-            # when cwd happens to be under $HOME.
-            # resolve(strict=False) then normalises ".." so "/home/user/../etc" is rejected.
-            if _xdg_candidate.is_absolute():
-                _xdg_resolved = _xdg_candidate.resolve(strict=False)
-            else:
-                _xdg_resolved = None
-            # Require absolute path under $HOME, not inside a credential directory.
-            if (
-                _xdg_resolved is not None
-                and _xdg_resolved.is_relative_to(home)
-                and not is_credential_dir(_xdg_resolved)
-            ):
-                xdg_data = _xdg_resolved
-            else:
-                import logging
-                logging.getLogger(__name__).debug(
-                    "XDG_DATA_HOME=%r is not a safe absolute path under $HOME; using default", _xdg_raw
-                )
-                xdg_data = _xdg_default
-        else:
-            xdg_data = _xdg_default
-        return xdg_data / "pipx"
-    if sys.platform == "win32":
-        return home / "pipx"
-    # macOS and other Unix
-    return home / ".local" / "pipx"
+    override = os.environ.get("PIPX_HOME")
+    if not sys.platform.startswith("linux") and not override:
+        return legacy if legacy.exists() or sys.platform != "win32" else home / "pipx"
+    default = legacy if legacy.exists() else home / ".local" / "share" / "pipx"
+    exact = _pipx_home_exact()
+    if exact == default:
+        return exact
+    return _home_tool_dir(exact, default, "PIPX_HOME" if override else "XDG_DATA_HOME")
 
 
 def _pipx_spec_comes_from_lock(spec: str) -> bool:
@@ -1586,13 +1656,9 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
         req_files = _value_flag_args(args[1:], frozenset({"--lock"})) if subcmd == "install" else []
         if req_files:
             packages = [p for p in packages if not _pipx_spec_comes_from_lock(p)]
-        home = Path.home()
         return ParsedInstall(
             manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
-            extra_write_home_dirs=[
-                _pipx_home() / "venvs",
-                home / ".local" / "bin",
-            ],
+            extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
             req_files=req_files,
         )
     if subcmd in ("inject",):
@@ -1602,26 +1668,18 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
         # `-r FILE` names packages to inject; its value is skipped as a
         # package above and scanned as a requirements file here.
         req_files = _value_flag_args(args[1:], frozenset({"-r", "--requirement"}))
-        home = Path.home()
         return ParsedInstall(
             manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
-            extra_write_home_dirs=[
-                _pipx_home() / "venvs",
-                home / ".local" / "bin",
-            ],
+            extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
             target_env_name=venv_name,
             req_files=req_files,
         )
     if subcmd in ("upgrade-all", "reinstall-all", "install-all"):
         # Packages are unknown but the command installs/upgrades tool venvs —
         # sandbox it with the full venvs dir writable so no install escapes.
-        home = Path.home()
         return ParsedInstall(
             manager="pipx", packages=[], ecosystem="pypi", venv_exe=argv[0],
-            extra_write_home_dirs=[
-                _pipx_home() / "venvs",
-                home / ".local" / "bin",
-            ],
+            extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
         )
     if subcmd in ("run", "uninstall", "uninstall-all", "list", "environment",
                   "ensurepath", "completions"):

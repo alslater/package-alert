@@ -3185,7 +3185,22 @@ def _home_ro_dirs() -> list[Path]:
         except Exception:
             log.warning("home_ro_paths raised for lang=%s — skipping",
                         getattr(lang, "name", "?"), exc_info=True)
-    return result
+    # bwrap binds each entry's resolved target at its name: one that is, lies in or holds a
+    # credential directory (a default such as ~/.local/share/uv/tools linking to ~/.ssh) would
+    # expose it, so it is left out, as is one that cannot be resolved. Opt-in grants
+    # (python:ssh-keys) are added by the plugin's configure_sandbox(), not here.
+    return [p for p in result if not _exposes_credentials(p)]
+
+
+def _exposes_credentials(path: Path) -> bool:
+    """Whether binding *path* (as its resolved target) would show a credential directory:
+    the target is, lies in or contains one, compared resolved. True when it cannot be resolved."""
+    try:
+        real = path.resolve(strict=False)
+        credentials = [c.resolve(strict=False) for c in credential_dirs()]
+    except (OSError, RuntimeError):
+        return True
+    return any(real == c or real.is_relative_to(c) or c.is_relative_to(real) for c in credentials)
 
 
 def _runtime_home_dirs() -> list[Path]:
@@ -3207,7 +3222,35 @@ def _runtime_home_dirs() -> list[Path]:
         Path(os.environ.get("PIPX_HOME", home / ".local" / "pipx")).expanduser(),
         home / ".local" / "share" / "pipx",
     ]
-    return [p for p in candidates if p.exists()]
+    # Wherever uv and pipx actually keep tools, their executables and the Pythons they run on
+    # (a uv-installed pipx under a custom UV_TOOL_DIR or XDG_DATA_HOME, say), within what
+    # the sandbox may bind. uv's credential store inside its state directory stays hidden
+    # (the Python plugin's sandbox_hidden_home_paths()).
+    from packagealert.parsers.process_args import (
+        _pipx_bin_dir,
+        _pipx_home,
+        _uv_python_dir,
+        _uv_state_dir,
+        _uv_tool_bin_dir,
+        _uv_tool_dir,
+    )
+
+    uv_python = _uv_python_dir()
+    candidates += [_uv_state_dir(), *([uv_python] if uv_python else []), _uv_tool_dir(), _uv_tool_bin_dir(),
+                   _pipx_home(), _pipx_bin_dir()]
+    # Each at its canonical path too: a venv's bin/python may name the target of a linked
+    # directory (UV_PYTHON_INSTALL_DIR=~/python-alias -> ~/real-pythons), and the home
+    # tmpfs hides it there. A target outside $HOME is visible already.
+    found = [p for p in candidates if p.exists()]
+    canonical = []
+    for p in found:
+        with contextlib.suppress(OSError, RuntimeError):
+            real = p.resolve()
+            if real != p and real.is_relative_to(home.resolve()):
+                canonical.append(real)
+    # Never one the runner refuses to mount (_home_ro_dirs()): _sandbox_visibility() reports
+    # these as visible, so they must be exactly what is mounted.
+    return [p for p in dict.fromkeys([*found, *canonical]) if not _exposes_credentials(p)]
 
 
 def _post_ro_tmpfs_dirs(home_ro: list[Path]) -> list[Path]:
