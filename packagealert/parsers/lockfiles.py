@@ -165,12 +165,30 @@ def is_public_pypi_index(url: object) -> bool:
 def _requirements_option_is_private(line: str) -> bool:
     """Whether a requirements-file option line points pip at a source other than public PyPI.
 
+    Parsed as pip parses it (requirements_line_options()). pip applies these options to
+    every requirement, whichever file they are in. A line pip could not parse counts as
+    private: its packages are then not looked up.
+    """
+    options = requirements_line_options(line)
+    if options is None:
+        return True
+    index_url: str | None = None  # the last --index-url wins, as in optparse
+    for option, value in options:
+        if option in _REQ_OTHER_SOURCE_OPTIONS:
+            return True
+        if option in _REQ_INDEX_URL_OPTIONS:
+            index_url = value
+    return index_url is not None and not is_public_pypi_index(index_url)
+
+
+def requirements_line_options(line: str) -> list[tuple[str, str | None]] | None:
+    """A requirements-file option line's options, each as (canonical long name, value), or
+    None when pip could not parse it.
+
     Parsed as pip does (its break_args_options(), shlex, then optparse): options
     start at the first token beginning with "-", a long option may be any unique
     prefix and take its value after "=" or as the next token, and a short option
-    takes the rest of its token or the next one. pip applies these options to
-    every requirement, whichever file they are in. A line pip could not parse
-    counts as private: its packages are then not looked up.
+    takes the rest of its token or the next one.
     """
     words = line.split(" ")
     while words and not words[0].startswith("-"):
@@ -178,8 +196,8 @@ def _requirements_option_is_private(line: str) -> bool:
     try:
         tokens = shlex.split(" ".join(words))
     except ValueError:
-        return True
-    index_url: str | None = None  # the last --index-url wins, as in optparse
+        return None
+    options: list[tuple[str, str | None]] = []
     i = 0
     while i < len(tokens):
         token, i = tokens[i], i + 1
@@ -188,7 +206,7 @@ def _requirements_option_is_private(line: str) -> bool:
             name, eq, attached = token.partition("=")
             matches = [o for o in _REQ_LONG_OPTIONS if o == name] or [o for o in _REQ_LONG_OPTIONS if o.startswith(name)]
             if len(matches) != 1:
-                return True  # pip rejects an unknown or ambiguous option
+                return None  # pip rejects an unknown or ambiguous option
             option = matches[0]
             if _REQ_LONG_OPTIONS[option]:
                 if eq:
@@ -196,24 +214,21 @@ def _requirements_option_is_private(line: str) -> bool:
                 elif i < len(tokens):
                     value, i = tokens[i], i + 1
                 else:
-                    return True
+                    return None
         elif token.startswith("-") and len(token) > 1:
             option = _REQ_SHORT_OPTIONS.get(token[:2], "")
             if not option:
-                return True
+                return None
             if len(token) > 2:
                 value = token[2:]
             elif i < len(tokens):
                 value, i = tokens[i], i + 1
             else:
-                return True
+                return None
         else:
             continue  # a positional argument, which pip ignores on an option line
-        if option in _REQ_OTHER_SOURCE_OPTIONS:
-            return True
-        if option in _REQ_INDEX_URL_OPTIONS:
-            index_url = value
-    return index_url is not None and not is_public_pypi_index(index_url)
+        options.append((option, value))
+    return options
 
 
 def _mark_private(packages: list[LockedPackage]) -> list[LockedPackage]:

@@ -403,6 +403,50 @@ Each risk row carries a `level` of `info`, `warning`, or `critical`. These are c
 - `composer.lock` → Packagist
 - `composer.json` (fallback when no lock file) → Packagist
 
+### `scan-tools`
+
+Scans the tools you installed with pipx and `uv tool install` for malicious or vulnerable packages. These are the apps in pipx's venvs directory and the environments in uv's tool directory, each in its own virtualenv outside any project, and every one of their dependencies is checked.
+
+```bash
+pa scan-tools                 # pipx apps and uv tools
+pa scan-tools --uv            # uv tools only
+pa scan-tools --format json
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--pipx` | off | Scan pipx apps (with neither `--pipx` nor `--uv`, both are scanned) |
+| `--uv` | off | Scan uv tool environments |
+| `--details` / `-d` | off | Show full advisory details |
+| `--no-risk` | off | Skip heuristic risk scoring |
+| `--format` / `-f` | `text` | `text`, `json`, `html` or `browser` |
+
+**Where it looks.** It looks where pipx and uv themselves put tools, and honours their settings:
+- **pipx:** `PIPX_HOME`, an existing `~/.local/pipx`, or `$XDG_DATA_HOME/pipx`.
+- **uv:** `UV_TOOL_DIR` or `$XDG_DATA_HOME/uv/tools`.
+
+When both pipx layouts exist, the one pipx no longer uses is scanned too and reported as a leftover that is safe to delete (unless anything in it could not be checked, or it holds the live tools directory). A `lib/pythonX.Y` directory left behind by an interpreter a tool no longer uses is listed (`orphaned` in JSON) rather than scanned, but not called safe to delete: something the tool uses can still live in or link into it.
+
+**How each tool is checked.** Every package installed in the tool's environment is looked up, as `scan-project --scan-installed` does, and its source code is scored from that environment. Nothing in a tool environment is run.
+- **Provenance:** where each tool came from is read from pipx's `pipx_metadata.json` or uv's `uv-receipt.toml`, and each package's `direct_url.json`. Packages added with `pipx inject` or `uv tool install --with` are judged by their own record, and an injection's replacement index counts for the whole environment.
+- **Not looked up publicly:** a tool installed from a local directory (often editable, such as a checkout of your own), a git repository or a URL is not looked up in public advisory databases, and is counted as not public. A PyPI package of the same name is a different one. Its dependencies from public PyPI are still checked.
+- **Indexes:** an index that replaces PyPI (`--index-url`, uv's `--default-index`), `--find-links` or `--no-index` means any package may have come from elsewhere, so none of the tool's packages are looked up publicly. The text output says how many were skipped. An extra index beside PyPI (`--extra-index-url`, uv's `--index`) leaves PyPI as a source, so packages are still looked up. A public package of the same name is exactly the dependency-confusion risk worth checking. The names of packages that exist only on the extra index are then sent to public lookups too. If those names are private, use a replacement index instead, such as a mirror that proxies PyPI. The inventory marks such a tool with `extra_index`.
+- **Configured indexes:** uv records the index it installed from in its receipt, wherever that was set. pipx records only the `--pip-args` it was given. So for a pipx app, the index configuration that holds when `scan-tools` runs also counts: `PIP_*` and `UV_*` variables, `pip.conf` (including the app's own venv) and `uv.toml`. Each tool's own precedence decides which value applies:
+  - **pip:** variables override files, a later file overrides an earlier one, and `[install]` overrides `[global]`.
+  - **uv:** variables override files, `[pip]` overrides the top level, the user's file overrides the system's, and `UV_CONFIG_FILE` replaces both.
+  - **Command line:** an index given in `--pip-args` replaces a configured one.
+
+  A project's own `uv.toml` or `pyproject.toml` is not read, since it depends on where pipx ran. When the configuration is what kept a tool's packages from being looked up, the inventory says `"index_source": "config"`. The app may have been installed under different settings, which nothing records.
+- **Not checked:** a tools directory, tool or `lib` directory that cannot be read is listed as `unchecked`, and the scan is reported as not clean. So is a tool whose `lib` holds several interpreters' directories with nothing to say which is in use, and one made with `--system-site-packages` (its `pyvenv.cfg` is listed): the base interpreter's packages it also uses are not read. A free-threaded interpreter's `lib/pythonX.Yt` is found.
+- **pipx's shared libraries:** `<pipx home>/shared`, the pip every pipx app imports through its `pipx_shared.pth`, is scanned as a tool named `(shared)` in each pipx tools directory's inventory.
+- **No record:** a tool whose `pipx_metadata.json` or `uv-receipt.toml` is missing still has its packages looked up publicly, with provenance `unknown`. pipx and uv always write these, and skipping the tool would leave it unchecked.
+- **Credentials:** index URLs are recorded without credentials.
+
+**JSON output.** There is one result per tools directory. Each has:
+- every finding, risk and remediation, labelled with the tool it belongs to (`"source": "pipx:awscli"`), so you can tell which tool to fix when two share a vulnerable dependency;
+- a `tools` inventory, including tools without findings;
+- the run's identity, which pa-central uses to retire a tools directory that has gone.
+
 ### `fix`
 
 Plan the commands that upgrade a uv or npm project's vulnerable packages. `pa fix`

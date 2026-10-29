@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 import httpx
 
@@ -32,6 +32,16 @@ class ScanPayload(TypedDict):
     sources: list[str]
     remediations: list[dict]
     scanned_at: str
+    # A tools scan only (scan_type "tools"; see ScanResult).
+    manager: NotRequired[str | None]
+    active: NotRequired[bool | None]
+    exists: NotRequired[bool | None]
+    run_id: NotRequired[str | None]
+    managers_scanned: NotRequired[list[str] | None]
+    run_roots: NotRequired[list[str] | None]
+    home: NotRequired[str | None]
+    tools: NotRequired[list[dict] | None]
+    unchecked: NotRequired[list[str]]
 
 
 class HeuristicAlertPayload(TypedDict):
@@ -163,7 +173,7 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
     # ScanPayload uses "root" for the project directory (matching pa scan-project
     # --format json output). The server also accepts "project_path" as an alias,
     # but "root" is the canonical ingest key. Response objects use "project_path".
-    return {
+    payload: ScanPayload = {
         "hostname": hostname,
         "root": scan.project_path,
         "scan_type": scan.scan_type,
@@ -186,7 +196,7 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         # value the server will reject.
         "status": (
             "findings" if scan.finding_count > 0
-            else "degraded" if scan.osv_failures > 0
+            else "degraded" if scan.osv_failures > 0 or scan.unchecked
             else "clean"
         ),
         "finding_count": scan.finding_count,
@@ -210,6 +220,19 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         else remediations_json(scan.findings),
         "scanned_at": scan.scanned_at.isoformat(),
     }
+    if scan.scan_type == "tools":
+        # A tools scan's directory, inventory and run, which let pa-central retire a tools
+        # directory a later run no longer reports (see ScanResult). Other scans send none.
+        payload["manager"] = scan.manager
+        payload["active"] = scan.active
+        payload["exists"] = scan.exists
+        payload["run_id"] = scan.run_id
+        payload["managers_scanned"] = scan.managers_scanned
+        payload["run_roots"] = scan.run_roots
+        payload["home"] = scan.home
+        payload["tools"] = scan.tools
+        payload["unchecked"] = scan.unchecked or []
+    return payload
 
 
 def _request_error(e: httpx.RequestError) -> str:

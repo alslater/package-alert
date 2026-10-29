@@ -978,6 +978,52 @@ _UV_PIP_INSTALL_VALUE_FLAGS = frozenset({
     # name in uv's CLI source (crates/uv-cli/src/lib.rs) — see CLAUDE.md.
     "--build-constraint", "--config-settings", "--constraint", "--exclude", "--override", "--preview-feature", "--preview-features", "--python-fetch", "--python-preference", "--requirement", "--trusted-host",
 })
+# Every long option `uv pip install` accepts, hidden ones included: clap refuses
+# any other (`--index-u` is pip's prefix of --index-url, not a uv option). The
+# names in its --help, plus every long name in uv's CLI source (crates/uv-cli/src)
+# that `uv pip install --<name> --help` does not report as an unexpected
+# argument. Audited against: uv 0.13.5.
+_UV_PIP_INSTALL_LONG_OPTIONS = frozenset({
+    "--all-extras", "--allow-insecure-host", "--allow-python-downloads",
+    "--break-system-packages", "--build", "--build-constraint",
+    "--build-constraints", "--build-isolation", "--cache-dir", "--cert",
+    "--check", "--color", "--compile", "--compile-bytecode", "--config-file",
+    "--config-setting", "--config-settings", "--config-settings-package",
+    "--constraint", "--constraints", "--default-index", "--deps", "--directory",
+    "--disable-pip-version-check", "--dry-run", "--editable", "--exact",
+    "--exclude", "--exclude-newer", "--exclude-newer-package", "--excludes",
+    "--extra", "--extra-index-url", "--find-links", "--force-reinstall",
+    "--fork-strategy", "--group", "--help", "--index", "--index-strategy",
+    "--index-url", "--inexact", "--isolated", "--keyring-provider",
+    "--link-mode", "--managed-python", "--native-tls", "--no-all-extras",
+    "--no-binary", "--no-break-system-packages", "--no-build",
+    "--no-build-isolation", "--no-build-isolation-package", "--no-cache",
+    "--no-cache-dir", "--no-color", "--no-compile", "--no-compile-bytecode",
+    "--no-config", "--no-deps", "--no-editable", "--no-editable-package",
+    "--no-exact", "--no-index", "--no-installer-metadata",
+    "--no-managed-python", "--no-native-tls", "--no-offline", "--no-preview",
+    "--no-progress", "--no-python-downloads", "--no-refresh", "--no-reinstall",
+    "--no-require-build-hashes", "--no-require-hashes", "--no-sources",
+    "--no-sources-package", "--no-strict", "--no-system", "--no-system-certs",
+    "--no-upgrade", "--no-verify-hashes", "--offline", "--only-binary",
+    "--output-format", "--override", "--overrides", "--pre", "--prefix",
+    "--prerelease", "--prerelease-package", "--preview", "--preview-feature",
+    "--preview-features", "--project", "--python", "--python-fetch",
+    "--python-platform", "--python-preference", "--python-version", "--quiet",
+    "--refresh", "--refresh-package", "--reinstall", "--reinstall-package",
+    "--require-build-hashes", "--require-hashes", "--requirement",
+    "--requirements", "--resolution", "--show-settings", "--strict", "--system",
+    "--system-certs", "--target", "--torch-backend", "--trusted-host",
+    "--upgrade", "--upgrade-group", "--upgrade-package", "--user", "--verbose",
+    "--verify-hashes",
+})
+# The short options each installer accepts; any other is refused. pip's come from each
+# supported version's install parser (identical in pip 24.0, 25.3, 26.1.2, 26.2.2); uv's
+# from probing every letter as `uv pip install -<letter> --help` (uv 0.13.5).
+_PIP_INSTALL_SHORT_OPTIONS = frozenset({
+    "-C", "-I", "-U", "-V", "-c", "-e", "-f", "-h", "-i", "-q", "-r", "-t", "-v"})
+_UV_PIP_INSTALL_SHORT_OPTIONS = frozenset({
+    "-C", "-P", "-U", "-b", "-c", "-e", "-f", "-h", "-i", "-n", "-p", "-q", "-r", "-t", "-v"})
 # Every spelling uv accepts for a requirements file (`uv pip install`, `uv add`):
 # `--requirements`, and the hidden `--requirement` alias.
 _UV_PIP_REQUIREMENT_FLAGS = frozenset({"-r", "--requirement", "--requirements"})
@@ -1592,7 +1638,9 @@ def _pipx_home_exact(env: Mapping[str, str] | None = None) -> Path:
     if value := env.get("PIPX_HOME"):
         return Path(value).expanduser().absolute()
     legacy = Path.home() / ".local" / "pipx"
-    if legacy.exists():
+    # os.path.exists(), as pipx's Path.exists() is from Python 3.14: a legacy home that cannot
+    # be searched for does not exist (3.12 and 3.13 raise there, so no pipx runs on them).
+    if os.path.exists(legacy):
         return legacy
     return (_xdg_dir(env, "XDG_DATA_HOME") or Path.home() / ".local" / "share") / "pipx"
 

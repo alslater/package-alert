@@ -834,3 +834,53 @@ def test_retrieved_scan_from_a_server_without_the_field_still_renders(capsys):
     out = capsys.readouterr().out
     assert "No findings — all clear." in out
     assert "unavailable" not in out
+
+
+def _tools_record(unchecked=()):
+    finding = {"package": "urllib3", "ecosystem": "PyPI", "version": "1.26.0", "advisory_id": "PYSEC-1",
+               "is_malicious": False, "severity": "HIGH", "summary": "x", "fixed_versions": ["2.0"], "aliases": []}
+    return {"id": 7, "project_path": "/home/al/.local/pipx/venvs", "scan_type": "tools", "status": "findings",
+            "scanned_at": "2026-10-30T12:00:00+00:00", "finding_count": 2,
+            "findings": [{**finding, "source": "pipx:awscli"}, {**finding, "source": "pipx:httpie"}],
+            "sources": ["pipx:awscli", "pipx:httpie"], "unchecked": list(unchecked)}
+
+
+def test_retrieved_tools_scan_keeps_each_tools_remediation(capsys):
+    """Two tools with the same vulnerable package: one remediation each, not one merged."""
+    import json
+
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    _render_scan_detail(_tools_record(), "json", show_details=False)
+    out = json.loads(capsys.readouterr().out)
+    assert [(r["package"], r["source"]) for r in out["remediations"]] == [
+        ("urllib3", "pipx:awscli"), ("urllib3", "pipx:httpie")]
+    _render_scan_detail(_tools_record(), "text", show_details=False)
+    text = capsys.readouterr().out
+    assert text.index("pipx:awscli") < text.index("PYSEC-1") < text.index("pipx:httpie")
+    assert text.count("PYSEC-1") == 2
+
+
+def test_retrieved_tools_scan_with_unchecked_directories_is_not_all_clear(capsys):
+    import json
+
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    record = {**_tools_record(["/home/al/.local/pipx/venvs/app/lib"]), "findings": [], "finding_count": 0}
+    _render_scan_detail(record, "text", show_details=False)
+    text = capsys.readouterr().out
+    assert "not checked: /home/al/.local/pipx/venvs/app/lib" in text and "all clear" not in text
+    _render_scan_detail(record, "json", show_details=False)
+    assert json.loads(capsys.readouterr().out)["unchecked"] == ["/home/al/.local/pipx/venvs/app/lib"]
+    _render_scan_detail(record, "html", show_details=False)
+    assert "Not checked, so this report is not a clean result" in capsys.readouterr().out
+
+
+def test_retrieved_tools_scan_risks_name_their_tool(capsys):
+    from packagealert.plugins.central.plugin import _render_scan_detail
+
+    record = {**_tools_record(), "findings": [], "finding_count": 0, "risks": [
+        {"package": "evilpkg", "version": "1.0", "ecosystem": "PyPI", "score": 90, "level": "critical",
+         "signals": [{"name": "typosquat", "score": 90, "reason": "x"}], "source": "pipx:httpie"}]}
+    _render_scan_detail(record, "text", show_details=False)
+    assert "pipx:httpie: evilpkg@1.0" in capsys.readouterr().out
