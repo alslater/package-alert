@@ -4616,3 +4616,68 @@ def test_an_unseen_node_running_a_known_npm_script(tmp_path, monkeypatch):
         assert not _node._npm_node_trusted()
     finally:
         COMMAND_ARGV.reset(token)
+
+
+def test_an_npmrc_the_runner_will_not_mount_is_not_read_in_the_sandbox(tmp_path, monkeypatch):
+    """~/.npmrc -> ~/.aws/npmrc: the runner leaves a file in a credential directory out of the
+    sandbox (_home_ro_dirs()), so npm there never sees its private registry, and provenance
+    must not assume it either. A global npmrc linking there is not bound for the same reason."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".aws").mkdir()
+    (home / ".aws" / "npmrc").write_text("registry=https://npm.corp.example/\n")
+    (home / ".npmrc").symlink_to(home / ".aws" / "npmrc")
+    (tmp_path / "proj").mkdir()
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://npm.corp.example/"   # on the host
+    token = SANDBOX_ENV.set({})
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+        assert _node._npm_home_bind(home / ".npmrc") is None
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_a_credential_backed_npmrc_shown_by_a_configured_mount_is_read(tmp_path, monkeypatch):
+    """npm_config_userconfig=~/.aws/npmrc with ~/.aws in sandbox.extra_ro_paths: the runner
+    binds the configured path after its own filter, so npm reads the file and its private
+    registry still applies (no public lookups of private names)."""
+    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_HOME_VISIBLE
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".aws").mkdir()
+    (home / ".aws" / "npmrc").write_text("@corp:registry=https://npm.corp.example/\n")
+    monkeypatch.setenv("npm_config_userconfig", str(home / ".aws" / "npmrc"))
+    (tmp_path / "proj").mkdir()
+    env = {"npm_config_userconfig": str(home / ".aws" / "npmrc")}
+    token = SANDBOX_ENV.set(env)
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})                      # not mounted
+        shown = SANDBOX_HOME_VISIBLE.set((home / ".aws",))                                 # configured mount
+        try:
+            assert _node.npm_registries(tmp_path / "proj") == (None, {"@corp": "https://npm.corp.example/"})
+        finally:
+            SANDBOX_HOME_VISIBLE.reset(shown)
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_a_hidden_link_to_a_mounted_credential_npmrc_is_not_read(tmp_path, monkeypatch):
+    """~/.npmrc -> ~/.aws/npmrc with only ~/.aws configured as a mount: npm opens ~/.npmrc,
+    a link the home tmpfs hides (its own bind is refused), so the file is not reached."""
+    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_HOME_VISIBLE
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".aws").mkdir()
+    (home / ".aws" / "npmrc").write_text("@corp:registry=https://npm.corp.example/\n")
+    (home / ".npmrc").symlink_to(home / ".aws" / "npmrc")
+    (tmp_path / "proj").mkdir()
+    tokens = [SANDBOX_ENV.set({}), SANDBOX_HOME_VISIBLE.set((home / ".aws",))]
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    finally:
+        SANDBOX_HOME_VISIBLE.reset(tokens[1])
+        SANDBOX_ENV.reset(tokens[0])

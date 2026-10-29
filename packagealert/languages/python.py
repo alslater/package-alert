@@ -2337,10 +2337,9 @@ class PythonLanguage:
         # directory. extra_write_home_dirs carries the venvs parent; derive
         # the tool venv from it.
         extra_write_home_dirs: list[Path] = getattr(parsed, "extra_write_home_dirs", [])
-        tool_venvs_dirs = [
-            Path.home() / ".local" / "share" / "uv" / "tools",
-            _pipx_venvs_dir(),
-        ]
+        # The command's own manager's root, as the parser resolved it (first): one manager's
+        # root may lie inside the other's (UV_TOOL_DIR=~/.local/share).
+        tool_venvs_dirs = extra_write_home_dirs[:1]
         is_tool_manager_cmd = False
         for venvs_dir in tool_venvs_dirs:
             if any(p == venvs_dir or p.is_relative_to(venvs_dir) for p in extra_write_home_dirs):
@@ -2536,9 +2535,24 @@ class PythonLanguage:
         # that is set, so forwarding a potentially unsafe XDG_DATA_HOME
         # alongside a corrected PIPX_HOME would have no effect on pipx but
         # could confuse other tools.
-        from packagealert.parsers.process_args import _pipx_home
+        from packagealert.parsers.process_args import (
+            _pipx_home,
+        )
         sandbox_env["PIPX_HOME"] = str(_pipx_home())
         sandbox_env.pop("XDG_DATA_HOME", None)
+        # A tool install's directories, as the parser resolved them like the tools themselves
+        # (its write dirs: the root, then the executables' directory), are given to the
+        # sandboxed uv or pipx explicitly: they are the directories
+        # bound writable and scanned (resolve_sandbox_targets(), post_run_scan_targets()), and
+        # the variables that chose them (UV_TOOL_DIR, XDG_DATA_HOME, XDG_BIN_HOME,
+        # PIPX_BIN_DIR) are not otherwise passed in. Only for a tool install: any other
+        # command (a container-isolated trial) is not handed paths into the real $HOME.
+        tool_dirs = list(getattr(parsed, "extra_write_home_dirs", None) or [])
+        manager = getattr(parsed, "manager", None)
+        if len(tool_dirs) == 2 and manager == "uv":
+            sandbox_env["UV_TOOL_DIR"], sandbox_env["UV_TOOL_BIN_DIR"] = map(str, tool_dirs)
+        elif len(tool_dirs) == 2 and manager == "pipx":
+            sandbox_env["PIPX_BIN_DIR"] = str(tool_dirs[1])
 
         # When uv-auth is active, uv inside the sandbox must resolve the same
         # credentials directory that _uv_credentials_dir() snapshotted on the
@@ -2667,17 +2681,13 @@ class PythonLanguage:
 
         extra_write_home_dirs: list[Path] = getattr(parsed, "extra_write_home_dirs", [])
         if extra_write_home_dirs:
-            _home = Path.home()
-            tool_venvs_dirs = [
-                _home / ".local" / "share" / "uv" / "tools",
-                _pipx_venvs_dir(),
-            ]
-            for p in extra_write_home_dirs:
+            # The command's own manager's root is the parser's first write dir, the rest (its
+            # executables' directory) are snapshotted whole, by position, not by where they
+            # lie: one manager's root may hold the other's (UV_TOOL_DIR=~/.local/share), and
+            # UV_TOOL_BIN_DIR may sit inside UV_TOOL_DIR.
+            for index, p in enumerate(extra_write_home_dirs):
                 targets.write_dirs.append(p)
-                matched_venvs_dir = next(
-                    (vd for vd in tool_venvs_dirs if p == vd or p.is_relative_to(vd)),
-                    None,
-                )
+                matched_venvs_dir = p if index == 0 else None
                 if matched_venvs_dir is not None:
                     # Derive site-packages for upgrade (venv already exists).
                     # For a fresh install the venv won't exist yet —

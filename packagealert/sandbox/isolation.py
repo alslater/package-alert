@@ -146,18 +146,19 @@ def _copy(src: Path, dst: Path, *, entry: Path, deny: Sequence[Path], budget: _B
     if real.is_dir():
         if real in ancestors:
             return
-        budget.take(0, entry)
+        if not dst.is_dir():  # charged once, however many overlapping entries reach it
+            budget.take(0, entry)
         dst.mkdir(parents=True, exist_ok=True)
         for child in sorted(real.iterdir()):
             _copy(child, dst / child.name, entry=entry, deny=deny, budget=budget, ancestors=ancestors | {real},
                   hidden=hidden)
     elif real.is_file():
+        if os.path.lexists(dst) and not dst.is_dir():
+            # An earlier, overlapping entry already copied it: the same path as written, so the
+            # same source. Neither copied nor counted again.
+            return
         budget.take(real.stat().st_size, entry)
         dst.parent.mkdir(parents=True, exist_ok=True)
-        if os.path.lexists(dst) and not dst.is_dir():
-            # An earlier, overlapping entry already copied it, keeping its mode: a read-only
-            # file (a 0400 ~/.npmrc) cannot be copied over, so replace it. It is our own copy.
-            dst.unlink()
         shutil.copy2(real, dst)
 
 
@@ -186,6 +187,10 @@ def populate_home(fresh: Path, home_ro_dirs: Sequence[Path], writable_binds: Seq
     # Hidden paths (sandbox_hidden_home_paths(): uv's credential store, #83) never come from a home_ro
     # entry; only a writable bind (python:uv-auth's snapshot), copied below, may provide them.
     hiding = [h.resolve(strict=False) for h in hidden]
+    # Every entry is copied, including one inside another (~/.local/share/uv/tools inside
+    # ~/.local/share/uv): _copy() skips, uncounted, what an overlapping entry already placed, so
+    # nothing counts twice against the limit, and the inner entry still restores what the outer
+    # copy left out (a loop such as tools/bin/up -> .., pruned there but not from bin's own copy).
     for entry in home_ro_dirs:
         real = _resolved(entry)
         if real is None:
