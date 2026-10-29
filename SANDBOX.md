@@ -246,7 +246,7 @@ The following paths are re-exposed read-only inside the home tmpfs when they exi
 | `~/.local/pipx` | pipx-managed tool environments |
 | `~/.config/pip`, `~/.pip` | pip configuration (index URLs, proxy, trusted hosts) |
 | `~/.config/uv` | uv configuration |
-| `~/.npmrc` | npm registry and auth configuration |
+| `~/.npmrc`, and npm's global and builtin npmrc when they, or the files they link to, are under `$HOME` (files only, never a directory; for the builtin npmrc, and a global one it locates, only those of the npm on `PATH` installed outside the project; for a global one found at the default prefix, only that of the node that runs npm — its shebang's (an absolute interpreter, or the command `#!/usr/bin/env` names on `PATH`; unknown when the interpreter is not node, such as a shell launcher, or `env`'s arguments cannot be read or change npm's environment, in which case only npm's command-line registry settings are assumed), else the one on `PATH`, judged by the original binary behind a package-alert shim as well — installed outside the project — the outermost directory above the working directory (below `$HOME` when it is) that is a repository root (`.git`, `.hg`) or has a `package.json`, so a workspace's `node_modules/.bin` on `PATH` counts as inside it from any subdirectory) | npm registry and auth configuration |
 
 For interactive shell sessions, shell RC files (`.bashrc`, `.zshrc`, etc.) and `~/.gitconfig` are also re-exposed so the shell initialises normally.
 

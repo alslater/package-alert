@@ -13,10 +13,13 @@ import pytest
 from packagealert.languages import node as _node
 from packagealert.languages.base import CURRENT_CONTRACT_VERSION, SandboxPaths, Snapshot
 from packagealert.languages.node import NodeLanguage
+from packagealert.parsers.process_args import parse_npm_args
 
 # Captured at import, before the autouse fixture points _user_npmrc at a missing file: a test
 # that needs the real lookup restores just this, keeping the fixture's other isolation.
 _REAL_USER_NPMRC = _node._user_npmrc
+_REAL_BUILTIN_NPMRC = _node._npm_builtin_npmrc
+_REAL_DEFAULT_PREFIX = _node._npm_default_prefix
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -3057,3 +3060,1559 @@ def test_post_install_scan_ignores_a_packages_own_sub_entry_manifests(tmp_path, 
 ])
 def test_manifest_depth(rel, depth):
     assert _node._manifest_depth(Path(rel)) == depth
+
+
+_GLOBAL_NPMRC = "registry=https://global.example/\n@corp:registry=https://global-scope.example/\n"
+
+
+def _home(tmp_path: Path, monkeypatch) -> Path:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(_node, "_user_npmrc", _REAL_USER_NPMRC)
+    return home
+
+
+@pytest.mark.parametrize("how", ["PREFIX", "npm_config_prefix", "npm_config_globalconfig", "user globalconfig",
+                                 "user prefix", "builtin prefix"])
+def test_the_global_npmrc_is_read_where_npm_finds_it(tmp_path, monkeypatch, how):
+    """Each way npm locates its global config (checked against npm 11.8's own resolution):
+    a registry set only there is the project's registry (#68)."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "pfx" / "etc").mkdir(parents=True)
+    (tmp_path / "pfx" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    if how == "PREFIX":
+        monkeypatch.setenv("PREFIX", str(tmp_path / "pfx"))
+    elif how == "npm_config_prefix":
+        monkeypatch.setenv("npm_config_prefix", str(tmp_path / "pfx"))
+    elif how == "npm_config_globalconfig":
+        monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    elif how == "user globalconfig":
+        (home / "g.npmrc").write_text(_GLOBAL_NPMRC)
+        (home / ".npmrc").write_text("globalconfig=~/g.npmrc\n")
+    elif how == "user prefix":
+        monkeypatch.setenv("MYPFX", str(tmp_path / "pfx"))
+        (home / ".npmrc").write_text("prefix=${MYPFX}\n")
+    else:
+        builtin = tmp_path / "npm" / "npmrc"
+        builtin.parent.mkdir()
+        builtin.write_text(f"prefix={tmp_path / 'pfx'}\n")
+        monkeypatch.setattr(_node, "_npm_builtin_npmrc", lambda env: builtin)
+    monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+    assert _node.npm_registries(tmp_path / "proj") == ("https://global.example/", {"@corp": "https://global-scope.example/"})
+
+
+def test_the_default_prefix_is_the_node_installation(tmp_path, monkeypatch):
+    """With nothing set, npm's prefix is the installation of the node it runs on, under $DESTDIR."""
+    install = tmp_path / "node-install"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "node").write_text("#!/bin/sh\n")
+    (install / "bin" / "node").chmod(0o755)
+    (tmp_path / "path").mkdir()
+    (tmp_path / "path" / "node").symlink_to(install / "bin" / "node")
+    env = {"PATH": str(tmp_path / "path")}
+    assert _REAL_DEFAULT_PREFIX(env) == install.resolve()
+    assert _REAL_DEFAULT_PREFIX({**env, "DESTDIR": "/stage"}) == Path("/stage") / install.resolve().relative_to("/")
+    assert _REAL_DEFAULT_PREFIX({**env, "PREFIX": "/opt/n"}) == Path("/opt/n")
+
+
+def test_the_builtin_npmrc_belongs_to_the_npm_on_path(tmp_path):
+    package = tmp_path / "lib" / "node_modules" / "npm"
+    (package / "bin").mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": "npm", "version": "11.8.0"}))
+    (package / "bin" / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+    (package / "bin" / "npm-cli.js").chmod(0o755)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "npm").symlink_to(package / "bin" / "npm-cli.js")
+    assert _REAL_BUILTIN_NPMRC({"PATH": str(tmp_path / "bin")}) == package.resolve() / "npmrc"
+    assert _REAL_BUILTIN_NPMRC({"PATH": str(tmp_path / "nowhere")}) is None
+
+
+def test_npm_precedence_puts_the_global_npmrc_last(tmp_path, monkeypatch):
+    """Environment, project and user settings each override the global npmrc's."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    (tmp_path / "proj" / ".npmrc").write_text("@corp:registry=https://proj-scope.example/\n")
+    (home / ".npmrc").write_text("registry=https://user.example/\n")
+    assert _node.npm_registries(tmp_path / "proj") == ("https://user.example/", {"@corp": "https://proj-scope.example/"})
+    monkeypatch.setenv("npm_config_registry", "https://env.example/")
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://env.example/"
+
+
+@pytest.mark.parametrize("key", ["globalconfig", "prefix"])
+def test_a_project_npmrc_cannot_choose_the_global_npmrc(tmp_path, monkeypatch, key):
+    """The repository's .npmrc does not decide which file is read as the global config: the
+    sandbox could not be made to read it, so its registries would be assumed but not used."""
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "pfx" / "etc").mkdir(parents=True)
+    (tmp_path / "pfx" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "pfx" / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    target = tmp_path / "pfx" / ("g.npmrc" if key == "globalconfig" else "")
+    (tmp_path / "proj" / ".npmrc").write_text(f"{key}={target}\n")
+    monkeypatch.chdir(tmp_path / "proj")
+    assert _node.npm_registries(tmp_path / "proj") == (None, {})
+
+
+def test_the_sandbox_sees_the_global_npmrc(tmp_path, monkeypatch):
+    """What locates the global npmrc, and its credential-free registry variables, are passed
+    into the sandbox, and a global npmrc under $HOME is bound in read-only."""
+    home = _home(tmp_path, monkeypatch)
+    global_rc = home / ".npm-global" / "etc" / "npmrc"
+    global_rc.parent.mkdir(parents=True)
+    global_rc.write_text("registry=${CORP_REGISTRY}\n")
+    monkeypatch.setenv("CORP_REGISTRY", "https://npm.corp.example/")
+    monkeypatch.setenv("npm_config_prefix", str(home / ".npm-global"))
+    monkeypatch.setenv("npm_config_globalconfig", str(global_rc))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    names = _node._npm_registry_env_names()
+    assert {"npm_config_prefix", "npm_config_globalconfig", "CORP_REGISTRY"} <= set(names)
+    assert global_rc in NodeLanguage().home_ro_paths()
+
+
+def test_a_global_npmrc_the_sandbox_cannot_see_is_not_assumed_there(tmp_path, monkeypatch):
+    """The sandbox mounts a fresh /tmp, so inside a sandboxed command a global npmrc there
+    is not read: npm in the sandbox would not read it either."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    assert str(tmp_path).startswith("/tmp/")
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"   # on the host
+    token = SANDBOX_ENV.set({"npm_config_globalconfig": str(tmp_path / "g.npmrc")})
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+@pytest.mark.parametrize(("where", "key"), [
+    ("project", "globalconfig"), ("project", "prefix"), ("project", "userconfig"),
+    ("command line", "globalconfig"), ("command line", "prefix"), ("command line", "userconfig"),
+])
+def test_a_config_file_moved_where_it_is_not_followed_is_not_assumed(tmp_path, monkeypatch, where, key):
+    """The command line and the project's .npmrc can move the user and global config files.
+    npm then does not read the usual ones (checked against npm 11.8), so their private
+    registries are not assumed: the packages are looked up publicly."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "pfx" / "etc").mkdir(parents=True)
+    (tmp_path / "pfx" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (home / ".npmrc").write_text(f"prefix={tmp_path / 'pfx'}\n" if key != "userconfig" else _GLOBAL_NPMRC)
+    assert _node.npm_registries(tmp_path / "proj") == ("https://global.example/", {"@corp": "https://global-scope.example/"})
+    monkeypatch.chdir(tmp_path / "proj")
+    if where == "project":
+        (tmp_path / "proj" / ".npmrc").write_text(f"{key}=/nonexistent\n")
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    else:
+        parsed = parse_npm_args(["npm", "install", f"--{key}=/nonexistent", "@corp/x"])
+        assert parsed is not None and parsed.registries[key] == "/nonexistent"
+        assert _node.npm_registries(tmp_path / "proj", command_line=parsed.registries) == (None, {})
+        assert NodeLanguage().explicit_package_public("@corp/x", parsed, tmp_path / "proj") is True
+
+
+def test_a_moved_prefix_keeps_a_global_npmrc_set_elsewhere(tmp_path, monkeypatch):
+    """npm install --prefix sub still reads a globalconfig set in the environment or the user's .npmrc."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (home / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    (home / ".npmrc").write_text("globalconfig=~/g.npmrc\n")
+    parsed = parse_npm_args(["npm", "install", "--prefix", "sub"])
+    assert parsed is not None
+    assert _node.npm_registries(tmp_path / "proj", command_line=parsed.registries)[0] == "https://global.example/"
+
+
+@pytest.mark.parametrize("key", ["userconfig", "globalconfig", "prefix"])
+def test_an_environment_config_location_expands_variables(tmp_path, monkeypatch, key):
+    """npm expands ${VAR} in a config location taken from the environment, as in a file."""
+    home = _home(tmp_path, monkeypatch)
+    (home / "etc").mkdir()
+    rc = home / ("etc/npmrc" if key != "userconfig" else "alt.npmrc")
+    rc.write_text(_GLOBAL_NPMRC)
+    value = {"userconfig": "${HOME}/alt.npmrc", "globalconfig": "${HOME}/etc/npmrc", "prefix": "${HOME}"}[key]
+    monkeypatch.setenv(f"npm_config_{key}", value)
+    monkeypatch.chdir(tmp_path)
+    assert _node.npm_registries(tmp_path)[0] == "https://global.example/"
+
+
+@pytest.mark.parametrize("key", ["userconfig", "globalconfig", "prefix"])
+def test_the_sandbox_is_given_config_locations_as_absolute_paths(tmp_path, monkeypatch, key):
+    """A trial runs npm in its scratch copy, where a relative location would name another
+    file, and the variables a location refers to are not passed: the sandbox gets the path."""
+    from packagealert.sandbox.runner import _build_sandbox_env
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CFG", "cfg")
+    monkeypatch.setenv(f"NPM_CONFIG_{key.upper()}", "${CFG}/x")
+    env = _build_sandbox_env([])
+    assert "CFG" not in env
+    NodeLanguage().prepare_sandbox_env(None, tmp_path / "scratch", env)
+    assert env[f"NPM_CONFIG_{key.upper()}"] == str(tmp_path / "cfg" / "x")
+
+
+def test_a_moved_userconfig_hides_where_the_user_put_the_global_npmrc(tmp_path, monkeypatch):
+    """A moved userconfig also hides the globalconfig the usual one sets, but not one set in
+    the environment (checked against npm 11.8)."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    (home / ".npmrc").write_text(f"globalconfig={tmp_path / 'g.npmrc'}\n")
+    moved = {"userconfig": "/nonexistent"}
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+    assert _node.npm_registries(tmp_path / "proj", command_line=moved) == (None, {})
+    (home / ".npmrc").unlink()
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    assert _node.npm_registries(tmp_path / "proj", command_line=moved)[0] == "https://global.example/"
+
+
+@pytest.mark.parametrize("key", ["userconfig", "globalconfig"])
+def test_a_config_location_naming_a_directory_is_not_bound(tmp_path, monkeypatch, key):
+    """npm_config_globalconfig=$HOME must not re-expose the home directory in the sandbox."""
+    home = _home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    monkeypatch.setenv(f"npm_config_{key}", str(home))
+    assert home not in NodeLanguage().home_ro_paths()
+
+
+def test_a_global_npmrc_linking_into_home_is_bound_at_its_target(tmp_path, monkeypatch):
+    """A global npmrc outside $HOME that links into it is visible in the sandbox only if its
+    target is bound."""
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    target = home / "private" / "npmrc"
+    target.parent.mkdir()
+    target.write_text(_GLOBAL_NPMRC)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "npmrc").symlink_to(target)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "etc" / "npmrc"))
+    bound = NodeLanguage().home_ro_paths()
+    assert target in bound and home / "private" not in bound
+
+
+@pytest.mark.parametrize("key", ["globalconfig", "prefix"])
+def test_a_relative_location_in_a_config_file_is_not_followed(tmp_path, monkeypatch, key):
+    """npm resolves it against its working directory, which for a trial is a scratch copy."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj" / "etc").mkdir(parents=True)
+    (tmp_path / "proj" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "proj" / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    (home / ".npmrc").write_text("globalconfig=g.npmrc\n" if key == "globalconfig" else "prefix=.\n")
+    monkeypatch.chdir(tmp_path / "proj")
+    assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    (home / ".npmrc").write_text(f"globalconfig={tmp_path / 'proj' / 'g.npmrc'}\n" if key == "globalconfig"
+                                 else f"prefix={tmp_path / 'proj'}\n")
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+
+
+def test_a_shimmed_npm_and_node_are_followed_to_the_originals(tmp_path):
+    """package-alert setup project renames npm and node to .__pa_real beside a wrapper;
+    npm's builtin npmrc and default prefix are the original's."""
+    package = tmp_path / "lib" / "node_modules" / "npm"
+    (package / "bin").mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": "npm", "version": "11.8.0"}))
+    (package / "bin" / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+    install = tmp_path / "node-install"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "node").write_text("#!/bin/sh\n")
+    bin_dir = tmp_path / "venv" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "npm.__pa_real").symlink_to(package / "bin" / "npm-cli.js")
+    (bin_dir / "node.__pa_real").symlink_to(install / "bin" / "node")
+    for tool in ("npm", "node"):
+        (bin_dir / tool).write_text("#!/bin/sh\n# package-alert shim\n")
+        (bin_dir / tool).chmod(0o755)
+    env = {"PATH": str(bin_dir)}
+    assert _REAL_BUILTIN_NPMRC(env) == package.resolve() / "npmrc"
+    assert _REAL_DEFAULT_PREFIX(env) == install.resolve()
+
+
+def test_a_global_npmrc_linking_into_tmp_is_not_assumed_in_the_sandbox(tmp_path, monkeypatch):
+    """The sandbox replaces /tmp, so a global npmrc outside it that links into it cannot be read there."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    sandbox_tmp = tmp_path / "tmp"
+    (sandbox_tmp / "company").mkdir(parents=True)
+    (sandbox_tmp / "company" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "var").mkdir()
+    (tmp_path / "var" / "npmrc").symlink_to(sandbox_tmp / "company" / "npmrc")
+    (tmp_path / "proj").mkdir()
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", sandbox_tmp)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "var" / "npmrc"))
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"   # on the host
+    token = SANDBOX_ENV.set({"npm_config_globalconfig": str(tmp_path / "var" / "npmrc")})
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_only_npm_is_judged_by_npms_global_and_builtin_npmrc(tmp_path, monkeypatch):
+    """pnpm 11 on reads neither file, pnpm 8-10 not the builtin one, yarn 1 neither (all
+    measured), so a registry set only there is not assumed for pnpm or yarn."""
+    from packagealert.parsers.process_args import ParsedInstall
+
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    assert _pnpm_public(proj) == {"a": True, "@corp/b": True}
+    (proj / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {
+        "": {"name": "app"}, "node_modules/a": {"version": "1.0.0"}}}))
+    assert [p.from_public_registry for p in NodeLanguage()._parse_package_lock(proj / "package-lock.json")] == [False]
+    (proj / "yarn.lock").write_text('# yarn lockfile v1\n\n\na@^1.0.0:\n  version "1.0.0"\n')
+    assert [p.from_public_registry for p in NodeLanguage()._parse_yarn_lock(proj / "yarn.lock")] == [True]
+    for manager, public in [("npm", False), ("pnpm", True), ("yarn", True)]:
+        parsed = ParsedInstall(manager=manager, packages=["a"], ecosystem="npm")
+        assert NodeLanguage().explicit_package_public("a", parsed, proj) is public, manager
+
+
+def _npm_installation(root: Path, builtin: str) -> Path:
+    package = root / "lib" / "node_modules" / "npm"
+    (package / "bin").mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": "npm", "version": "11.8.0"}))
+    (package / "bin" / "npm-cli.js").write_text("#!/usr/bin/env node\n")
+    (package / "bin" / "npm-cli.js").chmod(0o755)
+    (package / "npmrc").write_text(builtin)
+    (root / "bin").mkdir()
+    (root / "bin" / "npm").symlink_to(package / "bin" / "npm-cli.js")
+    return package
+
+
+@pytest.mark.parametrize("invocation", ["path", "versioned", "node", "node-bare", "node-renamed", "shimmed", "bare",
+                                        "rewritten"])
+def test_the_builtin_npmrc_is_the_invoked_npms(tmp_path, monkeypatch, invocation):
+    """pa run /opt/public/bin/npm uses that npm's builtin npmrc, not the one on PATH's."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, UNKNOWN_SCRIPT
+
+    on_path = _npm_installation(tmp_path / "corp", "registry=https://npm.corp.example/\n")
+    invoked = _npm_installation(tmp_path / "public", "")
+    env = {"PATH": str(tmp_path / "corp" / "bin")}
+    argv = {"path": (str(tmp_path / "public" / "bin" / "npm"), "install"),
+            "node": ("/usr/bin/node", str(invoked / "bin" / "npm-cli.js"), "install"),
+            "versioned": (str(tmp_path / "public" / "bin" / "npm-11"), "install"),  # as parse_npm_args() names it
+            "node-bare": ("/usr/bin/node", "npm-cli.js", "install"),      # node resolves it against cwd
+            "node-renamed": ("/usr/bin/node.__pa_real", str(invoked / "bin" / "npm-cli.js"), "install"),  # setup's shim
+            "shimmed": (str(tmp_path / "shims" / "npm"), "install"),
+            "bare": ("npm", "install"),
+            "rewritten": ("/usr/bin/node", UNKNOWN_SCRIPT)}[invocation]     # the monitor's `npm install` title
+    if invocation == "node-bare":
+        monkeypatch.chdir(invoked / "bin")
+    if invocation == "versioned":
+        (tmp_path / "public" / "bin" / "npm-11").symlink_to(invoked / "bin" / "npm-cli.js")
+    if invocation == "shimmed":
+        (tmp_path / "shims").mkdir()
+        (tmp_path / "shims" / "npm").write_text("#!/bin/sh\n")
+        (tmp_path / "shims" / "npm.__pa_real").symlink_to(invoked / "bin" / "npm-cli.js")
+    token = COMMAND_ARGV.set(argv)
+    try:
+        found = _REAL_BUILTIN_NPMRC(env)
+    finally:
+        COMMAND_ARGV.reset(token)
+    if invocation == "rewritten":
+        assert found is None                                            # which npm ran is not known
+    else:
+        assert found == (on_path if invocation == "bare" else invoked).resolve() / "npmrc"
+    assert _REAL_BUILTIN_NPMRC(env) == on_path.resolve() / "npmrc"     # no command: the one on PATH
+
+
+def test_the_default_prefix_is_the_named_nodes(tmp_path):
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    install = tmp_path / "other-node"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "node").write_text("#!/bin/sh\n")
+    token = COMMAND_ARGV.set((str(install / "bin" / "node"), "/x/lib/node_modules/npm/bin/npm-cli.js", "install"))
+    try:
+        assert _REAL_DEFAULT_PREFIX({"PATH": str(tmp_path / "nowhere")}) == install.resolve()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_the_monitor_judges_a_command_by_the_npm_it_ran(tmp_path, monkeypatch):
+    """An observed npm is `node /…/npm-cli.js`; its explicit packages are judged with
+    that npm's builtin npmrc, and a relative script against the process's cwd."""
+    from packagealert.languages import registry
+    from packagealert.languages.base import PackageSpec, ProcessInstall
+    from packagealert.monitors.process import _command_argv, _named_package_public
+    from packagealert.parsers.process_args import UNKNOWN_SCRIPT
+
+    registry.load()
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    _home(tmp_path, monkeypatch)
+    corp = _npm_installation(tmp_path / "corp", "registry=https://npm.corp.example/\n")
+    _npm_installation(tmp_path / "public", "")
+    monkeypatch.setenv("PATH", str(tmp_path / "public" / "bin"))
+    (tmp_path / "proj").mkdir()
+    argv = _command_argv(["node", "../corp/lib/node_modules/npm/bin/npm-cli.js", "install", "a"], str(tmp_path / "proj"))
+    assert argv == (UNKNOWN_SCRIPT, str(tmp_path / "proj" / "../corp/lib/node_modules/npm/bin/npm-cli.js"))  # node unread
+    assert Path(argv[1]).resolve() == (corp / "bin" / "npm-cli.js").resolve()
+    spec = PackageSpec(name="a", version=None, ecosystem="npm")
+    parsed = ProcessInstall(manager="npm", packages=[spec])
+    assert _named_package_public(spec, parsed, tmp_path / "proj") is True                 # PATH's npm: public
+    assert _named_package_public(spec, parsed, tmp_path / "proj", argv) is False          # the npm it ran: corp
+
+
+def test_an_installed_copy_is_judged_by_npms_config_only_in_a_tree_npm_wrote(tmp_path, monkeypatch):
+    """A pnpm store entry, or a node_modules no npm lock describes (yarn's, pnpm's hoisted),
+    is not judged by npm's global npmrc; one in a tree npm wrote is."""
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    proj = tmp_path / "proj"
+    store = proj / "node_modules" / ".pnpm" / "a@1.0.0" / "node_modules" / "a"
+    store.mkdir(parents=True)
+    flat = proj / "node_modules" / "b"
+    flat.mkdir()
+    lang = NodeLanguage()
+    assert lang.copy_from_public_registry("a", store) is True
+    assert lang.copy_from_public_registry("b", flat) is True
+    (proj / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {"": {"name": "app"}}}))
+    _node._cached_copy_provenance.cache_clear()
+    assert lang.copy_from_public_registry("b", flat) is False
+
+
+def test_installed_trees_pnpm_or_yarn_wrote_are_not_judged_by_npms_config(tmp_path, monkeypatch):
+    """Both discovery methods: without an npm lock (pnpm's or yarn's tree) npm's global npmrc
+    does not apply, nor to a pnpm store entry even beside an npm lock; npm's own tree it does."""
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "g.npmrc"))
+    proj = tmp_path / "proj"
+    nm = proj / "node_modules"
+    for directory, name in [(nm / "flat", "flat"), (nm / ".pnpm" / "st@1.0.0" / "node_modules" / "st", "st")]:
+        directory.mkdir(parents=True)
+        (directory / "package.json").write_text(json.dumps({"name": name, "version": "1.0.0"}))
+    # A store entry with no readable manifest: what it bundles is judged by its store id.
+    bundled = nm / ".pnpm" / "nm@1.0.0" / "node_modules" / "nm" / "node_modules" / "inner"
+    bundled.mkdir(parents=True)
+    (bundled / "package.json").write_text(json.dumps({"name": "inner", "version": "1.0.0"}))
+    new = {nm / "flat" / "package.json", nm / ".pnpm" / "st@1.0.0" / "node_modules" / "st" / "package.json"}
+    lang = NodeLanguage()
+
+    def verdicts():
+        return ({p.name: p.from_public_registry for p in lang.detect_installed_packages(proj)},
+                {p.name: p.from_public_registry for p in lang.detect_new_packages(new, nm)})
+
+    assert verdicts() == ({"flat": True, "st": True, "inner": True}, {"flat": True, "st": True})
+    (proj / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {"": {"name": "app"}}}))
+    assert verdicts() == ({"flat": False, "st": True, "inner": True}, {"flat": False, "st": True})
+
+
+def test_a_global_npmrc_the_builtin_npmrc_chooses_is_never_bound_from_home(tmp_path, monkeypatch):
+    """A repository's own npm (node node_modules/npm/bin/npm-cli.js) can point globalconfig at
+    any file: one under $HOME is not bound into the sandbox, so it is not assumed there either."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text(_GLOBAL_NPMRC)
+    repo_npm = _npm_installation(tmp_path / "repo", "globalconfig=${HOME}/.ssh/id_rsa\n")
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")   # home is under the real /tmp
+    (tmp_path / "proj").mkdir()
+    token = COMMAND_ARGV.set(("node", str(repo_npm / "bin" / "npm-cli.js"), "install"))
+    try:
+        assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"   # what npm reads, on the host
+        assert home / ".ssh" / "id_rsa" not in NodeLanguage().home_ro_paths()
+        sandbox = SANDBOX_ENV.set({"HOME": str(home)})
+        try:
+            assert _node.npm_registries(tmp_path / "proj") == (None, {})
+        finally:
+            SANDBOX_ENV.reset(sandbox)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_repositorys_own_npm_is_not_trusted_with_files_or_variables(tmp_path, monkeypatch):
+    """node tools/npm/bin/npm-cli.js: its builtin npmrc is the repository's. A variable it
+    refers to is not passed into the sandbox, and a link from it into $HOME is not bound
+    (nor assumed inside the sandbox, where npm cannot read it)."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text(_GLOBAL_NPMRC)
+    repo = tmp_path / "repo"
+    repo_npm = _npm_installation(repo / "tools", "@unused:registry=${SLACK_WEBHOOK_URL}\n")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/services/T000/B000/secret")
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")   # all of this is under the real /tmp
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("node", str(repo_npm / "bin" / "npm-cli.js"), "install"))
+    try:
+        assert "SLACK_WEBHOOK_URL" not in _node._npm_registry_env_names()
+        (repo_npm / "npmrc").unlink()
+        (repo_npm / "npmrc").symlink_to(home / ".ssh" / "id_rsa")
+        assert _node.npm_registries(repo)[0] == "https://global.example/"     # npm reads it, on the host
+        bound = NodeLanguage().home_ro_paths()
+        assert home / ".ssh" / "id_rsa" not in bound and repo_npm / "npmrc" not in bound
+        sandbox = SANDBOX_ENV.set({"HOME": str(home)})
+        try:
+            assert _node.npm_registries(repo) == (None, {})
+        finally:
+            SANDBOX_ENV.reset(sandbox)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("named", ["relative", "absolute"])
+def test_a_repositorys_own_node_is_not_trusted_with_the_global_npmrc(tmp_path, monkeypatch, named):
+    """./runtime/bin/node …/npm-cli.js: the default prefix is the repository's runtime, so
+    the global npmrc there is the repository's. A variable it refers to is not passed
+    into the sandbox, and a link from it into $HOME is not bound."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text(_GLOBAL_NPMRC)
+    npm = _npm_installation(tmp_path / "public", "")
+    (tmp_path / "public" / "bin" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "public" / "bin" / "node").chmod(0o755)
+    repo = tmp_path / "repo"
+    (repo / "runtime" / "bin").mkdir(parents=True)
+    (repo / "runtime" / "bin" / "node").write_text("#!/bin/sh\n")
+    (repo / "runtime" / "etc").mkdir()
+    (repo / "runtime" / "etc" / "npmrc").write_text("@unused:registry=${SLACK_WEBHOOK_URL}\n")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/services/T000/B000/secret")
+    monkeypatch.setenv("PATH", str(tmp_path / "public" / "bin"))
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+    monkeypatch.chdir(repo)
+    node = "./runtime/bin/node" if named == "relative" else str(repo / "runtime" / "bin" / "node")
+    token = COMMAND_ARGV.set((node, str(npm / "bin" / "npm-cli.js"), "install"))
+    try:
+        assert _node._npm_global_npmrc() == repo / "runtime" / "etc" / "npmrc"
+        assert "SLACK_WEBHOOK_URL" not in _node._npm_registry_env_names()
+        (repo / "runtime" / "etc" / "npmrc").unlink()
+        (repo / "runtime" / "etc" / "npmrc").symlink_to(home / ".ssh" / "id_rsa")
+        bound = NodeLanguage().home_ro_paths()
+        assert home / ".ssh" / "id_rsa" not in bound
+    finally:
+        COMMAND_ARGV.reset(token)
+    # The node on PATH, outside the working directory, locates a trusted one.
+    (tmp_path / "public" / "etc").mkdir()
+    (tmp_path / "public" / "etc" / "npmrc").write_text("@unused:registry=${SLACK_WEBHOOK_URL}\n")
+    for trusted_node in (str(tmp_path / "public" / "bin" / "node"), "node"):   # a bare name is the one on PATH
+        token = COMMAND_ARGV.set((trusted_node, str(npm / "bin" / "npm-cli.js"), "install"))
+        try:
+            assert "SLACK_WEBHOOK_URL" in _node._npm_registry_env_names()
+        finally:
+            COMMAND_ARGV.reset(token)
+
+
+def test_the_npm_on_path_is_trusted_with_its_builtin_npmrc(tmp_path, monkeypatch):
+    """The npm on PATH, outside the working directory, keeps its builtin npmrc's variables and binds."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    npm = _npm_installation(home / "npm", "registry=${CORP_REGISTRY}\n")
+    monkeypatch.setenv("CORP_REGISTRY", "https://npm.corp.example/")
+    monkeypatch.setenv("PATH", str(home / "npm" / "bin"))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    for argv in (None, ("npm", "install"), (str(home / "npm" / "bin" / "npm"), "install")):
+        token = COMMAND_ARGV.set(argv)
+        try:
+            assert "CORP_REGISTRY" in _node._npm_registry_env_names()
+            assert npm / "npmrc" in NodeLanguage().home_ro_paths()
+        finally:
+            COMMAND_ARGV.reset(token)
+
+
+def test_an_npm_on_path_inside_the_repository_is_not_trusted(tmp_path, monkeypatch):
+    """node_modules/.bin on PATH (direnv) makes the repository's npm the one on PATH."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    _home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo_npm = _npm_installation(repo / "node_modules" / ".tools", "@unused:registry=${SLACK_WEBHOOK_URL}\n")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/services/T000/B000/secret")
+    monkeypatch.setenv("PATH", str(repo / "node_modules" / ".tools" / "bin"))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        assert _REAL_BUILTIN_NPMRC(os.environ) == repo_npm.resolve() / "npmrc"
+        assert "SLACK_WEBHOOK_URL" not in _node._npm_registry_env_names()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("marker", [".git", "package.json", "nested"])
+@pytest.mark.parametrize("tool", ["npm", "node"])
+def test_a_repositorys_tools_are_not_trusted_from_a_subdirectory(tmp_path, monkeypatch, marker, tool):
+    """cd packages/app with the repository's node_modules/.bin on PATH: the npm or node
+    there lies outside the working directory but inside the repository (its .git, or the
+    workspace root's package.json), so its config is not trusted."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    repo = home / "src" / "repo"
+    rc = "@unused:registry=${SLACK_WEBHOOK_URL}\n"
+    if tool == "npm":
+        _npm_installation(repo / "node_modules" / ".tools", rc)
+        bin_dir = repo / "node_modules" / ".tools" / "bin"
+        monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    else:
+        bin_dir = repo / "node_modules" / ".bin"
+        bin_dir.mkdir(parents=True)
+        (bin_dir / "node").write_text("#!/bin/sh\n")
+        (bin_dir / "node").chmod(0o755)
+        (repo / "node_modules" / "etc").mkdir()
+        (repo / "node_modules" / "etc" / "npmrc").write_text(rc)          # the default prefix's global npmrc
+        monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+        monkeypatch.delenv("PREFIX", raising=False)
+    if marker in (".git", "nested"):
+        (repo / ".git").mkdir()
+    else:
+        (repo / "package.json").write_text('{"name": "monorepo", "workspaces": ["packages/*"]}')
+    (repo / "packages" / "app").mkdir(parents=True)
+    (repo / "packages" / "app" / "package.json").write_text('{"name": "app"}')
+    if marker == "nested":                                       # a marker the repository checked in lower down
+        (repo / "packages" / "app" / ".hg").mkdir()
+        (repo / "packages" / "app" / ".hg" / "placeholder").write_text("")
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/services/T000/B000/secret")
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.chdir(repo / "packages" / "app")
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        assert "SLACK_WEBHOOK_URL" not in _node._npm_registry_env_names()
+        (home / "other" / ".git").mkdir(parents=True)                      # from another repository it is
+        monkeypatch.chdir(home / "other")                                  # an installation like any other
+        assert "SLACK_WEBHOOK_URL" in _node._npm_registry_env_names()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_builtin_npmrc_the_sandbox_hides_does_not_locate_the_global_one(tmp_path, monkeypatch):
+    """An untrusted builtin npmrc linking into $HOME is unreadable in the sandbox, so the
+    global npmrc it selects is not npm's there."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "g.npmrc").write_text(_GLOBAL_NPMRC)                 # visible, outside $HOME
+    (home / "selector").write_text(f"globalconfig={tmp_path / 'etc' / 'g.npmrc'}\n")
+    repo = tmp_path / "repo"
+    repo_npm = _npm_installation(repo / "tools", "")
+    (repo_npm / "npmrc").unlink()
+    (repo_npm / "npmrc").symlink_to(home / "selector")
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("node", str(repo_npm / "bin" / "npm-cli.js"), "install"))
+    try:
+        assert _node.npm_registries(repo)[0] == "https://global.example/"     # on the host npm reads both
+        sandbox = SANDBOX_ENV.set({"HOME": str(home)})
+        try:
+            assert _node.npm_registries(repo) == (None, {})
+        finally:
+            SANDBOX_ENV.reset(sandbox)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("key", ["globalconfig", "prefix"])
+def test_a_relative_global_npmrc_location_is_not_followed(tmp_path, monkeypatch, key):
+    """npm resolves npm_config_globalconfig=company.npmrc against its own working
+    directory, which the daemon does not know for an observed process: the file in the
+    daemon's directory is not assumed (a public install would be judged private)."""
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    daemon = tmp_path / "daemon"
+    (daemon / "pfx" / "etc").mkdir(parents=True)
+    (daemon / "pfx" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (daemon / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.chdir(daemon)
+    monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+    monkeypatch.delenv("PREFIX", raising=False)
+    value = "g.npmrc" if key == "globalconfig" else "pfx"
+    monkeypatch.setenv(f"npm_config_{key}", value)
+    assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    monkeypatch.setenv(f"npm_config_{key}", str(daemon / value))                     # an absolute one is
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+
+
+def test_a_global_npmrc_the_sandbox_hides_is_not_assumed(tmp_path, monkeypatch):
+    """sandbox.extra_tmpfs hides /opt/company/etc: npm in the sandbox cannot read the
+    global npmrc there, so its private registry is not assumed, as written or through a link."""
+    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_TMPFS
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (tmp_path / "proj").mkdir()
+    company = tmp_path / "company" / "etc"
+    company.mkdir(parents=True)
+    (company / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "link.npmrc").symlink_to(company / "npmrc")
+    for rc in (company / "npmrc", tmp_path / "link.npmrc"):
+        env = {"npm_config_globalconfig": str(rc)}
+        monkeypatch.setenv("npm_config_globalconfig", str(rc))
+        token = SANDBOX_ENV.set(env)
+        try:
+            assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+            hidden = SANDBOX_TMPFS.set((company,))
+            try:
+                assert _node.npm_registries(tmp_path / "proj") == (None, {})
+            finally:
+                SANDBOX_TMPFS.reset(hidden)
+        finally:
+            SANDBOX_ENV.reset(token)
+
+
+def test_pnpm_store_registries_are_resolved_once_per_detection(tmp_path, monkeypatch):
+    calls = []
+    real = _node.npm_registries
+
+    def counted(*args, **kwargs):
+        calls.append(kwargs.get("npm"))
+        return real(*args, **kwargs)
+
+    monkeypatch.delenv("npm_config_registry", raising=False)
+    monkeypatch.setattr(_node, "npm_registries", counted)
+    nm = _pnpm_isolated_layout(tmp_path / "p")
+    specs = NodeLanguage().detect_new_packages({p for p in (nm / ".pnpm").rglob("package.json")}, nm)
+    assert len(specs) == 3
+    assert calls.count(False) == 2        # the installed provenance, and the store once for both registry copies
+
+
+def test_the_sandbox_environment_is_the_one_its_provenance_was_judged_with(tmp_path, monkeypatch):
+    """$PREFIX names an empty installation and is not passed into the sandbox, where npm
+    then reads the PATH node's global npmrc (registry=${PUBLIC_REGISTRY}). The variable
+    that file refers to is passed, and provenance reads the same file with it."""
+    from packagealert.languages import registry
+    from packagealert.parsers.process_args import SANDBOX_ENV
+    from packagealert.sandbox.runner import _settled_sandbox_env
+
+    registry.load()
+    _home(tmp_path, monkeypatch)
+    public = tmp_path / "public"
+    (public / "bin").mkdir(parents=True)
+    (public / "bin" / "node").write_text("#!/bin/sh\n")
+    (public / "bin" / "node").chmod(0o755)
+    (public / "etc").mkdir()
+    (public / "etc" / "npmrc").write_text("registry=${PUBLIC_REGISTRY}\n")
+    (tmp_path / "alt").mkdir()
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    monkeypatch.setenv("PATH", str(public / "bin"))
+    monkeypatch.setenv("PREFIX", str(tmp_path / "alt"))
+    monkeypatch.setenv("PUBLIC_REGISTRY", "https://registry.npmjs.org/")
+    monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    env = _settled_sandbox_env([])
+    assert "PREFIX" not in env
+    assert env.get("PUBLIC_REGISTRY") == "https://registry.npmjs.org/"
+    token = SANDBOX_ENV.set(env)
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == ("https://registry.npmjs.org/", {})
+        assert _settled_sandbox_env([]) == env                                    # the command gets the same
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_a_builtin_userconfig_displaces_the_users_npmrc(tmp_path, monkeypatch):
+    """npm's builtin npmrc sets userconfig=/dev/null: npm then never reads ~/.npmrc, so
+    neither its registry nor the global config it names is assumed."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    (home / ".npmrc").write_text(f"registry=https://user.example/\nglobalconfig={tmp_path / 'g.npmrc'}\n")
+    builtin = tmp_path / "npm" / "npmrc"
+    builtin.parent.mkdir()
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", lambda env: builtin)
+    builtin.write_text("")
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://user.example/"           # read without it
+    assert _node._npm_global_npmrc() == tmp_path / "g.npmrc"
+    builtin.write_text("userconfig=/dev/null\n")
+    assert _node.npm_registries(tmp_path / "proj") == (None, {})
+    assert _node._npm_global_npmrc() is None
+    assert _node.npm_registries(tmp_path / "proj", npm=False)[0] == "https://user.example/"  # pnpm/yarn read it
+    monkeypatch.setenv("npm_config_userconfig", str(home / ".npmrc"))                       # the environment wins
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://user.example/"
+
+
+def test_an_unknown_npms_global_npmrc_is_not_assumed(tmp_path, monkeypatch):
+    """npm rewrote its process title, so which npm ran, and what its builtin npmrc sets for
+    globalconfig or prefix, is unknown: the node's <prefix>/etc/npmrc is not assumed,
+    unless a source above the builtin npmrc names the global file."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, UNKNOWN_SCRIPT
+
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "pfx" / "etc").mkdir(parents=True)
+    (tmp_path / "pfx" / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    monkeypatch.setattr(_node, "_npm_default_prefix", lambda env: tmp_path / "pfx")
+    token = COMMAND_ARGV.set(("/usr/bin/node", UNKNOWN_SCRIPT))
+    try:
+        assert _node._npm_global_npmrc() is None
+        (home / ".npmrc").write_text(f"globalconfig={tmp_path / 'g.npmrc'}\n")
+        assert _node._npm_global_npmrc() == tmp_path / "g.npmrc"
+    finally:
+        COMMAND_ARGV.reset(token)
+    (home / ".npmrc").unlink()
+    assert _node._npm_global_npmrc() == tmp_path / "pfx" / "etc" / "npmrc"                 # a known npm
+
+
+@pytest.mark.parametrize("shebang", ["absolute", "env", "env-named", "env-options", "env-unknown", "env-path",
+                                     "launcher", "env-quoted", "env-other"])
+def test_the_default_prefix_follows_npms_own_interpreter(tmp_path, monkeypatch, shebang):
+    """npm run directly is run by its shebang's node: #!/opt/public/bin/node gives that
+    node's installation as the default prefix (and is not the PATH node, so not trusted);
+    #!/usr/bin/env node gives the one on PATH."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    _home(tmp_path, monkeypatch)
+    for name in ("corp", "public"):
+        (tmp_path / name / "bin").mkdir(parents=True)
+        (tmp_path / name / "bin" / "node").write_text("#!/bin/sh\n")
+        (tmp_path / name / "bin" / "node").chmod(0o755)
+    (tmp_path / "public" / "bin" / "node").rename(tmp_path / "public" / "bin" / "node-20")
+    (tmp_path / "public" / "bin" / "bash").write_text("#!/bin/sh\n")             # found on PATH, but not node
+    (tmp_path / "public" / "bin" / "bash").chmod(0o755)
+    npm = _npm_installation(tmp_path / "npm", "")
+    shebangs = {"absolute": f"#!{tmp_path / 'public' / 'bin' / 'node-20'}\n",
+                "env-named": "#!/usr/bin/env node-20\n",                     # PATH's node-20, not its node
+                "env-options": "#!/usr/bin/env -S node-20 --max-old-space-size=4096\n",
+                "env-unknown": "#!/usr/bin/env --weird node-20\n",           # cannot be read: unknown
+                "env-path": f"#!/usr/bin/env -S PATH={tmp_path / 'public' / 'bin'} node\n",  # its own PATH: unknown
+                "launcher": "#!/bin/sh\n",                                       # runs some node it chooses
+                "env-quoted": "#!/usr/bin/env -S '-i' node\n",                   # env -S unquotes it: -i
+                "env-other": "#!/usr/bin/env bash\n"}
+    if shebang in shebangs:
+        (npm / "bin" / "npm-cli.js").write_text(shebangs[shebang])
+    env = {"PATH": f"{tmp_path / 'corp' / 'bin'}:{tmp_path / 'public' / 'bin'}"}
+    monkeypatch.setenv("PATH", env["PATH"])
+    monkeypatch.delenv("PREFIX", raising=False)
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    token = COMMAND_ARGV.set((str(tmp_path / "npm" / "bin" / "npm"), "install"))
+    try:
+        unknown = ("env-unknown", "env-path", "launcher", "env-quoted", "env-other")
+        expected = None if shebang in unknown else {"env": tmp_path / "corp"}.get(shebang, tmp_path / "public")
+        assert _REAL_DEFAULT_PREFIX(env) == (expected.resolve() if expected else None)
+        # Only the node on PATH (by that name) is trusted; an env-named one is on PATH too.
+        assert _node._npm_node_trusted() is (shebang in ("env", "env-named", "env-options"))
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_config_chain_through_a_hidden_directory_is_not_readable_in_the_sandbox(tmp_path, monkeypatch):
+    """/opt/company/npmrc -> /tmp/selector -> /etc/company/npmrc: both ends are visible in
+    the sandbox, but the link between them is not, so npm there cannot read it. So too
+    through a symlinked parent directory."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    _home(tmp_path, monkeypatch)
+    hidden = tmp_path / "sandbox-tmp"
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", hidden)
+    hidden.mkdir()
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (hidden / "selector").symlink_to(tmp_path / "etc" / "npmrc")
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "npmrc").symlink_to(hidden / "selector")              # two hops
+    (hidden / "dir").symlink_to(tmp_path / "etc")
+    (tmp_path / "opt" / "dirlink").symlink_to(hidden / "dir")                 # a symlinked parent
+    (tmp_path / "proj").mkdir()
+    assert not _node._sandbox_breaks(tmp_path / "etc" / "npmrc", None)
+    for rc in (tmp_path / "opt" / "npmrc", tmp_path / "opt" / "dirlink" / "npmrc"):
+        assert _node._sandbox_breaks(rc, None)
+        monkeypatch.setenv("npm_config_globalconfig", str(rc))
+        token = SANDBOX_ENV.set({"npm_config_globalconfig": str(rc)})
+        try:
+            assert _node.npm_registries(tmp_path / "proj") == (None, {})
+        finally:
+            SANDBOX_ENV.reset(token)
+
+
+def test_a_config_chain_through_hidden_home_is_not_read_or_bound(tmp_path, monkeypatch):
+    """/etc/npmrc -> ~/selector -> /etc/company/npmrc: the sandbox hides ~/selector, so npm
+    there cannot read the global npmrc and it is not bound either. A file under $HOME is
+    bound at its own name, which replaces any chain behind it."""
+    from packagealert.parsers.process_args import SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (tmp_path / "etc" / "company").mkdir(parents=True)
+    (tmp_path / "etc" / "company" / "npmrc").write_text(_GLOBAL_NPMRC)
+    (home / "selector").symlink_to(tmp_path / "etc" / "company" / "npmrc")
+    (tmp_path / "etc" / "npmrc").symlink_to(home / "selector")
+    (tmp_path / "etc" / "direct").symlink_to(tmp_path / "etc" / "company" / "npmrc")
+    (home / ".npm-global" / "etc").mkdir(parents=True)
+    (home / ".npm-global" / "etc" / "npmrc").symlink_to(home / "selector")
+    (home / "company").mkdir()                                            # a chain ending under $HOME, whose
+    (home / "company" / "npmrc").write_text(_GLOBAL_NPMRC)                # end would be bound to no avail
+    (home / "selector2").symlink_to(home / "company" / "npmrc")
+    (tmp_path / "etc" / "npmrc2").symlink_to(home / "selector2")
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    for rc, readable, bound in ((tmp_path / "etc" / "npmrc", False, None),
+                                (tmp_path / "etc" / "npmrc2", False, None),
+                                (tmp_path / "etc" / "direct", True, None),
+                                (home / ".npm-global" / "etc" / "npmrc", True, home / ".npm-global" / "etc" / "npmrc")):
+        monkeypatch.setenv("npm_config_globalconfig", str(rc))
+        token = SANDBOX_ENV.set({"npm_config_globalconfig": str(rc)})
+        try:
+            expected = "https://global.example/" if readable else None
+            assert _node.npm_registries(tmp_path / "proj")[0] == expected, rc
+            paths = NodeLanguage().home_ro_paths()
+            assert home / "selector" not in paths and (bound is None or bound in paths), rc
+            assert home / "company" / "npmrc" not in paths, rc
+        finally:
+            SANDBOX_ENV.reset(token)
+
+
+def test_a_relative_global_npmrc_location_is_followed_for_a_sandboxed_command(tmp_path, monkeypatch):
+    """npm_config_globalconfig=cfg/npmrc under pa run is the working directory's file, which
+    npm in the sandbox is given by its absolute path: the variable it refers to is passed."""
+    from packagealert.languages import registry
+    from packagealert.parsers.process_args import COMMAND_CWD_KNOWN
+    from packagealert.sandbox.runner import _settled_sandbox_env
+
+    registry.load()
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (tmp_path / "proj" / "cfg").mkdir(parents=True)
+    (tmp_path / "proj" / "cfg" / "npmrc").write_text("registry=${CORP_REGISTRY}\n")
+    monkeypatch.chdir(tmp_path / "proj")
+    monkeypatch.setenv("npm_config_globalconfig", "cfg/npmrc")
+    monkeypatch.setenv("CORP_REGISTRY", "https://npm.corp.example/")
+    token = COMMAND_CWD_KNOWN.set(True)                                       # as pa run sets it
+    try:
+        env = _settled_sandbox_env([])
+        assert env.get("CORP_REGISTRY") == "https://npm.corp.example/"
+    finally:
+        COMMAND_CWD_KNOWN.reset(token)
+    assert "CORP_REGISTRY" not in _node._npm_registry_env_names()        # the daemon's own reading does not follow it
+
+
+def test_runtime_directories_the_sandbox_exposes_and_cwd_ancestors_do_not_hide_a_config(tmp_path, monkeypatch):
+    """~/.nvm is bound into the sandbox whole and ~/src holds the bound project, so a
+    builtin npmrc under the one, or linking through the other, is read there. A path the
+    sandbox hides for a plugin (uv's credential store) is not."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+        SANDBOX_HOME_VISIBLE,
+    )
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    nvm = home / ".nvm" / "versions" / "node" / "v20" / "lib" / "node_modules" / "npm"
+    nvm.mkdir(parents=True)
+    (nvm / "npmrc").write_text("registry=https://npm.corp.example/\n")
+    repo = home / "src" / "repo"
+    (repo / "tools").mkdir(parents=True)
+    (repo / "tools" / "npmrc").write_text("globalconfig=/dev/null\n")      # its path passes ~/src
+    (home / "src" / "shared.npmrc").write_text("registry=https://npm.corp.example/\n")
+    (repo / "tools" / "shared").symlink_to(home / "src" / "shared.npmrc")    # but ~/src's other files are hidden
+    creds = home / ".local" / "share" / "uv" / "credentials"
+    creds.mkdir(parents=True)
+    (creds / "npmrc").write_text("registry=https://npm.corp.example/\n")
+    monkeypatch.chdir(repo)
+    token = SANDBOX_ENV.set({})
+    try:
+        assert not _node._npm_sandbox_can_read(nvm / "npmrc", False)             # nothing exposes it yet
+        assert _node._npm_sandbox_can_read(creds / "npmrc", True)                # nor hides this one
+        visible = SANDBOX_HOME_VISIBLE.set((repo, home / ".nvm"))              # as pa run publishes them
+        hidden = SANDBOX_HIDDEN.set((creds,))
+        try:
+            assert _node._npm_sandbox_can_read(nvm / "npmrc", False)
+            assert not _node._sandbox_breaks(repo / "tools" / "npmrc", None)
+            assert _node._sandbox_breaks(repo / "tools" / "shared", None)
+            assert not _node._npm_sandbox_can_read(creds / "npmrc", True)
+        finally:
+            SANDBOX_HIDDEN.reset(hidden)
+            SANDBOX_HOME_VISIBLE.reset(visible)
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_a_scratch_trial_does_not_expose_this_working_directory(tmp_path, monkeypatch):
+    """pa fix's trials run in a scratch copy: a chain through the original project under
+    $HOME (/etc/npmrc -> ~/src/repo/selector -> …) breaks there."""
+    from packagealert.parsers.process_args import SANDBOX_ENV, SANDBOX_HOME_VISIBLE
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    repo = home / "src" / "repo"
+    repo.mkdir(parents=True)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "company").write_text(_GLOBAL_NPMRC)
+    (repo / "selector").symlink_to(tmp_path / "etc" / "company")
+    (tmp_path / "etc" / "npmrc").symlink_to(repo / "selector")
+    monkeypatch.chdir(repo)
+    assert not _node._sandbox_breaks(tmp_path / "etc" / "npmrc", None)    # this process reads it
+    token = SANDBOX_ENV.set({})
+    try:
+        for visible, breaks in (((repo,), False), ((), True)):                    # pa run; a pa fix trial
+            published = SANDBOX_HOME_VISIBLE.set(visible)
+            try:
+                assert _node._sandbox_breaks(tmp_path / "etc" / "npmrc", None) is breaks
+            finally:
+                SANDBOX_HOME_VISIBLE.reset(published)
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+def test_an_environment_locator_overrides_the_projects(tmp_path, monkeypatch):
+    """npm_config_globalconfig=/etc/company.npmrc beside a project .npmrc's globalconfig=/dev/null:
+    npm reads the environment's file, so its registry is assumed."""
+    _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / ".npmrc").write_text("globalconfig=/dev/null\n")
+    (tmp_path / "company.npmrc").write_text(_GLOBAL_NPMRC)
+    assert _node.npm_registries(tmp_path / "proj") == (None, {})                 # the project's is moved
+    monkeypatch.setenv("npm_config_globalconfig", str(tmp_path / "company.npmrc"))
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+
+
+def test_a_user_npmrc_the_sandbox_hides_selects_nothing(tmp_path, monkeypatch):
+    """npm_config_userconfig in a plugin-hidden directory is not bound, so npm in the sandbox
+    reads neither its registries nor the global config it selects. Under an extra_tmpfs
+    directory it is: the user's file is bound after that tmpfs is laid."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+        SANDBOX_TMPFS,
+    )
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    creds = home / ".local" / "share" / "uv" / "credentials"
+    creds.mkdir(parents=True)
+    (tmp_path / "g.npmrc").write_text(_GLOBAL_NPMRC)
+    (creds / "npmrc").write_text(f"@user:registry=https://user.example/\nglobalconfig={tmp_path / 'g.npmrc'}\n")
+    monkeypatch.setenv("npm_config_userconfig", str(creds / "npmrc"))
+    (tmp_path / "proj").mkdir()
+    env = {"npm_config_userconfig": str(creds / "npmrc")}
+    token = SANDBOX_ENV.set(env)
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == (
+            "https://global.example/", {"@user": "https://user.example/", "@corp": "https://global-scope.example/"})
+        overlaid = SANDBOX_TMPFS.set((creds,))
+        try:
+            assert _node.npm_registries(tmp_path / "proj")[1].get("@user") == "https://user.example/"
+        finally:
+            SANDBOX_TMPFS.reset(overlaid)
+        hidden = SANDBOX_HIDDEN.set((creds,))
+        try:
+            assert _node.npm_registries(tmp_path / "proj") == (None, {})
+        finally:
+            SANDBOX_HIDDEN.reset(hidden)
+    finally:
+        SANDBOX_ENV.reset(token)
+
+
+@pytest.mark.parametrize("shebang", ["-i node", "-u PATH node", "PREFIX=/opt/public node", "-S npm_config_x=1 node",
+                                     "-C /elsewhere node"])
+def test_an_npm_whose_shebang_changes_its_environment_has_unknown_config(tmp_path, monkeypatch, shebang):
+    """#!/usr/bin/env -i node runs npm without the caller's npm_config_* (and PATH, $PREFIX):
+    the caller's settings are not npm's, so only its command line is assumed."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    (home / ".npmrc").write_text("@user:registry=https://user.example/\n")
+    (tmp_path / "proj").mkdir()
+    npm = _npm_installation(tmp_path / "npm", "")
+    monkeypatch.setenv("npm_config_registry", "https://npm.corp.example/")
+    token = COMMAND_ARGV.set((str(tmp_path / "npm" / "bin" / "npm"), "install"))
+    try:
+        assert _node.npm_registries(tmp_path / "proj") == ("https://npm.corp.example/", {"@user": "https://user.example/"})
+        (npm / "bin" / "npm-cli.js").write_text(f"#!/usr/bin/env {shebang}\n")
+        assert _node.npm_registries(tmp_path / "proj") == (None, {})
+        assert _node.npm_registries(tmp_path / "proj", command_line={"registry": "https://cli.example/"}) == (
+            "https://cli.example/", {})
+        assert _node.npm_registries(tmp_path / "proj", npm=False)[0] == "https://npm.corp.example/"  # pnpm, yarn
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("marker", [".modules.yaml", ".yarn-integrity", ".yarn-state.yml"])
+def test_a_leftover_npm_lock_does_not_make_another_managers_tree_npms(tmp_path, marker):
+    """A project switched to yarn or pnpm's hoisted linker keeps its old package-lock.json:
+    the tree's own state file says who wrote it, unless the running command does."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    nm = tmp_path / "node_modules"
+    nm.mkdir()
+    (tmp_path / "package-lock.json").write_text("{}")
+    assert _node._npm_wrote(nm)
+    (nm / marker).write_text("")
+    assert not _node._npm_wrote(nm)
+    for argv, wrote in ((("npm", "install"), True), (("yarn", "add", "x"), False),
+                        (("/usr/bin/node", "/opt/pnpm/bin/pnpm.cjs", "add", "x"), False)):
+        token = COMMAND_ARGV.set(argv)
+        try:
+            assert _node._npm_wrote(nm) is wrote, argv
+        finally:
+            COMMAND_ARGV.reset(token)
+    (nm / marker).unlink()                                    # yarn running: not npm's, whatever the locks say
+    token = COMMAND_ARGV.set(("yarn", "add", "x"))
+    try:
+        assert not _node._npm_wrote(nm)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("line", ["globalconfig='{g}'", 'globalconfig="{g}"', "globalconfig={g} # corporate config",
+                                  "globalconfig = {g};comment", "\"globalconfig\" = {g}"])
+def test_npmrc_values_are_decoded_as_npms_ini_parser_does(tmp_path, monkeypatch, line):
+    """npm's ini parser unquotes a value and cuts an inline ; or # comment."""
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "g.npmrc").write_text("registry=https://global.example/ # the company's\n")
+    (home / ".npmrc").write_text(line.format(g=tmp_path / "g.npmrc") + "\n")
+    assert _node._npm_global_npmrc() == tmp_path / "g.npmrc"
+    assert _node.npm_registries(tmp_path / "proj")[0] == "https://global.example/"
+
+
+def test_npmrc_settings_under_a_section_are_not_top_level(tmp_path, monkeypatch):
+    home = _home(tmp_path, monkeypatch)
+    (tmp_path / "proj").mkdir()
+    (home / ".npmrc").write_text("@a:registry=https://a.example/\n[profile]\nregistry=https://npm.corp.example/\n")
+    assert _node.npm_registries(tmp_path / "proj") == (None, {"@a": "https://a.example/"})
+
+
+def test_ini_unsafe_matches_the_ini_package():
+    cases = {'"/etc/a"': "/etc/a", "'/etc/a'": "/etc/a", "/etc/a # c": "/etc/a", "/etc/a;c": "/etc/a",
+             "a\\#b": "a#b", "a\\;b": "a;b", "a\\\\b": "a\\b", "a\\xb": "a\\xb", '"a\\tb"': "a\tb",
+             "'a\"b'": 'a"b', '"unterminated': '"unterminated', "x\\": "x\\"}
+    assert {k: _node._ini_unsafe(k) for k in cases} == cases
+
+
+def test_a_shimmed_node_is_trusted_by_its_original(tmp_path, monkeypatch):
+    """/outside/bin/node is a package-alert shim whose node.__pa_real is the repository's own
+    runtime: the default prefix follows the original into the repository, so it is not trusted."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    repo = home / "src" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "runtime" / "bin").mkdir(parents=True)
+    (repo / "runtime" / "bin" / "node").write_text("#!/bin/sh\n")
+    (repo / "runtime" / "bin" / "node").chmod(0o755)
+    (tmp_path / "real" / "bin").mkdir(parents=True)
+    (tmp_path / "real" / "bin" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "real" / "bin" / "node").chmod(0o755)
+    outside = tmp_path / "outside" / "bin"
+    outside.mkdir(parents=True)
+    (outside / "node").write_text("#!/bin/sh\n# package-alert shim\n")
+    (outside / "node").chmod(0o755)
+    monkeypatch.setenv("PATH", str(outside))
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        (outside / "node.__pa_real").symlink_to(repo / "runtime" / "bin" / "node")
+        assert not _node._npm_node_trusted()
+        (outside / "node.__pa_real").unlink()
+        (outside / "node.__pa_real").symlink_to(tmp_path / "real" / "bin" / "node")
+        assert _node._npm_node_trusted()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_trusted_npmrc_chain_through_the_repository_is_not_trusted(tmp_path, monkeypatch):
+    """The PATH npm's builtin npmrc -> <repo>/selector -> ~/.ssh/id_rsa: both ends lie
+    outside the project, but the repository chose the hop, so the file is not trusted and
+    the key is not bound."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text("-----BEGIN KEY-----\n")
+    npm = _npm_installation(tmp_path / "public", "")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    monkeypatch.setenv("PATH", str(tmp_path / "public" / "bin"))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("npm", "install"))
+    sandbox = SANDBOX_ENV.set({})
+    try:
+        assert _node._npm_builtin_trusted(npm / "npmrc")                         # a plain file: trusted
+        (npm / "npmrc").unlink()
+        (repo / "selector").symlink_to(home / ".ssh" / "id_rsa")
+        (npm / "npmrc").symlink_to(repo / "selector")
+        assert not _node._npm_builtin_trusted(npm / "npmrc")
+        assert home / ".ssh" / "id_rsa" not in NodeLanguage().home_ro_paths()
+    finally:
+        SANDBOX_ENV.reset(sandbox)
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_later_bind_shows_a_config_under_an_earlier_tmpfs(tmp_path, monkeypatch):
+    """The sandbox lays its tmpfs (/tmp, $HOME, extra_tmpfs) first and binds the project and
+    runtime installations over them: a config in a bound project under an extra_tmpfs
+    directory is read; one beside it is not; a plugin-hidden path is never read."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+        SANDBOX_HOME_VISIBLE,
+        SANDBOX_TMPFS,
+    )
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    work = tmp_path / "work"
+    (work / "proj" / "tools").mkdir(parents=True)
+    (work / "proj" / "tools" / "npmrc").write_text("globalconfig=/dev/null\n")
+    (work / "other.npmrc").write_text("")
+    tokens = [SANDBOX_ENV.set({}), SANDBOX_TMPFS.set((work,)), SANDBOX_HOME_VISIBLE.set((work / "proj",))]
+    try:
+        assert not _node._sandbox_breaks(work / "proj" / "tools" / "npmrc", None)
+        assert _node._sandbox_breaks(work / "other.npmrc", None)
+        hidden = SANDBOX_HIDDEN.set((work / "proj" / "tools",))
+        try:
+            assert _node._sandbox_breaks(work / "proj" / "tools" / "npmrc", None)
+        finally:
+            SANDBOX_HIDDEN.reset(hidden)
+    finally:
+        SANDBOX_HOME_VISIBLE.reset(tokens[2])
+        SANDBOX_TMPFS.reset(tokens[1])
+        SANDBOX_ENV.reset(tokens[0])
+
+
+def test_an_unseen_runtime_assumes_no_npm_installation(tmp_path, monkeypatch):
+    """The monitor could not read the process's executable and npm rewrote its title: which
+    npm and node ran is unknown, so neither the daemon's builtin npmrc nor its node's global
+    npmrc is assumed; npm's environment and the project's .npmrc still are."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, UNKNOWN_SCRIPT
+
+    _home(tmp_path, monkeypatch)
+    _npm_installation(tmp_path / "daemon", "registry=https://npm.corp.example/\n")
+    (tmp_path / "daemon" / "bin" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "daemon" / "bin" / "node").chmod(0o755)
+    env = {"PATH": str(tmp_path / "daemon" / "bin")}
+    (tmp_path / "proj").mkdir()
+    (tmp_path / "proj" / ".npmrc").write_text("@corp:registry=https://npm.corp.example/\n")
+    assert _REAL_BUILTIN_NPMRC(env) is not None and _REAL_DEFAULT_PREFIX(env) is not None
+    token = COMMAND_ARGV.set((UNKNOWN_SCRIPT, UNKNOWN_SCRIPT))
+    try:
+        assert _REAL_BUILTIN_NPMRC(env) is None
+        assert _REAL_DEFAULT_PREFIX(env) is None
+        assert _node.npm_registries(tmp_path / "proj") == (None, {"@corp": "https://npm.corp.example/"})
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_found_global_npmrc_chaining_through_the_repository_is_not_trusted(tmp_path, monkeypatch):
+    """<prefix>/etc/npmrc -> <repo>/selector -> ~/.ssh/id_rsa, at the trusted PATH node's
+    default prefix: npm found it, and the repository chose a hop, so it is not trusted or
+    bound. A global file the user named is the user's choice, and stays trusted."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, SANDBOX_ENV
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text("@x:registry=https://x.example/\n")
+    node_install = tmp_path / "node"
+    (node_install / "bin").mkdir(parents=True)
+    (node_install / "bin" / "node").write_text("#!/bin/sh\n")
+    (node_install / "bin" / "node").chmod(0o755)
+    (node_install / "etc").mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "selector").symlink_to(home / ".ssh" / "id_rsa")
+    (node_install / "etc" / "npmrc").symlink_to(repo / "selector")
+    monkeypatch.setenv("PATH", str(node_install / "bin"))
+    monkeypatch.delenv("PREFIX", raising=False)
+    monkeypatch.setattr(_node, "_npm_default_prefix", _REAL_DEFAULT_PREFIX)
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("npm", "install"))
+    sandbox = SANDBOX_ENV.set({})
+    try:
+        assert _node._npm_node_trusted()
+        assert _node._npm_global_npmrc_located() == ((node_install / "etc" / "npmrc"), False)
+        assert home / ".ssh" / "id_rsa" not in NodeLanguage().home_ro_paths()
+        (home / ".npmrc").write_text(f"globalconfig={node_install / 'etc' / 'npmrc'}\n")   # the user's choice
+        assert _node._npm_global_npmrc_located() == ((node_install / "etc" / "npmrc"), True)
+    finally:
+        SANDBOX_ENV.reset(sandbox)
+        COMMAND_ARGV.reset(token)
+
+
+def test_a_relative_prefix_or_destdir_gives_no_default_prefix(tmp_path):
+    """npm resolves them against its own working directory, which is not known here."""
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "bin" / "node").chmod(0o755)
+    env = {"PATH": str(tmp_path / "bin")}
+    assert _REAL_DEFAULT_PREFIX({**env, "PREFIX": "pfx"}) is None
+    assert _REAL_DEFAULT_PREFIX({**env, "DESTDIR": "stage"}) is None
+    assert _REAL_DEFAULT_PREFIX({**env, "PREFIX": "/opt/n"}) == Path("/opt/n")
+
+
+def test_a_global_npmrc_the_builtin_chose_through_the_repository_is_not_trusted(tmp_path, monkeypatch):
+    """The trusted PATH npm's builtin npmrc names globalconfig=/etc/g.npmrc, which links
+    through <repo>/selector: npm found it rather than the user naming it, so not trusted."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    home = _home(tmp_path, monkeypatch)
+    (home / ".ssh").mkdir()
+    (home / ".ssh" / "id_rsa").write_text("")
+    npm = _npm_installation(tmp_path / "public", f"globalconfig={tmp_path / 'etc' / 'g.npmrc'}\n")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "g.npmrc").write_text("")
+    monkeypatch.setenv("PATH", str(tmp_path / "public" / "bin"))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.chdir(repo)
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        assert _node._npm_builtin_trusted(npm / "npmrc")
+        assert _node._npm_global_npmrc_located() == (tmp_path / "etc" / "g.npmrc", True)
+        (tmp_path / "etc" / "g.npmrc").unlink()
+        (repo / "selector").symlink_to(home / ".ssh" / "id_rsa")
+        (tmp_path / "etc" / "g.npmrc").symlink_to(repo / "selector")
+        assert _node._npm_global_npmrc_located() == (tmp_path / "etc" / "g.npmrc", False)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_an_npm_the_repository_links_onto_path_is_not_trusted(tmp_path, monkeypatch):
+    """<repo>/node_modules/.bin/npm -> /opt/npm/bin/npm-cli.js on PATH: the installation lies
+    outside the repository, but the repository chose it, so its builtin npmrc is not trusted."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    _home(tmp_path, monkeypatch)
+    npm = _npm_installation(tmp_path / "opt", "@unused:registry=${SLACK_WEBHOOK_URL}\n")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "node_modules" / ".bin").mkdir(parents=True)
+    (repo / "node_modules" / ".bin" / "npm").symlink_to(npm / "bin" / "npm-cli.js")
+    (repo / "packages" / "app").mkdir(parents=True)
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.example/services/T000/B000/secret")
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.chdir(repo / "packages" / "app")
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        monkeypatch.setenv("PATH", str(repo / "node_modules" / ".bin"))
+        assert _REAL_BUILTIN_NPMRC(os.environ) == npm.resolve() / "npmrc"
+        assert not _node._npm_builtin_trusted(npm.resolve() / "npmrc")
+        assert "SLACK_WEBHOOK_URL" not in _node._npm_registry_env_names()
+        monkeypatch.setenv("PATH", str(tmp_path / "opt" / "bin"))                 # the same npm, linked from outside
+        assert _node._npm_builtin_trusted(npm.resolve() / "npmrc")
+        assert "SLACK_WEBHOOK_URL" in _node._npm_registry_env_names()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("argv", [("/usr/bin/node", "/opt/pnpm/bin/pnpm.cjs", "install"),
+                                  ("/usr/bin/node", "/opt/pnpm/bin/pnpm.mjs", "install"),
+                                  ("/usr/bin/node", "/opt/yarn/bin/yarn.js", "install")])
+def test_a_script_runtimes_manager_is_recognised_without_a_state_file(tmp_path, argv):
+    """node …/pnpm.cjs is pnpm, whatever an npm lock left beside the tree says."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    nm = tmp_path / "node_modules"
+    nm.mkdir()
+    (tmp_path / "package-lock.json").write_text("{}")
+    token = COMMAND_ARGV.set(argv)
+    try:
+        assert not _node._npm_wrote(nm)
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("tool", ["npm", "node"])
+def test_a_shims_original_linked_through_the_repository_is_not_trusted(tmp_path, monkeypatch, tool):
+    """/outside/bin/npm.__pa_real -> <repo>/selector -> /opt/npm/bin/npm-cli.js: the original
+    resolves outside the repository, but the repository chose a hop on the way."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    _home(tmp_path, monkeypatch)
+    npm = _npm_installation(tmp_path / "opt", "")
+    (tmp_path / "opt" / "bin" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "opt" / "bin" / "node").chmod(0o755)
+    real = npm / "bin" / "npm-cli.js" if tool == "npm" else tmp_path / "opt" / "bin" / "node"
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "selector").symlink_to(real)
+    outside = tmp_path / "outside" / "bin"
+    outside.mkdir(parents=True)
+    (outside / tool).write_text("#!/bin/sh\n# package-alert shim\n")
+    (outside / tool).chmod(0o755)
+    monkeypatch.setenv("PATH", str(outside))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.chdir(repo)
+
+    def trusted() -> bool:
+        return _node._npm_builtin_trusted(npm.resolve() / "npmrc") if tool == "npm" else _node._npm_node_trusted()
+
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        (outside / f"{tool}.__pa_real").symlink_to(repo / "selector")
+        assert not trusted()
+        (outside / f"{tool}.__pa_real").unlink()
+        (outside / f"{tool}.__pa_real").symlink_to(real)                         # straight to the original
+        assert trusted()
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+def test_pa_fix_on_another_directory_does_not_trust_that_repositorys_npm(tmp_path, monkeypatch):
+    """pa fix /srv/repo from elsewhere: /srv/repo/node_modules/.tools/npm on PATH is the
+    target repository's, though it lies outside this process's working directory."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+    from packagealert.sandbox import runner as runner_mod
+
+    _home(tmp_path, monkeypatch)
+    repo = tmp_path / "srv" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    repo_npm = _npm_installation(repo / "node_modules" / ".tools", "")
+    (tmp_path / "elsewhere").mkdir()
+    monkeypatch.setenv("PATH", str(repo / "node_modules" / ".tools" / "bin"))
+    monkeypatch.setattr(_node, "_npm_builtin_npmrc", _REAL_BUILTIN_NPMRC)
+    monkeypatch.setattr(runner_mod, "_settled_sandbox_env", lambda extra: {})
+    monkeypatch.chdir(tmp_path / "elsewhere")
+    token = COMMAND_ARGV.set(("npm", "install"))
+    try:
+        assert _node._npm_builtin_trusted(repo_npm.resolve() / "npmrc")          # judged from here alone
+        with runner_mod.sandbox_config_context([], [], project=repo):
+            assert not _node._npm_builtin_trusted(repo_npm.resolve() / "npmrc")
+    finally:
+        COMMAND_ARGV.reset(token)
+
+
+@pytest.mark.parametrize("tool", ["node", "npm"])
+def test_dot_dot_after_a_symlink_names_the_installation_the_kernel_runs(tmp_path, monkeypatch, tool):
+    """/opt/selector/../bin/node with selector -> /srv/node/lib runs /srv/node/bin/node: the
+    `..` applies after the link, as the kernel resolves it, not lexically (/opt/bin/node)."""
+    from packagealert.parsers.process_args import COMMAND_ARGV
+
+    _home(tmp_path, monkeypatch)
+    for root in ("srv/node", "opt"):                                        # /opt/bin is the decoy
+        (tmp_path / root / "lib").mkdir(parents=True)
+        (tmp_path / root / "bin").mkdir(parents=True, exist_ok=True)
+        (tmp_path / root / "bin" / "node").write_text("#!/bin/sh\n")
+        (tmp_path / root / "bin" / "node").chmod(0o755)
+    (tmp_path / "opt" / "selector").symlink_to(tmp_path / "srv" / "node" / "lib")
+    via = str(tmp_path / "opt" / "selector" / ".." / "bin")
+    if tool == "node":
+        npm = _npm_installation(tmp_path / "npm", "")
+        argv: tuple[str, ...] = (f"{via}/node", str(npm / "bin" / "npm-cli.js"), "install")
+        token = COMMAND_ARGV.set(argv)
+        try:
+            assert _REAL_DEFAULT_PREFIX({"PATH": "/nonexistent"}) == (tmp_path / "srv" / "node").resolve()
+        finally:
+            COMMAND_ARGV.reset(token)
+    else:
+        for root in ("srv/node", "opt"):
+            _npm_installation(tmp_path / root / "npmroot", "")
+            (tmp_path / root / "bin" / "npm").symlink_to(tmp_path / root / "npmroot" / "lib" / "node_modules" / "npm"
+                                                       / "bin" / "npm-cli.js")
+        token = COMMAND_ARGV.set((f"{via}/npm", "install"))
+        try:
+            expected = (tmp_path / "srv" / "node" / "npmroot" / "lib" / "node_modules" / "npm").resolve() / "npmrc"
+            assert _REAL_BUILTIN_NPMRC({"PATH": "/nonexistent"}) == expected
+        finally:
+            COMMAND_ARGV.reset(token)
+
+
+def test_a_config_under_a_runtime_log_directory_is_hidden_by_its_later_tmpfs(tmp_path, monkeypatch):
+    """~/.nvm is bound read-only, then its logs/ directory gets an empty tmpfs: a global
+    npmrc at ~/.nvm/logs/npmrc is not readable there, though ~/.nvm/npmrc is."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HOME_VISIBLE,
+        SANDBOX_POST_RO_TMPFS,
+    )
+
+    home = _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    (home / ".nvm" / "logs").mkdir(parents=True)
+    (home / ".nvm" / "logs" / "npmrc").write_text("")
+    (home / ".nvm" / "npmrc").write_text("")
+    tokens = [SANDBOX_ENV.set({}), SANDBOX_HOME_VISIBLE.set((home / ".nvm",))]
+    try:
+        assert not _node._sandbox_breaks(home / ".nvm" / "logs" / "npmrc", None)
+        overlay = SANDBOX_POST_RO_TMPFS.set((home / ".nvm" / "logs",))
+        try:
+            assert _node._sandbox_breaks(home / ".nvm" / "logs" / "npmrc", None)
+            assert not _node._sandbox_breaks(home / ".nvm" / "npmrc", None)
+            # A trusted file is bound at its own name, and the log tmpfs is laid over that bind too.
+            assert not _node._npm_sandbox_can_read(home / ".nvm" / "logs" / "npmrc", True)
+            assert _node._npm_sandbox_can_read(home / ".nvm" / "npmrc", True)
+        finally:
+            SANDBOX_POST_RO_TMPFS.reset(overlay)
+    finally:
+        SANDBOX_HOME_VISIBLE.reset(tokens[1])
+        SANDBOX_ENV.reset(tokens[0])
+
+
+def test_a_dot_dot_path_into_the_repository_is_not_outside_it(tmp_path, monkeypatch):
+    """<outside>/selector/../bin/npm with selector -> <repo>/lib is <repo>/bin/npm to the
+    kernel, though lexically it is <outside>/bin/npm (a decoy installed outside)."""
+    _home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / "lib").mkdir()
+    (repo / "bin").mkdir()
+    (repo / "bin" / "npm").write_text("#!/bin/sh\n")
+    outside = tmp_path / "outside"
+    (outside / "bin").mkdir(parents=True)
+    (outside / "bin" / "npm").write_text("#!/bin/sh\n")
+    (outside / "selector").symlink_to(repo / "lib")
+    monkeypatch.chdir(repo)
+    assert not _node._executable_outside_project(str(outside / "selector" / ".." / "bin" / "npm"))
+    assert _node._executable_outside_project(str(outside / "bin" / "npm"))
+
+
+def test_a_configured_read_only_bind_shows_a_config_under_extra_tmpfs(tmp_path, monkeypatch):
+    """extra_tmpfs hides /opt/company and extra_ro_paths binds /opt/company/npmrc back: npm
+    reads it, so provenance does too."""
+    from packagealert.parsers.process_args import (
+        SANDBOX_ENV,
+        SANDBOX_HOME_VISIBLE,
+        SANDBOX_TMPFS,
+    )
+
+    _home(tmp_path, monkeypatch)
+    monkeypatch.setattr(_node, "_SANDBOX_TMP", tmp_path / "sandbox-tmp")       # all of this is under the real /tmp
+    company = tmp_path / "opt" / "company"
+    company.mkdir(parents=True)
+    (company / "npmrc").write_text("")
+    tokens = [SANDBOX_ENV.set({}), SANDBOX_TMPFS.set((company,))]
+    try:
+        assert _node._sandbox_breaks(company / "npmrc", None)
+        shown = SANDBOX_HOME_VISIBLE.set((company / "npmrc",))
+        try:
+            assert not _node._sandbox_breaks(company / "npmrc", None)
+        finally:
+            SANDBOX_HOME_VISIBLE.reset(shown)
+    finally:
+        SANDBOX_TMPFS.reset(tokens[1])
+        SANDBOX_ENV.reset(tokens[0])
+
+
+def test_an_unseen_node_running_a_known_npm_script(tmp_path, monkeypatch):
+    """The monitor saw `node /opt/other/npm/bin/npm-cli.js install` without reading node's
+    executable: npm's builtin npmrc is that script's, and node's prefix is not assumed."""
+    from packagealert.parsers.process_args import COMMAND_ARGV, UNKNOWN_SCRIPT
+
+    _home(tmp_path, monkeypatch)
+    npm = _npm_installation(tmp_path / "other", "")
+    (tmp_path / "daemon").mkdir()
+    (tmp_path / "daemon" / "node").write_text("#!/bin/sh\n")
+    (tmp_path / "daemon" / "node").chmod(0o755)
+    env = {"PATH": str(tmp_path / "daemon")}
+    token = COMMAND_ARGV.set((UNKNOWN_SCRIPT, str(npm / "bin" / "npm-cli.js"), "install"))
+    try:
+        assert _REAL_BUILTIN_NPMRC(env) == npm.resolve() / "npmrc"
+        assert _REAL_DEFAULT_PREFIX(env) is None
+        assert not _node._npm_node_trusted()
+    finally:
+        COMMAND_ARGV.reset(token)

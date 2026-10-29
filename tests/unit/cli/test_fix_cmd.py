@@ -729,6 +729,46 @@ async def test_trials_judge_a_project_npmrc_by_the_sandbox_environment(tmp_path,
     assert SANDBOX_ENV.get() is None                          # scoped to the verification
 
 
+async def test_trials_judge_npm_config_with_the_commands_settled_environment_and_tmpfs(tmp_path, capsys, monkeypatch):
+    """Verification reads npm's config as the captured trial commands do: the settled
+    sandbox environment (the one they are given) and the directories sandbox.extra_tmpfs hides."""
+    from packagealert.parsers.process_args import (
+        COMMAND_CWD_KNOWN,
+        COMMAND_PROJECT,
+        SANDBOX_ENV,
+        SANDBOX_HIDDEN,
+        SANDBOX_HOME_VISIBLE,
+        SANDBOX_TMPFS,
+    )
+    from packagealert.remediate import verify as verify_mod
+    from packagealert.sandbox import runner as runner_mod
+    from packagealert.sandbox.hidden import hidden_home_paths
+
+    monkeypatch.setattr(runner_mod, "_settled_sandbox_env", lambda extra: {"SETTLED": "1"})
+    seen = []
+    real = verify_mod.verify_plan
+
+    async def spy(plan, **kw):
+        seen.append((SANDBOX_ENV.get(), SANDBOX_TMPFS.get(), SANDBOX_HOME_VISIBLE.get(), COMMAND_CWD_KNOWN.get(),
+                     SANDBOX_HIDDEN.get(), COMMAND_PROJECT.get()))
+        return await real(plan, **kw)
+
+    cfg = load_config(None)
+    (tmp_path / "hidden").mkdir()
+    cfg.sandbox.extra_tmpfs = [tmp_path / "hidden"]
+    (tmp_path / "shown.npmrc").write_text("")
+    cfg.sandbox.extra_ro_paths = [tmp_path / "shown.npmrc"]
+    with patch("packagealert.remediate.verify.verify_plan", spy):
+        await _run(tmp_path, LOCK, cfg=cfg)
+    assert len(seen) == 1 and seen[0][0] == {"SETTLED": "1"}
+    assert seen[0][1] == (tmp_path / "hidden",)
+    assert set(hidden_home_paths()) <= set(seen[0][4])                   # what the plugins hide (uv's credentials)
+    assert seen[0][2] == (*runner_mod._runtime_home_dirs(), tmp_path / "shown.npmrc") and seen[0][3] is True
+    assert seen[0][5] == tmp_path                                       # the project acted on
+    assert SANDBOX_ENV.get() is None and SANDBOX_TMPFS.get() == ()   # scoped to the verification
+    assert SANDBOX_HOME_VISIBLE.get() == () and COMMAND_CWD_KNOWN.get() is False and SANDBOX_HIDDEN.get() == ()
+
+
 async def test_text_prints_one_also_changes_line_under_commands(tmp_path, capsys):
     await _run(tmp_path, LOCK, fmt="text", extra_stderr="Add glue v0.5.0\n")
     out = capsys.readouterr().out
@@ -1861,6 +1901,26 @@ async def test_sync_mode_runs_the_sync_in_the_project(tmp_path, capsys):
         code = await _run(tmp_path, LOCK, cwd=elsewhere, apply=ApplyOptions("sync", yes=True, interactive=False))
     assert code == 0 and seen["argv"] == ["uv", "sync", "--locked"] and seen["cwd"].resolve() == tmp_path.resolve()
     assert json.loads(capsys.readouterr().out)["apply"]["synced"] is True
+
+
+@pytest.mark.parametrize("fmt", ["json", "text"])
+async def test_apply_runs_with_the_target_projects_config_context(tmp_path, fmt):
+    """pa fix /srv/repo --apply from elsewhere: apply's captured commands are judged with the
+    project acted on, as verification is, in either output format."""
+    from packagealert.parsers.process_args import COMMAND_PROJECT, SANDBOX_ENV
+
+    seen = []
+
+    async def apply_plan(*a, **kw):
+        seen.append((COMMAND_PROJECT.get(), SANDBOX_ENV.get() is not None))
+        return _APPLIED
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with patch("packagealert.remediate.apply.apply_plan", apply_plan):
+        await _run(tmp_path, LOCK, fmt=fmt, cwd=elsewhere, apply=ApplyOptions("lock-only", yes=True, interactive=False))
+    assert seen == [(tmp_path, True)]
+    assert COMMAND_PROJECT.get() is None
 
 
 async def test_failed_sync_keeps_the_write_and_exits_1(tmp_path, capsys):

@@ -19,8 +19,11 @@ from packagealert.managers import manager_registry_name
 from packagealert.models.events import PackageEvent, normalise_ecosystem
 from packagealert.monitors.base import AbstractMonitor
 from packagealert.parsers.process_args import (
+    COMMAND_ARGV,
     COMMAND_LINE_REGISTRIES,
+    UNKNOWN_SCRIPT,
     InvalidInvocationDirectory,
+    _cmd,
     derive_site_packages,
     resolve_invocation_dirs,
     resolve_lockfile_dir,
@@ -82,6 +85,44 @@ class _PendingInstall:
     # so it is emitted once the install has written it.
     scan_lockfile: bool = True
     deferred_events: list[PackageEvent] = field(default_factory=list)
+    # The command's leading argv (_command_argv()): which installation of the tool ran
+    # it, for the lock scan after it exits (COMMAND_ARGV).
+    argv: tuple[str, ...] = ()
+
+
+def _command_argv(cmdline: list[str], cwd: str | None, exe: str | None = None) -> tuple[str, ...]:
+    """The first two arguments of an observed command (the tool, or the runtime and the
+    script it runs), a relative path made absolute against the process's own cwd, and
+    the runtime named by its executable (*exe*) rather than as the command spelled it:
+    a bare ``node`` would otherwise be looked up on the daemon's PATH.
+
+    Node resolves its script against the cwd even when it is a bare name. A node whose
+    command line was rewritten (npm sets its process title to ``npm install …``) is
+    kept, with its script UNKNOWN_SCRIPT rather than the tool name it now shows. A bare
+    ``node`` whose executable cannot be read is UNKNOWN_SCRIPT itself."""
+    def is_node(arg: str) -> bool:
+        return _cmd(os.path.basename(arg).removesuffix(".__pa_real")) in ("node", "nodejs")  # or setup's renamed original
+
+    def absolute(arg: str, path: bool) -> str:
+        return os.path.join(cwd, arg) if cwd and (path or os.sep in arg) and not os.path.isabs(arg) else arg
+
+    if cmdline and " " in cmdline[0] and cmdline[0].lstrip().startswith("npm"):
+        # A title npm packed into one argument (``npm install x``, then empty slots), as
+        # parse_npm_args() reads it.
+        cmdline = cmdline[0].split() + [a for a in cmdline[1:] if a]
+    argv = [absolute(a, i == 1 and is_node(cmdline[0])) for i, a in enumerate(cmdline[:2])]
+    if argv and exe and is_node(exe) and not is_node(argv[0]):
+        return (exe, UNKNOWN_SCRIPT)
+    if argv and not exe and os.sep not in argv[0] and _cmd(argv[0]) == "npm":
+        # npm runs under node, so a bare ``npm`` is its rewritten title: with the executable
+        # unreadable, which node and npm ran is unknown (not the daemon's on PATH).
+        return (UNKNOWN_SCRIPT, UNKNOWN_SCRIPT)
+    if argv and is_node(argv[0]):
+        if exe:
+            argv[0] = exe
+        elif os.sep not in argv[0]:
+            argv[0] = UNKNOWN_SCRIPT  # a bare node with its executable unread: not the daemon's on PATH
+    return tuple(argv)
 
 
 def _moved_project_dir(cwd: Path, parsed: ProcessInstall) -> Path | None:
@@ -107,13 +148,15 @@ def _moved_lockfile_dir(cwd: Path, parsed: ProcessInstall, project: Path | None)
     return resolve_lockfile_dir(cwd, lockfile_dir, project or cwd)
 
 
-def _named_package_public(spec: PackageSpec, parsed: ProcessInstall, project_dir: Path | None) -> bool:
+def _named_package_public(spec: PackageSpec, parsed: ProcessInstall, project_dir: Path | None,
+                          argv: tuple[str, ...] = ()) -> bool:
     """Whether a package named on a command line comes from the public registry.
 
     The spec says whether its source is a registry at all (a git or local spec
     is not); the owning language's optional ``explicit_package_public`` hook
     says which registry it is configured to come from, as for a sandboxed
     command. Without the hook, or when it fails, the package counts as public.
+    *argv* (_command_argv()) is the command's, for the hook's COMMAND_ARGV.
     """
     if getattr(spec, "from_public_registry", True) is False:
         return False
@@ -123,7 +166,11 @@ def _named_package_public(spec: PackageSpec, parsed: ProcessInstall, project_dir
         if lang is None or not callable(hook) or project_dir is None:
             return True
         # As the language writes the package spec, which is what the hook parses.
-        return hook(lang.serialise_package_spec(spec.name, spec.version), parsed, project_dir) is not False
+        token = COMMAND_ARGV.set(argv or None)
+        try:
+            return hook(lang.serialise_package_spec(spec.name, spec.version), parsed, project_dir) is not False
+        finally:
+            COMMAND_ARGV.reset(token)
     except Exception:
         log.warning("explicit_package_public raised for %s — treating it as public", spec.name, exc_info=True)
         return True
@@ -199,7 +246,7 @@ class ProcessMonitor(AbstractMonitor):
         # reconciled onto.
         known_create_time_by_pid: dict[int, float | None] = dict(self._pending.keys())
         known_create_time_by_pid.update(self._seen_processes)
-        for proc in psutil.process_iter(["pid", "ppid", "cmdline", "cwd", "create_time"]):
+        for proc in psutil.process_iter(["pid", "ppid", "cmdline", "cwd", "create_time", "exe"]):
             try:
                 info = proc.info
                 pid = info["pid"]
@@ -394,6 +441,7 @@ class ProcessMonitor(AbstractMonitor):
                             pid=event_pid,
                             pid_create_time=create_time,
                             registries=dict(getattr(parsed, "registries", None) or {}),
+                            argv=_command_argv(cmdline, cwd_str, info.get("exe")),
                         )
                         ppid = info.get("ppid")
                         parent_name = ""
@@ -427,7 +475,8 @@ class ProcessMonitor(AbstractMonitor):
                         site_packages_dir=site_pkgs,
                         pid=event_pid,
                         pid_create_time=create_time,
-                        from_public_registry=_named_package_public(spec, parsed, event_project_path),
+                        from_public_registry=_named_package_public(
+                            spec, parsed, event_project_path, _command_argv(cmdline, cwd_str, info.get("exe"))),
                     )
                     log.info(
                         "Detected install: %s %s@%s via %s",
@@ -493,6 +542,7 @@ class ProcessMonitor(AbstractMonitor):
             candidate = lock_dir / pattern
             if candidate.exists():
                 token = COMMAND_LINE_REGISTRIES.set(pending.registries)
+                argv_token = COMMAND_ARGV.set(pending.argv or None)
                 try:
                     packages = lang.parse_lockfile(candidate)
                 except Exception:
@@ -502,6 +552,7 @@ class ProcessMonitor(AbstractMonitor):
                     )
                     continue
                 finally:
+                    COMMAND_ARGV.reset(argv_token)
                     COMMAND_LINE_REGISTRIES.reset(token)
                 if packages:
                     break

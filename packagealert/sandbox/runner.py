@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -30,8 +30,16 @@ from packagealert.languages.base import (
     ShellEnvironment,
 )
 from packagealert.parsers.process_args import (
+    COMMAND_ARGV,
+    COMMAND_CWD_KNOWN,
     COMMAND_LINE_REGISTRIES,
+    COMMAND_PROJECT,
     SANDBOX_ENV,
+    SANDBOX_HIDDEN,
+    SANDBOX_HOME_VISIBLE,
+    SANDBOX_POST_RO_TMPFS,
+    SANDBOX_TMPFS,
+    SANDBOX_WRITABLE,
     InvalidInvocationDirectory,
     ParsedInstall,
     parse_package_spec,
@@ -282,8 +290,20 @@ class SandboxRunner:
 
         cwd = Path.cwd()
 
+        # Which installation of the tool runs (npm's builtin npmrc is that one's, and its
+        # registry variables are among those the sandbox environment passes).
+        COMMAND_ARGV.set(tuple(argv) if argv else None)
         # A project config's ${VAR}s (npm's .npmrc) are judged as the sandbox will expand them.
-        SANDBOX_ENV.set(_build_sandbox_env([*self._cfg.sandbox.extra_env, *(extra_env or [])]))
+        COMMAND_CWD_KNOWN.set(True)
+        # What the sandbox hides and exposes first: it decides which config files the
+        # environment is settled with.
+        tmpfs, hidden, visible = _sandbox_visibility(self._cfg.sandbox.extra_tmpfs, self._cfg.sandbox.extra_ro_paths)
+        SANDBOX_TMPFS.set(tmpfs)
+        SANDBOX_HIDDEN.set(hidden)
+        SANDBOX_HOME_VISIBLE.set(visible)
+        SANDBOX_POST_RO_TMPFS.set(tuple(_post_ro_tmpfs_dirs(list(visible))))
+        SANDBOX_WRITABLE.set((cwd,))  # the command runs here, which is bound
+        SANDBOX_ENV.set(_settled_sandbox_env([*self._cfg.sandbox.extra_env, *(extra_env or [])]))
         if argv and Path(argv[0]).name in _SHELL_NAMES:
             COMMAND_LINE_REGISTRIES.set({})
             return await self._run_shell(argv, cwd=cwd, allow_network=allow_network, extra_env=extra_env, flags=flags, allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
@@ -292,6 +312,13 @@ class SandboxRunner:
         # Every lock-file scan for this command (before and after it runs) judges an
         # entry without a resolved URL by the registry this command was given.
         COMMAND_LINE_REGISTRIES.set(dict(parsed.registries) if parsed is not None else {})
+        # A command moved to another project (npm --prefix, uv --directory) is that
+        # project's too: its repository's tools are not trusted either. The environment
+        # is settled again under it, before anything is assembled.
+        target = _command_project(cwd, parsed)
+        if target is not None:
+            COMMAND_PROJECT.set(target)
+            SANDBOX_ENV.set(_settled_sandbox_env([*self._cfg.sandbox.extra_env, *(extra_env or [])]))
 
         # Apply any environment variables suggested by the language module (e.g.
         # VIRTUAL_ENV derived from a venv shim path in python.py).
@@ -356,6 +383,9 @@ class SandboxRunner:
         via_project_shim = real_argv is not argv
         via_shim = via_project_shim or bool(os.environ.get("_PA_VIA_SHELL"))
         is_global = parsed.global_install
+        if is_global:
+            # It runs unsandboxed, so its config is judged as the host reads it.
+            SANDBOX_ENV.set(None)
 
         if via_shim:
             self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
@@ -899,7 +929,7 @@ class SandboxRunner:
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
             combined_extra.extend(extra_env)
-        sandbox_env = _build_sandbox_env(combined_extra)
+        sandbox_env = _settled_sandbox_env(combined_extra)
 
         if ctx.parsed is not None:
             lang = lang_registry.for_ecosystem(ctx.parsed.ecosystem)
@@ -1901,7 +1931,7 @@ class SandboxRunner:
         combined_extra = list(self._cfg.sandbox.extra_env)
         if extra_env:
             combined_extra.extend(extra_env)
-        sandbox_env = _build_sandbox_env(combined_extra)
+        sandbox_env = _settled_sandbox_env(combined_extra)
 
         # Propagate active flags into PA_RUN_OPTS so shim-invoked package managers
         # inside the shell inherit them (e.g. pipenv lock picking up python:ssh-keys).
@@ -3136,26 +3166,11 @@ def _home_ro_dirs() -> list[Path]:
     so that SSH keys, cloud credentials, and secrets in other directories are
     not readable by install-time scripts.
 
-    Runtime tool paths (pyenv, nvm, uv, pipx, local bin) are listed here.
-    Package-manager config paths (pip, npmrc, etc.) are contributed by each
-    language module via the home_ro_paths() hook.
+    Runtime tool paths (pyenv, nvm, uv, pipx, local bin) come from
+    _runtime_home_dirs(). Package-manager config paths (pip, npmrc, etc.) are
+    contributed by each language module via the home_ro_paths() hook.
     """
-    home = Path.home()
-    candidates: list[Path] = [
-        # pyenv-managed Python installations (respects PYENV_ROOT override)
-        Path(os.environ.get("PYENV_ROOT", home / ".pyenv")),
-        # nvm-managed Node installations (respects NVM_DIR override)
-        Path(os.environ.get("NVM_DIR", home / ".nvm")),
-        # uv-managed Python installations and tool environments
-        home / ".local" / "share" / "uv",
-        # User-local binaries: uv, pip-installed scripts, etc.
-        home / ".local" / "bin",
-        # pipx-managed tool environments — shebangs in ~/.local/bin/* may point here
-        # PIPX_HOME defaults differ by install method: ~/.local/pipx or ~/.local/share/pipx
-        Path(os.environ.get("PIPX_HOME", home / ".local" / "pipx")).expanduser(),
-        home / ".local" / "share" / "pipx",
-    ]
-    result = [p for p in candidates if p.exists()]
+    result = _runtime_home_dirs()
     # Merge language-module config paths
     for lang in lang_registry.all_languages():
         try:
@@ -3171,6 +3186,28 @@ def _home_ro_dirs() -> list[Path]:
             log.warning("home_ro_paths raised for lang=%s — skipping",
                         getattr(lang, "name", "?"), exc_info=True)
     return result
+
+
+def _runtime_home_dirs() -> list[Path]:
+    """The runtime installations under $HOME the sandbox exposes whole (pyenv, nvm, uv,
+    pipx, local bin): fixed by this process's environment, unlike the config files the
+    language modules add, which depend on the sandbox environment being settled."""
+    home = Path.home()
+    candidates: list[Path] = [
+        # pyenv-managed Python installations (respects PYENV_ROOT override)
+        Path(os.environ.get("PYENV_ROOT", home / ".pyenv")),
+        # nvm-managed Node installations (respects NVM_DIR override)
+        Path(os.environ.get("NVM_DIR", home / ".nvm")),
+        # uv-managed Python installations and tool environments
+        home / ".local" / "share" / "uv",
+        # User-local binaries: uv, pip-installed scripts, etc.
+        home / ".local" / "bin",
+        # pipx-managed tool environments — shebangs in ~/.local/bin/* may point here
+        # PIPX_HOME defaults differ by install method: ~/.local/pipx or ~/.local/share/pipx
+        Path(os.environ.get("PIPX_HOME", home / ".local" / "pipx")).expanduser(),
+        home / ".local" / "share" / "pipx",
+    ]
+    return [p for p in candidates if p.exists()]
 
 
 def _post_ro_tmpfs_dirs(home_ro: list[Path]) -> list[Path]:
@@ -3199,6 +3236,109 @@ def _post_ro_tmpfs_dirs(home_ro: list[Path]) -> list[Path]:
                 seen.add(key)
                 result.append(logs)
     return result
+
+
+@contextlib.contextmanager
+def sandbox_config_context(extra_env: list[str], extra_tmpfs: Sequence[Path],
+                           project: Path | None = None, extra_ro: Sequence[Path] = ()) -> Iterator[None]:
+    """Judge config files (npm's) as a sandboxed command reads them for the duration: its
+    environment (SANDBOX_ENV, _settled_sandbox_env()) and what it hides and exposes
+    (_sandbox_visibility()). The command runs in a scratch copy (pa fix's trials), so this
+    working directory is not among what it exposes, though relative paths in its
+    configuration still mean this directory's (COMMAND_CWD_KNOWN). *project* is the
+    project acted on (COMMAND_PROJECT), whose repository's tools are not trusted, and
+    *extra_ro* the configured read-only binds (``sandbox.extra_ro_paths``)."""
+    tmpfs, hidden, visible = _sandbox_visibility(extra_tmpfs, extra_ro)
+    # Visibility first: it decides what the environment is settled with.
+    cwd_token = COMMAND_CWD_KNOWN.set(True)
+    project_token = COMMAND_PROJECT.set(project)
+    tmpfs_token = SANDBOX_TMPFS.set(tmpfs)
+    hidden_token = SANDBOX_HIDDEN.set(hidden)
+    visible_token = SANDBOX_HOME_VISIBLE.set(visible)
+    post_ro_token = SANDBOX_POST_RO_TMPFS.set(tuple(_post_ro_tmpfs_dirs(list(visible))))
+    try:
+        env_token = SANDBOX_ENV.set(_settled_sandbox_env(extra_env))
+        try:
+            yield
+        finally:
+            SANDBOX_ENV.reset(env_token)
+    finally:
+        SANDBOX_POST_RO_TMPFS.reset(post_ro_token)
+        SANDBOX_HOME_VISIBLE.reset(visible_token)
+        SANDBOX_HIDDEN.reset(hidden_token)
+        SANDBOX_TMPFS.reset(tmpfs_token)
+        COMMAND_PROJECT.reset(project_token)
+        COMMAND_CWD_KNOWN.reset(cwd_token)
+
+
+def _sandbox_visibility(extra_tmpfs: Sequence[Path], extra_ro: Sequence[Path] = (),
+                        ) -> tuple[tuple[Path, ...], tuple[Path, ...], tuple[Path, ...]]:
+    """(the ``sandbox.extra_tmpfs`` directories, laid over before the binds; the language
+    plugins' hidden home paths, laid over after them; the runtime installations under
+    $HOME bound whole, _runtime_home_dirs(), and the configured read-only binds,
+    ``sandbox.extra_ro_paths``, *extra_ro*, that exist), the first two each as written and resolved,
+    as the sandbox hides them at both. The config files bound beside the runtime
+    installations depend on the environment being settled, so they are not here: npm's
+    are judged where they are bound (packagealert.languages.node._npm_home_bind()). A
+    plugin that cannot say what it hides adds nothing here: the command is then refused
+    when the sandbox is built."""
+    try:
+        plugin_hidden = hidden_home_paths()
+    except HiddenPathsError:
+        plugin_hidden = []
+
+    def with_resolved(paths: Sequence[Path]) -> tuple[Path, ...]:
+        out = list(paths)
+        for path in paths:
+            with contextlib.suppress(OSError, RuntimeError):
+                real = path.resolve()
+                if real != path and real not in out:
+                    out.append(real)
+        return tuple(out)
+
+    # bwrap lays a tmpfs only over an extra_tmpfs entry that is a directory and not a symlink.
+    mounted = [p for p in extra_tmpfs if not p.is_symlink() and p.is_dir()]
+    read_only = [*_runtime_home_dirs(), *(p for p in extra_ro if p.exists())]
+    return with_resolved(mounted), with_resolved(plugin_hidden), tuple(dict.fromkeys(read_only))
+
+
+def _command_project(cwd: Path, parsed: ParsedInstall | None) -> Path | None:
+    """The project a parsed command acts on when it is not *cwd*: its moved working or
+    project directory, or its lock-file directory (resolve_invocation_dirs(),
+    resolve_lockfile_dir()). None when it acts on *cwd*, or its directories cannot be
+    resolved (the command is refused later)."""
+    if parsed is None:
+        return None
+    try:
+        work_dir, project_dir = resolve_invocation_dirs(cwd, parsed.working_dir, parsed.project_dir)
+        lockfile_dir = resolve_lockfile_dir(cwd, getattr(parsed, "lockfile_dir", None), project_dir)
+    except (InvalidInvocationDirectory, OSError, RuntimeError):
+        return None
+    for directory in (project_dir, work_dir, lockfile_dir):
+        if directory is not None and directory != cwd:
+            return directory
+    return None
+
+
+def _settled_sandbox_env(extra: list[str]) -> dict[str, str]:
+    """_build_sandbox_env(*extra*), rebuilt until it no longer changes.
+
+    Which variables a language passes can depend on the environment the tool reads its
+    config with (npm's global npmrc moves with $PREFIX, and the variables it refers to
+    are passed), so the sandbox's own environment decides them, and the provenance
+    checks and the command see the same one.
+    """
+    env = _build_sandbox_env(extra)
+    for _ in range(4):
+        token = SANDBOX_ENV.set(env)
+        try:
+            again = _build_sandbox_env(extra)
+        finally:
+            SANDBOX_ENV.reset(token)
+        if again == env:
+            break
+        env = again
+    return env
 
 
 def _build_sandbox_env(extra: list[str]) -> dict[str, str]:

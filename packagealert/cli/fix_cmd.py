@@ -358,22 +358,24 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     unverified_reason: str | None = None
     verified = False
     runner = None
+    from packagealert.sandbox.runner import sandbox_config_context
+
+    def config_context():
+        # Trial and apply commands, and the checks around them, judge npm's config files as
+        # their sandbox reads them: its environment (a project .npmrc's ${VAR}s), the
+        # directories it hides, and the project acted on.
+        return sandbox_config_context([*cfg.sandbox.extra_env, *(settings.env if settings is not None else [])],
+                                      cfg.sandbox.extra_tmpfs, project=lockfile.parent,
+                                      extra_ro=cfg.sandbox.extra_ro_paths)
+
     if plan.planned:
         runner, blocked = _captured_runner(cfg, adapter, lockfile.parent, settings, console, pause)
         if verify:
-            from packagealert.parsers.process_args import SANDBOX_ENV
-            from packagealert.sandbox.runner import _build_sandbox_env
-
-            # Trials judge a project config's ${VAR}s (npm's .npmrc) as their sandbox expands them.
-            token = SANDBOX_ENV.set(_build_sandbox_env(
-                [*cfg.sandbox.extra_env, *(settings.env if settings is not None else [])]))
-            try:
+            with config_context():
                 plan, unverified_reason = await _verify(cfg, adapter, lockfile, plan, allow_cooldown, allowed_major,
                                                         console, settings, settings_error, say=say, runner=runner,
                                                         blocked=blocked, locked_yanks=locked_yanks,
                                                         direct=graph.direct, snap=snap)
-            finally:
-                SANDBOX_ENV.reset(token)
             verified = unverified_reason is None
         else:
             unverified_reason = "--no-verify"
@@ -410,9 +412,10 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     outcome = None
     interrupted: BaseException | None = None
     if apply is not None and fmt == "json":
-        outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection, snap,
-                                            console, pause, osv_failures=osv_failures,
-                                            unverified_reason=unverified_reason, json_output=True)
+        with config_context():
+            outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection, snap,
+                                                console, pause, osv_failures=osv_failures,
+                                                unverified_reason=unverified_reason, json_output=True)
     if fmt == "json":
         print(json.dumps(_plan_json(lockfile, plan, cmds, osv_failures, unverified_reason, cadences,
                                     sync=selection, yank_failures=yank_failures, not_public=not_public,
@@ -422,10 +425,11 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
                     unverified_reason=unverified_reason, cadences=cadences, sync=selection,
                     yank_failures=yank_failures, not_public=not_public)
         if apply is not None:
-            outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection, snap,
-                                                console, pause, osv_failures=osv_failures,
-                                                unverified_reason=unverified_reason, json_output=False,
-                                                on_written=lambda o: _print_written(out, o))
+            with config_context():
+                outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection,
+                                                    snap, console, pause, osv_failures=osv_failures,
+                                                    unverified_reason=unverified_reason, json_output=False,
+                                                    on_written=lambda o: _print_written(out, o))
             _print_apply_end(out, outcome)
     if interrupted is not None:
         # The report is out; stop as interrupted.
