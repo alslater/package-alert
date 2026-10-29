@@ -26,7 +26,7 @@ async def _scan(tmp_path, fmt, *, found=(DJANGO,), failures=0, **kw):
 async def test_scan_json_carries_yanks(tmp_path, capsys):
     await _scan(tmp_path, "json")
     out = json.loads(capsys.readouterr().out)
-    assert out["yanked"] == [DJANGO.as_dict()] and out["yank_failures"] == 0
+    assert out["yanked"] == [DJANGO.as_dict()] and out["yank_failures"] == 0 and out["yank_checked"] is True
     assert out["findings"]  # the advisory is still reported as before
 
 
@@ -50,7 +50,8 @@ async def test_no_yank_skips_the_check(tmp_path, capsys):
     check = await _scan(tmp_path, "json", no_yank=True)
     check.assert_not_awaited()
     out = json.loads(capsys.readouterr().out)
-    assert out["yanked"] == [] and out["yank_failures"] == 0
+    # Not checked, which is not the same as checked and nothing yanked.
+    assert (out["yank_checked"], out["yanked"], out["yank_failures"]) == (False, None, None)
 
 
 async def test_scan_result_carries_yanks_to_plugins(tmp_path):
@@ -84,7 +85,7 @@ async def test_installed_scan_does_not_check_yanks(tmp_path, capsys):
                                 show_details=False, fmt="json", no_risk=True)
     check.assert_not_awaited()
     out = json.loads(capsys.readouterr().out)
-    assert out["yanked"] == [] and out["yank_failures"] == 0 and out["findings"]
+    assert (out["yank_checked"], out["yanked"], out["yank_failures"]) == (False, None, None) and out["findings"]
 
 
 async def test_scan_result_carries_the_remediations_the_json_shows(tmp_path, capsys):

@@ -36,6 +36,8 @@ class ScanRecord:
     # OsvResult.degraded). Without it an empty `findings` list cannot be told
     # apart from a genuinely clean scan when the record is read back.
     osv_failures: int = 0
+    # Packages deliberately not looked up publicly (see ScanResult.not_public).
+    not_public: int = 0
 
 
 def _max_severity(findings: list[dict]) -> str | None:
@@ -135,6 +137,7 @@ async def save_scan_result(
     findings: list[dict],
     sources: list[str],
     osv_failures: int = 0,
+    not_public: int = 0,
 ) -> int:
     if schedule not in _VALID_SCHEDULES:
         raise ValueError(f"schedule must be one of {_VALID_SCHEDULES}, got {schedule!r}")
@@ -144,8 +147,8 @@ async def save_scan_result(
     severity = _max_severity(findings)
     async with db.execute(
         """INSERT INTO scan_results(project_path, scanned_at, schedule, scan_type,
-               findings_json, sources_json, max_severity, finding_count, osv_failures)
-           VALUES(?,?,?,?,?,?,?,?,?)""",
+               findings_json, sources_json, max_severity, finding_count, osv_failures, not_public)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
             project_path,
             now,
@@ -156,6 +159,7 @@ async def save_scan_result(
             severity,
             len(findings),
             osv_failures,
+            not_public,
         ),
     ) as cur:
         row_id = cur.lastrowid
@@ -168,7 +172,7 @@ async def get_scan_result(db: aiosqlite.Connection, record_id: int) -> ScanRecor
     async with db.execute(
         """SELECT id, project_path, scanned_at, schedule, scan_type,
                   findings_json, sources_json, max_severity, finding_count,
-                  osv_failures
+                  osv_failures, not_public
            FROM scan_results WHERE id=?""",
         (record_id,),
     ) as cur:
@@ -186,6 +190,7 @@ async def get_scan_result(db: aiosqlite.Connection, record_id: int) -> ScanRecor
         max_severity=row["max_severity"],
         finding_count=row["finding_count"],
         osv_failures=row["osv_failures"],
+        not_public=row["not_public"],
     )
 
 
@@ -199,14 +204,14 @@ async def list_scan_results(
     if scan_type is not None:
         sql = """SELECT id, project_path, scanned_at, schedule, scan_type,
                         findings_json, sources_json, max_severity, finding_count,
-                  osv_failures
+                  osv_failures, not_public
                  FROM scan_results WHERE project_path=? AND scan_type=?
                  ORDER BY scanned_at DESC LIMIT ?"""
         params = (project_path, scan_type, limit)
     else:
         sql = """SELECT id, project_path, scanned_at, schedule, scan_type,
                         findings_json, sources_json, max_severity, finding_count,
-                  osv_failures
+                  osv_failures, not_public
                  FROM scan_results WHERE project_path=?
                  ORDER BY scanned_at DESC LIMIT ?"""
         params = (project_path, limit)
@@ -224,6 +229,7 @@ async def list_scan_results(
             max_severity=r["max_severity"],
             finding_count=r["finding_count"],
             osv_failures=r["osv_failures"],
+            not_public=r["not_public"],
         )
         for r in rows
     ]
@@ -238,7 +244,7 @@ async def list_all_scan_results(
     async with db.execute(
         """SELECT id, project_path, scanned_at, schedule, scan_type,
                   findings_json, sources_json, max_severity, finding_count,
-                  osv_failures
+                  osv_failures, not_public
            FROM scan_results
            ORDER BY scanned_at DESC LIMIT ?""",
         (limit,),
@@ -256,6 +262,7 @@ async def list_all_scan_results(
             max_severity=r["max_severity"],
             finding_count=r["finding_count"],
             osv_failures=r["osv_failures"],
+            not_public=r["not_public"],
         )
         for r in rows
     ]

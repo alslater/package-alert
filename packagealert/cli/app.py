@@ -1424,7 +1424,8 @@ async def _run_scan_project(
     yank_failures = 0
     # Locked versions only: an installed package records no index, so a private
     # one could be matched to an unrelated public project of the same name.
-    if not no_yank and not installed:
+    yank_checked = not no_yank and not installed
+    if yank_checked:
         from packagealert.yanks import check_yanks
         try:
             found, yank_failures = await check_yanks(db, to_query)
@@ -1462,6 +1463,8 @@ async def _run_scan_project(
         osv_failures=osv_failures,
         yanked=yanked,
         yank_failures=yank_failures,
+        yank_checked=yank_checked,
+        not_public=not_public,
         remediations=remediations,
     )
     await plugin_registry.fire_on_scan_complete(scan)
@@ -1488,9 +1491,12 @@ async def _run_scan_project(
             # genuinely clean project. See OsvResult.degraded.
             "osv_failures": osv_failures,
             # Locked versions their registry has yanked (a warning, not a finding),
-            # and how many could not be checked. See packagealert.yanks.
-            "yanked": yanked,
-            "yank_failures": yank_failures,
+            # and how many could not be checked. See packagealert.yanks. null for both
+            # when the check did not run (--no-yank, --scan-installed): "nothing yanked"
+            # would claim a check that never ran. The plugin payload follows the same rule.
+            "yank_checked": yank_checked,
+            "yanked": yanked if yank_checked else None,
+            "yank_failures": yank_failures if yank_checked else None,
             # Locked packages from a private registry, git or a local path, not looked up publicly.
             "not_public": not_public,
         }, indent=2))
@@ -1510,6 +1516,7 @@ async def _run_scan_project(
             cooldown_days=cooldown_days,
             yanked=yanked,
             yank_failures=yank_failures,
+            not_public=not_public,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -1577,13 +1584,7 @@ async def _run_scan_project(
             f"[yellow]⚠ Risk scoring unavailable for {risk_failures} package(s)[/yellow]"
         )
 
-    if yanked:
-        console.print(f"\n[bold]Yanked versions ({len(yanked)}):[/bold]")
-        for y in yanked:
-            reason = f" — {y['reason']}" if y["reason"] else ""
-            console.print(f"  {y['package']} {y['version']}{reason}", style="yellow", markup=False, highlight=False)
-    if yank_failures:
-        console.print(f"[yellow]⚠ Yank status unavailable for {yank_failures} package(s)[/yellow]")
+    _print_yank_notes(console, yanked, yank_failures)
 
     if osv_failures:
         console.print(
@@ -1602,9 +1603,27 @@ async def _run_scan_project(
     console.print(f"\nScan complete: [bold red]{malicious} malicious[/bold red], [bold yellow]{vulnerable} vulnerable[/bold yellow]{in_packages}, "
                   f"[yellow]{len(result.unpinned)} unpinned[/yellow], [cyan]{len(risks)} at risk[/cyan] "
                   f"({checked} packages checked{unchecked_note})")
+    _print_not_public_note(console, not_public)
+
+
+def _print_not_public_note(console, not_public: int) -> None:
+    """The note that *not_public* packages were deliberately not looked up publicly."""
     if not_public:
         console.print(f"[dim]{not_public} locked package(s) come from a private registry, git or a local path and "
                       f"were not looked up in public advisory databases.[/dim]")
+
+
+def _print_yank_notes(console, yanked: list, yank_failures: int) -> None:
+    """Locked versions their registry has yanked, and how many could not be checked."""
+    if yanked:
+        console.print(f"\n[bold]Yanked versions ({len(yanked)}):[/bold]")
+        for y in yanked:
+            if isinstance(y, dict):  # read back from a server too
+                reason = f" — {y['reason']}" if y.get("reason") else ""
+                console.print(f"  {y.get('package', '?')} {y.get('version', '?')}{reason}", style="yellow",
+                              markup=False, highlight=False)
+    if yank_failures:
+        console.print(f"[yellow]⚠ Yank status unavailable for {yank_failures} package(s)[/yellow]")
 
 
 def open_html_in_browser(html: str) -> None:
@@ -1621,7 +1640,7 @@ def open_html_in_browser(html: str) -> None:
     make_console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0) -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0, not_public: int = 0) -> str:
     """Render a self-contained HTML report.
 
     *yanked* lists locked versions their registry has yanked (a warning, not a
@@ -1768,6 +1787,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   {f'<span class="malicious">{yank_failures} yank-unchecked</span>' if yank_failures else ""}
 </div>
 {f'<div class="warn">&#9888; OSV lookup unavailable for {osv_failures} package(s) &mdash; these were NOT checked for advisories, so this report is not a clean result.</div>' if osv_failures else ""}
+{f'<p>{not_public} locked package(s) come from a private registry, git or a local path and were not looked up in public advisory databases.</p>' if not_public else ""}
 {"<h2>Unpinned dependencies</h2><ul>" + unpinned_rows + "</ul>" if unpinned else ""}
 <table>
   <thead><tr><th></th><th>Package</th><th>Ecosystem</th><th>Version</th><th>Advisory</th><th>Summary</th><th>Fix</th></tr></thead>
@@ -2484,9 +2504,9 @@ def _findings_cell(record) -> str:
     else:
         count = record.finding_count
     unchecked = getattr(record, "osv_failures", 0) or 0
-    if unchecked:
-        return f"{count} [yellow](+{unchecked} unchecked)[/yellow]"
-    return str(count)
+    private = getattr(record, "not_public", 0) or 0
+    cell = f"{count} [yellow](+{unchecked} unchecked)[/yellow]" if unchecked else str(count)
+    return f"{cell} [dim](+{private} not public)[/dim]" if private else cell
 
 
 @scans_app.command("listall")
@@ -2586,6 +2606,7 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
     # Records written before osv_failures existed report 0, so they render
     # exactly as they did before — see OsvResult.degraded.
     osv_failures = getattr(record, "osv_failures", 0) or 0
+    not_public = getattr(record, "not_public", 0) or 0
     root_str = record.project_path
     sources = record.sources
     date_str = datetime.datetime.fromtimestamp(record.scanned_at).strftime("%Y-%m-%d %H:%M:%S")  # local time for display
@@ -2606,13 +2627,14 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
             # A degraded lookup may be missing advisories, so "findings": []
             # alone cannot be told apart from a genuinely clean scan.
             "osv_failures": osv_failures,
+            "not_public": not_public,
         }, indent=2))
         return
 
     if fmt in ("html", "browser"):
         html = _render_html(
             Path(root_str), sources, [], findings,
-            osv_failures=osv_failures, scanned_at=date_str,
+            osv_failures=osv_failures, scanned_at=date_str, not_public=not_public,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -2632,6 +2654,7 @@ async def _scans_show(cfg, scan_id: int, fmt: str, show_details: bool) -> None:
             f"[yellow]⚠ OSV lookup unavailable for {osv_failures} package(s) — "
             f"these were NOT checked for advisories[/yellow]"
         )
+    _print_not_public_note(console, not_public)
 
     if not findings:
         if not osv_failures:

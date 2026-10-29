@@ -80,7 +80,7 @@ Called for every alert the daemon fires — both OSV-confirmed advisories and he
 
 #### `async on_scan_complete(scan: ScanResult) -> None`
 
-Called after every scan completes — both scheduled daemon scans and interactive `pa scan-project` / `pa scan-installed` runs — regardless of whether findings were found. `scan` fields: `project_path`, `scan_type`, `finding_count`, `findings`, `sources`, `scanned_at`.
+Called after every scan completes — both scheduled daemon scans and interactive `pa scan-project` / `pa scan-installed` runs — regardless of whether findings were found. `scan` fields: `project_path`, `scan_type`, `finding_count`, `findings`, `sources`, `scanned_at`, `risks`, `remediations`, and the counts that say how much of the scan was really checked: `risk_failures` and `osv_failures` (packages whose risk score or OSV lookup failed), `not_public` (packages from a private registry, git or a local path, deliberately not looked up publicly), `yanked` and `yank_failures` (locked versions their registry has yanked, and how many could not be checked), with `yank_checked` saying whether the yank check ran at all (it does not for scheduled scans, `--scan-installed` or `--no-yank`; pa-central then receives `null` for both). An empty `findings` is a clean result only when those counts are 0. Local scan history (`pa scans show`) keeps `not_public` and `osv_failures` but not yank results, which only an interactive `scan-project` produces.
 
 Note: when `pa-central` is enabled, scan results are **not** written to local SQLite. The plugin receives the scan and is responsible for any persistence needed.
 

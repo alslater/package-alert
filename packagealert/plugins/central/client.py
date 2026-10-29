@@ -23,6 +23,12 @@ class ScanPayload(TypedDict):
     risks: list[dict]
     risk_failures: int
     osv_failures: int
+    # Packages deliberately not looked up publicly, and the locked versions their registry
+    # has yanked with how many could not be checked (see ScanResult).
+    not_public: int
+    yank_checked: bool
+    yanked: list[dict] | None
+    yank_failures: int | None
     sources: list[str]
     remediations: list[dict]
     scanned_at: str
@@ -188,6 +194,14 @@ def build_scan_payload(hostname: str, scan: ScanResult) -> ScanPayload:
         "risks": scan.risks,
         "risk_failures": scan.risk_failures,
         "osv_failures": scan.osv_failures,
+        # Without these a scan of private packages, or one whose yank check failed, looks
+        # fully checked to the fleet. A pa-central that predates them ignores them. A scan
+        # that did not run the yank check (scheduled, --scan-installed, --no-yank) sends null
+        # for its results, as "nothing yanked" would claim a check that never ran.
+        "not_public": scan.not_public,
+        "yank_checked": scan.yank_checked,
+        "yanked": scan.yanked if scan.yank_checked else None,
+        "yank_failures": scan.yank_failures if scan.yank_checked else None,
         "sources": scan.sources,
         # The scan's own upgrade advice (with the live ages a scan-project looked
         # up), else derived from its findings for a ScanResult built without it.

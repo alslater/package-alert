@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS scan_results (
     sources_json    TEXT NOT NULL,
     max_severity    TEXT,
     finding_count   INTEGER NOT NULL DEFAULT 0,
-    osv_failures    INTEGER NOT NULL DEFAULT 0
+    osv_failures    INTEGER NOT NULL DEFAULT 0,
+    not_public      INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_scan_results_project
     ON scan_results(project_path, scanned_at DESC);
@@ -403,6 +404,12 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             "ALTER TABLE scan_results ADD COLUMN osv_failures INTEGER NOT NULL DEFAULT 0"
         )
         log.debug("Migrated scan_results table: added osv_failures column")
+    if "not_public" not in columns:
+        # 0 for existing rows: the count was not kept, the same reading they had before.
+        await conn.execute(
+            "ALTER TABLE scan_results ADD COLUMN not_public INTEGER NOT NULL DEFAULT 0"
+        )
+        log.debug("Migrated scan_results table: added not_public column")
 
     async with conn.execute("PRAGMA table_info(top_packages_cache)") as cur:
         columns = {row["name"] for row in await cur.fetchall()}

@@ -98,7 +98,7 @@ class TestScheduledScannerHistory:
 
             with patch.object(
                 scanner, "_scan_project",
-                new=AsyncMock(return_value=([], ["uv.lock"], 67)),
+                new=AsyncMock(return_value=([], ["uv.lock"], 67, 0)),
             ):
                 await scanner.run_due_scans()
 
@@ -255,7 +255,7 @@ class TestScheduledScanner:
              "fixed_versions": ["2.32.0"], "url": "https://osv.dev/CVE-2025-1"}
         ]
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=(mock_findings, ["requirements.txt"], 0))):
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=(mock_findings, ["requirements.txt"], 0, 0))):
             await scanner.run_due_scans()
 
         results = await list_scan_results(db, str(project_dir), scan_type="project")
@@ -282,8 +282,8 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))) as mock_p, \
-             patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0))) as mock_i:
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0, 0))) as mock_p, \
+             patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0, 0))) as mock_i:
             await scanner.run_due_scans()
             mock_p.assert_called_once()
             mock_i.assert_called_once()
@@ -309,8 +309,8 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0))) as mock_installed, \
-             patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], [], 0))) as mock_project:
+        with patch.object(scanner, "_scan_installed", new=AsyncMock(return_value=([], ["pip list"], 0, 0))) as mock_installed, \
+             patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], [], 0, 0))) as mock_project:
             await scanner.run_due_scans()
             mock_installed.assert_called_once()
             mock_project.assert_not_called()
@@ -341,7 +341,7 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))):
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0, 0))):
             await scanner.run_due_scans()
 
         results = await list_scan_results(db, str(project_dir), scan_type="project")
@@ -375,7 +375,7 @@ class TestScheduledScanner:
         cfg = AppConfig()
         scanner = ScheduledScanner(cfg, db)
 
-        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0))), \
+        with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([], ["requirements.txt"], 0, 0))), \
              patch("packagealert.plugins.registry.plugin_registry.fire_on_scan_complete", new=AsyncMock()), \
              patch("packagealert.plugins.registry.plugin_registry.has_scan_store", return_value=True):
             await scanner.run_due_scans()
@@ -472,7 +472,7 @@ async def test_scheduled_scan_result_carries_remediations(tmp_path):
     await add_project(db, path=str(project_dir), schedule="daily", scan_type="project")
     scanner = ScheduledScanner(AppConfig(), db)
     fired = AsyncMock()
-    with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([finding], ["uv.lock"], 0))), \
+    with patch.object(scanner, "_scan_project", new=AsyncMock(return_value=([finding], ["uv.lock"], 0, 0))), \
          patch("packagealert.plugins.registry.plugin_registry.fire_on_scan_complete", new=fired), \
          patch("packagealert.plugins.registry.plugin_registry.has_scan_store", return_value=True):
         await scanner.run_due_scans()

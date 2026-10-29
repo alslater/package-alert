@@ -159,6 +159,13 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     # genuinely clean project. A server that predates this field simply
     # reports 0, which reads exactly as it did before.
     osv_failures = record.get("osv_failures") or 0
+    # The same for packages not looked up publicly, and for yanks (a server that predates
+    # these fields reports none).
+    not_public = record.get("not_public") or 0
+    # null when the scan did not run the yank check (yank_checked false).
+    yanked = [y for y in (record.get("yanked") or []) if isinstance(y, dict)]
+    yank_failures = record.get("yank_failures") or 0
+    yank_checked = bool(record.get("yank_checked"))
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
@@ -188,6 +195,10 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "risks": risks,
             "risk_failures": risk_failures,
             "osv_failures": osv_failures,
+            "not_public": not_public,
+            "yank_checked": yank_checked,
+            "yanked": yanked if yank_checked else None,
+            "yank_failures": yank_failures if yank_checked else None,
         }, indent=2))
         return
 
@@ -203,6 +214,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             risk_total=len(risks), risk_failures=risk_failures,
             osv_failures=osv_failures,
             scanned_at=date_str,
+            yanked=yanked, yank_failures=yank_failures, not_public=not_public,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -212,8 +224,12 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
 
     console.print(f"\nScan [bold]#{escape(str(scan_id))}[/bold] — {escape(project_path)}")
     console.print(f"Run at: {date_str}  |  Type: {escape(scan_type)}\n")
+    from packagealert.cli.app import _print_not_public_note, _print_yank_notes
 
-    if not findings and not risks and not risk_failures and not osv_failures:
+    _print_not_public_note(console, not_public)
+    _print_yank_notes(console, yanked, yank_failures)
+
+    if not findings and not risks and not risk_failures and not osv_failures and not yanked and not yank_failures:
         console.print("[green]No findings — all clear.[/green]")
         return
 

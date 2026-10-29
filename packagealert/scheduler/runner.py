@@ -76,11 +76,11 @@ class ScheduledScanner:
             log.info("Running scheduled scan for %s (%s)", project.path, project.schedule)
             try:
                 if project.scan_type == "installed":
-                    findings, sources, osv_failures = await self._scan_installed(
+                    findings, sources, osv_failures, not_public = await self._scan_installed(
                         project_path
                     )
                 else:
-                    findings, sources, osv_failures = await self._scan_project(
+                    findings, sources, osv_failures, not_public = await self._scan_project(
                         project_path
                     )
             except Exception:
@@ -99,6 +99,7 @@ class ScheduledScanner:
                 sources=sources,
                 scanned_at=now_utc,
                 osv_failures=osv_failures,
+                not_public=not_public,
                 # The recommended versions' ages are not looked up here, so those
                 # fields are left unknown.
                 remediations=remediations_json(findings),
@@ -113,6 +114,7 @@ class ScheduledScanner:
                     findings=findings,
                     sources=sources,
                     osv_failures=osv_failures,
+                    not_public=not_public,
                 )
             await plugin_registry.fire_on_scan_complete(scan)
             await update_last_scanned(self._db, project.path, project.scan_type, scanned_at)
@@ -204,36 +206,36 @@ class ScheduledScanner:
 
         return findings, osv_failures
 
+    async def _scan_pinned(self, result) -> tuple[list[dict], list[str], int, int]:
+        """(findings, sources, osv_failures, not_public) for a scan's pinned (versioned)
+        packages, which are what scan-project looks up without --unpinned. Only those from the
+        public registry are looked up there (a private one is not the public package of that
+        name); the rest are counted, as scan-project counts them."""
+        public = [p for p in result.pinned if getattr(p, "from_public_registry", True) is not False]
+        findings, osv_failures = await self._run_osv_queries(
+            [(p.ecosystem, p.name, p.version) for p in public if p.version])
+        return findings, result.sources, osv_failures, len(result.pinned) - len(public)
+
     async def _scan_project(
         self, project_path: Path
-    ) -> tuple[list[dict], list[str], int]:
-        """Run a full project scan and return (findings, sources, osv_failures)."""
+    ) -> tuple[list[dict], list[str], int, int]:
+        """Run a full project scan and return (findings, sources, osv_failures, not_public)."""
         from packagealert.parsers.lockfiles import scan_project as detect_project
 
         result = detect_project(project_path)
         if not result.sources:
-            return [], [], 0
-        # Only packages from the public registry are looked up there (a private one is not
-        # the public package of that name).
-        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned
-                   if p.version and getattr(p, "from_public_registry", True) is not False]
-        findings, osv_failures = await self._run_osv_queries(queries)
-        return findings, result.sources, osv_failures
+            return [], [], 0, 0
+        return await self._scan_pinned(result)
 
     async def _scan_installed(
         self, project_path: Path
-    ) -> tuple[list[dict], list[str], int]:
+    ) -> tuple[list[dict], list[str], int, int]:
         """Enumerate actually-installed packages and scan them against OSV.
 
-        Returns (findings, sources, osv_failures).
+        Returns (findings, sources, osv_failures, not_public).
         """
         from packagealert.parsers.lockfiles import scan_installed
         result = scan_installed(project_path)
         if not result.sources:
-            return [], [], 0
-        # Only packages from the public registry are looked up there (a private one is not
-        # the public package of that name).
-        queries = [(p.ecosystem, p.name, p.version) for p in result.pinned
-                   if p.version and getattr(p, "from_public_registry", True) is not False]
-        findings, osv_failures = await self._run_osv_queries(queries)
-        return findings, result.sources, osv_failures
+            return [], [], 0, 0
+        return await self._scan_pinned(result)
