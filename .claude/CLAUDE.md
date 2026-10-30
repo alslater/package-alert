@@ -5,7 +5,7 @@
 - When running tests, prefer `.venv/bin/pytest` or `.venv/bin/python -m pytest`.
 - Do not use the system `python`, `pip`, or `pytest` for this repository when the project virtualenv is available.
 - After any Python file changes, run `.venv/bin/python -m ruff check .` and `.venv/bin/pyright` and fix all issues found before considering the task complete.
-- Do not use any git write commands in this repository. Do not run commands such as `git add`, `git commit`, `git merge`, `git rebase`, `git cherry-pick`, `git tag`, `git push`, `git stash`, `git reset`, or any other command that mutates git state. The user will handle all git write operations.
+- Do not commit or push (`git add`, `git commit`, `git push`, `git tag`, and history-changing commands such as `git merge`, `git rebase`, `git cherry-pick`, `git reset` to another commit) unless the user says so. Putting the working tree back to what is already committed is fine: `git stash` / `git stash pop`, or `git checkout -- <file>` / `git restore <file>` to undo an experiment (e.g. a mutation test).
 
 ## Branch names
 
