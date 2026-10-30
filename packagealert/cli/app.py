@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from collections.abc import Collection
+from dataclasses import dataclass
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
 from typing import cast
@@ -992,6 +993,42 @@ def _is_low_signal_risk(row: dict) -> bool:
     )
 
 
+def _print_risk_rows(console, risks: list[dict], *, show_details: bool, indent: str = "") -> None:
+    """Print risk rows as scan-project's text output does: one line per package carrying the
+    highest-scoring signal's reason, the full breakdown with --details, low-signal rows
+    hidden (and counted) without it."""
+    if not risks:
+        return
+    shown = _visible_risks(risks, show_details=show_details)
+    suppressed = len(risks) - len(shown)
+    if shown:
+        console.print(f"\n{indent}[bold]Risk signals ({len(shown)}):[/bold]")
+        for r in shown:
+            colour = _RISK_LEVEL_COLOUR.get(r["level"], "cyan")
+            version = r["version"] or "unpinned"
+            console.print(
+                f"{indent}[RISK {r['score']}] {r['level']:<8} {r['package']}@{version}"
+                f"{_primary_reason(r)}",
+                style=colour,
+                markup=False,
+                highlight=False,
+            )
+            # The breakdown adds each signal's name and score — the attribution behind the
+            # composite total — which the one-clause summary does not carry.
+            if show_details:
+                for s in r["signals"]:
+                    console.print(
+                        f"{indent}    - {s['name']} ({s['score']}): {s['reason']}",
+                        style="dim",
+                        markup=False,
+                        highlight=False,
+                    )
+    if suppressed:
+        console.print(
+            f"[dim]{indent}  ({suppressed} low-signal row(s) hidden — use --details to show)[/dim]"
+        )
+
+
 def _visible_risks(risks: list[dict], *, show_details: bool) -> list[dict]:
     """Filter risk rows for display. Shared by the text and HTML renderers.
 
@@ -1031,7 +1068,7 @@ def _primary_reason(row: dict) -> str:
     return f" — {best['reason'].strip()}"
 
 
-def _installed_dir_resolver(root: Path):
+def _installed_dir_resolver(root: Path, site_packages: list[Path] | None = None):
     """Build (path_resolver, manifest_warning_resolver) for score_packages, for a scan root.
 
     *path_resolver* is a (ecosystem, name, version) -> list[list[Path]] resolver.
@@ -1070,7 +1107,9 @@ def _installed_dir_resolver(root: Path):
     # list here silently dropped source-code signals for env/.env. All candidates
     # are kept: detection aggregates across multiple venvs, so stopping at the
     # first would miss a package shadowed by an earlier empty environment.
-    site_packages_dirs = all_installed_site_packages(root)
+    # A caller that already knows the environment (a pipx app or uv tool, `pa scan-tools`)
+    # names its site-packages; otherwise the project's own are discovered.
+    site_packages_dirs = all_installed_site_packages(root) if site_packages is None else site_packages
 
     # `[None]` when no venv exists, so the loop still runs once for ecosystems that
     # ignore site_packages_dir (Node derives node_modules from project_path).
@@ -1098,9 +1137,9 @@ def _installed_dir_resolver(root: Path):
         # since they are one distribution's own files, not competing candidates.
         groups: list[list[Path]] = []
         warning: str | None = None
-        for site_packages in candidates:
+        for env_site_packages in candidates:
             resolved, env_warning = _resolve_installed_dir(
-                ecosystem, name, root, site_packages,
+                ecosystem, name, root, env_site_packages,
                 project_path=root, version=version,
             )
             if resolved and _resolves_copies(ecosystem):
@@ -1131,6 +1170,7 @@ async def _risk_pass(
     root: Path | None = None,
     installed: bool = False,
     local_only: Collection[tuple[str, str, str | None]] = (),
+    site_packages: list[Path] | None = None,
 ) -> tuple[list[dict], int]:
     """Score *to_query* with the heuristic risk engine. Packages whose
     (ecosystem, name, version) is in *local_only* are scored on their source alone,
@@ -1188,7 +1228,7 @@ async def _risk_pass(
             # resolver and let the source-code heuristics contribute. Lock-file
             # mode has nothing on disk, so both resolvers stay None.
             resolver, manifest_warning_resolver = (
-                _installed_dir_resolver(root)
+                _installed_dir_resolver(root, site_packages)
                 if installed and root is not None
                 else (None, None)
             )
@@ -1288,6 +1328,26 @@ def scan_project(
     asyncio.run(_run_scan_project(cfg, root, scan_unpinned, scan_installed, details, fmt, requirements=requirements, prod_only=prod_only, no_risk=no_risk, no_yank=no_yank))
 
 
+@app.command("scan-tools")
+def scan_tools(
+    pipx: bool = typer.Option(False, "--pipx", help="Scan pipx apps."),
+    uv: bool = typer.Option(False, "--uv", help="Scan uv tool environments."),
+    details: bool = typer.Option(False, "--details", "-d", help="Show full advisory details."),
+    no_risk: bool = typer.Option(False, "--no-risk", help="Skip heuristic risk scoring (typosquat, popularity). Scoring is on by default."),
+    fmt: str = typer.Option("text", "--format", "-f", help="Output format: text, json, html, browser."),
+    config: Path | None = _cfg_option,
+):
+    """Scan pipx apps and uv tool environments for malicious or vulnerable packages (both, unless --pipx or --uv)."""
+    if fmt not in ("text", "json", "html", "browser"):
+        console.print("[red]--format must be one of: text, json, html, browser[/red]")
+        raise typer.Exit(1)
+    from packagealert.cli.scan_tools import run_scan_tools
+
+    managers = tuple(m for m, on in (("pipx", pipx), ("uv", uv)) if on) or ("pipx", "uv")
+    cfg, _ = _load(config)
+    asyncio.run(run_scan_tools(cfg, managers, fmt, details, no_risk))
+
+
 async def _query_osv_findings(cfg, db, packages: list) -> tuple[list[dict], int]:
     """Look *packages* up in OSV and return (findings, osv_failures).
 
@@ -1353,6 +1413,50 @@ async def _query_osv_findings(cfg, db, packages: list) -> tuple[list[dict], int]
     return findings, osv_failures
 
 
+@dataclass
+class _Assessment:
+    """What looking packages up found: advisories (OSV), risk scores, and the upgrade advice."""
+
+    findings: list[dict]
+    osv_failures: int
+    risks: list[dict]
+    risk_failures: int
+    ages: dict
+    remediations: list[dict]
+
+
+async def _assess_packages(
+    cfg, db, to_query: list, *, no_risk: bool, root: Path | None, installed: bool,
+    site_packages: list[Path] | None = None,
+) -> _Assessment:
+    """Look *to_query* up as every scan does (scan-project, scan-tools).
+
+    A package from a private registry, git or a local path is not the public one of that name:
+    its name is not sent to OSV or the risk lookups, nor judged by the public package's
+    advisories. An installed package's source is on disk, so a non-public one is still scored
+    on that source alone (*installed*, with *root* and *site_packages* locating it); a locked
+    one has nothing to score without its name.
+    """
+    public = [p for p in to_query if getattr(p, "from_public_registry", True) is not False]
+    findings, osv_failures = await _query_osv_findings(cfg, db, public)
+    risks, risk_failures = await _risk_pass(
+        cfg, db, to_query if installed else public, skip=no_risk, root=root, installed=installed,
+        local_only=[(p.ecosystem.lower(), p.name, p.version) for p in to_query
+                    if installed and getattr(p, "from_public_registry", True) is False],
+        site_packages=site_packages,
+    )
+    from packagealert.osv.remediation import group_findings
+    # Decoration only: a failed lookup must not cost the scan its results, and must not skip
+    # the caller's db.close(), whose worker thread otherwise keeps the process alive.
+    try:
+        ages = await _recommendation_ages(db, group_findings(findings)) if findings else {}
+    except Exception:
+        log.warning("Could not check recommended versions against the cooldown period", exc_info=True)
+        ages = {}
+    remediations = _remediations_json(findings, ages, cfg.sandbox.cooldown.period_days)
+    return _Assessment(findings, osv_failures, risks, risk_failures, ages, remediations)
+
+
 async def _run_scan_project(
     cfg, root: Path, scan_unpinned: bool, installed: bool, show_details: bool, fmt: str,
     requirements: Path | None = None,
@@ -1410,15 +1514,9 @@ async def _run_scan_project(
     not_public = len(to_query) - len(public)
 
     db = await open_db(enabled_plugins=set(cfg.plugins.enabled))
-    findings, osv_failures = await _query_osv_findings(cfg, db, public)
-
-    # An installed package's source is on disk, so a non-public one is still scored
-    # on that source alone; a locked one has nothing to score without its name.
-    risks, risk_failures = await _risk_pass(
-        cfg, db, to_query if installed else public, skip=no_risk, root=root, installed=installed,
-        local_only=[(p.ecosystem.lower(), p.name, p.version) for p in to_query
-                    if installed and getattr(p, "from_public_registry", True) is False],
-    )
+    assessment = await _assess_packages(cfg, db, to_query, no_risk=no_risk, root=root, installed=installed)
+    findings, osv_failures = assessment.findings, assessment.osv_failures
+    risks, risk_failures = assessment.risks, assessment.risk_failures
 
     yanked: list = []
     yank_failures = 0
@@ -1434,21 +1532,12 @@ async def _run_scan_project(
             log.warning("Yank check failed", exc_info=True)
             yank_failures = len(to_query)
 
-    from packagealert.osv.remediation import group_findings
     cooldown_days = cfg.sandbox.cooldown.period_days
-    # Decoration only: a failed lookup must not cost the scan its results, and
-    # must not skip db.close(), whose worker thread otherwise keeps the process alive.
-    try:
-        ages = await _recommendation_ages(db, group_findings(findings)) if findings else {}
-    except Exception:
-        log.warning("Could not check recommended versions against the cooldown period", exc_info=True)
-        ages = {}
+    ages, remediations = assessment.ages, assessment.remediations
 
     await db.close()
 
     from datetime import datetime
-
-    remediations = _remediations_json(findings, ages, cooldown_days)
 
     from packagealert.models.scans import ScanResult
     scan = ScanResult(
@@ -1546,38 +1635,7 @@ async def _run_scan_project(
     )
     malicious, vulnerable, vulnerable_packages = _count_advisories(findings)
 
-    if risks:
-        shown = _visible_risks(risks, show_details=show_details)
-        suppressed = len(risks) - len(shown)
-        if shown:
-            console.print(f"\n[bold]Risk signals ({len(shown)}):[/bold]")
-            for r in shown:
-                colour = _RISK_LEVEL_COLOUR.get(r["level"], "cyan")
-                version = r["version"] or "unpinned"
-                # Default is one line per package, carrying the highest-scoring
-                # signal's reason; --details expands the full breakdown below it.
-                console.print(
-                    f"[RISK {r['score']}] {r['level']:<8} {r['package']}@{version}"
-                    f"{_primary_reason(r)}",
-                    style=colour,
-                    markup=False,
-                    highlight=False,
-                )
-                # The breakdown adds each signal's name and score — the
-                # attribution behind the composite total — which the one-clause
-                # summary above does not carry, even for a single-signal row.
-                if show_details:
-                    for s in r["signals"]:
-                        console.print(
-                            f"    - {s['name']} ({s['score']}): {s['reason']}",
-                            style="dim",
-                            markup=False,
-                            highlight=False,
-                        )
-        if suppressed:
-            console.print(
-                f"[dim]  ({suppressed} low-signal row(s) hidden — use --details to show)[/dim]"
-            )
+    _print_risk_rows(console, risks, show_details=show_details)
 
     if risk_failures:
         console.print(
@@ -1640,7 +1698,7 @@ def open_html_in_browser(html: str) -> None:
     make_console().print(f"[dim]Report opened in browser: {tmp_path}[/dim]")
 
 
-def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0, not_public: int = 0) -> str:
+def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, risks: list | None = None, risk_total: int | None = None, risk_failures: int = 0, osv_failures: int = 0, scanned_at: str = "", ages: dict | None = None, cooldown_days: int | None = None, yanked: list | None = None, yank_failures: int = 0, not_public: int = 0, unchecked: list[str] | None = None) -> str:
     """Render a self-contained HTML report.
 
     *yanked* lists locked versions their registry has yanked (a warning, not a
@@ -1677,13 +1735,20 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
     from packagealert.osv.remediation import group_findings
 
     rows = ""
-    for group in group_findings(findings):
+    # Findings that name their source (a scan-tools tool) are grouped within it, so two tools
+    # sharing a vulnerable dependency stay two rows, each saying which tool to fix.
+    by_source: dict[str, list[dict]] = {}
+    for f in findings:
+        by_source.setdefault(str(f.get("source") or ""), []).append(f)
+    source_groups = [(source, group) for source, items in by_source.items() for group in group_findings(items)]
+    for source, group in source_groups:
         advice, _ = _recommendation_text(group)
         note = _cooldown_note(group, ages, cooldown_days)
         note_html = f' <span class="cooldown">&#9203; {escape(note)}</span>' if note else ""
+        where = f"{escape(source)}: " if source else ""
         rows += f"""
         <tr class="pkg">
-          <td colspan="7"><strong>{escape(group.package)}@{escape(group.version or 'unpinned')}</strong>
+          <td colspan="7">{where}<strong>{escape(group.package)}@{escape(group.version or 'unpinned')}</strong>
             &mdash; {escape(advice)}{note_html}</td>
         </tr>"""
         unfixed = _open_advisory_ids(group)
@@ -1717,7 +1782,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
         risk_rows += f"""
         <tr>
           <td><span style="background:{bg};color:#fff;padding:2px 6px;border-radius:3px;font-size:0.8em;font-weight:bold">{escape(str(r['score']))}</span></td>
-          <td><strong>{escape(r['package'])}</strong></td>
+          <td>{escape(r['source'] + ': ') if r.get('source') else ''}<strong>{escape(r['package'])}</strong></td>
           <td>{escape(r['ecosystem'])}</td>
           <td>{escape(r['version'] or 'unpinned')}</td>
           <td>{escape(r['level'])}</td>
@@ -1787,6 +1852,7 @@ def _render_html(root: Path, sources: list, unpinned: list, findings: list, *, r
   {f'<span class="malicious">{yank_failures} yank-unchecked</span>' if yank_failures else ""}
 </div>
 {f'<div class="warn">&#9888; OSV lookup unavailable for {osv_failures} package(s) &mdash; these were NOT checked for advisories, so this report is not a clean result.</div>' if osv_failures else ""}
+{f'<div class="warn">&#9888; Not checked, so this report is not a clean result: {escape(", ".join(unchecked))}</div>' if unchecked else ""}
 {f'<p>{not_public} locked package(s) come from a private registry, git or a local path and were not looked up in public advisory databases.</p>' if not_public else ""}
 {"<h2>Unpinned dependencies</h2><ul>" + unpinned_rows + "</ul>" if unpinned else ""}
 <table>

@@ -141,6 +141,17 @@ def _render_pending_outbox(entries: list[OutboxEntry]) -> None:
     make_console().print(table)
 
 
+def _by_source(findings: list) -> list[tuple[str | None, list[dict]]]:
+    """*findings* grouped by their `source` (a tools scan's tool), in order of appearance;
+    one group with source None when they carry none."""
+    groups: dict[str | None, list[dict]] = {}
+    for f in findings:
+        if isinstance(f, dict):
+            source = f.get("source")
+            groups.setdefault(source if isinstance(source, str) else None, []).append(f)
+    return list(groups.items()) or [(None, [])]
+
+
 def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     import json as jsonlib
     from pathlib import Path
@@ -166,6 +177,8 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
     yanked = [y for y in (record.get("yanked") or []) if isinstance(y, dict)]
     yank_failures = record.get("yank_failures") or 0
     yank_checked = bool(record.get("yank_checked"))
+    # A tools scan's directories whose packages were not checked (absent from other scans).
+    unchecked = [str(d) for d in (record.get("unchecked") or [])]
     sources = record.get("sources") or []
     scanned_at = str(record.get("scanned_at") or "")
     try:
@@ -188,10 +201,13 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "sources": sources,
             "findings": findings,
             # Recomputed from the retrieved findings, as the live scan computes
-            # them; the age/cooldown fields are null (live-scan only).
-            "remediations": _remediations_json(
-                [f for f in findings if isinstance(f, dict)], None, None,
-            ),
+            # them (per tool for a tools scan); the age/cooldown fields are null
+            # (live-scan only).
+            "remediations": [
+                {**r, "source": source} if source is not None else r
+                for source, group in _by_source(findings)
+                for r in _remediations_json(group, None, None)
+            ],
             "risks": risks,
             "risk_failures": risk_failures,
             "osv_failures": osv_failures,
@@ -199,6 +215,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             "yank_checked": yank_checked,
             "yanked": yanked if yank_checked else None,
             "yank_failures": yank_failures if yank_checked else None,
+            **({"unchecked": unchecked} if scan_type == "tools" else {}),
         }, indent=2))
         return
 
@@ -215,6 +232,7 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             osv_failures=osv_failures,
             scanned_at=date_str,
             yanked=yanked, yank_failures=yank_failures, not_public=not_public,
+            unchecked=unchecked,
         )
         if fmt == "browser":
             open_html_in_browser(html)
@@ -228,16 +246,20 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
 
     _print_not_public_note(console, not_public)
     _print_yank_notes(console, yanked, yank_failures)
+    for directory in unchecked:
+        console.print(f"⚠ not checked: {directory}", style="yellow", markup=False, highlight=False)
 
-    if not findings and not risks and not risk_failures and not osv_failures and not yanked and not yank_failures:
+    if not (findings or risks or risk_failures or osv_failures or yanked or yank_failures or unchecked):
         console.print("[green]No findings — all clear.[/green]")
         return
 
     from packagealert.cli.app import _print_findings_by_package
 
-    _print_findings_by_package(
-        console, [f for f in findings if isinstance(f, dict)], show_details=show_details,
-    )
+    # A tools scan's findings are shown per tool, as the live scan shows them.
+    for source, group in _by_source(findings):
+        if source is not None:
+            console.print(f"\n{source}", style="bold", markup=False, highlight=False)
+        _print_findings_by_package(console, group, show_details=show_details)
 
     if risks:
         from packagealert.cli.app import (
@@ -252,8 +274,10 @@ def _render_scan_detail(record: dict, fmt: str, show_details: bool) -> None:
             for r in shown:
                 colour = _RISK_LEVEL_COLOUR.get(r.get("level") or "", "cyan")
                 version = r.get("version") or "unpinned"
+                # A tools scan's risk names its tool, as its findings do.
+                tool = f"{r['source']}: " if isinstance(r.get("source"), str) else ""
                 console.print(
-                    f"[RISK {r.get('score')}] {r.get('level', ''):<8} {r.get('package', '')}@{version}"
+                    f"[RISK {r.get('score')}] {r.get('level', ''):<8} {tool}{r.get('package', '')}@{version}"
                     f"{_primary_reason(r)}",
                     style=colour,
                     markup=False,

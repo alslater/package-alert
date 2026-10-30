@@ -981,7 +981,7 @@ def _contained_in(candidate: Path, boundary: Path) -> bool:
     try:
         resolved = candidate.resolve()
         root_resolved = boundary.resolve()
-    except OSError:
+    except (OSError, RuntimeError):     # Python 3.12 reports a symlink loop as RuntimeError
         return False
     if not resolved.is_relative_to(root_resolved):
         log.warning(

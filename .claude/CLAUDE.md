@@ -64,6 +64,11 @@ pip install --help 2>&1 | grep -E "^\s+-"
 uv --help 2>&1 | grep -E "^\s+-"
 uv pip sync --help 2>&1 | grep -E "^\s+-"
 uv pip install --help 2>&1 | grep -E "^\s+-"   # _UV_PIP_INSTALL_VALUE_FLAGS
+# _UV_PIP_INSTALL_LONG_OPTIONS (every long option, Boolean ones too: pa scan-tools reads a pipx
+# install a uv option-set refuses as pip-only) = the help names plus every long name in
+# crates/uv-cli/src/*.rs that `uv pip install --<name> --help` does not call an unexpected argument
+# _UV_PIP_INSTALL_SHORT_OPTIONS: every letter probed as `uv pip install -<letter> --help`;
+# _PIP_INSTALL_SHORT_OPTIONS: each supported pip's create_command("install").parser short options
 
 # yarn 1 (_YARN_VALUE_FLAGS / _YARN_OPTIONAL_VALUE_FLAGS: "<x>" vs "[x]")
 yarn --help 2>&1 | grep -E "^\s+-"

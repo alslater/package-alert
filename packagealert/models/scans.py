@@ -46,3 +46,21 @@ class ScanResult:
     # path, whose names are not sent to OSV or the risk lookups (a public package of the same
     # name is a different one). Without it a scan of private packages looks fully checked.
     not_public: int = 0
+    # A tools scan (`pa scan-tools`, scan_type "tools"): one per tools directory. None on any
+    # other scan. `manager` is "pipx" or "uv"; `active` False only for a leftover pipx layout
+    # pipx no longer uses; `exists` False for a manager whose directory was not found (the scan
+    # still reports what it looked at). The run fields let a consumer retire a tools
+    # directory a later run no longer reports: `run_id` is shared by every ScanResult of one
+    # run, as is `scanned_at`; `managers_scanned` and `run_roots` say what the run covered;
+    # `home` whose tools these are. `tools` is the inventory, a tool without findings included.
+    # `unchecked` lists directories whose packages were not checked (unreadable, or a tool
+    # whose interpreter could not be told): the scan is then not a clean result.
+    manager: str | None = None
+    active: bool | None = None
+    exists: bool | None = None
+    run_id: str | None = None
+    managers_scanned: list[str] | None = None
+    run_roots: list[str] | None = None
+    home: str | None = None
+    tools: list[dict] | None = None
+    unchecked: list[str] | None = None
