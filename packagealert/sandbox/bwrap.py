@@ -140,10 +140,17 @@ def build_cmd(
     for p in (post_ro_tmpfs or []):
         if not p.is_symlink() and p.is_dir():
             cmd += ["--tmpfs", str(p)]
-    bound_write_dirs: list[Path] = []
+    candidates: list[Path] = []
     for d in write_dirs:
         d.mkdir(parents=True, exist_ok=True)
-        if _inside_hidden(d, hidden_real):
+        if not _inside_hidden(d, hidden_real):
+            candidates.append(d)
+    bound_write_dirs: list[Path] = []
+    for i, d in enumerate(candidates):
+        # A directory another writable bind already exposes, at the same real place, is not
+        # bound again: its own mount point could not be removed (`uv tool install --force`
+        # deletes and recreates the tool's venv, whose site-packages is a target too).
+        if any(_covers(b, d) and (b != d or j < i) for j, b in enumerate(candidates) if j != i):
             continue
         bound_write_dirs.append(d)
         cmd += ["--bind", str(d), str(d)]
@@ -241,6 +248,17 @@ def _hidden_dirs(hidden: list[Path]) -> list[Path]:
         if real.is_dir() and real not in out:
             out.append(real)
     return out
+
+
+def _covers(outer: Path, inner: Path) -> bool:
+    """Whether binding *outer* already exposes *inner* at the same real location (no symlink
+    on the way from *outer* to *inner* leads elsewhere)."""
+    if not inner.is_relative_to(outer):
+        return False
+    try:
+        return inner.resolve(strict=True) == outer.resolve(strict=True) / inner.relative_to(outer)
+    except (OSError, RuntimeError):
+        return False
 
 
 def _inside_hidden(entry: Path, hidden_real: list[Path]) -> bool:

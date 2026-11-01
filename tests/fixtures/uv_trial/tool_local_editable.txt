@@ -1,0 +1,7 @@
+# uv 0.13.5 rc=0
+Resolved 3 packages in 125ms
+Would download 1 package
+Would uninstall 1 package
+Would install 1 package
+ - requests-toolbelt==0.0.1 (from file:///home/user/src/mytool)
+ + requests-toolbelt @ file:///home/user/src/mytool

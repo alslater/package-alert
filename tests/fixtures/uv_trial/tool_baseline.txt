@@ -1,0 +1,12 @@
+# uv 0.13.5 rc=0
+Using Python 3.12.13 environment at: .
+Resolved 17 packages in 504ms
+Would download 3 packages
+Would uninstall 3 packages
+Would install 3 packages
+ - certifi==2026.7.22
+ + certifi==2026.10.23
+ - pygments==2.15.0
+ + pygments==2.21.0
+ - urllib3==1.26.5
+ + urllib3==1.26.20

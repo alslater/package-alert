@@ -20,7 +20,7 @@ from packagealert.safe_output import make_console
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
-    from packagealert.remediate.adapter import RunFn, Yank
+    from packagealert.remediate.adapter import FixAdapter, RunFn, Yank
     from packagealert.remediate.planner import FixPlan
 
 # pa fix discovers its package-manager adapter through the language registry
@@ -34,9 +34,23 @@ _BACKUP_ROOT = Path.home() / ".cache" / "package-alert" / "fix-backups"
 @dataclasses.dataclass(frozen=True)
 class ApplyOptions:
     mode: str
-    """``sync`` or ``lock-only``."""
+    """``sync`` or ``lock-only``; ``reinstall`` for a tool environment."""
     yes: bool
     interactive: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class PlanTarget:
+    """What to plan when it is not found from a project directory (``pa fix --tools``)."""
+
+    adapter: FixAdapter
+    lockfile: Path
+    label: str
+    """Named in the output in place of the lock file."""
+    emit: Callable[[dict], object] | None = None
+    """Takes the JSON plan instead of it being printed."""
+    apply: Callable[..., Awaitable[tuple[dict, BaseException | None]]] | None = None
+    """Applies the plan instead of writing the lock file (``_apply``'s arguments after the options)."""
 
 
 def _interactive() -> bool:
@@ -101,6 +115,9 @@ def fix(
     sync: bool = typer.Option(False, "--sync", help="With --apply: sync the environment afterwards, even when not at a terminal."),
     yes: bool = typer.Option(False, "--yes", "-y", help="With --apply: apply without asking."),
     config: Path | None = typer.Option(None, "--config", "-c", help="Path to config TOML file."),
+    tools: bool = typer.Option(False, "--tools", help="Fix tool environments instead of a project (needs --uv)."),
+    uv_tools: bool = typer.Option(False, "--uv", help="With --tools: fix uv tool environments (uv tool install)."),
+    app_name: str | None = typer.Option(None, "--app", metavar="NAME", help="With --tools: only the tool named NAME."),
 ):
     """Plan upgrade commands that fix vulnerable packages. Prints the commands; with --apply, applies the verified plan."""
     from packagealert.cli.app import _load, console
@@ -119,12 +136,29 @@ def fix(
         ("--apply needs the plan verified: drop --no-verify", apply and no_verify),
         ("--format json with --apply needs --yes at a terminal (it cannot prompt)",
          apply and fmt == "json" and not yes and _interactive()),
+        ("--uv and --app need --tools", (uv_tools or app_name is not None) and not tools),
+        ("--tools needs a manager: --uv", tools and not uv_tools),
+        ("--tools fixes tool environments, not a project: drop the path", tools and path != Path(".")),
+        ("--lock-only and --sync do not apply to --tools (a tool is reinstalled)", tools and (lock_only or sync)),
     ):
         if bad:
             console.print(message, style="red", markup=False)
             raise typer.Exit(2)
     import os
     interactive = _interactive()
+    if tools:
+        if apply and _container_isolation():
+            console.print("pa fix --tools --apply is not supported under PA_SANDBOX_ISOLATION=container "
+                          "(it reinstalls the tool)", style="red", markup=False)
+            raise typer.Exit(2)
+        from packagealert.cli import fix_tools
+
+        cfg, _ = _load(config)
+        code = asyncio.run(fix_tools.run_fix_tools(
+            cfg, app_name=app_name, allow_major=cli_allow_major, allow_cooldown=allow_cooldown, fmt=fmt,
+            verify=not no_verify, allow_project_env=allow_project_env,
+            apply=ApplyOptions("reinstall", yes=yes, interactive=interactive) if apply else None))
+        raise typer.Exit(code)
     apply_options = (ApplyOptions(_apply_mode(lock_only, sync, interactive=interactive, env=os.environ),
                                   yes=yes, interactive=interactive) if apply else None)
     if apply_options is not None and apply_options.mode == "sync" and _container_isolation():
@@ -194,7 +228,7 @@ class _Spinner:
 
 async def _run_fix(cfg, root: Path, *, allow_major: frozenset[str], allow_cooldown: bool, fmt: str,
                     verify: bool = True, allow_project_env: bool = False,
-                    apply: ApplyOptions | None = None) -> int:
+                    apply: ApplyOptions | None = None, target: PlanTarget | None = None) -> int:
     from packagealert.cli import app as app_module
 
     out = app_module.console
@@ -217,7 +251,7 @@ async def _run_fix(cfg, root: Path, *, allow_major: frozenset[str], allow_cooldo
     try:
         return await _plan_and_report(cfg, root, allow_major=allow_major, allow_cooldown=allow_cooldown, fmt=fmt,
                                       verify=verify, allow_project_env=allow_project_env, apply=apply,
-                                      out=out, console=console, say=status.update, pause=paused)
+                                      out=out, console=console, say=status.update, pause=paused, target=target)
     finally:
         status.stop()
 
@@ -226,7 +260,7 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
                            verify: bool, allow_project_env: bool, out, console,
                            say: Callable[[str], object],
                            pause: Callable[[], contextlib.AbstractContextManager[None]],
-                           apply: ApplyOptions | None = None) -> int:
+                           apply: ApplyOptions | None = None, target: PlanTarget | None = None) -> int:
     from packagealert.cli import app as app_module
     from packagealert.cli.run_settings import (
         ProjectRunSettings,
@@ -246,19 +280,25 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
     from packagealert.remediate.graph import DependencyGraph
     from packagealert.storage.db import open_db
 
-    found = discover(root)
-    if not found.matches:
+    if target is not None:
+        found = None
+        adapter, lockfile = target.adapter, target.lockfile
+    else:
+        found = discover(root)
+    if found is not None and not found.matches:
         supported = ", ".join(dict.fromkeys(found.supported)) or "no lock files (no adapters are installed)"
         console.print(f"No supported lock file in {root}: pa fix supports {supported}.", style="red", markup=False)
         return 2
-    if len(found.matches) > 1:
+    if found is not None and len(found.matches) > 1:
         names = ", ".join(lf.name for _, lf in found.matches)
         console.print(f"Several lock files in {root} ({names}): pa fix cannot tell which package manager to use.",
                   style="red", markup=False)
         return 2
-    adapter, lockfile = found.matches[0]
+    if found is not None:
+        adapter, lockfile = found.matches[0]
+    subject = target.label if target is not None else None
     snap = None
-    if apply is not None:
+    if apply is not None and (target is None or target.apply is None):
         from packagealert.remediate import apply as apply_module
         try:
             names = (apply_module.checked_files(adapter) if hasattr(adapter, "written_files")
@@ -355,6 +395,7 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
         allow_major=allowed_major, allow_cooldown=allow_cooldown,
         pins_every_copy=getattr(adapter, "pins_every_copy", False),
     )
+    plan = _hold_for_adapter(plan, adapter)
     unverified_reason: str | None = None
     verified = False
     runner = None
@@ -411,25 +452,34 @@ async def _plan_and_report(cfg, root: Path, *, allow_major: frozenset[str], allo
         return 2
     outcome = None
     interrupted: BaseException | None = None
-    if apply is not None and fmt == "json":
+    async def apply_now(json_output: bool, on_written=None):
+        assert apply is not None
         with config_context():
-            outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection, snap,
-                                                console, pause, osv_failures=osv_failures,
-                                                unverified_reason=unverified_reason, json_output=True)
+            if target is not None and target.apply is not None:
+                return await target.apply(apply, plan, runner, settings, console, pause,
+                                          osv_failures=osv_failures, unverified_reason=unverified_reason,
+                                          json_output=json_output, on_written=on_written)
+            return await _apply(apply, adapter, lockfile, plan, runner, settings, selection, snap,
+                                console, pause, osv_failures=osv_failures,
+                                unverified_reason=unverified_reason, json_output=json_output,
+                                on_written=on_written)
+
+    if apply is not None and fmt == "json":
+        outcome, interrupted = await apply_now(True)
     if fmt == "json":
-        print(json.dumps(_plan_json(lockfile, plan, cmds, osv_failures, unverified_reason, cadences,
-                                    sync=selection, yank_failures=yank_failures, not_public=not_public,
-                                    apply=outcome), indent=2))
+        data = _plan_json(lockfile, plan, cmds, osv_failures, unverified_reason, cadences,
+                          sync=selection, yank_failures=yank_failures, not_public=not_public,
+                          apply=outcome, subject=subject)
+        if target is not None and target.emit is not None:
+            target.emit(data)
+        else:
+            print(json.dumps(data, indent=2))
     else:
         _print_plan(out, lockfile, plan, cmds, osv_failures, checked=len(public),
                     unverified_reason=unverified_reason, cadences=cadences, sync=selection,
-                    yank_failures=yank_failures, not_public=not_public)
+                    yank_failures=yank_failures, not_public=not_public, subject=subject)
         if apply is not None:
-            with config_context():
-                outcome, interrupted = await _apply(apply, adapter, lockfile, plan, runner, settings, selection,
-                                                    snap, console, pause, osv_failures=osv_failures,
-                                                    unverified_reason=unverified_reason, json_output=False,
-                                                    on_written=lambda o: _print_written(out, o))
+            outcome, interrupted = await apply_now(False, on_written=lambda o: _print_written(out, o))
             _print_apply_end(out, outcome)
     if interrupted is not None:
         # The report is out; stop as interrupted.
@@ -553,7 +603,7 @@ async def _sync(adapter, project_dir: Path, plan: FixPlan, runner, settings, sel
 
 def _print_written(out, outcome: dict) -> None:
     """The first part of the apply block: what was written and where the originals are."""
-    label = "lock only" if outcome["mode"] == "lock-only" else "lock, then the environment"
+    label = {"lock-only": "lock only", "reinstall": "tool reinstalled"}.get(outcome["mode"], "lock, then the environment")
     changes = ", ".join(f"{c['package']} {', '.join(c['before']) or 'none'} → {', '.join(c['after']) or 'none'}"
                         for c in outcome["changes"])
     out.print(f"\nApplied ({label}):", markup=False)
@@ -866,6 +916,25 @@ async def _held_major_cadences(plan: FixPlan, settings, adapter) -> dict[str, st
 _TRIAL_NOT_PUBLIC: ContextVar[frozenset[tuple[str, str]]] = ContextVar("_TRIAL_NOT_PUBLIC", default=frozenset())
 
 
+def _hold_for_adapter(plan: FixPlan, adapter: object) -> FixPlan:
+    """*plan* with every item held when the adapter's optional ``held_reason()`` names a reason
+    no command can apply any of them (a uv tool receipt the command cannot carry over), with or
+    without verification."""
+    from packagealert.remediate import planner
+    from packagealert.remediate.planner import HeldFix
+
+    hook = getattr(adapter, "held_reason", None)
+    try:
+        reason = hook() if callable(hook) else None
+    except Exception:  # noqa: BLE001 - an adapter bug holds nothing it did not name
+        reason = None
+    if not isinstance(reason, str) or not plan.planned:
+        return plan
+    held = [HeldFix(package=p.package, version=p.version, target=p.target, reason=planner.COULD_NOT_VERIFY,
+                    advisories=p.advisories, detail=reason) for p in plan.planned]
+    return dataclasses.replace(plan, planned=[], held=[*plan.held, *held])
+
+
 def _hold_untrialled(plan: FixPlan, adapter: object, reason: str = "--no-verify") -> FixPlan:
     """*plan* with the transitive items an adapter applies only as its trials choose held, when nothing is trialled.
 
@@ -1082,13 +1151,15 @@ async def _verify_with(cfg, adapter, plan: FixPlan, allow_cooldown: bool, allow_
 
 def _plan_json(lockfile: Path, plan: FixPlan, cmds: list[list[str]], osv_failures: int,
                unverified_reason: str | None, cadences: dict[str, str | None], *, sync=None,
-               yank_failures: int = 0, not_public: int = 0, apply: dict | None = None) -> dict:
+               yank_failures: int = 0, not_public: int = 0, apply: dict | None = None,
+               subject: str | None = None) -> dict:
     from packagealert.remediate import planner
     from packagealert.remediate.adapter import SyncSelection
 
     sync = sync if sync is not None else SyncSelection()
 
     data = {
+        **({"tool": subject} if subject is not None else {}),
         "lockfile": str(lockfile),
         "planned": [{
             "package": p.package, "version": p.version, "target": p.target,
@@ -1165,7 +1236,7 @@ def _describe_changes(changes) -> str:
 def _print_plan(out, lockfile: Path, plan: FixPlan, cmds: list[list[str]],
                 osv_failures: int, *, checked: int, unverified_reason: str | None = None,
                 cadences: dict[str, str | None] | None = None, sync=None, yank_failures: int = 0,
-                not_public: int = 0) -> None:
+                not_public: int = 0, subject: str | None = None) -> None:
     from packagealert.remediate import planner
     from packagealert.remediate.adapter import SyncSelection
 
@@ -1173,13 +1244,14 @@ def _print_plan(out, lockfile: Path, plan: FixPlan, cmds: list[list[str]],
 
     cadences = cadences or {}
     hint = {planner.COOLDOWN: " (use --allow-cooldown)"}
-    out.print(f"\nFix plan for {lockfile}\n", markup=False, highlight=False)
+    out.print(f"\nFix plan for {subject or lockfile}\n", markup=False, highlight=False)
     if not plan.planned and not plan.held:
         if osv_failures:
             out.print(f"No vulnerabilities found in {checked - osv_failures} checked packages; "
                       f"{osv_failures} could not be checked.", style="yellow", markup=False)
         else:
-            out.print(f"No known vulnerabilities in {checked} locked packages.", style="green", markup=False)
+            what = "installed" if subject else "locked"
+            out.print(f"No known vulnerabilities in {checked} {what} packages.", style="green", markup=False)
     if not_public:
         out.print(f"{not_public} locked package(s) come from a private registry, git or a local path and were "
                   f"not looked up in public advisory databases.", style="dim", markup=False)
@@ -1235,8 +1307,11 @@ def _print_plan(out, lockfile: Path, plan: FixPlan, cmds: list[list[str]],
             out.print(f"\nNext, after applying that and re-running pa fix: {', '.join(deferred)}",
                       style="yellow", markup=False, highlight=False)
     if plan.drift:
-        out.print(f"\n⚠ {lockfile.name} is out of date: re-locking it changes {len(plan.drift)} package(s) "
-                  f"with nothing pinned, and every command below makes these changes too:",
+        what = (f"Reinstalling {subject} changes {len(plan.drift)} package(s) with nothing pinned"
+                if subject else
+                f"{lockfile.name} is out of date: re-locking it changes {len(plan.drift)} package(s) "
+                "with nothing pinned")
+        out.print(f"\n⚠ {what}, and every command below makes these changes too:",
                   style="yellow", markup=False, highlight=False)
         for c in plan.drift[:10]:
             move = f"{c.old} → {c.new}" if c.old and c.new else (f"+{c.new}" if c.new else f"-{c.old}")

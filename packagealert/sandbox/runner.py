@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
+from rich.text import Text
 
 from packagealert import safe_read
 from packagealert.languages import registry as lang_registry
@@ -46,7 +47,7 @@ from packagealert.parsers.process_args import (
     resolve_invocation_dirs,
     resolve_lockfile_dir,
 )
-from packagealert.safe_output import harden, make_console
+from packagealert.safe_output import harden, make_console, redacted
 from packagealert.sandbox import isolation
 from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
@@ -387,12 +388,14 @@ class SandboxRunner:
             # It runs unsandboxed, so its config is judged as the host reads it.
             SANDBOX_ENV.set(None)
 
+        # Shown with any credentials in its URLs hidden; the command runs as given.
+        shown = " ".join(redacted(argv))
         if via_shim:
-            self._console.print(r"[bold cyan]\[package-alert][/bold cyan] " + " ".join(argv))
+            self._console.print(Text.assemble(("[package-alert]", "bold cyan"), " ", shown))
         if is_global:
             self._console.print("[dim]Global install: pre-flight check only (not sandboxed)[/dim]")
         elif not via_shim:
-            self._console.print(f"\n[bold]Sandbox:[/bold] {' '.join(argv)}")
+            self._console.print(Text.assemble("\n", ("Sandbox:", "bold"), " ", shown))
 
         if not self._pre_run_checks(parsed, cwd, flags):
             return 1

@@ -1724,6 +1724,11 @@ def _find_site_packages(parsed: Any, cwd: Path) -> Path | None:
 # PythonLanguage
 # ---------------------------------------------------------------------------
 
+# Options whose value is a local source installed in editable mode (uv tool install takes
+# --with-editable as well as --editable).
+_EDITABLE_OPTIONS = ("-e", "--editable", "--with-editable")
+
+
 class PythonLanguage:
     """Language module for Python / pip / uv / pipenv."""
 
@@ -2280,7 +2285,7 @@ class PythonLanguage:
         ]
 
     def prepare_sandbox_argv(self, argv: list[str], cwd: Path) -> list[str]:
-        """Resolve relative -e/--editable paths to absolute for bwrap compatibility.
+        """Resolve relative -e/--editable/--with-editable paths to absolute for bwrap compatibility.
 
         Preserves PEP 508 extras suffixes (e.g. '.[dev]', '../proj[extra]').
         """
@@ -2288,30 +2293,35 @@ class PythonLanguage:
         i = 0
         while i < len(result):
             tok = result[i]
-            if tok in ("-e", "--editable") and i + 1 < len(result):
+            if tok in _EDITABLE_OPTIONS and i + 1 < len(result):
                 result[i + 1] = self._abs_editable(result[i + 1], cwd)
                 i += 2
                 continue
-            if tok.startswith("--editable="):
-                val = tok[len("--editable="):]
-                result[i] = f"--editable={self._abs_editable(val, cwd)}"
+            for flag in ("--editable=", "--with-editable="):
+                if tok.startswith(flag):
+                    result[i] = f"{flag}{self._abs_editable(tok[len(flag):], cwd)}"
             i += 1
         return result
 
     def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
-        return []
+        """The local sources a uv tool's trial resolve or reinstall builds from (pa fix --tools):
+        read-only, subject to sandbox.editable_roots."""
+        from packagealert.languages.python_fix.uv_tool import local_sources
+
+        return local_sources(argv)
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
-        """Editable install source dirs need to be writable for egg-info generation."""
+        """Editable install source dirs need to be writable for egg-info generation, including
+        ``uv tool install --with-editable``'s."""
         paths: list[Path] = []
         i = 0
         while i < len(argv):
             tok = argv[i]
-            if tok in ("-e", "--editable") and i + 1 < len(argv):
+            if tok in _EDITABLE_OPTIONS and i + 1 < len(argv):
                 val = argv[i + 1]
                 i += 2
-            elif tok.startswith("--editable="):
-                val = tok[len("--editable="):]
+            elif tok.startswith(("--editable=", "--with-editable=")):
+                val = tok.split("=", 1)[1]
                 i += 1
             else:
                 i += 1
@@ -2953,13 +2963,13 @@ class PythonLanguage:
         return normalise_package_name(name)
 
     def is_read_only_command(self, argv: list[str]) -> bool:
-        """Whether *argv* changes nothing, so the sandbox may run it captured (pa fix's uv trials).
+        """Whether *argv* changes nothing, so the sandbox may run it captured (pa fix's uv and uv tool trials).
 
         Optional hook: see the comment beside fix_adapters() in base.py.
         """
-        from packagealert.languages.python_fix.uv import is_read_only_command
+        from packagealert.languages.python_fix import uv, uv_tool
 
-        return is_read_only_command(argv)
+        return uv.is_read_only_command(argv) or uv_tool.is_read_only_command(argv)
 
     def is_scratch_command(self, argv: list[str]) -> bool:
         """Whether *argv* is a uv command pa fix runs in a scratch copy (see python_fix.uv)."""

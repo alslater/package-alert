@@ -1,0 +1,5 @@
+# uv 0.13.5 rc=1
+Using Python 3.12.13 environment at: .
+error: No solution found when resolving dependencies
+  cause: Because requests==2.25.1 depends on urllib3>=1.21.1,<1.27 and you require requests==2.25.1, we can conclude that you require urllib3>=1.21.1,<1.27.
+         And because you require urllib3==2.2.2, we can conclude that your requirements are unsatisfiable.

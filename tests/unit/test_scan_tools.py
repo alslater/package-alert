@@ -1437,6 +1437,14 @@ def test_a_package_installed_from_outside_an_index_is_not_public(home, direct, p
     ("https://files.example/packages/some_long_package_name_v2-1.0.0-py3-none-any.whl",
      "https://files.example/packages/some_long_package_name_v2-1.0.0-py3-none-any.whl"),    # a file name stays
     ("git+ssh://git@github.com/org/repo", "git+ssh://github.com/org/repo"),
+    ("git+https://git.example/ghp_abcdefghijklmnopqrstuvwxyz0123456789@main", None),  # before a revision
+    ("git+https://git.example/org/repo@feature/v2", "git+https://git.example/org/repo@feature/v2"),
+    # A commit hash looks like a token, but a revision is not checked.
+    ("git+https://github.com/example/tool@4d8a69ca971fb513da4a632ba322d961d8f94a38", "git+https://github.com/example/tool@4d8a69ca971fb513da4a632ba322d961d8f94a38"),
+    ("git+https://github.com/example/tool@feature%40alice/4d8a69ca971fb513da4a632ba322d961d8f94a38",
+     "git+https://github.com/example/tool@feature%40alice/4d8a69ca971fb513da4a632ba322d961d8f94a38"),
+    ("git+https://git.example/org%40ghp_abcdefghijklmnopqrstuvwxyz0123456789@main", None),  # encoded "@"
+    ("https://files.example/pkgs/@4d8a69ca971fb513da4a632ba322d961d8f94a38/x.whl", None),          # no revision outside git
     ("https://alice:secret@[2001:db8::1]:8443/simple", "https://[2001:db8::1]:8443/simple"),
     ("https://[2001:db8::1]/simple", "https://[2001:db8::1]/simple"),
     ("not a url", None),
@@ -1688,3 +1696,15 @@ def test_a_tool_without_its_managers_record_is_still_checked(home):
     _venv(root, "tool", {"tool": "1.0"})
     [env] = _envs(pt.ToolRoot("uv", root, True, True))
     assert env.provenance == {"kind": "unknown"} and [p.public for p in env.packages] == [True]
+
+
+def test_a_receipt_nested_too_deeply_is_an_unknown_record(tmp_path):
+    """tomllib raises RecursionError for it; the tool is then read as having no record."""
+    (tmp_path / "uv-receipt.toml").write_text("[tool]\nx = " + "[" * 1500 + "]" * 1500 + "\n")
+    assert pt._uv_provenance(tmp_path) == pt._UNKNOWN_RECORD
+
+
+def test_uv_configuration_nested_too_deeply_is_not_read(tmp_path):
+    conf = tmp_path / "uv.toml"
+    conf.write_text("x = " + "[" * 1500 + "]" * 1500 + "\n")
+    assert pt._uv_config_tables(str(conf)) == ([], True)
