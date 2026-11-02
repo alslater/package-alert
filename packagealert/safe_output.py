@@ -57,3 +57,53 @@ def harden(console: Console) -> Console:
 def make_console(*args: Any, **kwargs: Any) -> Console:
     """A rich Console with harden() applied; takes Console's arguments."""
     return harden(Console(*args, **kwargs))
+
+
+# A URL runs to the next whitespace: ";" and "@" can be part of its credentials. Its userinfo
+# runs to the last "@" before the authority ends, whitespace included, so no part of a
+# password with a space in it is left after the redacted URL.
+_URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#]*@)?\S*")
+
+
+def _redact_url(url: str) -> str:
+    """*url* with credentials hidden: userinfo and a query replaced by ``REDACTED``, and a URL
+    that cannot be parsed or whose path holds what looks like a token replaced whole. A local
+    ``file:`` URL, or one with none of these, is left as it is."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    from packagealert.languages.python_tools import safe_source_url
+
+    prefix = "git+" if url.startswith("git+") else ""
+    try:
+        parts = urlsplit(url.removeprefix("git+"))
+        has_userinfo = parts.username is not None or parts.password is not None
+    except ValueError:
+        return "REDACTED-URL"
+    if parts.scheme == "file":
+        return url
+    if safe_source_url(url) is None:
+        return "REDACTED-URL"
+    netloc = "REDACTED@" + parts.netloc.rsplit("@", 1)[1] if has_userinfo else parts.netloc
+    return prefix + urlunsplit((parts.scheme, netloc, parts.path, "REDACTED" if parts.query else "", parts.fragment))
+
+
+def redacted(argv: list[str]) -> list[str]:
+    """*argv* for display (printed commands, banners, logs): each URL in it with credentials
+    hidden (``_redact_url()``). The command itself is run with *argv* as it is."""
+    return [redacted_text(a) for a in argv]
+
+
+# What can close a URL quoted in a message (`…`, '…', "…", (from …), <…>, […], end of a
+# sentence or clause, `'…': error`): left out of the URL, so a token ending its path is still
+# recognised as one.
+_URL_CLOSERS = "`'\")>],.:;"
+
+
+def _redact_match(url: str) -> str:
+    core = url.rstrip(_URL_CLOSERS)
+    return _redact_url(core) + url[len(core):]
+
+
+def redacted_text(text: str) -> str:
+    """*text* for display with each URL in it redacted as ``redacted()`` does."""
+    return _URL_RE.sub(lambda m: _redact_match(m.group(0)), text)

@@ -19,6 +19,7 @@ WORKSPACE_MEMBER = "workspace member"
 NO_FIX = "no fix known"
 NOT_COMPARABLE = "version not comparable"
 NON_REGISTRY = "not a registry package"
+LOCAL_SOURCE = "local source"
 ALIASED = "installed under an alias"
 MULTIPLE_VERSIONS = "multiple locked versions"
 MAJOR = "major upgrade"
@@ -142,6 +143,8 @@ def _hold_reason(
         return NOT_COMPARABLE
     if rec.version is None:
         return NO_FIX
+    if group.package in graph.local_source:
+        return LOCAL_SOURCE
     if group.package in graph.non_registry:
         return NON_REGISTRY
     if group.package in graph.aliased:

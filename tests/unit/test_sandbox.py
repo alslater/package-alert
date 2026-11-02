@@ -211,6 +211,26 @@ class TestBuildCmd:
         assert cmd[bind_idx + 1] == str(target)
         assert cmd[bind_idx + 2] == str(target)
 
+    def test_a_write_dir_inside_another_is_not_bound_again(self, tmp_path):
+        """`uv tool install --force` deletes the tool's venv: a nested bind would be a mount point uv cannot remove."""
+        tools = tmp_path / "tools"
+        site = tools / "httpie" / "lib" / "python3.12" / "site-packages"
+        site.mkdir(parents=True)
+        for order in ([tools, site, tools / "httpie" / "bin"], [site, tools]):
+            binds = [src for src, _ in _bind_pairs(build_cmd(["uv", "tool", "install"], order))]
+            assert binds == [str(tools)]
+
+    def test_a_write_dir_reached_through_a_symlink_elsewhere_is_still_bound(self, tmp_path):
+        tools, outside = tmp_path / "tools", tmp_path / "outside"
+        tools.mkdir()
+        outside.mkdir()
+        (tools / "linked").symlink_to(outside)
+        binds = [src for src, _ in _bind_pairs(build_cmd(["uv", "sync"], [tools, tools / "linked"]))]
+        assert binds == [str(tools), str(tools / "linked")]
+
+    def test_a_repeated_write_dir_is_bound_once(self, tmp_path):
+        assert [src for src, _ in _bind_pairs(build_cmd(["uv", "sync"], [tmp_path, tmp_path]))] == [str(tmp_path)]
+
     def test_write_dir_created_if_missing(self, tmp_path):
         target = tmp_path / "node_modules"
         assert not target.exists()

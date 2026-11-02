@@ -2656,3 +2656,14 @@ async def test_an_interruption_while_re_resolving_is_reported_then_raised(tmp_pa
     out = json.loads(capsys.readouterr().out)
     assert out["apply"]["applied"] is False
     assert out["apply"]["reason"] == "interrupted while re-resolving; nothing was written"
+
+
+async def test_an_adapter_hold_applies_without_verification(tmp_path, capsys):
+    """A reason no command can apply (a uv tool receipt it cannot carry over) holds every item
+    even with --no-verify, so no incomplete command is printed."""
+    reason = "the command cannot carry over the tool's constraints"
+    with patch("packagealert.languages.python_fix.uv.UvFixAdapter.held_reason", lambda _self: reason, create=True):
+        assert await _run(tmp_path, LOCK, verify=False) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["planned"] == [] and out["commands"] == []
+    assert {(h["package"], h["detail"]) for h in out["held"]} == {("django", reason), ("urllib3", reason)}

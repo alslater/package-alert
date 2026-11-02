@@ -788,6 +788,28 @@ the npm adapter uses only `is_scratch_command` (`npm install [name@x.y.z …]` o
 `npm update <name …>`, each with exactly `--package-lock-only --ignore-scripts
 --no-audit --no-fund`).
 
+`pa fix --tools --uv` does not discover its adapter through `fix_adapters()`:
+it builds one `UvToolFixAdapter` (`packagealert/languages/python_fix/uv_tool.py`)
+per uv tool environment `pa scan-tools` finds, whose "lock file" is the tool's
+`uv-receipt.toml`, and hands it to the same planning and verification. Its
+trial is `uv pip install --dry-run --upgrade --python <tool venv>/bin/python`
+followed only by the receipt's carried-over options, requirements and `-e REQ`,
+which the Python plugin's `is_read_only_command` accepts in that exact form. A
+local requirement's directory (`-e /src/app`, `name @ file:///src/lib`, a `git+file://`
+repository), and a local `--find-links`, `--index-url` or `--extra-index-url` directory, is bound
+read-only for that trial, and for the `uv tool install --force` reinstall, through
+`sandbox_extra_ro_paths`, subject to `sandbox.editable_roots` like any other
+extra path; `sandbox_extra_write_paths` makes a `--with-editable` source writable,
+as it does an `--editable` one. `--apply` does not use the file-writing members
+below: the adapter's `apply_argv(plan)` reinstalls the tool through `pa run`
+(see `cli/fix_tools.py`).
+
+| Adapter | Lock file | Trial | `--apply` |
+|---------|-----------|-------|-----------|
+| uv | `uv.lock` | `uv lock --dry-run`, read-only in the project | the lock update in a scratch copy, then `uv sync --locked` |
+| npm | `package-lock.json` | `npm install --package-lock-only …` in a scratch copy | the same in a scratch copy, then `npm install` |
+| uv tool | the tool's `uv-receipt.toml` | `uv pip install --dry-run --upgrade --python <tool venv>`, read-only | `uv tool install --force …` (or `uv tool upgrade`) through `pa run`, with the whole tool backed up and restored on failure |
+
 An adapter (`packagealert/remediate/adapter.py`, `FixAdapter`) holds no
 policy: planning, verification and output are shared. It provides:
 
@@ -795,7 +817,7 @@ policy: planning, verification and output are shared. It provides:
 |--------|---------|
 | `name`, `ecosystem`, `lockfile_name` | non-empty strings; `ecosystem` is the OSV/registry ecosystem (`"PyPI"`, `"npm"`) and selects the name normalisation for `--allow-major` |
 | `find_lockfile(root) -> Path \| None` | the lock file this manager uses in *root*, or None |
-| `load_graph(lockfile) -> DependencyGraph` | members, direct dependencies, edges, every locked version, non-registry names; raise `LockfileError` (with the reason) for an unusable lock — `pa fix` exits 2 |
+| `load_graph(lockfile) -> DependencyGraph` | members, direct dependencies, edges, every locked version, non-registry names (and `local_source`: names installed from a local checkout, held as `local source`); raise `LockfileError` (with the reason) for an unusable lock — `pa fix` exits 2 |
 | `locked_packages(lockfile) -> list[PackageSpec]` | the versioned packages to check against OSV, **named exactly as the graph names them** (the planner compares the two directly) |
 | `commands(plan, project_dir=None, sync_flags=()) -> list[list[str]]` | the printed commands; with *project_dir* they must work from any directory; with `plan.separate`, only the first item's |
 | `probe_argv() -> list[str]` | the command a trial runs, used to authorise the sandbox before any trial |

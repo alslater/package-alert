@@ -1,0 +1,5 @@
+# uv 0.13.5 rc=0
+Using Python 3.13.13 environment at: .
+Resolved 2 packages in 142ms
+Checked 2 packages in 0.04ms
+Would make no changes

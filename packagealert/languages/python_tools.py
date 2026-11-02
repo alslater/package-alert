@@ -923,7 +923,7 @@ def _uv_config_tables(config_file: str | None = None, *, no_config: bool = False
     for conf in files:
         try:
             loaded.append(tomllib.loads(safe_read.read_text(conf, errors="replace")))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # RecursionError: nesting too deep to parse
             unresolved = explicit
     return [t["pip"] for t in loaded if isinstance(t.get("pip"), dict)] + loaded, unresolved
 
@@ -992,7 +992,7 @@ def _uv_provenance(venv: Path) -> _ManagerRecord:
         tool = receipt["tool"]
         requirement, *with_requirements = tool["requirements"]
         options = tool.get("options") or {}
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):  # nesting too deep to parse
         return _UNKNOWN_RECORD
     if not isinstance(requirement, dict) or not isinstance(options, dict):
         return _UNKNOWN_RECORD
@@ -1078,9 +1078,13 @@ def safe_source_url(url: str | None) -> str | None:
         return None
     if not parts.scheme or not host:
         return None
-    # Decoded first, so neither an encoded character nor an encoded "/" hides a token.
-    if any(_TOKEN_SEGMENT_RE.match(segment) or _JWT_SEGMENT_RE.match(segment) or _TOKEN_PREFIX_RE.match(segment)
-           for segment in unquote(parts.path).split("/")):
+    # A git URL's revision follows the path's first "@" (a commit hash looks like a token, so it
+    # is not checked); what precedes it is, so `…/<token>@main` is caught. Decoded first, so
+    # neither an encoded character nor an encoded "/" hides a token; each segment also in its
+    # "@"-separated parts, so an encoded "@" does not.
+    path = parts.path.split("@", 1)[0] if scheme_prefix else parts.path
+    if any(_TOKEN_SEGMENT_RE.match(piece) or _JWT_SEGMENT_RE.match(piece) or _TOKEN_PREFIX_RE.match(piece)
+           for segment in unquote(path).split("/") for piece in (segment, *segment.split("@"))):
         return None
     if ":" in host:                     # an IPv6 literal keeps its brackets
         host = f"[{host}]"
