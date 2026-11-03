@@ -132,14 +132,24 @@ def test_only_real_tool_environments_inside_the_root_count(home, tmp_path):
     assert names == ["good"]
 
 
-def test_a_stale_interpreters_directory_is_orphaned_not_scanned(home):
+def test_an_empty_stale_interpreters_directory_is_orphaned(home):
     root = home / "tools"
     venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
-    old = venv / "lib" / "python3.13" / "site-packages" / "urllib3-1.26.0.dist-info"   # newer, but not in use
-    old.mkdir(parents=True)
+    (venv / "lib" / "python3.13" / "site-packages").mkdir(parents=True)
     [env] = _envs(pt.ToolRoot("pipx", root, True, True))
     assert env.python == "3.12" and env.orphaned == ["lib/python3.13"]
     assert [p.name for p in env.packages] == ["app"]
+
+
+def test_another_interpreters_directory_holding_packages_is_unchecked(home):
+    """pyvenv.cfg can be rewritten to name an empty decoy while Python keeps importing from its
+    own directory: neither is reported as the tool's inventory."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    (venv / "lib" / "python3.13" / "site-packages" / "urllib3-1.26.5.dist-info").mkdir(parents=True)
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert envs[0].packages == [] and envs[0].orphaned == []
+    assert unchecked == [str(venv / "lib")]
 
 
 
@@ -539,16 +549,35 @@ def test_a_lib_linked_to_another_tools_lib_is_neither_scanned_nor_orphaned(home)
         "app": ([], []), "other": ([], ["other"])}
 
 
-def test_links_into_another_tool_are_neither_orphaned_nor_scanned(home):
+def test_a_dist_info_linked_into_another_tool_is_not_scanned(home):
     root = home / "tools"
     app = _venv(root, "app", {"app": "1.0"}, python="3.13")
     other = _venv(root, "other", {"other": "1.0", "theirs": "2.0"}, python="3.12")
-    (app / "lib" / "python3.12").symlink_to(other / "lib" / "python3.12")      # other's live libraries
     site = app / "lib" / "python3.13" / "site-packages"
     (site / "theirs-2.0.dist-info").symlink_to(other / "lib" / "python3.12" / "site-packages" / "theirs-2.0.dist-info")
     [app_env, _other], unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
     assert app_env.orphaned == [] and [p.name for p in app_env.packages] == ["app"]
     assert unchecked == [str(site / "theirs-2.0.dist-info")]       # not this tool's to check
+
+
+@pytest.mark.parametrize("where", ["another_tool", "outside"])
+def test_another_interpreters_directory_leading_out_with_packages_leaves_lib_unchecked(home, tmp_path, where):
+    """pyvenv.cfg names an empty 3.13 while lib/python3.12 links to populated libraries outside
+    the tool, which a 3.12 interpreter imports: the tool is unchecked, not reported empty, and
+    the directory is not called safe to delete."""
+    root = home / "tools"
+    app = _venv(root, "app", {}, python="3.13")
+    if where == "another_tool":
+        other = _venv(root, "other", {"other": "1.0", "theirs": "2.0"}, python="3.12")
+        target = other / "lib" / "python3.12"
+    else:
+        target = tmp_path / "py312"
+        (target / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    (app / "lib" / "python3.12").symlink_to(target)
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    app_env = next(e for e in envs if e.name == "app")
+    assert app_env.orphaned == [] and app_env.packages == []
+    assert str(app / "lib") in unchecked
 
 
 def test_a_site_packages_outside_the_tool_is_unchecked(home, tmp_path):
@@ -1708,3 +1737,106 @@ def test_uv_configuration_nested_too_deeply_is_not_read(tmp_path):
     conf = tmp_path / "uv.toml"
     conf.write_text("x = " + "[" * 1500 + "]" * 1500 + "\n")
     assert pt._uv_config_tables(str(conf)) == ([], True)
+
+
+@pytest.mark.parametrize("dist", ["httpie-3.2.2\x1b]52;c;cm0K\x1b\\.dist-info", "bad name-1.0.dist-info",
+                                  "nover.dist-info"])
+def test_a_dist_info_that_is_not_a_plain_distribution_is_unchecked(home, dist):
+    """Neither read as a package (its name would reach the console and OSV) nor skipped silently."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    odd = venv / "lib" / "python3.12" / "site-packages" / dist
+    odd.mkdir()
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert [p.name for p in envs[0].packages] == ["app"]
+    assert unchecked == [str(odd)]
+
+
+def test_packages_in_a_real_lib64_make_the_tool_unchecked(home):
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    (venv / "lib64" / "python3.12" / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert envs[0].packages == [] and unchecked == [str(venv / "lib")]
+
+
+def test_a_lib64_link_to_another_directory_is_scanned_as_one(home):
+    """lib64 is normally a link to lib; one that leads anywhere else is what a lib64 Python
+    imports, so its packages count as another interpreter's directory."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    (venv / "other" / "python3.12" / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    (venv / "lib64").symlink_to("other")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert envs[0].packages == [] and unchecked == [str(venv / "lib")]
+    (venv / "lib64").unlink()
+    (venv / "lib64").symlink_to("lib")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert [p.name for p in envs[0].packages] == ["app"] and unchecked == []
+
+
+def test_an_interpreter_directory_the_in_use_site_packages_links_into_is_still_checked(home):
+    """pyvenv.cfg names 3.13, whose site-packages links to an empty lib/python3.12/decoy: 3.12 is
+    not stale (it holds what is in use) but its own site-packages holds packages a 3.12
+    interpreter imports, so the tool is unchecked, not reported empty."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"evil": "1.0"}, python="3.12")
+    lib = venv / "lib"
+    (lib / "python3.12" / "decoy").mkdir()
+    (lib / "python3.13").mkdir()
+    (lib / "python3.13" / "site-packages").symlink_to("../python3.12/decoy")
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.13.1\n")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert envs[0].packages == [] and envs[0].orphaned == []
+    assert unchecked == [str(lib)]
+
+
+def test_another_interpreters_site_packages_that_is_the_one_in_use_is_scanned(home):
+    """lib/python3.13/site-packages linking to the in-use lib/python3.12/site-packages is the same
+    package directory under another name, not a second inventory."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    (venv / "lib" / "python3.13").mkdir()
+    (venv / "lib" / "python3.13" / "site-packages").symlink_to("../python3.12/site-packages")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert [p.name for p in envs[0].packages] == ["app"] and unchecked == []
+
+
+@pytest.mark.parametrize("link", ["site-packages", "python3.12"])
+def test_a_real_lib64_whose_site_packages_is_the_one_in_use_is_scanned(home, link):
+    """A real lib64 whose site-packages (or interpreter directory) links to lib's in-use one is
+    the same package directory under another name, not a second inventory."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    if link == "site-packages":
+        (venv / "lib64" / "python3.12").mkdir(parents=True)
+        (venv / "lib64" / "python3.12" / "site-packages").symlink_to("../../lib/python3.12/site-packages")
+    else:
+        (venv / "lib64").mkdir()
+        (venv / "lib64" / "python3.12").symlink_to("../lib/python3.12")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert [p.name for p in envs[0].packages] == ["app"] and unchecked == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_unreadable_lib64_is_unchecked(home):
+    """Path.glob() skips a directory it cannot list, so lib64 is listed explicitly."""
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    lib64 = venv / "lib64"
+    (lib64 / "python3.12" / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    lib64.chmod(0)
+    try:
+        envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    finally:
+        lib64.chmod(0o755)
+    assert envs[0].packages == [] and unchecked == [str(lib64)]
+
+
+def test_a_lib64_link_out_of_the_environment_is_unchecked(home):
+    root = home / "tools"
+    venv = _venv(root, "app", {"app": "1.0"}, python="3.12")
+    (home / "elsewhere").mkdir()
+    (venv / "lib64").symlink_to(home / "elsewhere")
+    envs, unchecked = pt.tool_envs(pt.ToolRoot("pipx", root, True, True))
+    assert envs[0].packages == [] and unchecked == [str(venv / "lib64")]

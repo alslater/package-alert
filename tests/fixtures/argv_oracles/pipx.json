@@ -93,6 +93,21 @@
 ],
 [
 [
+"--version",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--v",
 "install",
 "evilpkg"
@@ -183,6 +198,21 @@
 ],
 [
 [
+"--v",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--ve",
 "install",
 "evilpkg"
@@ -273,6 +303,21 @@
 ],
 [
 [
+"--ve",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--ver",
 "install",
 "evilpkg"
@@ -363,6 +408,21 @@
 ],
 [
 [
+"--ver",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--vers",
 "install",
 "evilpkg"
@@ -453,6 +513,21 @@
 ],
 [
 [
+"--vers",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--versi",
 "install",
 "evilpkg"
@@ -543,6 +618,21 @@
 ],
 [
 [
+"--versi",
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
 "--versio",
 "install",
 "evilpkg"
@@ -623,6 +713,21 @@
 [
 "--versio",
 "reinstall-all"
+],
+{
+"cmd": null,
+"packages": [],
+"req_files": [],
+"target": null
+}
+],
+[
+[
+"--versio",
+"runpip",
+"app",
+"install",
+"evilpkg"
 ],
 {
 "cmd": null,
@@ -30600,6 +30705,1448 @@
 ],
 [
 [
+"runpip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"second"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"second"
+]
+}
+],
+[
+[
+"runpip",
+"--quiet",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--quiet"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--quiet"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"-q"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"-q"
+]
+}
+],
+[
+[
+"runpip",
+"--q",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--q"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--q"
+]
+}
+],
+[
+[
+"runpip",
+"--qu",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--qu"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--qu"
+]
+}
+],
+[
+[
+"runpip",
+"--qui",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--qui"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--qui"
+]
+}
+],
+[
+[
+"runpip",
+"--quie",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--quie"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--quie"
+]
+}
+],
+[
+[
+"runpip",
+"--verbose",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--verbose"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--verbose"
+]
+}
+],
+[
+[
+"runpip",
+"-v",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"-v"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"-v"
+]
+}
+],
+[
+[
+"runpip",
+"--v",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--v"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--v"
+]
+}
+],
+[
+[
+"runpip",
+"--ve",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--ve"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--ve"
+]
+}
+],
+[
+[
+"runpip",
+"--ver",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--ver"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--ver"
+]
+}
+],
+[
+[
+"runpip",
+"--verb",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--verb"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--verb"
+]
+}
+],
+[
+[
+"runpip",
+"--verbo",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--verbo"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--verbo"
+]
+}
+],
+[
+[
+"runpip",
+"--verbos",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--verbos"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--verbos"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-maintenance",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-maintenance"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-maintenance"
+]
+}
+],
+[
+[
+"runpip",
+"--s",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--s"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--s"
+]
+}
+],
+[
+[
+"runpip",
+"--sk",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--sk"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--sk"
+]
+}
+],
+[
+[
+"runpip",
+"--ski",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--ski"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--ski"
+]
+}
+],
+[
+[
+"runpip",
+"--skip",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-m",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-m"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-m"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-ma",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-ma"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-ma"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-mai",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-mai"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-mai"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-main",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-main"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-main"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-maint",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-maint"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-maint"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-mainte",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-mainte"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-mainte"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-mainten",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-mainten"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-mainten"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-maintena",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-maintena"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-maintena"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-maintenan",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-maintenan"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-maintenan"
+]
+}
+],
+[
+[
+"runpip",
+"--skip-maintenanc",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--skip-maintenanc"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--skip-maintenanc"
+]
+}
+],
+[
+[
+"runpip",
+"--global",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--global"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--global"
+]
+}
+],
+[
+[
+"runpip",
+"--g",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--g"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--g"
+]
+}
+],
+[
+[
+"runpip",
+"--gl",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--gl"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--gl"
+]
+}
+],
+[
+[
+"runpip",
+"--glo",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--glo"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--glo"
+]
+}
+],
+[
+[
+"runpip",
+"--glob",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--glob"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--glob"
+]
+}
+],
+[
+[
+"runpip",
+"--globa",
+"app",
+"install",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"evilpkg",
+"--globa"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"evilpkg",
+"--globa"
+]
+}
+],
+[
+[
 "install",
 "evilpkg==1.0",
 "--lock",
@@ -30700,6 +32247,528 @@
 "pylock.toml"
 ],
 "target": null
+}
+],
+[
+[
+"runpip",
+"app",
+"list"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"list"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"list"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"list"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"list"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"list"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"show",
+"x"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"show",
+"x"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"show",
+"x"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"show",
+"x"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"show",
+"x"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"show",
+"x"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"freeze"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"freeze"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"freeze"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"freeze"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"freeze"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"freeze"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"--dry-run",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"install",
+"--dry-run",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"install",
+"--dry-run",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"-r",
+"r.txt",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install --dry-run evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"install --dry-run evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"install --dry-run evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--dry-run",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"--glo",
+"x",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--glo",
+"x",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"install",
+"--glo",
+"x",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--glo",
+"x",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"install",
+"--glo",
+"x",
+"evilpkg"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--glo",
+"x",
+"evilpkg"
+]
+}
+],
+[
+[
+"runpip",
+"app"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": []
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": []
+}
+],
+[
+[
+"runpip",
+"--",
+"app"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": []
+}
+],
+[
+[
+"runpip",
+"app",
+"install",
+"--",
+"-evil"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--",
+"-evil"
+]
+}
+],
+[
+[
+"runpip",
+"-q",
+"-v",
+"app",
+"install",
+"--",
+"-evil"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--",
+"-evil"
+]
+}
+],
+[
+[
+"runpip",
+"--",
+"app",
+"install",
+"--",
+"-evil"
+],
+{
+"cmd": "runpip",
+"packages": [],
+"req_files": [],
+"target": "app",
+"pipargs": [
+"install",
+"--",
+"-evil"
+]
 }
 ]
 ]

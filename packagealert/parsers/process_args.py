@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -572,6 +573,22 @@ class ParsedInstall:
     # (pnpm 8-9 and 10+ resolve `-C a --prefix b` differently), so no one
     # directory is the one it uses. The sandbox refuses such a command.
     ambiguous_dirs: bool = False
+    # A tool manager's home the command writes in several places that must share one mount, so
+    # it is bound writable whole and not snapshotted (pipx install/reinstall/reinstall-all rename
+    # the old venv into PIPX_HOME/.trash, and lock PIPX_HOME/.shared.lock). None otherwise.
+    writable_tool_home: Path | None = None
+    # The command rebuilds tool environments from the specs their manager recorded (pipx
+    # reinstall/upgrade: the environments named in `packages`; their -all forms: every one), so
+    # it builds from each one's recorded local source.
+    rebuilds_recorded_envs: bool = False
+    # The pipx venvs (directory names under PIPX_HOME/venvs) a pipx command names, as pipx names
+    # them; None when one is known only after a build (`pipx install <URL or path>`), so every
+    # venv counts. Empty for any other command.
+    pipx_venvs: list[str] | None = field(default_factory=list)
+    # The command writes only the environments it names under its manager's root (the first
+    # extra_write_home_dirs entry), not the root itself: pipx runpip writes one app's venv and
+    # its lock beside it, so neither another app's venv nor the root is made writable.
+    writes_only_named_envs: bool = False
 
     @property
     def registry_name(self) -> str:
@@ -586,13 +603,20 @@ def derive_site_packages(exe_path: str) -> Path | None:
 
     Works for:  /path/to/venv/bin/pip
                 /path/to/venv/bin/python3
-    Returns None for system executables or paths that don't resolve to a venv.
+    Returns None for system executables or paths that don't resolve to a venv. In a venv (one
+    with a pyvenv.cfg) the choice is venv_site_packages()'s, whose ValueError (packages under
+    more than one interpreter's directory, or a tampered pyvenv.cfg) propagates: the first match
+    could be a decoy an earlier install left.
     """
     p = Path(exe_path)
     if not p.is_absolute():
         return None
     # venv/bin/<exe>  →  venv/lib/pythonX.Y/site-packages
     venv_root = p.parent.parent
+    if (venv_root / "pyvenv.cfg").is_file():
+        from packagealert.languages.python import venv_site_packages
+
+        return venv_site_packages(venv_root)
     candidates = sorted(venv_root.glob("lib/python*/site-packages"))
     return candidates[0] if candidates else None
 
@@ -1665,22 +1689,131 @@ def _pipx_home() -> Path:
     return _home_tool_dir(exact, default, "PIPX_HOME" if override else "XDG_DATA_HOME")
 
 
-def _pipx_spec_comes_from_lock(spec: str) -> bool:
-    """Whether `pipx install <spec> --lock F` takes *spec* from the lock file:
-    pipx's `valid_pypi_name()` — a PEP 508 requirement with no URL whose name
-    is not an archive (pipx 1.17's ARCHIVE_EXTENSIONS)."""
+def _pipx_man_dir() -> Path:
+    """The directory pipx links app manual pages into, as pipx resolves it (pipx.paths at
+    1.18.4): $PIPX_MAN_DIR with ``~`` expanded, made absolute; else ~/.local/share/man. Bounded
+    by _home_tool_dir()."""
+    default = Path.home() / ".local" / "share" / "man"
+    if value := os.environ.get("PIPX_MAN_DIR"):
+        return _home_tool_dir(Path(value).expanduser().absolute(), default, "PIPX_MAN_DIR")
+    return default
+
+
+def _pipx_shared_libs() -> Path:
+    """pipx's shared libraries (pipx.paths at 1.18.4): $PIPX_SHARED_LIBS with ``~`` expanded,
+    made absolute; else ``<home>/shared``. Bounded by _home_tool_dir()."""
+    default = _pipx_home() / "shared"
+    if value := os.environ.get("PIPX_SHARED_LIBS"):
+        return _home_tool_dir(Path(value).expanduser().absolute(), default, "PIPX_SHARED_LIBS")
+    return default
+
+
+def _pipx_pypi_name(spec: str) -> str | None:
+    """pipx's ``valid_pypi_name()`` (1.18.4): the canonical name of a PEP 508 requirement with no
+    URL whose name is not an archive (ARCHIVE_EXTENSIONS), else None."""
     from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
 
     try:
         req = Requirement(spec)
     except InvalidRequirement:
-        return False
-    return not req.url and not req.name.endswith((".whl", ".tar.gz", ".zip"))
+        return None
+    if req.url or req.name.endswith((".whl", ".tar.gz", ".zip")):
+        return None
+    return canonicalize_name(req.name)
+
+
+def _pipx_spec_comes_from_lock(spec: str) -> bool:
+    """Whether `pipx install <spec> --lock F` takes *spec* from the lock file:
+    pipx's `valid_pypi_name()` accepts it."""
+    return _pipx_pypi_name(spec) is not None
+
+
+def _pipx_venv_name(arg: str) -> str:
+    """The venv directory pipx 1.18.4 uses for a command naming an installed app (upgrade,
+    reinstall, inject, runpip): ``get_venv_dir(valid_pypi_name(arg) or arg)``, canonicalised."""
+    from packaging.utils import canonicalize_name
+
+    return canonicalize_name(_pipx_pypi_name(arg) or arg)
+
+
+def _is_file(p: Path) -> bool:
+    try:
+        return p.is_file()
+    except OSError:
+        return True
+
+
+def _pipx_install_venvs(specs: list[str], suffix: str) -> list[str] | None:
+    """The venv directories `pipx install SPEC... --suffix S` writes, as pipx 1.18.4 names them:
+    the requirement's canonical name plus the suffix, canonicalised together. None when a spec's
+    name is known only after building it (a URL, archive, local path) or may be a script's (a
+    file, or a spec ending in .py; an unreadable path counts as a file)."""
+    from packaging.utils import canonicalize_name
+
+    names: list[str] = []
+    for spec in specs:
+        # pipx tries a spec as a script first (script_name_from_spec): a local file, or one
+        # ending in .py, names its venv after the file stem or --app.
+        if spec.lower().endswith(".py") or _is_file(Path(spec).expanduser()):
+            return None
+        if (name := _pipx_pypi_name(spec)) is None:
+            return None
+        names.append(canonicalize_name(f"{name}{suffix}"))
+    return names
+
+
+def _parse_pipx_runpip(argv: list[str]) -> ParsedInstall | None:
+    """`pipx runpip [options] APP PIPARGS...`: pip run inside APP's venv.
+
+    runpip's own options (`--quiet`, `--verbose`, `--skip-maintenance`, `--global`) take no
+    value and come before APP; everything after APP is pip's, untouched (argparse REMAINDER),
+    so pip's options are never abbreviation-expanded against pipx's. A single quoted
+    argument (`"install black"`) is split on whitespace, as pipx's get_runpip_args() does.
+    Only `pip install` is an install: every other pip command returns None. `--dry-run`
+    still is one, since resolving can build an sdist and run its code."""
+    from packaging.utils import canonicalize_name
+
+    rest = argv[2:]
+    i = 0
+    while i < len(rest) and rest[i].startswith("-"):
+        i += 1
+        if rest[i - 1] == "--":
+            break
+    if i >= len(rest):
+        return None
+    app, pip_args = rest[i], rest[i + 1:]
+    if len(pip_args) == 1 and any(c.isspace() for c in pip_args[0]):
+        try:
+            pip_args = shlex.split(pip_args[0]) or pip_args
+        except ValueError:
+            return None
+    pip = parse_pip_args(["pip", *pip_args])
+    if pip is None:
+        return None
+    # pipx runs pip in the app's venv (run_raw_pip's run_dir), so a relative requirements file
+    # is that directory's, not the caller's: pre-flight reads the file pip installs from.
+    venv = _pipx_home() / "venvs" / canonicalize_name(app)
+    req_files = [rf if os.path.isabs(rf) else str(venv / rf) for rf in pip.req_files]
+    return ParsedInstall(
+        manager="pipx", packages=pip.packages, req_files=req_files, ecosystem="pypi",
+        venv_exe=argv[0],
+        # The venvs directory, not venvs/APP: PythonLanguage reads the FIRST entry as the
+        # venvs parent and joins target_env_name onto it, so naming venvs/APP here would
+        # resolve to venvs/APP/APP and miss the scan and snapshot. pip writes console scripts
+        # into venvs/APP/bin, so PIPX_BIN_DIR is not writable, nor is the shared directory.
+        extra_write_home_dirs=[_pipx_home() / "venvs"],
+        target_env_name=app,
+        pipx_venvs=[_pipx_venv_name(app)],
+        writes_only_named_envs=True,
+    )
 
 
 def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
     if not argv or _cmd(argv[0]) != "pipx":
         return None
+    if argv[1:2] == ["runpip"]:
+        return _parse_pipx_runpip(argv)
     # pipx's top level accepts only -h/--version, so abbreviations matter only
     # after the subcommand (`pipx install --suff x tool`).
     args = _canonicalise_long_options(
@@ -1690,11 +1823,21 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
     if not args:
         return None
     subcmd = args[0]
+    # What each subcommand writes, measured with pipx 1.18.4 (tests/fixtures/pip_trial/README.md,
+    # "Step 5"): install and reinstall (and reinstall-all) lock PIPX_HOME/.shared.lock and link
+    # executables and manual pages; reinstall also renames the old venv into PIPX_HOME/.trash,
+    # which must share a mount with the venvs. upgrade writes only the venvs (and its log).
+    recreates = subcmd in ("install", "reinstall", "reinstall-all")
+    tool_dirs = [_pipx_home() / "venvs", _pipx_bin_dir(), *([_pipx_man_dir()] if recreates else [])]
+    home = _pipx_home() if recreates else None
     if subcmd in ("install", "upgrade", "reinstall"):
         # `install`/`upgrade` take ONE OR MORE packages (pipx's own parser:
         # nargs="+"); checking only the first let `pipx install black evil`
         # install `evil` unchecked.
         packages = _positionals(args[1:], _PIPX_VALUE_FLAGS)
+        suffix = (_value_flag_args(args[1:], frozenset({"--suffix"})) or [""])[-1]
+        venvs = (_pipx_install_venvs(packages, suffix) if subcmd == "install"
+                 else [_pipx_venv_name(p) for p in packages])
         # `install --lock pylock.toml` installs EVERY package in the lock file
         # (pipx's backend.install_lock()); collect_requirements_packages()
         # reads it as PEP 751. A named spec pipx then satisfies FROM the lock
@@ -1706,8 +1849,8 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
             packages = [p for p in packages if not _pipx_spec_comes_from_lock(p)]
         return ParsedInstall(
             manager="pipx", packages=packages, ecosystem="pypi", venv_exe=argv[0],
-            extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
-            req_files=req_files,
+            extra_write_home_dirs=tool_dirs, req_files=req_files, writable_tool_home=home,
+            rebuilds_recorded_envs=subcmd != "install", pipx_venvs=venvs,
         )
     if subcmd in ("inject",):
         positionals = _positionals(args[1:], _PIPX_VALUE_FLAGS)
@@ -1721,13 +1864,15 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
             extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
             target_env_name=venv_name,
             req_files=req_files,
+            pipx_venvs=[_pipx_venv_name(venv_name)] if venv_name else [],
         )
     if subcmd in ("upgrade-all", "reinstall-all", "install-all"):
         # Packages are unknown but the command installs/upgrades tool venvs —
         # sandbox it with the full venvs dir writable so no install escapes.
         return ParsedInstall(
             manager="pipx", packages=[], ecosystem="pypi", venv_exe=argv[0],
-            extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
+            extra_write_home_dirs=tool_dirs, writable_tool_home=home,
+            rebuilds_recorded_envs=subcmd != "install-all",
         )
     if subcmd in ("run", "uninstall", "uninstall-all", "list", "environment",
                   "ensurepath", "completions"):

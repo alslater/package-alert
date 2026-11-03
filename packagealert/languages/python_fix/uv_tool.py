@@ -24,7 +24,6 @@ would install from somewhere else.
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import email.parser
 import os
@@ -37,6 +36,18 @@ from typing import TYPE_CHECKING
 
 from packagealert import safe_read
 from packagealert.languages.python_fix import uv_trial
+from packagealert.languages.python_fix.tool_fix import (
+    Baseline,
+    Inventory,
+    ToolState,
+    first_write_dir,
+    in_place,
+    inventory,
+    is_venv,
+    measure_from_baseline,
+    public_cadences,
+    reread_env,
+)
 from packagealert.remediate.adapter import Change, LockfileError, TrialResult, Yank
 from packagealert.remediate.graph import DependencyGraph
 from packagealert.safe_output import redacted, redacted_text
@@ -847,12 +858,59 @@ def dependency_edges(site_packages: Path | None, receipt: Receipt, python: str |
     return {n: frozenset(d) for n, d in edges.items()}
 
 
-@dataclass(frozen=True)
-class ToolState:
-    """What the tool has installed and records, read once when planning starts."""
+# ---- what --apply checks after the reinstall (cli/fix_tools.py) ------------------------------
 
-    receipt_bytes: bytes
-    installed: Mapping[str, frozenset[str]]
+def readable_receipt(data: bytes | None) -> bool:
+    """Whether *data* is a receipt uv (and pa fix) can use as the tool's record: one ``pa fix``
+    could plan from again, with nothing it would hold as malformed or not carried over."""
+    if data is None:
+        return False
+    try:
+        receipt = read_receipt(data.decode("utf-8", errors="strict"))
+    except (ReceiptError, UnicodeDecodeError):
+        return False
+    return not receipt.unsupported
+
+
+def entrypoint_paths(receipt: bytes | None) -> set[Path]:
+    """The executables a receipt records (each entry point's absolute ``install-path``)."""
+    if receipt is None:
+        return set()
+    try:
+        entries = tomllib.loads(receipt.decode("utf-8", errors="replace"))["tool"]["entrypoints"]
+    except (tomllib.TOMLDecodeError, KeyError, TypeError, RecursionError):  # nesting too deep to parse
+        return set()
+    # A NUL cannot name a file: os.path functions raise ValueError on it.
+    return {Path(p) for e in (entries if isinstance(entries, list) else [])
+            if isinstance(e, dict) and isinstance(p := e.get("install-path"), str) and os.path.isabs(p)
+            and "\0" not in p}
+
+
+def _physical(paths: set[Path]) -> set[Path]:
+    """*paths* with each parent directory resolved, the name kept: two receipts can name one
+    executables directory through different links (the name itself is the link uv writes)."""
+    return {Path(os.path.realpath(p.parent)) / p.name for p in paths}
+
+
+def unexpected(expected: Mapping[str, frozenset[str]], actual: Mapping[str, frozenset[str]],
+               before: Mapping[str, frozenset[str]], required: frozenset[str],
+               local: frozenset[str] = frozenset()) -> list[str]:
+    """How *actual* differs from the verified end state. A package left out that the plan did not
+    move is allowed only when it is not *required* (the receipt's requirements and what they
+    need, read from the reinstalled environment): a reinstall drops what nothing needs. A
+    *local* package (built from its source: a checkout, or git) need only be present: the dry
+    run does not know the version its source now holds."""
+    out = []
+    for name in sorted(expected.keys() | actual.keys() | required):
+        want, got = expected.get(name, frozenset()), actual.get(name, frozenset())
+        if name in required and not got:
+            pass  # a requirement the reinstalled tool needs is missing
+        elif name in local and got:
+            continue  # rebuilt from its source, at whatever version that now holds
+        elif want == got or (not got and want == before.get(name) and name not in required):
+            continue
+        out.append(f"{name} {', '.join(sorted(got)) or 'absent'} (verified: {', '.join(sorted(want)) or 'absent'})")
+    return out
 
 
 class UvToolFixAdapter:
@@ -868,6 +926,11 @@ class UvToolFixAdapter:
     can_force = False
     pins_every_copy = False
     yanks_from_registry = True
+    # How --apply names the tool and its command (``cli.fix_tools.ToolApplyTarget``).
+    kind = "tool"
+    action = "reinstall"
+    doing = "reinstalling the tool"
+    confirm_note = "reinstalls the tool"
 
     def __init__(self, env: ToolEnv, receipt: Receipt, receipt_bytes: bytes) -> None:
         self.env = env
@@ -876,9 +939,7 @@ class UvToolFixAdapter:
         self.label = env.label
         self.state = ToolState(receipt_bytes, self._installed())
         # The no-pin resolution's end state, once run (None when it did not resolve).
-        self._baseline: TrialResult | None = None
-        self._baseline_run = False
-        self._baseline_guard = asyncio.Lock()
+        self._baseline = Baseline()
         # Names installed, required or seen in a trial from outside public PyPI: never looked
         # up there.
         self._not_public: set[str] = ({_norm(p.name) for p in env.packages if not p.public}
@@ -1019,28 +1080,14 @@ class UvToolFixAdapter:
         if (held := self.held_reason()) is not None:
             return TrialResult("inconclusive", detail=held)
         result = await self._run(pins, run)
-        base = await self.baseline(run)
-        if result.status != "resolved" or result.after is None or base is None or base.after is None:
-            return result
-        try:
-            changes, declined = diff_from_baseline(self.state.installed, base.after, result.after)
-        except ValueError as exc:
-            return TrialResult("inconclusive", detail=f"cannot compare the trial with the baseline ({exc})")
-        # Measured from the baseline, whose versions keep their own provenance.
-        return dataclasses.replace(result, changes=changes, declined=declined,
-                                   non_public=result.non_public | base.non_public)
+        return measure_from_baseline(self.state.installed, result, await self.baseline(run))
 
     async def baseline(self, run: TrialRunner) -> TrialResult | None:
         """What reinstalling (or ``uv tool upgrade``) changes with nothing pinned, measured from
         what the tool has installed; run once, and None when it does not resolve."""
         if self.held_reason() is not None:
             return None
-        async with self._baseline_guard:
-            if not self._baseline_run:
-                result = await self._run((), run)
-                self._baseline = result if result.status == "resolved" else None
-                self._baseline_run = True
-        return self._baseline
+        return await self._baseline.get(lambda: self._run((), run))
 
     def held_reason(self) -> str | None:
         """Why no command can apply a fix to this tool, which holds every fix; None when one can."""
@@ -1059,9 +1106,95 @@ class UvToolFixAdapter:
                     "reinstall could change it")
         return None
 
-    async def cadences(self, names: list[str]) -> dict[str, str | None]:
-        from packagealert.languages.python_fix import release_cadence
+    # ---- --apply (``cli.fix_tools.ToolApplyTarget``) ----
 
+    @property
+    def venv_root(self) -> Path:
+        return self.env.venv_root
+
+    @property
+    def metadata_path(self) -> Path:
+        return self.env.venv_root / RECEIPT
+
+    @property
+    def backup_name(self) -> str:
+        return f"uv-tool-{self.env.name}"
+
+    def pin_problem(self, plan: FixPlan) -> str | None:
+        """Every verified plan has a command (``apply_argv()``)."""
+        return None
+
+    def install_root(self, parsed: object) -> Path | None:
+        """The tools directory ``pa run`` would reinstall in, resolved."""
+        return first_write_dir(parsed)
+
+    def bin_dir(self, parsed: object) -> Path:
+        """The executables' directory ``pa run`` binds writable; ValueError when it does not say."""
+        dirs = getattr(parsed, "extra_write_home_dirs", None) or []
+        if len(dirs) < 2 or not isinstance(dirs[1], Path):
+            raise ValueError("pa run did not say which directory the tool's executables go in")
+        return dirs[1]
+
+    def run_env(self, parsed: object) -> dict[str, str]:
+        """UV_TOOL_DIR and UV_TOOL_BIN_DIR set to the absolute directories ``pa run`` resolved for
+        *parsed*, so a run from another directory resolves the same ones."""
+        dirs = getattr(parsed, "extra_write_home_dirs", None) or []
+        return {k: str(d) for k, d in zip(("UV_TOOL_DIR", "UV_TOOL_BIN_DIR"), dirs, strict=False)
+                if isinstance(d, Path) and d.is_absolute()}
+
+    def read_only_paths(self, parsed: object) -> list[Path]:
+        """Nothing outside the tool and its executables needs to stay read-only for uv."""
+        return []
+
+    def reread(self, root_identity: tuple[str, int, int] | None = None
+               ) -> tuple[bytes | None, Inventory | None]:
+        """The tool's receipt and installed versions now (None for what cannot be read)."""
+        receipt, env = reread_env(self.env, RECEIPT, root_identity)
+        return receipt, (None if env is None else inventory(env))
+
+    def config_problem(self, extra_env: Sequence[str]) -> str | None:
+        """Why the reinstall could read other uv configuration from its trial (see ``config_mismatch()``)."""
+        return config_mismatch(self.env.venv_root)
+
+    def executables(self, metadata: bytes | None) -> set[Path]:
+        return entrypoint_paths(metadata)
+
+    def end_state_problem(self, expected: Mapping[str, frozenset[str]], before: Mapping[str, frozenset[str]],
+                          root_identity: tuple[str, int, int] | None) -> str | None:
+        """Why the reinstalled tool is not the verified end state (*expected*, and *before* for
+        what the plan did not move), or None when it is."""
+        venv = self.env.venv_root
+        new_receipt, new_env = reread_env(self.env, RECEIPT, root_identity)
+        if new_env is not None and readable_receipt(new_receipt) and is_venv(venv):
+            after = inventory(new_env)
+            try:
+                # The new receipt's requirements too: a --with pin is one, and what it needs is required.
+                interp = tool_interpreter(venv, new_env.python)
+                reinstalled = read_receipt((new_receipt or b"").decode())
+                required = (required_packages(new_env.site_packages, self.receipt, interp)
+                            | required_packages(new_env.site_packages, reinstalled, interp))
+            except ValueError as exc:
+                problems = [f"what the reinstalled packages need cannot be read ({exc})"]
+            else:
+                problems = unexpected(expected, after, before, required, self.from_source)
+                # The tool must be one pa fix could plan for again: a receipt for another tool (whose
+                # directory uv would reinstall) or with no recorded interpreter would be held.
+                if held := type(self)(new_env, reinstalled, new_receipt or b"").held_reason():
+                    problems.append(f"pa fix would hold the reinstalled tool: {held}")
+            # An executable the tool had and the reinstall dropped (a `--with-executables-from` not
+            # carried over removes its provider's): the versions alone would accept that.
+            if lost := sorted(p.name for p in _physical(entrypoint_paths(self.state.receipt_bytes))
+                              - _physical(entrypoint_paths(new_receipt))):
+                problems.append(f"it no longer installs {', '.join(lost)}")
+            return f"the reinstall did not install the verified versions: {'; '.join(problems)}" if problems else None
+        if new_env is not None and not readable_receipt(new_receipt):
+            return "the reinstalled tool has no usable uv-receipt.toml (unreadable, or one pa fix would hold)"
+        if new_env is not None and not is_venv(venv):
+            return "the reinstalled tool is not a working virtualenv (pyvenv.cfg or bin/python is missing)"
+        if not in_place(venv, root_identity):
+            return "the tool's directory was replaced during the run"
+        return "the reinstalled tool could not be read"
+
+    async def cadences(self, names: list[str]) -> dict[str, str | None]:
         # A private package's name is not sent to PyPI; it has no public release history.
-        found = await release_cadence.cadences([n for n in names if _norm(n) not in self._not_public])
-        return {n: found.get(n) for n in names}
+        return await public_cadences(names, self._not_public, _norm)

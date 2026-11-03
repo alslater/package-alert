@@ -427,7 +427,10 @@ class ProcessMonitor(AbstractMonitor):
                     log.warning("Skipping %s pid=%d: %s", parsed.manager, pid, exc)
                     continue
                 event_project_path = moved_project or project_path
-                site_pkgs = derive_site_packages(parsed.venv_exe) if parsed.venv_exe else None
+                try:
+                    site_pkgs = derive_site_packages(parsed.venv_exe) if parsed.venv_exe else None
+                except ValueError:
+                    site_pkgs = None  # which site-packages it uses cannot be told (logged)
                 if parsed.defer_to_lockfile:
                     if project_path:
                         self._pending[process_identity] = _PendingInstall(

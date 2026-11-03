@@ -8,10 +8,12 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
@@ -22,6 +24,7 @@ from rich.console import Console
 from rich.text import Text
 
 from packagealert import safe_read
+from packagealert.fs_identity import dir_identity, entry_names
 from packagealert.languages import registry as lang_registry
 from packagealert.languages.base import (
     PackageSpec,
@@ -48,7 +51,7 @@ from packagealert.parsers.process_args import (
     resolve_lockfile_dir,
 )
 from packagealert.safe_output import harden, make_console, redacted
-from packagealert.sandbox import isolation
+from packagealert.sandbox import dir_backup, isolation
 from packagealert.sandbox.backend import InstallSnapshot, SandboxBackend
 from packagealert.sandbox.backends.registry import build_backend
 from packagealert.sandbox.bwrap import available as bwrap_available
@@ -116,6 +119,20 @@ class _Context:
     scan_targets: list[Path] = field(default_factory=list)
     # Directories to snapshot+restore for rollback but not scanned for new packages
     snapshot_only_dirs: list[Path] = field(default_factory=list)
+    # Paths inside a writable directory that stay read-only (SandboxTargets.read_only_over_write)
+    read_only_over_write: list[Path] = field(default_factory=list)
+    # Directories backed up whole before the run (SandboxTargets.backup_dirs)
+    backup_dirs: list[Path] = field(default_factory=list)
+    # Backup directories _resolve_targets() dropped as unsafe: the run is refused
+    unsafe_backup_dirs: list[Path] = field(default_factory=list)
+    # Directories that must stay the same real directory through the run (SandboxTargets.stable_dirs)
+    stable_dirs: list[Path] = field(default_factory=list)
+    # Directories whose entries created by the run are scanned after it (SandboxTargets.env_parents)
+    env_parents: list[Path] = field(default_factory=list)
+    # Environments the command may change that could not be scanned (SandboxTargets.unscanned)
+    unscanned: list[Path] = field(default_factory=list)
+    # Single files bound writable in place (SandboxTargets.write_files)
+    write_files: list[Path] = field(default_factory=list)
     # Where the command effectively runs and discovers its project, when the
     # invocation moves either away from cwd (uv's `--directory`/`--project`);
     # both are cwd otherwise. Used for what the command READS — requirement
@@ -158,6 +175,21 @@ class _Assembly:
     extra_tmpfs: list[Path]
     writable_binds: list[tuple[Path, Path]]
     hidden: list[Path]
+    # Bound read-only over the writable paths (build_cmd()'s ro_over_write): what the plugin
+    # keeps read-only, and the repositories in every editable or local source bound writable.
+    ro_over_write: list[Path] = field(default_factory=list)
+    # The editable or local sources bound writable (sandbox_extra_write_paths()), resolved:
+    # checked for repositories build code planted (repository_changes()).
+    checkouts: list[Path] = field(default_factory=list)
+
+
+@dataclass
+class _ScratchWrites:
+    """The extra writable paths a plugin asks for a scratch run (``sandbox_extra_write_paths()``):
+    those sandbox.editable_roots allows, and those it refuses."""
+
+    dirs: list[Path] = field(default_factory=list)
+    refused: list[Path] = field(default_factory=list)
 
 
 # How many known-vulnerable packages an OSV gate lists before summarising the rest.
@@ -269,6 +301,30 @@ class SandboxRunner:
         self._backend: SandboxBackend = build_backend(cfg.sandbox)
 
     async def run(self, argv: list[str], *, allow_network: bool = True, extra_env: list[str] | None = None, flags: dict[str, frozenset[str]] | None = None, allow_external_lockfiles: bool = False, no_change: bool = False) -> int:
+        # Whole-directory backups made for this run (SandboxTargets.backup_dirs): removed when it
+        # ends, unless one could not be put back.
+        state = _RunState()
+        try:
+            return await self._run(argv, state, allow_network=allow_network, extra_env=extra_env, flags=flags,
+                                   allow_external_lockfiles=allow_external_lockfiles, no_change=no_change)
+        except BaseException:
+            # Interrupted or failed after the command started: nothing has put its directories
+            # back, so the backups are the only full copies left.
+            if state.started:
+                for b in state.backups:
+                    b.keep = True
+                    self._console.print(f"Backup of {b.target} kept in {b.copy / 'tree'}", style="yellow",
+                                        markup=False)
+            raise
+        finally:
+            for b in state.backups:
+                if not b.keep:
+                    dir_backup.discard(b)
+
+    async def _run(self, argv: list[str], state: _RunState, *, allow_network: bool,
+                   extra_env: list[str] | None, flags: dict[str, frozenset[str]] | None,
+                   allow_external_lockfiles: bool, no_change: bool) -> int:
+        backups = state.backups
         try:
             mode = isolation.selected()
         except isolation.IsolationError as exc:
@@ -484,6 +540,22 @@ class SandboxRunner:
                     self._console.print(f"✗ Cannot snapshot rollback target {_t}: {exc}", style="bold red", markup=False)
                     self._console.print("Aborting — rollback cannot be guaranteed without a snapshot.", style="dim")
                     return 1
+        if ctx.unsafe_backup_dirs:
+            self._console.print(f"✗ Cannot back up {ctx.unsafe_backup_dirs[0]}: not a path the sandbox may write.",
+                                style="bold red", markup=False)
+            self._console.print("Aborting — rollback cannot be guaranteed without a backup.", style="dim")
+            return 1
+        stable_before = {p: dir_identity(p) for p in ctx.stable_dirs}
+        env_entries_before = {p: entry_names(p) for p in ctx.env_parents}
+        for _t in ctx.backup_dirs:
+            if not _t.is_dir():
+                continue  # nothing to put back: a snapshot_only entry removes what the run creates
+            try:
+                backups.append(dir_backup.make(_t, [cwd, *ctx.write_dirs]))
+            except dir_backup.BackupError as exc:
+                self._console.print(f"✗ {exc}", style="bold red", markup=False)
+                self._console.print("Aborting — rollback cannot be guaranteed without a backup.", style="dim")
+                return 1
         lock_snapshots = _snapshot_lock_files(ctx.lockfile_root, allow_external_lockfiles=allow_external_lockfiles)
         npmrc_snapshot = _snapshot_npmrc(ctx.lockfile_root)
 
@@ -515,6 +587,47 @@ class SandboxRunner:
             return 1
         if asm is None:
             return 1
+        if backups:
+            # The final writable set: nothing the command can write may hold a backup.
+            dests = [p for pair in asm.writable_binds for p in pair]
+            if (w := dir_backup.overlap(dir_backup.BACKUP_ROOT, [cwd, *asm.write_dirs, *dests])) is not None:
+                _cleanup_writable_binds(asm.writable_binds)
+                self._console.print(f"✗ {dir_backup.overlap_message(dir_backup.BACKUP_ROOT, w)}",
+                                    style="bold red", markup=False)
+                return 1
+            try:
+                # The links to check after a rollback, judged against everything the command can
+                # now write (the checkouts and binds the assembly added included).
+                for b in backups:
+                    dir_backup.track(b, [cwd, *asm.write_dirs, *dests, *ctx.write_files])
+            except OSError as exc:
+                _cleanup_writable_binds(asm.writable_binds)
+                self._console.print(f"✗ Cannot check the links in a backed-up directory ({exc}); refusing to run.",
+                                    style="bold red", markup=False)
+                return 1
+        for c in asm.checkouts:
+            if not c.is_relative_to(cwd):
+                # A rebuild's source can come from a record (pipx_metadata.json) rather than argv.
+                self._console.print(f"Writable for this build (its repositories stay read-only): {c}",
+                                    style="dim", markup=False)
+        try:
+            repositories = {c: repository_entries(c) for c in asm.checkouts}
+        except OSError as exc:
+            _cleanup_writable_binds(asm.writable_binds)
+            self._console.print(f"✗ Cannot check the repositories in a writable source ({exc}); refusing to run.",
+                                style="bold red", markup=False)
+            return 1
+        # What a rollback may write below, as it is now: every snapshot root, backup target and
+        # directory the command may write (a later snapshot root lies under one of these).
+        state.guard.record(*_rollback_roots(snapshots), *(b.target for b in backups), *ctx.stable_dirs, cwd, *asm.write_dirs)
+        try:
+            # Checked and bound in two steps; see _create_write_files() for that window.
+            write_files = _create_write_files(ctx.write_files)
+        except CapturedRunError as exc:
+            _cleanup_writable_binds(asm.writable_binds)
+            self._console.print(f"✗ {exc}", style="bold red", markup=False)
+            return 1
+        state.started = True
         try:
             result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
                 asm.argv, asm.write_dirs,
@@ -525,10 +638,28 @@ class SandboxRunner:
                 post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
                 writable_binds=asm.writable_binds,
                 hidden_paths=asm.hidden,
+                ro_over_write=asm.ro_over_write,
+                write_files=write_files,
             ), check=False)
         finally:
             _cleanup_writable_binds(asm.writable_binds)
         print()
+
+        if planted := repository_changes(repositories):
+            self._report_planted_repositories(quarantine_repositories(planted), repositories)
+            self._console.print("Rolling back the install.", style="bold red", markup=False)
+            _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
+            return 1
+
+        for p, before in stable_before.items():
+            if not _still_same_dir(p, before):
+                self._console.print(
+                    f"✗ {p} is not the directory it was before the run (replaced, possibly with a link). "
+                    "Rolling back; inspect it before running the command again.", style="bold red", markup=False)
+                _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
+                return 1
 
         if result.returncode != 0:
             self._console.print(f"[yellow]Command exited with code {result.returncode}[/yellow]")
@@ -542,13 +673,21 @@ class SandboxRunner:
                 allow_external_lockfiles=allow_external_lockfiles)
             if no_change:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-                restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+                restore_ok = _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
                 return result.returncode if (scan_ok and restore_ok) else 1
             elif not scan_ok:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-                _restore_install_targets(self._backend, snapshots, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
                 return 1
-            return result.returncode if scan_ok else 1
+            elif backups:
+                # A directory is backed up whole only for a command that can fail with it half
+                # rebuilt (pipx reinstall moves the venv away first), and run() discards the backup
+                # afterwards: a failed run puts it back now.
+                self._console.print("Restoring what the failed command was rebuilding.", style="yellow", markup=False)
+                _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
+                if not _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard):
+                    return 1
+            return result.returncode
 
         scan_ok = await self._scan_updated_lock_files(ctx.lockfile_root, lock_snapshots, allow_external_lockfiles=allow_external_lockfiles)
         # Versions the command chose while it ran get the cooldown check the pre-run gate could not give them.
@@ -557,13 +696,13 @@ class SandboxRunner:
             allow_external_lockfiles=allow_external_lockfiles)
         if not no_change and not scan_ok:
             _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
             return 1
 
         if not scan_ok:
             # no_change=True: lock file scan failed — restore everything and exit.
             _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
             return 1
 
         # Re-detect scan targets that may have been created during the run
@@ -596,6 +735,8 @@ class SandboxRunner:
                     if scan_target.exists():
                         ctx.scan_targets.append(scan_target)
                         snapshots[rollback_root] = self._backend.absent_snapshot()
+        if parsed:
+            self._add_new_env_targets(ctx, parsed, env_entries_before, snapshots, backups)
 
         ecosystem = parsed.ecosystem if parsed else None
         non_public: set[tuple[str, str, str | None, Path]] = set()
@@ -611,7 +752,7 @@ class SandboxRunner:
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
             _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
             return 1
 
         if new_pkgs:
@@ -619,20 +760,68 @@ class SandboxRunner:
             post_ok = await self._post_scan(new_pkgs, non_public, scored_locally)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-                _restore_install_targets(self._backend, snapshots, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
                 return 1
-        else:
+        if ctx.unscanned:
+            names = ", ".join(str(p) for p in dict.fromkeys(ctx.unscanned))
+            self._console.print(f"⚠ Post-install scan: not scanned: {names} — packages installed there were not checked.",
+                                style="bold yellow", markup=False)
+        elif not new_pkgs and not ctx.scan_targets:
+            self._console.print("⚠ Post-install scan: nothing was scanned — no install target was found.",
+                                style="bold yellow", markup=False)
+        elif not new_pkgs:
             self._console.print("[dim]Post-install scan: no new packages detected[/dim]")
 
         # --no-change: restore lock files and install targets after all checks pass.
         if no_change:
             _restore_lock_files(lock_snapshots, ctx.lockfile_root, self._console)
-            restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+            restore_ok = _restore_install_targets(self._backend, snapshots, self._console, backups, state.guard)
             if not restore_ok:
                 return 1
 
         await self._store_cooldown_clears(pending_clears)
         return 0
+
+    def _add_new_env_targets(self, ctx: _Context, parsed: ParsedInstall,
+                             before: dict[Path, list[str] | None],
+                             snapshots: dict[Path, InstallSnapshot],
+                             backups: list[dir_backup.DirBackup]) -> None:
+        """Scan the environments the run created under each of ctx.env_parents (a venv whose name
+        only the build told): every entry new since *before* that the language says is one, its
+        scan target inside it. One it cannot scan, or a directory that cannot be read, goes to
+        ctx.unscanned. A new venv no backup covers gets an absent snapshot, so a rollback removes it."""
+        lang = lang_registry.for_ecosystem(parsed.ecosystem)
+        fn = getattr(lang, "post_run_new_env_targets", None) if lang is not None else None
+        for parent, names_before in before.items():
+            names_now = entry_names(parent)
+            if names_before is None or names_now is None:
+                ctx.unscanned.append(parent)
+                continue
+            new = sorted(set(names_now) - set(names_before))
+            if not new:
+                continue
+            try:
+                found = fn(parsed, parent, new) if callable(fn) else None
+            except Exception:
+                log.warning("post_run_new_env_targets raised for lang=%s — skipping",
+                            getattr(lang, "name", "?"), exc_info=True)
+                found = None
+            if not isinstance(found, list):
+                ctx.unscanned.append(parent)
+                continue
+            for item in found:
+                venv, site = item if isinstance(item, tuple) and len(item) == 2 else (None, None)
+                if not isinstance(venv, Path) or venv.parent != parent:
+                    ctx.unscanned.append(parent)
+                    continue
+                if (not isinstance(site, Path) or not site.is_relative_to(venv)
+                        or not _is_safe_sandbox_path(site, editable_roots=[ctx.cwd, Path.home()])):
+                    ctx.unscanned.append(venv)
+                    continue
+                if site not in ctx.scan_targets:
+                    ctx.scan_targets.append(site)
+                if venv not in snapshots and not any(venv.is_relative_to(b.target) for b in backups):
+                    snapshots[venv] = self._backend.absent_snapshot()
 
     def _pre_run_checks(self, parsed: ParsedInstall | None, cwd: Path, flags: dict[str, frozenset[str]]) -> bool:
         """Run every flagged language's pre_run_check (warnings, confirmations); False if one blocks.
@@ -820,6 +1009,13 @@ class SandboxRunner:
             if cwd == root or not cwd.is_relative_to(root):
                 raise CapturedRunError(f"not a scratch directory under {root}: {cwd}")
         cwd = cwd.absolute()
+        # The files the command writes in place outside its copy (a pipx app's trial and its
+        # lock), asked for before anything is read or written: only such a command gets
+        # writable paths beyond its copy.
+        in_place = _scratch_write_paths(argv, cwd) if scratch else []
+        if in_place and isolation.selected() == isolation.CONTAINER:
+            # Container isolation has no mount namespace: nothing it runs is kept read-only.
+            raise CapturedRunError(CONTAINER_IN_PLACE_REFUSAL)
         parsed = _try_parse(argv)
         if parsed is None or parsed.global_install:
             raise CapturedRunError(f"not a recognised project command: {' '.join(argv)}")
@@ -830,16 +1026,31 @@ class SandboxRunner:
         except InvalidInvocationDirectory as exc:
             raise CapturedRunError(str(exc)) from exc
         _resolve_targets(ctx, None)
+        scratch_writes = _ScratchWrites() if in_place else None
+        write_files: list[Path] = []
         try:
             asm = self._assemble_sandbox(
                 ctx, list(argv), flags or {}, extra_env,
-                on_extra_write=None, read_only=True,
+                on_extra_write=None, read_only=True, scratch_writes=scratch_writes,
             )
         except HiddenPathsError as exc:
             raise CapturedRunError(f"{exc}; refusing rather than risk exposing credentials") from exc
         if asm is None:
             raise CapturedRunError("sandbox setup was aborted")
         try:
+            if scratch_writes is not None:
+                # A command that writes in place outside its copy (a pipx app's trial) also builds
+                # its local checkouts there, so its plugin's extra writable paths are bound, as for
+                # an install, and one sandbox.editable_roots refuses fails the run rather than run
+                # without it. Every other scratch command gets only its copy.
+                if scratch_writes.refused:
+                    raise CapturedRunError(
+                        f"sandbox.editable_roots does not include {scratch_writes.refused[0]}, which this "
+                        "command builds in place")
+                for d in scratch_writes.dirs:
+                    if d == cwd or d.is_relative_to(cwd) or cwd.is_relative_to(d):
+                        raise CapturedRunError(f"a writable path overlaps the scratch directory: {d}")
+                write_files = _create_write_files(in_place)
             if scratch:
                 # The scratch copy is the one writable path; everything else
                 # stays read-only. build_cmd() applies write_dirs after every
@@ -852,6 +1063,8 @@ class SandboxRunner:
                         raise CapturedRunError(f"a sandbox flag's writable bind overlaps the scratch directory: {dest}")
                 asm.home_ro[:] = [p for p in asm.home_ro if not p.is_relative_to(cwd)]
                 asm.write_dirs.append(cwd)
+                if scratch_writes is not None:
+                    asm.write_dirs.extend(d for d in scratch_writes.dirs if d not in asm.write_dirs)
             if isolation.selected() == isolation.CONTAINER:
                 # The command runs in its own session, so neither Ctrl-C nor cancelling this
                 # coroutine reaches it: on cancellation tell the worker thread to kill its process
@@ -888,18 +1101,30 @@ class SandboxRunner:
                     post_ro_tmpfs=_post_ro_tmpfs_dirs(asm.home_ro),
                     writable_binds=asm.writable_binds,
                     hidden_paths=asm.hidden,
+                    # Checked and bound in two steps; see _create_write_files() for that window.
+                    write_files=write_files,
+                    ro_over_write=asm.ro_over_write,
                 )
             except ValueError as exc:
                 raise CapturedRunError(str(exc)) from exc
+            try:
+                repositories = {c: repository_entries(c) for c in asm.checkouts}
+            except OSError as exc:
+                raise CapturedRunError(f"cannot check the repositories in a writable source ({exc})") from exc
             try:
                 proc = await asyncio.to_thread(
                     subprocess.run, cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL,
                     timeout=timeout, cwd=str(cwd), check=False,
                 )
             except subprocess.TimeoutExpired:
-                return CapturedRun(-1, "", "", timed_out=True)
+                proc = None
             except OSError as exc:
                 raise CapturedRunError(f"could not start the sandbox: {exc}") from exc
+            if planted := repository_changes(repositories):
+                raise CapturedRunError(self._report_planted_repositories(quarantine_repositories(planted),
+                                                                         repositories))
+            if proc is None:
+                return CapturedRun(-1, "", "", timed_out=True)
             return CapturedRun(proc.returncode, proc.stdout or "", proc.stderr or "")
         finally:
             _cleanup_writable_binds(asm.writable_binds)
@@ -913,6 +1138,7 @@ class SandboxRunner:
         *,
         on_extra_write: Callable[[Path], bool] | None,
         read_only: bool,
+        scratch_writes: _ScratchWrites | None = None,
     ) -> _Assembly | None:
         """Turn a resolved context into build_cmd()'s arguments; None = abort (already reported).
 
@@ -924,6 +1150,10 @@ class SandboxRunner:
 
         *on_extra_write* is called for each extra writable path
         prepare_sandbox_env() adds; returning False aborts the assembly.
+
+        With *scratch_writes* (a read-only scratch run), the paths the plugin's
+        sandbox_extra_write_paths() returns are collected there instead of dropped:
+        the caller binds them writable beside the scratch copy.
 
         On success the caller owns the returned writable binds and must pass
         them to _cleanup_writable_binds(). On abort, or if this method raises,
@@ -1049,6 +1279,8 @@ class SandboxRunner:
             hidden = hidden_home_paths()  # HiddenPathsError: the caller refuses
 
             home_ro.extend(self._cfg.sandbox.extra_ro_paths)
+            ro_over_write: list[Path] = []
+            checkouts: list[Path] = []
 
             argv = _resolve_real_binary(argv)
             if ctx.parsed is not None:
@@ -1100,9 +1332,18 @@ class SandboxRunner:
                                 if _is_safe_sandbox_path(p, editable_roots):
                                     if not read_only:
                                         ctx.write_dirs.append(p.resolve())
+                                    elif scratch_writes is not None:
+                                        scratch_writes.dirs.append(p.resolve())
+                                    # Build code may write the source, but not its repositories:
+                                    # hooks or config planted there would run outside the sandbox.
+                                    if not read_only or scratch_writes is not None:
+                                        ro_over_write += checkout_git_dirs(p.resolve())
+                                        checkouts.append(p.resolve())
                                 else:
                                     log.warning("sandbox_extra_write_paths: rejecting path %s from lang=%s", p, lang_name)
                                     self._print_editable_rejection(p, editable_roots)
+                                    if scratch_writes is not None:
+                                        scratch_writes.refused.append(p)
                     except Exception:
                         log.warning("sandbox_extra_write_paths raised for lang=%s — skipping", lang_name, exc_info=True)
         except BaseException:
@@ -1113,6 +1354,7 @@ class SandboxRunner:
         return _Assembly(
             argv=argv, write_dirs=write_dirs, env=sandbox_env, home_ro=home_ro,
             extra_tmpfs=extra_tmpfs, writable_binds=_writable_binds, hidden=hidden,
+            ro_over_write=[*ctx.read_only_over_write, *ro_over_write], checkouts=checkouts,
         )
 
     # ------------------------------------------------------------------
@@ -1150,6 +1392,33 @@ class SandboxRunner:
             roots = ", ".join(f'"{r}"' for r in editable_roots)
             self._console.print(f"  Path is outside configured editable_roots: [{roots}]", style="dim", markup=False)
             self._console.print(f'  Add "{p.parent}" to sandbox.editable_roots to permit this install.', style="dim", markup=False)
+
+    def _report_planted_repositories(self, moved: list[tuple[Path, Path | None, str | None]],
+                                     before: Mapping[Path, RepositoryEntries]) -> str:
+        """Report what quarantine_repositories() did with each repository the command planted or
+        changed (one that was in *before*, the snapshot taken before the run, existed already);
+        returns the first report, for an error message."""
+        reports: list[str] = []
+        for p, dest, why in moved:
+            existed = any(p in entries for entries in before.values())
+            # A link out of the source leads git to whatever repository lies where it points.
+            link = dest is not None and p.name != ".git" and os.path.islink(dest)
+            thing = "link out of the source" if link else "git repository"
+            if dest is not None and existed:
+                text = (f"The command changed the {thing} at {p}, in a source it could write; it was moved "
+                        f"to {dest} so git does not use it (its hooks or config would run outside the sandbox). "
+                        f"Inspect it before putting it back (mv {dest} {p}); do not commit it.")
+            elif dest is not None:
+                text = (f"The command created a {thing} at {p}, in a source it could write; it was moved "
+                        f"to {dest} so git does not use it (its hooks or config would run outside the sandbox). "
+                        "Inspect it, then delete it; do not commit it.")
+            else:
+                text = (f"The command may have created or changed a git repository at {p}, in a source it could "
+                        f"write, and it could not be moved aside ({why}). Do not run git, or open an editor, in that "
+                        "directory until it is removed.")
+            self._console.print(f"✗ {text}", style="bold red", markup=False)
+            reports.append(text)
+        return reports[0] if reports else ""
 
     def _collect_and_print_writable_binds(
         self,
@@ -2015,6 +2284,7 @@ class SandboxRunner:
                 targets_to_snapshot.append(p)
 
         snapshots: dict[Path, InstallSnapshot] = {}
+        guard = _AncestryGuard()
         for _t in targets_to_snapshot:
             try:
                 snapshots[_t] = self._backend.snapshot_install_target(_t, self._console, cwd)
@@ -2085,6 +2355,8 @@ class SandboxRunner:
 
             home_ro.extend(self._cfg.sandbox.extra_ro_paths)
 
+            # What a rollback may write below, as it is now: the session runs arbitrary code.
+            guard.record(*_rollback_roots(snapshots), cwd, *write_dirs)
             result = subprocess.run(build_cmd(  # noqa: ASYNC221 — single-shot CLI command, this blocking call is the program's main work
                 argv, write_dirs,
                 allow_network=allow_network,
@@ -2109,12 +2381,12 @@ class SandboxRunner:
             allow_external_lockfiles=allow_external_lockfiles)
         if not no_change and not scan_ok:
             _restore_lock_files(lock_snapshots, cwd, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, guard=guard)
             return 1
         if not scan_ok:
             # no_change=True and lock file scan failed — restore and exit.
             _restore_lock_files(lock_snapshots, cwd, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, guard=guard)
             return 1
 
         non_public: set[tuple[str, str, str | None, Path]] = set()
@@ -2130,7 +2402,7 @@ class SandboxRunner:
         except SandboxScanError as exc:
             self._console.print(str(exc), style="bold red", markup=False)
             _restore_lock_files(lock_snapshots, cwd, self._console)
-            _restore_install_targets(self._backend, snapshots, self._console)
+            _restore_install_targets(self._backend, snapshots, self._console, guard=guard)
             return 1
 
         if new_pkgs:
@@ -2138,7 +2410,7 @@ class SandboxRunner:
             post_ok = await self._post_scan(new_pkgs, non_public, scored_locally)
             if not post_ok:
                 _restore_lock_files(lock_snapshots, cwd, self._console)
-                _restore_install_targets(self._backend, snapshots, self._console)
+                _restore_install_targets(self._backend, snapshots, self._console, guard=guard)
                 return 1
         else:
             self._console.print("[dim]Post-shell scan: no new packages detected[/dim]")
@@ -2146,7 +2418,7 @@ class SandboxRunner:
         # --no-change: restore lock files and install targets after all checks pass.
         if no_change:
             _restore_lock_files(lock_snapshots, cwd, self._console)
-            restore_ok = _restore_install_targets(self._backend, snapshots, self._console)
+            restore_ok = _restore_install_targets(self._backend, snapshots, self._console, guard=guard)
             if not restore_ok:
                 return 1
 
@@ -3256,6 +3528,68 @@ def _runtime_home_dirs() -> list[Path]:
     return [p for p in dict.fromkeys([*found, *canonical]) if not _exposes_credentials(p)]
 
 
+CONTAINER_IN_PLACE_REFUSAL = ("could not verify: the pipx trial needs bubblewrap's read-only mounts, which "
+                              "container isolation does not provide")
+
+
+def _scratch_write_paths(argv: list[str], cwd: Path) -> list[Path]:
+    """The files the owning plugin says a scratch command run in *cwd* writes in place outside
+    its copy (its optional scratch_write_files(argv, cwd) hook: a pipx app's trial opens that
+    app's lock read-write). Nothing is read or written here. CapturedRunError when the hook
+    raises (it refuses the command) or returns anything but a list of paths."""
+    lang_registry.load()
+    lang = lang_registry.for_process(re.split(r"[/\\]", argv[0])[-1]) if argv else None
+    fn = getattr(lang, "scratch_write_files", None) if lang is not None else None
+    if not callable(fn):
+        return []
+    try:
+        raw = fn(list(argv), cwd)
+    except Exception as exc:
+        raise CapturedRunError(f"scratch_write_files() refused the command: {exc}") from exc
+    if not isinstance(raw, list) or not all(isinstance(p, Path) for p in raw):
+        raise CapturedRunError("scratch_write_files() did not return a list of paths")
+    return raw
+
+
+def _create_write_files(raw: list[Path]) -> list[Path]:
+    """*raw* (``_scratch_write_paths()``), each checked and created empty if missing, as the tool
+    itself would.
+
+    Each must be an absolute path whose directory exists, outside every credential directory,
+    and, once opened without following a symlink, a regular file of this user's with no other
+    hard link: a link would make what it names writable too. CapturedRunError otherwise.
+
+    The check and the bind are not atomic: between them a process of this same user could
+    replace the file (with a link to another file of theirs). That needs a live attacker
+    already running as the user, who can write those files directly anyway, so it is accepted.
+    """
+    out: list[Path] = []
+    for path in raw:
+        try:
+            parent = path.parent.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise CapturedRunError(f"cannot bind the lock file {path}: {exc}") from exc
+        target = parent / path.name
+        if not path.is_absolute() or path.name in ("", ".", "..") or _exposes_credentials(target):
+            raise CapturedRunError(f"refusing to bind the lock file {path}")
+        try:
+            # O_NONBLOCK: a FIFO left there (by build code in an earlier run) fails at once with
+            # ENXIO rather than blocking until something reads it.
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o644)
+        except OSError as exc:
+            raise CapturedRunError(f"cannot bind the lock file {target}: {exc} (if it is not a plain file, remove "
+                                   "it; the tool creates it again)") from exc
+        try:
+            st = os.fstat(fd)
+        finally:
+            os.close(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.geteuid():
+            raise CapturedRunError(f"refusing to bind the lock file {target}: not a plain file of this user's "
+                                   "with no other hard link (remove it; the tool creates it again)")
+        out.append(target)
+    return out
+
+
 def _post_ro_tmpfs_dirs(home_ro: list[Path]) -> list[Path]:
     """Return log subdirectories of ro-bound tool dirs that need a writable tmpfs overlay.
 
@@ -3552,8 +3886,335 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         install_dirs=list(getattr(pi, "install_dirs", None) or []),
         # getattr default False: a plugin predating this field reads one directory.
         ambiguous_dirs=getattr(pi, "ambiguous_dirs", False) is True,
+        # getattr defaults: a plugin predating these fields binds no tool home whole and
+        # rebuilds nothing from recorded specs.
+        writable_tool_home=_path_or_none(getattr(pi, "writable_tool_home", None)),
+        rebuilds_recorded_envs=getattr(pi, "rebuilds_recorded_envs", False) is True,
+        # getattr default []: a plugin predating this field names no pipx venv. A malformed value
+        # is None, so every venv counts.
+        pipx_venvs=_str_list_or_none(getattr(pi, "pipx_venvs", [])),
+        # Narrows what is writable, so only an explicit True counts.
+        writes_only_named_envs=getattr(pi, "writes_only_named_envs", False) is True,
     )
 
+
+def _str_list_or_none(value: object) -> list[str] | None:
+    """*value* when it is a list of strings, else None."""
+    if not isinstance(value, list):
+        return None
+    names = [v for v in value if isinstance(v, str)]
+    return names if len(names) == len(value) else None
+
+
+_Ident = tuple[int, int, bool, str]
+
+
+def _ident(p: Path) -> _Ident | None:
+    """(device, inode, is a link, link target) of the entry *p* names, not following it."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return None
+    link = stat.S_ISLNK(st.st_mode)
+    try:
+        target = os.readlink(p) if link else ""
+    except OSError:
+        target = ""
+    return (st.st_dev, st.st_ino, link, target)
+
+
+class _AncestryGuard:
+    """The directories above the paths a rollback writes, as they were before the run, so it
+    never deletes or writes through a link the run put in place of one.
+
+    A path is written through whatever its directories resolve to, so for each directory above
+    a recorded path the guard also keeps where it resolved (``os.path.realpath``) and the
+    directories on that resolved chain: a link that was already there before the run is allowed,
+    but not the run replacing a directory beyond it."""
+
+    def __init__(self) -> None:
+        self._before: dict[Path, _Ident | None] = {}
+        self._real: dict[Path, Path] = {}
+
+    def record(self, *paths: Path) -> None:
+        for p in paths:
+            for a in Path(os.path.abspath(p)).parents:
+                if a in self._real:
+                    continue
+                self._before.setdefault(a, _ident(a))
+                real = Path(os.path.realpath(a))
+                self._real[a] = real
+                for r in (real, *real.parents):
+                    self._before.setdefault(r, _ident(r))
+
+    def _link_problem(self, a: Path) -> str | None:
+        now = _ident(a)
+        if now is None or not now[2]:
+            return None
+        before = self._before.get(a)
+        if before == now:
+            return None
+        if before is None:
+            return f"{a} is now a link"
+        if before[2]:
+            return f"{a} now links somewhere else"
+        return f"{a} was replaced by a link during the run"
+
+    def problem(self, p: Path) -> str | None:
+        """Why a rollback must not write at *p*: a directory above it that is a link it was not
+        before the run (a new link, or one now naming somewhere else), one that now resolves
+        somewhere else, or a directory on where it resolved that is now such a link; else None.
+        A directory the run recreated, or removed, at the same path is no escape (a reinstall
+        recreates its venv), so only links count."""
+        for a in reversed(Path(os.path.abspath(p)).parents):
+            if (why := self._link_problem(a)) is not None:
+                return why
+            real = self._real.get(a)
+            if real is None:
+                continue
+            if (now := Path(os.path.realpath(a))) != real:
+                return f"{a} now leads to {now}, not {real}"
+            for r in reversed((real, *real.parents)):
+                if (why := self._link_problem(r)) is not None:
+                    return why
+        return None
+
+
+def _rollback_roots(snapshots: dict[Path, InstallSnapshot]) -> list[Path]:
+    """Every path a rollback of *snapshots* writes at: each snapshot root and, for a root that was
+    a link, the directory it resolved to (restored through that recorded path, not the link)."""
+    roots: list[Path] = []
+    for path, snap in snapshots.items():
+        roots.append(path)
+        resolved = getattr(snap, "root_symlink_resolved", None)
+        if isinstance(resolved, Path):
+            roots.append(resolved)
+    return roots
+
+
+def _snapshot_guard_problem(guard: _AncestryGuard, path: Path, snap: InstallSnapshot) -> str | None:
+    """Why *guard* stops the rollback of the snapshot *snap* of *path*, at any path it writes."""
+    for root in _rollback_roots({path: snap}):
+        if (why := guard.problem(root)) is not None:
+            return why
+    return None
+
+
+@dataclass
+class _RunState:
+    """What run() must clean up after _run(): its backups, and whether the command started."""
+
+    backups: list[dir_backup.DirBackup] = field(default_factory=list)
+    started: bool = False
+    guard: _AncestryGuard = field(default_factory=_AncestryGuard)
+
+
+def _still_same_dir(p: Path, before: tuple[str, int, int] | None) -> bool:
+    """Whether *p* is still the directory it was (*before*, its dir_identity()); one that did not
+    exist may now exist only as a real directory at its own place, not a link."""
+    if before is not None:
+        return not p.is_symlink() and dir_identity(p) == before
+    if not os.path.lexists(p):
+        return True
+    return not p.is_symlink() and p.is_dir() and os.path.realpath(p) == os.path.join(os.path.realpath(p.parent), p.name)
+
+
+def _path_or_none(value: object) -> Path | None:
+    return value if isinstance(value, Path) else None
+
+
+def git_dirs(path: Path) -> list[Path]:
+    """The repository paths of a checkout at *path* that must stay read-only while the checkout
+    is writable: ``path/.git`` when it is a directory; when it is a file (a worktree or a
+    submodule), the file, the git directory it names and, for a worktree, the common directory
+    that one names (where hooks and config live), each resolved. [] when there is no ``.git``.
+
+    build_cmd() binds each one read-only only where the sandbox already shows it writable."""
+    dot_git = path / ".git"
+    if dot_git.is_dir():
+        return [dot_git]
+    if not dot_git.is_file():
+        return []
+    out = [dot_git]
+    try:
+        text = safe_read.read_text(dot_git, errors="replace")
+    except OSError:
+        return out
+    first = text.splitlines()[0] if text else ""
+    if not first.startswith("gitdir:"):
+        return out
+    try:
+        gitdir = (path / first.removeprefix("gitdir:").strip()).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return out
+    out.append(gitdir)
+    try:
+        common = (gitdir / safe_read.read_text(gitdir / "commondir", errors="replace").strip()).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return out
+    if common not in out:
+        out.append(common)
+    return out
+
+
+
+def _bare_repository(names: set[str]) -> bool:
+    """Whether a directory holding *names* is one git would take for a bare repository: a
+    ``HEAD`` with ``objects`` and ``refs``, or with a ``commondir`` that names where they are
+    (git's ``is_git_directory()``)."""
+    return "HEAD" in names and ("commondir" in names or ("objects" in names and "refs" in names))
+
+
+def checkout_git_dirs(path: Path) -> list[Path]:
+    """The repository paths of the checkout at *path* that must stay read-only while it is
+    writable, at any depth, links not followed: git_dirs() of each directory holding a ``.git``
+    (the checkout's own, a nested repository or submodule's), and each directory that looks like
+    a bare repository (git would read its config in place)."""
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(path):
+        here = Path(dirpath)
+        if ".git" in dirnames or ".git" in filenames:
+            out += [p for p in git_dirs(here) if p not in out]
+        if _bare_repository({*dirnames, *filenames}) and here not in out:
+            out.append(here)
+            dirnames[:] = []
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+    return out
+
+
+RepositoryEntries = dict[Path, tuple[object, ...]]
+
+
+def repository_entries(path: Path) -> RepositoryEntries:
+    """Where in the checkout at *path* git would find a repository, each with its identity: every
+    ``.git`` entry (a link with its target), every directory that looks like a bare repository,
+    and every link leading outside the checkout, or nowhere yet (with its target), except a link
+    to a file no run can turn into a directory (_fixed_file()); links not followed. OSError when
+    part of the tree cannot be read, since a repository there could not be seen."""
+
+    def fail(exc: OSError) -> None:
+        raise exc
+
+    out: RepositoryEntries = {}
+    root = os.path.realpath(path)
+    containers, bases = ([os.path.realpath(d) for d in group] for group in interpreter_prefixes())
+    for dirpath, dirnames, filenames in os.walk(path, onerror=fail):
+        here = Path(dirpath)
+        for name in (*dirnames, *filenames):
+            # git resolves the working directory physically, so `cd` through a link out of the
+            # source reaches whatever repository lies, or later appears, where it points: a file
+            # there can become a directory holding one in any later run that may write its
+            # directory, which pa need not be checking this source in. A link to an interpreter
+            # (a venv's bin/python) is left out, since a rebuild may legitimately change it.
+            link = here / name
+            if name != ".git" and os.path.islink(link):
+                real = os.path.realpath(link)
+                inside = real == root or real.startswith(root + os.sep)
+                if not os.path.exists(link) or not (inside or _fixed_file(real, containers, bases)):
+                    out[link] = ("link", os.readlink(link))
+        if ".git" in dirnames or ".git" in filenames:
+            st = os.lstat(here / ".git")
+            target = os.readlink(here / ".git") if stat.S_ISLNK(st.st_mode) else None
+            out[here / ".git"] = (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode), target)
+        if _bare_repository({*dirnames, *filenames}):
+            st = os.lstat(here)
+            out[here] = ("bare", st.st_dev, st.st_ino)
+            dirnames[:] = []
+        dirnames[:] = [d for d in dirnames if d != ".git"]
+    return out
+
+
+def interpreter_prefixes() -> tuple[list[Path], list[Path]]:
+    """Where Python interpreters are installed under $HOME, as (directories holding one
+    installation prefix per child, installation prefixes): pyenv's versions, uv's managed Pythons
+    and conda's envs hold prefixes; conda's base installations are prefixes. A link from a source
+    to the interpreter in such a prefix's ``bin`` (a venv's bin/python) is not tracked."""
+    home = Path.home()
+    env = os.environ
+    pyenv = Path(env["PYENV_ROOT"]) if os.path.isabs(env.get("PYENV_ROOT", "")) else home / ".pyenv"
+    data = Path(env["XDG_DATA_HOME"]) if os.path.isabs(env.get("XDG_DATA_HOME", "")) else home / ".local" / "share"
+    containers = [pyenv / "versions", data / "uv" / "python"]
+    if os.path.isabs(uv := env.get("UV_PYTHON_INSTALL_DIR", "")):
+        containers.append(Path(uv))
+    bases = [home / conda for conda in ("miniconda3", "anaconda3", "miniforge3", "mambaforge", ".conda")]
+    containers += [base / "envs" for base in bases]
+    return containers, bases
+
+
+_INTERPRETER_RE = re.compile(r"(python|pypy)[0-9.]*\Z")
+
+
+def _fixed_file(real: str, containers: Sequence[str], bases: Sequence[str]) -> bool:
+    """Whether *real* (a resolved path) is a file no sandboxed run is expected to turn into a
+    directory: one whose directory and every ancestor belong to another user and are not
+    writable by this one (``/usr/bin/python3.12``), or an interpreter in the ``bin`` of an
+    installation prefix under $HOME (interpreter_prefixes()). Anything else this user owns could
+    be made writable again, and anything else in an installation (its site-packages) is written
+    by sandboxed installs."""
+    if not os.path.isfile(real):
+        return False
+    bindir = os.path.dirname(real)
+    prefix = os.path.dirname(bindir)
+    if (_INTERPRETER_RE.match(os.path.basename(real)) and os.path.basename(bindir) == "bin"
+            and (prefix in bases or os.path.dirname(prefix) in containers)):
+        return True
+    directory = bindir
+    while True:
+        try:
+            owner = os.stat(directory).st_uid
+        except OSError:
+            return False
+        if owner == os.geteuid() or os.access(directory, os.W_OK):
+            return False
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return True
+        directory = parent
+
+
+def repository_changes(before: Mapping[Path, RepositoryEntries]) -> list[Path]:
+    """The repositories that appeared or changed in each writable checkout since *before*
+    (``repository_entries()`` of each, taken before the run); a checkout that cannot be read
+    any more is one. Build code that plants one makes git run its config or hooks later, outside
+    the sandbox, wherever the user next runs git there."""
+    changed: list[Path] = []
+    for checkout, entries in before.items():
+        try:
+            now = repository_entries(checkout)
+        except OSError:
+            changed.append(checkout)
+            continue
+        changed += [p for p, identity in now.items() if entries.get(p) != identity]
+    return changed
+
+
+def quarantine_repositories(planted: list[Path]) -> list[tuple[Path, Path | None, str | None]]:
+    """Make git stop taking each of *planted* (repository_changes()) for a repository, at once,
+    before anything is printed (a prompt or editor running git in that directory would run its
+    config): a ``.git``, or a link out of the source, is renamed to ``<name>.pa-quarantine-<time>``
+    (the link itself, never what it names); a bare-looking directory keeps its contents and its
+    ``HEAD`` is renamed instead. Nothing else is moved: a checkout
+    that could not be read is only reported. (path, where it went or None, why not or None)
+    for each; the sandboxed command has exited, so nothing else is writing there."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    out: list[tuple[Path, Path | None, str | None]] = []
+    for p in planted:
+        if p.name == ".git" or os.path.islink(p):
+            src, dest = p, p.with_name(f"{p.name}.pa-quarantine-{stamp}")
+        elif os.path.lexists(p / "HEAD") and not os.path.islink(p):
+            src, dest = p / "HEAD", p / f"HEAD.pa-quarantine-{stamp}"
+        else:
+            out.append((p, None, "it could not be read"))
+            continue
+        try:
+            if os.path.lexists(dest):
+                raise FileExistsError(f"{dest} exists")
+            os.rename(src, dest)
+        except OSError as exc:
+            out.append((p, None, str(exc)))
+        else:
+            out.append((p, dest, None))
+    return out
 
 
 _UNSAFE_PREFIXES: tuple[Path, ...] = (
@@ -4095,6 +4756,26 @@ def _resolve_targets(ctx: _Context, console: Console | None = None) -> None:
                             f"⚠ Unsafe write path blocked: {p}",
                             style="bold yellow", markup=False,
                         )
+            # Read-only overlays only narrow what is writable, so any absolute path is accepted.
+            ctx.read_only_over_write += [
+                p for p in getattr(result, "read_only_over_write", None) or []
+                if isinstance(p, Path) and p.is_absolute()]
+            for p in getattr(result, "backup_dirs", None) or []:
+                if isinstance(p, Path) and _is_safe_sandbox_path(p, editable_roots=_safe_roots):
+                    ctx.backup_dirs.append(p)
+                else:
+                    log.warning("_resolve_targets: dropping unsafe backup_dir %r from lang=%s", str(p), _lang_name)
+                    ctx.unsafe_backup_dirs.append(p if isinstance(p, Path) else Path(str(p)))
+                    if console is not None:
+                        console.print(f"⚠ Unsafe backup path blocked: {p}", style="bold yellow", markup=False)
+            ctx.stable_dirs += [p for p in getattr(result, "stable_dirs", None) or [] if isinstance(p, Path)]
+            ctx.unscanned += [p for p in getattr(result, "unscanned", None) or [] if isinstance(p, Path)]
+            ctx.write_files += [p for p in getattr(result, "write_files", None) or [] if isinstance(p, Path)]
+            for p in getattr(result, "env_parents", None) or []:
+                if isinstance(p, Path) and _is_safe_sandbox_path(p, editable_roots=_safe_roots):
+                    ctx.env_parents.append(p)
+                else:
+                    log.warning("_resolve_targets: dropping unsafe env_parent %r from lang=%s", str(p), _lang_name)
             for p in getattr(result, "snapshot_only_dirs", []):
                 if _is_safe_sandbox_path(p, editable_roots=_safe_roots):
                     ctx.snapshot_only_dirs.append(p)
@@ -4252,10 +4933,24 @@ def _restore_install_targets(
     backend: SandboxBackend,
     snapshots: dict[Path, InstallSnapshot],
     console: Console,
+    backups: list[dir_backup.DirBackup] | None = None,
+    guard: _AncestryGuard | None = None,
 ) -> bool:
-    """Restore all install targets. Returns True if all succeeded, False if any failed."""
+    """Restore all install targets. Returns True if all succeeded, False if any failed.
+
+    A snapshot inside a directory backed up whole (*backups*) is not restored itself: the backup,
+    put back last, replaces that whole directory. With *guard*, a snapshot or backup below a
+    directory the run replaced is not restored (nothing is deleted or written through it) and is
+    reported. A backup that cannot be put back is kept, and its location printed."""
     ok = True
+    covered = [b.target for b in backups or []]
     for path, snap in snapshots.items():
+        if any(path == t or path.is_relative_to(t) for t in covered):
+            continue
+        if guard is not None and (why := _snapshot_guard_problem(guard, path, snap)) is not None:
+            console.print(f"✗ {path} not restored: {why}.", style="bold red", markup=False)
+            ok = False
+            continue
         try:
             target_ok = backend.restore_install_target(path, snap, console)
             if not target_ok:
@@ -4265,6 +4960,22 @@ def _restore_install_targets(
             console.print(f"✗ Failed to restore install target: {path}", style="bold red", markup=False)
             console.print("  The install target may be partially modified — inspect and clean up manually.", style="yellow")
             ok = False
+    for b in backups or []:
+        if guard is not None and (why := guard.problem(b.target)) is not None:
+            b.keep = True
+            console.print(f"✗ {b.target} not restored: {why}.", style="bold red", markup=False)
+            console.print(f"  Its backup is kept in {b.copy / 'tree'}.", style="yellow", markup=False)
+            ok = False
+            continue
+        try:
+            dir_backup.restore(b)
+        except OSError as exc:
+            b.keep = True
+            console.print(f"✗ Failed to restore {b.target}: {exc}", style="bold red", markup=False)
+            console.print(f"  Its backup is kept, for inspection, in {b.copy / 'tree'}.", style="yellow", markup=False)
+            ok = False
+        else:
+            console.print(f"✓ Restored {b.target.name} from its backup", style="dim", markup=False)
     return ok
 
 

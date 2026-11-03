@@ -370,3 +370,17 @@ async def test_captured_run_hides_the_plugins_paths_and_refuses_without_them(tmp
     with pytest.raises(CapturedRunError, match="'fake' could not say"):
         await SandboxRunner(AppConfig()).run_captured(argv, cwd=scratch, scratch=True)
     assert not _bwrap(seen)
+
+
+@real_bwrap
+def test_a_read_only_overlay_on_the_stores_ancestor_does_not_show_it(home):
+    # A path kept read-only over the writable working directory (a .git file can name one) that
+    # contains the store: the overlay must not undo the store's tmpfs, nor the snapshot bound there.
+    work = home / "work"
+    creds = _store(work / "uv" / "credentials")
+    assert TOKEN in _read(creds, write_dirs=[work], ro_over_write=[work / "uv"]).stdout  # control
+    assert TOKEN not in _read(creds, write_dirs=[work], hidden_paths=[creds], ro_over_write=[work / "uv"]).stdout
+    snap = _store(home.parent / "snap", "SNAPSHOT-TOKEN")
+    res = _read(creds, write_dirs=[work], hidden_paths=[creds], writable_binds=[(snap, creds)],
+                ro_over_write=[work / "uv"])
+    assert "SNAPSHOT-TOKEN" in res.stdout and TOKEN not in res.stdout

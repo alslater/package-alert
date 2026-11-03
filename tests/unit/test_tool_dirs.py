@@ -130,7 +130,7 @@ def test_pipx_write_dirs_and_sandbox_follow_pipx_bin_dir(home, monkeypatch):
     monkeypatch.setenv("PIPX_BIN_DIR", str(home / "pbin"))
     for argv in (["pipx", "install", "cowsay"], ["pipx", "inject", "app", "x"], ["pipx", "upgrade-all"]):
         parsed = parse_pipx_args(argv)
-        assert parsed is not None and parsed.extra_write_home_dirs[-1] == home / "pbin", argv
+        assert parsed is not None and parsed.extra_write_home_dirs[1] == home / "pbin", argv
     sandbox_env: dict[str, str] = {}
     PythonLanguage().configure_sandbox(parse_pipx_args(["pipx", "install", "cowsay"]),
                                        home, frozenset(), SandboxTargets(), [], sandbox_env)

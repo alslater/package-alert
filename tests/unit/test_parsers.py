@@ -4328,3 +4328,142 @@ class TestPnpmAudit:
         # An alias names two scopes; the target's is the one fetched.
         alias = parse_pnpm_args(["pnpm", "add", "--global", "false", "@alias/x@npm:@corp/pkg@1"])
         assert alias is not None and lang.explicit_package_public("@alias/x@npm:@corp/pkg@1", alias, tmp_path)
+
+
+# --- pipx runpip ---
+
+_RUNPIP_TRIAL = [
+    "pipx", "runpip", "httpie", "install", "--dry-run", "--no-input",
+    "--report", "-", "urllib3==2.2.2",
+]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [_RUNPIP_TRIAL, ["pipx", "runpip", "app", "install", "--dry-run", "sdist-pkg"]],
+    ids=["trial-shape", "dry-run-sdist"],
+)
+def test_pipx_runpip_dry_run_is_still_sandboxed(argv):
+    # A dry run resolves, and resolving can build an sdist and run its code.
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    result = parse_pipx_args(argv)
+    assert result is not None
+    assert result.manager == "pipx"
+    assert result.target_env_name == argv[2]
+
+
+def test_pipx_runpip_install_is_gated(monkeypatch, tmp_path):
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(tmp_path / "pipx"))
+    result = parse_pipx_args(
+        ["pipx", "runpip", "httpie", "install", "--index-url", "X", "urllib3==2.2.2", "-r", "r.txt"]
+    )
+    assert result is not None
+    assert result.packages == ["urllib3==2.2.2"]
+    assert result.req_files == [str(tmp_path / "pipx" / "venvs" / "httpie" / "r.txt")]
+    assert result.target_env_name == "httpie"
+    assert result.ecosystem == "pypi"
+    assert result.extra_write_home_dirs == [tmp_path / "pipx" / "venvs"]
+
+
+def test_pipx_runpip_requirement_files_are_the_venvs(monkeypatch, tmp_path):
+    """pipx runs pip with the app's venv as its working directory, so a relative -r names a file
+    there, not in the caller's directory: pre-flight must read the file pip installs from."""
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(tmp_path / "pipx"))
+    result = parse_pipx_args(["pipx", "runpip", "My_App", "install", "-r", "reqs.txt",
+                              "--requirement=sub/more.txt", "-r", "/abs/reqs.txt"])
+    assert result is not None
+    venv = tmp_path / "pipx" / "venvs" / "my-app"
+    assert result.req_files == [str(venv / "reqs.txt"), str(venv / "sub" / "more.txt"), "/abs/reqs.txt"]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pipx", "runpip", "--verbose", "app", "install", "evil"],
+        ["pipx", "runpip", "--verb", "-q", "app", "install", "evil"],
+        ["pipx", "runpip", "-vv", "app", "install", "evil"],
+        ["pipx", "runpip", "app", "install", "evil"],
+        ["pipx", "runpip", "app", "install evil"],
+        ["pipx", "runpip", "app", "--quiet", "install", "evil"],
+    ],
+)
+def test_pipx_runpip_own_options_and_quoted_args(argv):
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    result = parse_pipx_args(argv)
+    assert result is not None
+    assert result.packages == ["evil"]
+    assert result.target_env_name == "app"
+
+
+def test_pipx_runpip_pip_options_are_not_abbreviated_against_pipx():
+    # After APP everything is pip's: `--glo` is not pipx's `--global`.
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    result = parse_pipx_args(["pipx", "runpip", "app", "install", "--glo", "x", "evil"])
+    assert result is not None
+    assert result.target_env_name == "app"
+    assert "evil" in result.packages
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["pipx", "runpip", "httpie", "list"],
+        ["pipx", "runpip", "httpie", "show", "x"],
+        ["pipx", "runpip", "httpie", "freeze"],
+        ["pipx", "runpip", "httpie", "uninstall", "-y", "x"],
+        ["pipx", "runpip", "httpie"],
+        ["pipx", "runpip"],
+    ],
+)
+def test_pipx_runpip_non_install_is_not_gated(argv):
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    assert parse_pipx_args(argv) is None
+
+
+def test_pipx_runpip_targets_the_apps_venv(monkeypatch, tmp_path):
+    """The venvs directory is the first write dir and the app names the venv inside it, so
+    scan, snapshot and post-run discovery find venvs/httpie, never venvs/httpie/httpie."""
+    from packagealert.languages.python import PythonLanguage
+    from packagealert.parsers.process_args import _pipx_bin_dir, parse_pipx_args
+
+    home = tmp_path / "pipx"
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(home))
+    monkeypatch.setenv("PIPX_BIN_DIR", str(bin_dir))
+    venv = home / "venvs" / "httpie"
+    site = venv / "lib" / "python3.12" / "site-packages"
+    site.mkdir(parents=True)
+    (venv / "bin").mkdir()
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.0\n")
+    (home / "shared").mkdir()
+
+    parsed = parse_pipx_args(["pipx", "runpip", "httpie", "install", "urllib3==2.2.2"])
+    assert parsed is not None
+    lang = PythonLanguage()
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+
+    targets = lang.resolve_sandbox_targets(parsed, cwd)
+    assert targets.scan_targets == [site]
+    assert not any(p == venv / "httpie" or "httpie/httpie" in str(p) for p in targets.write_dirs)
+    # Only the app's own venv and its lock, never the venvs directory (another app's venv).
+    assert home / "venvs" not in targets.write_dirs and venv in targets.write_dirs
+    assert targets.write_files == [home / "venvs" / ".httpie.lock"]
+    assert venv / "bin" in targets.snapshot_only_dirs
+    assert home / "shared" not in targets.write_dirs
+    assert _pipx_bin_dir() not in targets.write_dirs
+    assert bin_dir not in targets.write_dirs
+
+    post = lang.post_run_scan_targets(parsed, cwd)
+    assert post == [venv, site]

@@ -54,6 +54,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: marks tests that exercise real OS resources (filesystem, processes, network)",
+    "bwrap: needs bubblewrap and a real sandbox run",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -79,6 +79,9 @@ class ProcessInstall:
     lockfile_dir: str | None = None  # lock file alone (pnpm --lockfile-dir); relative to the process cwd
     install_dirs: list[str] = field(default_factory=list)  # installed into besides the project (pnpm deploy <dir>); relative to the effective working dir
     ambiguous_dirs: bool = False     # the directories depend on which tool version runs; the sandbox refuses the command
+    writable_tool_home: Path | None = None  # a tool home bound writable whole, not snapshotted (pipx reinstall renames into PIPX_HOME/.trash)
+    rebuilds_recorded_envs: bool = False    # rebuilds tool envs from their recorded specs (pipx reinstall/upgrade)
+    pipx_venvs: list[str] | None = []       # pipx venv names the command writes, named as pipx names them; None: known only after a build, so every venv counts
 
 @dataclass
 class SandboxPaths:
@@ -404,7 +407,9 @@ class LanguageBase(Protocol):
 
         Called with the prepared argv (after prepare_sandbox_argv). Override to expose
         paths the install process must write to, e.g. editable install source directories
-        where egg-info or build artifacts are written.
+        where egg-info or build artifacts are written. The runner keeps every repository
+        in each returned path read-only (``runner.checkout_git_dirs()``), and fails the run
+        when one appears or changes there (``runner.repository_changes()``).
         Default returns []."""
 
     def post_run_scan_targets(self, parsed: Any, cwd: Path) -> list[Path]:
@@ -543,7 +548,10 @@ class LanguageBase(Protocol):
 
         Replaces the per-ecosystem if/elif branches that previously lived in the
         runner. scan_targets are diffed for new packages; write_dirs are bound
-        writable inside the sandbox. Default returns empty SandboxTargets.
+        writable inside the sandbox; snapshot_only_dirs are snapshotted for
+        rollback; read_only_over_write are bound read-only over the writable
+        mounts (only narrowing them: a path no writable mount shows is left
+        alone). Default returns empty SandboxTargets.
 
         *parsed* is a ``ParsedInstall`` — see ``post_run_scan_targets`` for
         the available fields.
@@ -748,6 +756,14 @@ def configure_sandbox_writable(self, parsed, cwd, flags, targets):
     return [(tmp, creds_dir)]
 ```
 
+#### `post_run_new_env_targets` (optional)
+
+```python
+def post_run_new_env_targets(self, parsed: Any, parent: Path, names: list[str]) -> list[tuple[Path, Path | None]]:
+```
+
+An optional capability, not a `LanguageBase` member (same reasoning as `poll_only_cache_paths`). *parent* is one of the `SandboxTargets.env_parents` directories `resolve_sandbox_targets()` returned (pipx's venvs directory, where a venv whose name only the build tells can appear); *names* are the entries created there during the run. Return `(environment, scan target)` for each entry that is an environment, with `None` as the scan target for one that cannot be scanned safely (a link, say). The runner accepts only an environment directly under *parent* and a scan target inside it, scans each one after a successful run whatever else was scanned, and names everything it could not scan, along with `SandboxTargets.unscanned`, instead of reporting a clean post-install scan. Callers use `getattr` + `callable`; without it a directory where the run created entries is reported as not scanned.
+
 #### `sandbox_hidden_home_paths` (optional)
 
 ```python
@@ -804,11 +820,32 @@ as it does an `--editable` one. `--apply` does not use the file-writing members
 below: the adapter's `apply_argv(plan)` reinstalls the tool through `pa run`
 (see `cli/fix_tools.py`).
 
+`pa fix --tools --pipx` likewise builds one `PipxAppFixAdapter`
+(`packagealert/languages/python_fix/pipx_app.py`) per pipx app, whose "lock
+file" is the app's `pipx_metadata.json`. Its trial is `pipx runpip <app> install
+--dry-run --no-input` (not `--quiet`: pip prints a conflict's cause on stdout only at
+its default verbosity), the app's carried-over index options, then `-r
+reqs.txt -c cons.txt --report report.json` in one directory of the scratch root,
+then only `name==version` pins: the Python plugin's `is_scratch_command` accepts
+that exact form (`pipx_app.is_trial_command()`), and only when the files are in
+the trial's own scratch copy. The main package reaches pip only through those
+files, since `runpip` rewrites `pipx_metadata.json` when a positional argument
+names it. A local or editable app's checkout, and a local injected package, is
+built in place by pip, so `sandbox_extra_write_paths` binds it writable (under
+`sandbox.editable_roots`, and only a directory with a `pyproject.toml`, `setup.py` or
+`setup.cfg`: `pipx_app.checkout_problem()`) with its repositories read-only. The adapter sets
+`drift_pinned_by`: its command pins what the app's own requirements move with nothing pinned,
+so a major or too-young version there holds the fix rather than only being reported. `--apply` runs
+`apply_argv(plan)` (`pipx runpip <app> install <pins>`, the main package never
+named) through `pa run`, sharing `apply_tool()` with the uv tool adapter through
+the `ToolApplyTarget` protocol in `cli/fix_tools.py`.
+
 | Adapter | Lock file | Trial | `--apply` |
 |---------|-----------|-------|-----------|
 | uv | `uv.lock` | `uv lock --dry-run`, read-only in the project | the lock update in a scratch copy, then `uv sync --locked` |
 | npm | `package-lock.json` | `npm install --package-lock-only …` in a scratch copy | the same in a scratch copy, then `npm install` |
 | uv tool | the tool's `uv-receipt.toml` | `uv pip install --dry-run --upgrade --python <tool venv>`, read-only | `uv tool install --force …` (or `uv tool upgrade`) through `pa run`, with the whole tool backed up and restored on failure |
+| pipx app | the app's `pipx_metadata.json` | `pipx runpip <app> install --dry-run --report …` with the app's requirements in files in a scratch copy, the venv read-only | `pipx runpip <app> install <pins>` through `pa run` (shared libraries read-only), with the app's venv backed up and restored on failure |
 
 An adapter (`packagealert/remediate/adapter.py`, `FixAdapter`) holds no
 policy: planning, verification and output are shared. It provides:
@@ -821,7 +858,7 @@ policy: planning, verification and output are shared. It provides:
 | `locked_packages(lockfile) -> list[PackageSpec]` | the versioned packages to check against OSV, **named exactly as the graph names them** (the planner compares the two directly) |
 | `commands(plan, project_dir=None, sync_flags=()) -> list[list[str]]` | the printed commands; with *project_dir* they must work from any directory; with `plan.separate`, only the first item's |
 | `probe_argv() -> list[str]` | the command a trial runs, used to authorise the sandbox before any trial |
-| `async trial(pins, floats, run, *, force=(), lowest=None) -> TrialResult` | resolve with *pins* (`(name, version)`) held exactly, *floats* free to move and *force* the pins (`(name, target)`, not names: a package may be pinned once per major line) to pin past their parents; *lowest* maps a pin, `(name, target)`, to the lowest vulnerable locked version it is meant to move (accept it; an adapter whose pins move one copy can ignore it); status `resolved` (with `changes`), `blocked` (with a `Blocker(parent, constraint)` when known) or `inconclusive` — anything unreadable must be `inconclusive`, never `resolved` |
+| `async trial(pins, floats, run, *, force=(), lowest=None) -> TrialResult` | resolve with *pins* (`(name, version)`) held exactly, *floats* free to move and *force* the pins (`(name, target)`, not names: a package may be pinned once per major line) to pin past their parents; *lowest* maps a pin, `(name, target)`, to the lowest vulnerable locked version it is meant to move (accept it; an adapter whose pins move one copy can ignore it); status `resolved` (with `changes`), `blocked` (with a `Blocker(parent, constraint, parent_version=None)` when known; the hold reads "<parent> [<version>] requires <constraint>") or `inconclusive` — anything unreadable must be `inconclusive`, never `resolved` |
 
 Optional members:
 
@@ -907,8 +944,8 @@ Optional members:
 Both run in the sandbox with the project's `.pa-run.toml` flags and
 environment allowlist. Read the outcome from files, not from the tool's
 printed summary, unless that summary is a documented interface: re-record the
-adapter's fixtures on every tool upgrade (see `tests/fixtures/uv_trial/` and
-`tests/fixtures/npm_trial/`).
+adapter's fixtures on every tool upgrade (see `tests/fixtures/uv_trial/`,
+`tests/fixtures/npm_trial/` and `tests/fixtures/pip_trial/`).
 
 ---
 

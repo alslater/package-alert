@@ -12,12 +12,14 @@ import shutil
 import subprocess
 import tempfile
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import httpx
 
 from packagealert import safe_read
+from packagealert.fs_identity import entry_names
 from packagealert.heuristics.base import AbstractHeuristic
 from packagealert.languages.base import (
     CURRENT_CONTRACT_VERSION,
@@ -1440,11 +1442,14 @@ def _strict_resolve(path: Path, label: str, hint: str, fields: dict[str, str]) -
 def venv_site_packages(venv_root: Path) -> Path | None:
     """Return the site-packages directory for a virtualenv.
 
-    Reads pyvenv.cfg to find the Python version, then constructs the exact
-    lib/pythonX.Y/site-packages path. Falls back to the first glob match if
-    pyvenv.cfg is absent or unreadable (e.g. a freshly created venv —
-    there will be exactly one match).
+    pyvenv.cfg's version is checked (a value that is not a version is refused) but does not
+    choose among several ``lib/pythonX.Y``: an install can rewrite it while the interpreter keeps
+    using its own directory, so it could point every scan at an empty decoy. The directory that
+    holds packages is the one returned; ValueError when more than one does (which one Python uses
+    cannot be told). With none populated, pyvenv.cfg's, else the first (a freshly created venv
+    has exactly one).
     """
+    wanted: Path | None = None
     cfg = venv_root / "pyvenv.cfg"
     if cfg.exists():
         try:
@@ -1462,10 +1467,7 @@ def venv_site_packages(venv_root: Path) -> Path | None:
                         )
                         log.warning(msg)
                         raise ValueError(msg)
-                    major_minor = ".".join(parts)
-                    sp = venv_root / "lib" / f"python{major_minor}" / "site-packages"
-                    if sp.exists():
-                        return sp
+                    wanted = venv_root / "lib" / f"python{'.'.join(parts)}" / "site-packages"
                     break
         except ValueError:
             raise  # invalid version — let caller surface the warning
@@ -1473,8 +1475,112 @@ def venv_site_packages(venv_root: Path) -> Path | None:
             msg = f"⚠ Could not read pyvenv.cfg in {venv_root}: {exc} — Python packages may not be scanned correctly."
             log.warning(msg)
             raise ValueError(msg) from exc
-    candidates = list(venv_root.glob("lib/python*/site-packages"))
+    candidates = sorted(venv_root.glob("lib/python*/site-packages"))
+    if separate_lib64(venv_root):
+        try:
+            candidates += lib64_site_packages(venv_root)
+        except OSError as exc:
+            msg = (f"⚠ {venv_root / 'lib64'} cannot be listed ({exc.strerror or exc}); packages a Python whose "
+                   "platlibdir is lib64 imports from it cannot be told apart from lib's. Python packages there "
+                   "will not be scanned.")
+            log.warning(msg)
+            raise ValueError(msg) from exc
+    populated = [c for c in candidates if _has_entries(c)]
+    if len(populated) > 1:
+        msg = (f"⚠ {venv_root} has packages under more than one interpreter's directory "
+               f"({', '.join(str(c.relative_to(venv_root)) for c in populated)}); which one Python uses cannot be "
+               "told from pyvenv.cfg, which an install can rewrite. Python packages there will not be scanned.")
+        log.warning(msg)
+        raise ValueError(msg)
+    if populated:
+        return populated[0]
+    if wanted is not None and wanted in candidates:
+        return wanted
     return candidates[0] if candidates else None
+
+
+def separate_lib64(venv: Path) -> bool:
+    """Whether *venv*'s lib64 is a directory of its own: a Python whose platlibdir is lib64
+    (Fedora, RHEL) imports lib64/pythonX.Y/site-packages too. A venv normally has lib64 as a link
+    to lib; a real one, or a link that leads anywhere else, is a second place packages load from."""
+    lib64 = venv / "lib64"
+    return lib64.is_dir() and os.path.realpath(lib64) != os.path.realpath(venv / "lib")
+
+
+def lib64_site_packages(venv: Path) -> list[Path]:
+    """Each ``lib64/python*/site-packages`` in *venv*, listed explicitly: OSError when lib64 cannot
+    be listed (Path.glob() would skip it silently). An interpreter directory that cannot be
+    searched is included, since what it holds cannot be told."""
+    lib64 = venv / "lib64"
+    with os.scandir(lib64) as it:
+        names = sorted(e.name for e in it if e.name.startswith("python"))
+    return [lib64 / n / "site-packages" for n in names
+            if os.path.lexists(lib64 / n / "site-packages") or not os.access(lib64 / n, os.X_OK)]
+
+
+def _named_or_every_env(root: Path, names: Sequence[str] | None) -> list[Path]:
+    """``root/<name>`` for each of *names* that is one path component; every directory in *root*
+    when *names* is None (a command whose environments only a build names)."""
+    if names is not None:
+        return [root / n for n in names if n and "/" not in n and n not in (".", "..")]
+    try:
+        return sorted(e for e in root.iterdir() if not e.name.startswith("."))
+    except OSError:
+        return []
+
+
+def tool_env_problem(venv: Path) -> str | None:
+    """Why the directories pa derives inside the tool environment *venv* (``bin``, ``lib``,
+    ``lib64``, each ``lib/python*`` and ``lib64/python*`` and its ``site-packages``) must not be bound writable on their
+    own: one of them resolves outside the environment. A link there, left by build code in an
+    earlier run (the tools directory is writable then), would make whatever it names writable,
+    since bwrap binds the link's target. *venv* itself must not be a link either: each path is
+    checked against where the environment lies in its (resolved) tools directory, never against
+    where a link would take it. None when every one resolves inside it, or *venv* does not exist
+    yet."""
+    if os.path.islink(venv):
+        return (f"the tool environment {venv} is a link ({os.readlink(venv)}); pa run will not write through it "
+                "(an earlier install may have left it: remove the link and reinstall the tool)")
+    if not os.path.lexists(venv):
+        return None
+    paths = [venv / "bin", venv / "lib", venv / "lib64"]
+    # venv_site_packages() searches a real lib64 as well as lib, so both levels beneath each are checked.
+    # A lib that is a link is listed through the link: the paths beneath it are what gets bound, and a
+    # link inside the environment can still lead to one that resolves outside it.
+    for lib in (venv / "lib", venv / "lib64"):
+        if not lib.is_dir():
+            continue
+        try:
+            with os.scandir(lib) as it:
+                for entry in it:
+                    if entry.name.startswith(("python", "pypy")):
+                        paths += [lib / entry.name, lib / entry.name / "site-packages"]
+        except OSError as exc:
+            return f"the environment {venv} cannot be listed ({exc.strerror or exc})"
+    for p in paths:
+        if os.path.lexists(p) and (problem := _resolves_outside(p, venv)) is not None:
+            return problem
+    return None
+
+
+def _resolves_outside(path: Path, venv: Path) -> str | None:
+    """Why *path*, inside the tool environment *venv*, must not be bound writable: it resolves
+    outside the environment (bwrap binds a link's target). None when it resolves inside."""
+    root = Path(os.path.realpath(venv.parent)) / venv.name
+    real = Path(os.path.realpath(path))
+    if real.is_relative_to(root):
+        return None
+    return (f"{path} in the tool environment {venv} resolves outside it ({real}) (an earlier install may "
+            "have left it: remove the environment and reinstall the tool)")
+
+
+def _has_entries(directory: Path) -> bool:
+    """Whether *directory* holds anything; one that cannot be read counts as holding something."""
+    try:
+        with os.scandir(directory) as it:
+            return next(it, None) is not None
+    except OSError:
+        return True
 
 
 # Matches scp-style git@host:path — colon (not slash) after hostname
@@ -1662,6 +1768,39 @@ def _is_external_managed_venv(resolved: Path) -> bool:
         return False
 
 
+# Why a pipx checkout overlapping pipx's home is not bound writable for an install or rebuild.
+_PIPX_CHECKOUT_WHY = "whose shared libraries pa run keeps read-only and whose venvs it snapshots"
+
+
+# pipx's own settings, passed to a sandboxed pipx command as the user set them, so it builds
+# and links as it would outside the sandbox (PIPX_DEFAULT_PYTHON picks the interpreter a
+# reinstall rebuilds the venv with).
+_PIPX_VALUE_SETTINGS = ("PIPX_DEFAULT_PYTHON", "PIPX_DEFAULT_BACKEND")
+
+
+def _forward_pipx_settings(sandbox_env: dict[str, str], home_ro: list[Path]) -> None:
+    """Pass the pipx settings the user set into a sandboxed pipx command: its default Python
+    and backend as set, and its directories as pipx resolves them, bounded to $HOME
+    (process_args), never as a raw ``--env`` value. A shared-libraries directory it names is
+    shown read-only."""
+    from packagealert.parsers.process_args import (
+        _pipx_bin_dir,
+        _pipx_man_dir,
+        _pipx_shared_libs,
+    )
+
+    for name in _PIPX_VALUE_SETTINGS:
+        if value := os.environ.get(name):
+            sandbox_env[name] = value
+    for name, resolve in (("PIPX_BIN_DIR", _pipx_bin_dir), ("PIPX_MAN_DIR", _pipx_man_dir),
+                          ("PIPX_SHARED_LIBS", _pipx_shared_libs)):
+        if os.environ.get(name):
+            sandbox_env[name] = str(resolve())
+    shared = _pipx_shared_libs()
+    if "PIPX_SHARED_LIBS" in sandbox_env and shared.is_dir() and shared not in home_ro:
+        home_ro.append(shared)
+
+
 def _pipx_venvs_dir() -> Path:
     from packagealert.parsers.process_args import _pipx_home
     return _pipx_home() / "venvs"
@@ -1691,6 +1830,65 @@ def _tool_name_from_spec(spec: str, ecosystem: str) -> str | None:
     from packagealert.parsers.process_args import parse_package_spec
     name, _ = parse_package_spec(spec, ecosystem)
     return name or None
+
+
+def _tool_venv_names(parsed: Any, warnings: list[str] | None = None) -> list[str] | None:
+    """The tool environments under the command's venvs directory: for pipx, every venv the parser
+    named as pipx names it (``pipx_venvs``); for another tool manager, the one its spec or target
+    names. None when there is no usable name, or one is unsafe as a single path component: the
+    caller then treats the whole venvs directory, which fails closed."""
+    if getattr(parsed, "manager", None) == "pipx":
+        names = getattr(parsed, "pipx_venvs", None)
+        names = list(names) if isinstance(names, list) and names else None
+    else:
+        raw_spec = parsed.packages[0] if parsed.packages else None
+        tool_name = getattr(parsed, "target_env_name", None) or (
+            _tool_name_from_spec(raw_spec, parsed.ecosystem) if raw_spec else None
+        )
+        names = [tool_name] if tool_name else None
+    for name in names or []:
+        if not _safe_tool_name(name):
+            msg = f"⚠ Tool name {name!r} is an unsafe path component (separators or traversal sequences) — ignoring."
+            log.warning("%s", msg)
+            if warnings is not None:
+                warnings.append(msg)
+            return None
+    return names
+
+
+def _venv_scan_targets(parent: Path, names: list[str]) -> list[tuple[Path, Path | None]]:
+    """``(venv, site-packages)`` for each environment among the entries *names* of *parent*, with
+    None for one that cannot be scanned safely: a link, one whose site-packages cannot be found,
+    or one whose site-packages is a link or resolves outside it. Entries that are not directories
+    (pipx's ``.<name>.lock`` files) and hidden ones are not environments and are left out."""
+    try:
+        real_parent = parent.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return [(parent / n, None) for n in names if not n.startswith(".")]
+    out: list[tuple[Path, Path | None]] = []
+    for name in names:
+        if name.startswith(".") or "/" in name or name in ("", "..", "."):
+            continue
+        venv = parent / name
+        if venv.is_symlink():
+            out.append((venv, None))
+            continue
+        if not venv.is_dir():
+            continue
+        try:
+            site = venv_site_packages(venv)
+        except ValueError:
+            site = None
+        if site is not None:
+            try:
+                real_site = site.resolve(strict=True)
+            except (OSError, RuntimeError):
+                site = None
+            else:
+                if site.is_symlink() or not real_site.is_relative_to(real_parent / name):
+                    site = None
+        out.append((venv, site))
+    return out
 
 
 def _find_site_packages(parsed: Any, cwd: Path) -> Path | None:
@@ -1818,6 +2016,10 @@ class PythonLanguage:
                 is_system_python_target=result.is_system_python_target,
                 working_dir=result.working_dir,
                 project_dir=result.project_dir,
+                writable_tool_home=result.writable_tool_home,
+                rebuilds_recorded_envs=result.rebuilds_recorded_envs,
+                pipx_venvs=result.pipx_venvs,
+                writes_only_named_envs=result.writes_only_named_envs,
             )
         return None
 
@@ -2304,16 +2506,31 @@ class PythonLanguage:
         return result
 
     def sandbox_extra_ro_paths(self, argv: list[str], cwd: Path) -> list[Path]:
-        """The local sources a uv tool's trial resolve or reinstall builds from (pa fix --tools):
-        read-only, subject to sandbox.editable_roots."""
+        """The local sources a uv tool's trial resolve or reinstall, or a pipx app's trial or fix,
+        builds from (pa fix --tools): read-only, subject to sandbox.editable_roots."""
+        from packagealert.languages.python_fix import pipx_app
         from packagealert.languages.python_fix.uv_tool import local_sources
 
-        return local_sources(argv)
+        return [*local_sources(argv), *pipx_app.local_sources(argv)]
 
     def sandbox_extra_write_paths(self, argv: list[str], cwd: Path) -> list[Path]:
         """Editable install source dirs need to be writable for egg-info generation, including
-        ``uv tool install --with-editable``'s."""
+        ``uv tool install --with-editable``'s, the local checkouts a pipx app's trial builds
+        in place (pa fix --tools; a scratch run makes them writable only for that trial), and
+        the local checkouts a pipx install, reinstall or upgrade builds from (a plain local one
+        too: pip writes its egg-info there). One that is, holds or lies in pipx's home is left
+        out (pre_run_check() refuses a rebuild from one)."""
+        from packagealert.languages.python_fix import pipx_app
+        from packagealert.parsers.process_args import _pipx_home
+
+        if pipx_app.is_trial_command(argv):
+            return pipx_app.trial_checkouts(argv, _pipx_venvs_dir())
         paths: list[Path] = []
+        for checkout in pipx_app.rebuild_checkouts(argv, cwd, _pipx_venvs_dir()):
+            if (problem := pipx_app.checkout_problem(checkout, _pipx_home(), why=_PIPX_CHECKOUT_WHY)) is not None:
+                log.warning("sandbox_extra_write_paths: %s", problem)
+            elif checkout not in paths:
+                paths.append(checkout)
         i = 0
         while i < len(argv):
             tok = argv[i]
@@ -2333,7 +2550,7 @@ class PythonLanguage:
                 resolved = p.resolve() if p.is_absolute() else (cwd / p).resolve()
                 # Only return paths outside cwd — the runner already binds cwd
                 # writable.
-                if resolved.exists() and not resolved.is_relative_to(cwd):
+                if resolved.exists() and not resolved.is_relative_to(cwd) and resolved not in paths:
                     paths.append(resolved)
         return paths
 
@@ -2354,17 +2571,7 @@ class PythonLanguage:
         for venvs_dir in tool_venvs_dirs:
             if any(p == venvs_dir or p.is_relative_to(venvs_dir) for p in extra_write_home_dirs):
                 is_tool_manager_cmd = True
-                _raw_spec = parsed.packages[0] if parsed.packages else None
-                tool_name = getattr(parsed, "target_env_name", None) or (
-                    _tool_name_from_spec(_raw_spec, parsed.ecosystem) if _raw_spec else None
-                )
-                if tool_name and not _safe_tool_name(tool_name):
-                    log.warning(
-                        "post_run_scan_targets: tool name %r is an unsafe path component — ignoring",
-                        tool_name,
-                    )
-                    tool_name = None
-                if tool_name:
+                for tool_name in _tool_venv_names(parsed) or []:
                     tool_venv = venvs_dir / tool_name
                     if (tool_venv / "pyvenv.cfg").exists():
                         targets = _venv_targets(tool_venv)
@@ -2379,7 +2586,11 @@ class PythonLanguage:
         from packagealert.parsers.process_args import derive_site_packages
         # 1. Try the venv exe path from the parsed install
         if parsed.venv_exe:
-            sp = derive_site_packages(parsed.venv_exe)
+            try:
+                sp = derive_site_packages(parsed.venv_exe)
+            except ValueError:
+                # Which site-packages Python uses cannot be told: the whole venv is scanned.
+                return [Path(parsed.venv_exe).parent.parent]
             if sp and sp.exists():
                 venv_root = sp.parent.parent.parent
                 if (venv_root / "pyvenv.cfg").exists():
@@ -2417,6 +2628,36 @@ class PythonLanguage:
         cwd: Path,
         flags: frozenset[str] = frozenset(),
     ) -> PreRunResult:
+        # A pipx rebuild (reinstall, upgrade) builds each app's recorded local checkout in place,
+        # so the sandbox binds it writable; one overlapping pipx's home is refused.
+        if parsed is not None and parsed.manager == "pipx":
+            from packagealert.languages.python_fix import pipx_app
+            from packagealert.parsers.process_args import _pipx_home
+
+            # Every pipx command makes the venvs directory, or something under it, writable.
+            if (problem := pipx_app.venvs_problem(_pipx_venvs_dir(), _pipx_home())) is not None:
+                return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
+            names = getattr(parsed, "pipx_venvs", None)
+            if (problem := pipx_app.app_venv_problem(names, _pipx_venvs_dir())) is not None:
+                return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
+            for venv in _named_or_every_env(_pipx_venvs_dir(), names):
+                if (problem := tool_env_problem(venv)) is not None:
+                    return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
+            home = getattr(parsed, "writable_tool_home", None)
+            if isinstance(home, Path) and (problem := pipx_app.home_problem(home)) is not None:
+                return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
+        if parsed is not None and parsed.manager == "uv" and (roots := getattr(parsed, "extra_write_home_dirs", None)):
+            # uv's counterpart: a tool environment the command names is bound writable on its own.
+            for name in _tool_venv_names(parsed, []) or []:
+                if (problem := tool_env_problem(roots[0] / name)) is not None:
+                    return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
+        if parsed is not None and parsed.manager == "pipx" and getattr(parsed, "rebuilds_recorded_envs", False):
+            from packagealert.languages.python_fix import pipx_app
+            from packagealert.parsers.process_args import _pipx_home
+
+            for checkout in pipx_app.recorded_checkouts(parsed.packages, _pipx_venvs_dir()):
+                if (problem := pipx_app.checkout_problem(checkout, _pipx_home(), why=_PIPX_CHECKOUT_WHY)) is not None:
+                    return PreRunResult(ok=False, message=f"✗ Blocked — {problem}.")
         # 1. VIRTUAL_ENV cross-project scope check (pip/pipenv/uv, skipped in
         # cross-namespace calls)
         if parsed is not None and parsed.manager in ("pip", "pipenv", "uv"):
@@ -2561,8 +2802,12 @@ class PythonLanguage:
         manager = getattr(parsed, "manager", None)
         if len(tool_dirs) == 2 and manager == "uv":
             sandbox_env["UV_TOOL_DIR"], sandbox_env["UV_TOOL_BIN_DIR"] = map(str, tool_dirs)
-        elif len(tool_dirs) == 2 and manager == "pipx":
-            sandbox_env["PIPX_BIN_DIR"] = str(tool_dirs[1])
+        elif manager == "pipx":
+            _forward_pipx_settings(sandbox_env, home_ro)
+            if len(tool_dirs) >= 2:
+                sandbox_env["PIPX_BIN_DIR"] = str(tool_dirs[1])
+            if len(tool_dirs) >= 3:
+                sandbox_env["PIPX_MAN_DIR"] = str(tool_dirs[2])
 
         # When uv-auth is active, uv inside the sandbox must resolve the same
         # credentials directory that _uv_credentials_dir() snapshotted on the
@@ -2695,58 +2940,95 @@ class PythonLanguage:
             # executables' directory) are snapshotted whole, by position, not by where they
             # lie: one manager's root may hold the other's (UV_TOOL_DIR=~/.local/share), and
             # UV_TOOL_BIN_DIR may sit inside UV_TOOL_DIR.
+            only_named = getattr(parsed, "writes_only_named_envs", False) is True
             for index, p in enumerate(extra_write_home_dirs):
-                targets.write_dirs.append(p)
+                if not (index == 0 and only_named):
+                    targets.write_dirs.append(p)
                 matched_venvs_dir = p if index == 0 else None
                 if matched_venvs_dir is not None:
                     # Derive site-packages for upgrade (venv already exists).
                     # For a fresh install the venv won't exist yet —
                     # post_run_scan_targets() discovers it after the install.
-                    _raw_spec = parsed.packages[0] if parsed.packages else None
-                    tool_name = getattr(parsed, "target_env_name", None) or (
-                        _tool_name_from_spec(_raw_spec, parsed.ecosystem) if _raw_spec else None
-                    )
-                    if tool_name and not _safe_tool_name(tool_name):
-                        msg = f"⚠ Tool name {tool_name!r} is an unsafe path component (separators or traversal sequences) — ignoring."
-                        log.warning("resolve_sandbox_targets: %s", msg)
-                        targets.warnings.append(msg)
-                        tool_name = None
-                    if tool_name:
-                        tool_venv = matched_venvs_dir / tool_name
-                        try:
-                            site_pkgs = venv_site_packages(tool_venv)
-                        except ValueError as exc:
-                            msg = str(exc)
-                            log.warning("resolve_sandbox_targets: %s", msg)
-                            targets.warnings.append(msg)
-                            site_pkgs = None
-                        if site_pkgs:
-                            targets.scan_targets.append(site_pkgs)
-                            targets.write_dirs.append(site_pkgs)
-                            # Snapshot tool_venv/bin so rollback reverts
-                            # entry-point scripts added/modified by an
-                            # upgrade. Mirrors the venv/bin handling in
-                            # prepare_sandbox_env().
-                            tool_bin = tool_venv / "bin"
-                            if tool_bin.exists():
-                                targets.write_dirs.append(tool_bin)
-                                targets.snapshot_only_dirs.append(tool_bin)
-                        else:
-                            # Venv absent (fresh install) — pre-register it
-                            # with an absent snapshot so rollback can remove a
-                            # partially-created venv if the install exits non-
-                            # zero before post_run_scan_targets fires. The
-                            # backend records existed=False; restore() then
-                            # calls shutil.rmtree if the path was created
-                            # during the run.
-                            targets.snapshot_only_dirs.append(tool_venv)
+                    tool_names = _tool_venv_names(parsed, targets.warnings)
+                    if tool_names:
+                        for tool_name in tool_names:
+                            tool_venv = matched_venvs_dir / tool_name
+                            if (problem := tool_env_problem(tool_venv)) is not None:
+                                # Bound on its own, a link would make what it names writable;
+                                # left to the root's bind, writing through it fails instead.
+                                log.warning("resolve_sandbox_targets: %s", problem)
+                                targets.warnings.append(f"⚠ {problem}; it is not made writable or scanned.")
+                                targets.unscanned.append(tool_venv)
+                                continue
+                            try:
+                                site_pkgs = venv_site_packages(tool_venv)
+                            except ValueError as exc:
+                                msg = str(exc)
+                                log.warning("resolve_sandbox_targets: %s", msg)
+                                targets.warnings.append(msg)
+                                targets.unscanned.append(tool_venv)
+                                continue
+                            if only_named and tool_venv.is_dir():
+                                # The venv alone, and pipx's lock for it beside it (runpip opens it
+                                # read-write before pip starts); the root stays read-only.
+                                from packagealert.languages.python_fix import pipx_app
+
+                                targets.write_dirs.append(tool_venv)
+                                targets.write_files.append(pipx_app.lock_file(tool_name, matched_venvs_dir))
+                            if site_pkgs and (problem := (_resolves_outside(site_pkgs, tool_venv)
+                                                          or _resolves_outside(tool_venv / "bin", tool_venv))) is not None:
+                                log.warning("resolve_sandbox_targets: %s", problem)
+                                targets.warnings.append(f"⚠ {problem}; it is not made writable or scanned.")
+                                targets.unscanned.append(tool_venv)
+                                continue
+                            if site_pkgs:
+                                targets.scan_targets.append(site_pkgs)
+                                targets.write_dirs.append(site_pkgs)
+                                # Snapshot tool_venv/bin so rollback reverts
+                                # entry-point scripts added/modified by an
+                                # upgrade. Mirrors the venv/bin handling in
+                                # prepare_sandbox_env().
+                                tool_bin = tool_venv / "bin"
+                                if tool_bin.exists():
+                                    targets.write_dirs.append(tool_bin)
+                                    targets.snapshot_only_dirs.append(tool_bin)
+                                if getattr(parsed, "writable_tool_home", None) is not None:
+                                    # A command that recreates the venv (pipx reinstall, install
+                                    # --force) may rebuild it on another Python, leaving a new
+                                    # lib/pythonX.Y beside the old one: the whole venv is backed up,
+                                    # large files included, so a rollback puts back exactly the tree
+                                    # from before the run.
+                                    targets.backup_dirs.append(tool_venv)
+                            else:
+                                # Venv absent (fresh install) — pre-register it
+                                # with an absent snapshot so rollback can remove a
+                                # partially-created venv if the install exits non-
+                                # zero before post_run_scan_targets fires. The
+                                # backend records existed=False; restore() then
+                                # calls shutil.rmtree if the path was created
+                                # during the run.
+                                targets.snapshot_only_dirs.append(tool_venv)
                     else:
-                        # No single tool name (e.g. pipx upgrade-all) —
-                        # snapshot the entire venvs directory so rollback can
-                        # revert all mutations.
-                        targets.snapshot_only_dirs.append(matched_venvs_dir)
+                        if getattr(parsed, "writable_tool_home", None) is not None:
+                            # pipx reinstall-all recreates every venv, and an install whose
+                            # venv name only a build tells may write any: the venvs directory
+                            # is backed up whole.
+                            targets.backup_dirs.append(matched_venvs_dir)
+                        else:
+                            # No usable tool name (e.g. pipx upgrade-all) — snapshot the
+                            # entire venvs directory so rollback can revert all mutations.
+                            targets.snapshot_only_dirs.append(matched_venvs_dir)
+                        # The command may change any venv there: every one is scanned.
+                        self._target_every_venv(matched_venvs_dir, targets)
+                    if parsed.manager == "pipx" or not tool_names:
+                        # A venv the run creates that no name above predicts (a URL install,
+                        # the second of `pipx install a b`) is found and scanned after it.
+                        targets.env_parents.append(matched_venvs_dir)
                 else:
                     targets.snapshot_only_dirs.append(p)
+            tool_home = getattr(parsed, "writable_tool_home", None)
+            if isinstance(tool_home, Path) and parsed.manager == "pipx":
+                self._bind_pipx_home(tool_home, targets)
         else:
             try:
                 site_pkgs = _find_site_packages(parsed, cwd)
@@ -2785,6 +3067,54 @@ class PythonLanguage:
                         targets.scan_targets.append(sp)
 
         return targets
+
+    @staticmethod
+    def _target_every_venv(venvs_dir: Path, targets: SandboxTargets) -> None:
+        """Scan every venv under *venvs_dir*; one that cannot be scanned is named as such."""
+        names = entry_names(venvs_dir)
+        found = (_venv_scan_targets(venvs_dir, names) if names is not None
+                 else [(venvs_dir, None)])
+        for venv, site in found:
+            if site is not None:
+                targets.scan_targets.append(site)
+                continue
+            targets.unscanned.append(venv)
+            msg = f"⚠ {venv} cannot be scanned (a link, or no site-packages found) — packages installed there are not checked."
+            log.warning("%s", msg)
+            targets.warnings.append(msg)
+
+    def post_run_new_env_targets(
+        self, parsed: Any, parent: Path, names: list[str],
+    ) -> list[tuple[Path, Path | None]]:
+        return _venv_scan_targets(parent, names)
+
+    @staticmethod
+    def _bind_pipx_home(home: Path, targets: SandboxTargets) -> None:
+        """Bind pipx's home writable whole: install, reinstall and reinstall-all rename the old
+        venv into ``.trash`` (a bind each for it and ``venvs`` would make that rename fail with
+        EXDEV) and lock ``.shared.lock``. Only a home holding nothing but pipx's own entries
+        (pre_run_check() refuses any other). Its shared libraries, standalone Pythons and
+        ``pipx run`` cache, which these commands only read, are created empty when missing (as
+        pipx would) and kept read-only, so build code cannot plant anything there that pipx
+        loads later; ``.trash`` is snapshotted, so a rollback removes what the run left there."""
+        from packagealert.languages.python_fix import pipx_app
+        from packagealert.parsers.process_args import _pipx_shared_libs
+
+        if pipx_app.home_problem(home) is not None:
+            return
+        try:
+            for name in pipx_app.READ_ONLY_HOME_DIRS:
+                (home / name).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            log.warning("cannot prepare pipx's home %s: %s", home, exc)
+            return
+        targets.write_dirs.append(home)
+        targets.read_only_over_write += [_pipx_shared_libs(), *(home / d for d in pipx_app.READ_ONLY_HOME_DIRS)]
+        # pipx trashes into <home>/.trash, or <home>/trash when its home is the default one.
+        targets.snapshot_only_dirs += [home / ".trash", home / "trash"]
+        # Build code can write the home: a venvs, logs or trash directory replaced by a link
+        # would make its target writable to the next pipx command.
+        targets.stable_dirs += [home / d for d in ("venvs", "logs", ".trash", "trash")]
 
     def prepare_sandbox_env(
         self,
@@ -2972,10 +3302,24 @@ class PythonLanguage:
         return uv.is_read_only_command(argv) or uv_tool.is_read_only_command(argv)
 
     def is_scratch_command(self, argv: list[str]) -> bool:
-        """Whether *argv* is a uv command pa fix runs in a scratch copy (see python_fix.uv)."""
+        """Whether *argv* is a command pa fix runs in a scratch copy: a uv one (see python_fix.uv)
+        or a pipx app's trial (python_fix.pipx_app)."""
+        from packagealert.languages.python_fix import pipx_app
         from packagealert.languages.python_fix.uv import is_scratch_command
 
-        return is_scratch_command(argv)
+        return is_scratch_command(argv) or pipx_app.is_trial_command(argv)
+
+    def scratch_write_files(self, argv: list[str], cwd: Path) -> list[Path]:
+        """The files a scratch command run in *cwd* writes in place outside its copy: a pipx app's
+        trial opens that app's lock in pipx's venvs directory read-write (pa fix --tools).
+        ValueError for a trial whose files are not in *cwd*, its scratch copy.
+
+        Optional hook, read by SandboxRunner.run_captured(scratch=True) only."""
+        from packagealert.languages.python_fix import pipx_app
+
+        if pipx_app.is_trial_command(argv) and pipx_app.trial_workdir(argv) != cwd.resolve():
+            raise ValueError("the trial's files are not in its scratch copy")
+        return pipx_app.trial_lock_files(argv, _pipx_venvs_dir())
 
     def fix_adapters(self) -> list:
         """`pa fix` adapters for Python package managers (uv only so far).

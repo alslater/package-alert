@@ -1,0 +1,25 @@
+Processing /SCRATCH/src/deepcapapp
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting urllib3==2.2.2
+  Using cached urllib3-2.2.2-py3-none-any.whl.metadata (6.4 kB)
+Requirement already satisfied: requests==2.25.1 in ./lib/python3.13/site-packages (from deepcapapp==1.0->-r /SCRATCH/work/deep_capped_conflict/reqs.txt (line 1)) (2.25.1)
+Requirement already satisfied: chardet<5,>=3.0.2 in ./lib/python3.13/site-packages (from requests==2.25.1->deepcapapp==1.0->-r /SCRATCH/work/deep_capped_conflict/reqs.txt (line 1)) (4.0.0)
+Requirement already satisfied: idna<3,>=2.5 in ./lib/python3.13/site-packages (from requests==2.25.1->deepcapapp==1.0->-r /SCRATCH/work/deep_capped_conflict/reqs.txt (line 1)) (2.10)
+INFO: pip is looking at multiple versions of requests to determine which version is compatible with other requirements. This could take a while.
+
+The conflict is caused by:
+    The user requested urllib3==2.2.2
+    requests 2.25.1 depends on urllib3<1.27 and >=1.21.1
+
+Additionally, some packages in these conflicts have no matching distributions available for your environment:
+    urllib3
+
+To fix this you could try to:
+1. loosen the range of package versions you've specified
+2. remove package versions to allow pip to attempt to solve the dependency conflict
+

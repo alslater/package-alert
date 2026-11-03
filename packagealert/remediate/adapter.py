@@ -35,6 +35,13 @@ class Change:
 class Blocker:
     parent: str
     constraint: str
+    parent_version: str | None = None
+    """The version of *parent* whose requirement blocks the pin, when the manager names it."""
+
+    def describe(self) -> str:
+        """``<parent> [<version>] requires <constraint>``."""
+        who = f"{self.parent} {self.parent_version}" if self.parent_version else self.parent
+        return f"{who} requires {self.constraint}"
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,9 @@ class TrialResult:
     """Set by verification, not by an adapter: the (reason, detail) hold for
     lock drift this trial leaves in place (a yanked, downgraded or newly
     vulnerable version a plain re-lock installs and the trial does not move off)."""
+    drift_needs_major: tuple[str, ...] = ()
+    """Set by verification with *drift_problem*: the drifting package whose major it is, the one
+    --allow-major must name."""
     non_public: frozenset[tuple[str, str]] = frozenset()
     """(package, version) pairs the changes install of which no copy comes from
     the public registry (a private registry, git, a file): a registry lookup by
@@ -105,15 +115,18 @@ class TrialRunner(Protocol):
         ...
 
     async def in_copy(
-        self, files: list[str], argvs: list[list[str] | Callable[[Path], None]],
+        self, files: list[str], argvs: Sequence[list[str] | Callable[[Path], object]],
         edit: Callable[[Path], None] | None = None, read_back: list[str] | None = None,
     ) -> CopyResult:
         """Run *argvs* in a scratch copy holding *files*, after *edit(copy_dir)* if given.
 
-        An entry of *argvs* that is a callable is an edit made between commands
-        (``step(copy_dir)``), in Python rather than in the sandbox; it has no
-        result in ``CopyResult.results``, which holds one per command run.
-        ``CopyResult.files`` holds *read_back* (default: *files*) afterwards.
+        An entry of *argvs* that is a callable is called with the copy's path
+        (``step(copy_dir)``) when its turn comes: one that returns a list (an
+        argv) is a command that names the copy's path, run like any other; any
+        other is an edit made between commands, in Python rather than in the
+        sandbox, with no result in ``CopyResult.results``. ``CopyResult.results``
+        holds one per command run, and ``CopyResult.files`` holds *read_back*
+        (default: *files*) afterwards.
         """
         ...
 
@@ -160,6 +173,10 @@ class FixAdapter(Protocol):
     language plugin that owns it answers True from its optional
     ``is_read_only_command(argv)`` hook; a plugin supplying an adapter declares
     its read-only commands there.
+
+    ``drift_pinned_by: str`` is also optional: set by an adapter whose printed command pins the
+    baseline's changes rather than making them anyway, naming what makes them; verification
+    then holds a fix for a major or too-young version there too (``verify_plan``).
 
     Optional attributes: ``can_force: bool = False`` (the adapter's ``trial`` accepts
     ``force`` versions) and ``pins_every_copy: bool = False``.

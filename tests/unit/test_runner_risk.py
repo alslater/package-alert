@@ -1275,7 +1275,7 @@ def test_run_wires_shared_resources_into_both_gates():
     """
     import inspect
 
-    src = inspect.getsource(SandboxRunner.run)
+    src = inspect.getsource(SandboxRunner._run)  # run() wraps _run() with its backups
     assert "_open_gate_resources()" in src
     assert "res=gate_res" in src.split("self._risk_check(")[1][:120]
     assert "res=gate_res" in src.split("_cooldown_check")[1][:120]
@@ -1368,7 +1368,7 @@ def test_run_guards_gate_resource_construction():
     """run() must consult _gate_resources_needed before constructing resources."""
     import inspect
 
-    src = inspect.getsource(SandboxRunner.run)
+    src = inspect.getsource(SandboxRunner._run)  # run() wraps _run() with its backups
     assert "_gate_resources_needed(" in src, "predicate not consulted in run()"
     # The construction must be reachable only through the predicate, i.e. the
     # predicate appears no later than the open call it guards.

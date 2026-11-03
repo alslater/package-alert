@@ -1,0 +1,136 @@
+{
+  "version": "1",
+  "pip_version": "26.2.2",
+  "install": [
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/0d/e0/481445ea9f9a8ede3f6f373566c7fb20de435203e4828f3738906013ecfa/certifi-2022.5.18-py3-none-any.whl",
+        "archive_info": {
+          "hashes": {
+            "sha256": "8d15a5a7fde18536a249c49e07e8e462b8fc13de21b3c80e8a68315dfa227c99"
+          },
+          "hash": "sha256=8d15a5a7fde18536a249c49e07e8e462b8fc13de21b3c80e8a68315dfa227c99"
+        }
+      },
+      "is_direct": false,
+      "is_yanked": true,
+      "requested": true,
+      "metadata": {
+        "metadata_version": "2.1",
+        "name": "certifi",
+        "version": "2022.5.18",
+        "platform": [
+          "UNKNOWN"
+        ],
+        "summary": "Python package for providing Mozilla's CA Bundle.",
+        "description": "Certifi: Python SSL Certificates\n================================\n\nCertifi provides Mozilla's carefully curated collection of Root Certificates for\nvalidating the trustworthiness of SSL certificates while verifying the identity\nof TLS hosts. It has been extracted from the `Requests`_ project.\n\nInstallation\n------------\n\n``certifi`` is available on PyPI. Simply install it with ``pip``::\n\n    $ pip install certifi\n\nUsage\n-----\n\nTo reference the installed certificate authority (CA) bundle, you can use the\nbuilt-in function::\n\n    >>> import certifi\n\n    >>> certifi.where()\n    '/usr/local/lib/python3.7/site-packages/certifi/cacert.pem'\n\nOr from the command line::\n\n    $ python -m certifi\n    /usr/local/lib/python3.7/site-packages/certifi/cacert.pem\n\nEnjoy!\n\n1024-bit Root Certificates\n~~~~~~~~~~~~~~~~~~~~~~~~~~\n\nBrowsers and certificate authorities have concluded that 1024-bit keys are\nunacceptably weak for certificates, particularly root certificates. For this\nreason, Mozilla has removed any weak (i.e. 1024-bit key) certificate from its\nbundle, replacing it with an equivalent strong (i.e. 2048-bit or greater key)\ncertificate from the same CA. Because Mozilla removed these certificates from\nits bundle, ``certifi`` removed them as well.\n\nIn previous versions, ``certifi`` provided the ``certifi.old_where()`` function\nto intentionally re-add the 1024-bit roots back into your bundle. This was not\nrecommended in production and therefore was removed at the end of 2018.\n\n.. _`Requests`: https://requests.readthedocs.io/en/master/\n\nAddition/Removal of Certificates\n--------------------------------\n\nCertifi does not support any addition/removal or other modification of the\nCA trust store content. This project is intended to provide a reliable and\nhighly portable root of trust to python deployments. Look to upstream projects\nfor methods to use alternate trust.\n\n\n",
+        "home_page": "https://github.com/certifi/python-certifi",
+        "author": "Kenneth Reitz",
+        "author_email": "me@kennethreitz.com",
+        "license": "MPL-2.0",
+        "license_file": [
+          "LICENSE"
+        ],
+        "classifier": [
+          "Development Status :: 5 - Production/Stable",
+          "Intended Audience :: Developers",
+          "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+          "Natural Language :: English",
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3",
+          "Programming Language :: Python :: 3.5",
+          "Programming Language :: Python :: 3.6",
+          "Programming Language :: Python :: 3.7",
+          "Programming Language :: Python :: 3.8",
+          "Programming Language :: Python :: 3.9"
+        ],
+        "requires_python": ">=3.5",
+        "project_url": [
+          "Source, https://github.com/certifi/python-certifi"
+        ]
+      }
+    },
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
+        "archive_info": {
+          "hashes": {
+            "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+          },
+          "hash": "sha256=2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": false,
+      "metadata": {
+        "metadata_version": "2.5",
+        "name": "Pygments",
+        "version": "2.21.0",
+        "summary": "Pygments is a syntax highlighting package written in Python.",
+        "description": "Pygments\n~~~~~~~~\n\nPygments is a syntax highlighting package written in Python.\n\nIt is a generic syntax highlighter suitable for use in code hosting, forums,\nwikis or other applications that need to prettify source code.  Highlights\nare:\n\n* a wide range of over 500 languages and other text formats is supported\n* special attention is paid to details, increasing quality by a fair amount\n* support for new languages and formats are added easily\n* a number of output formats, presently HTML, LaTeX, RTF, SVG, all image\n  formats that PIL supports and ANSI sequences\n* it is usable as a command-line tool and as a library\n\nCopyright 2006-present by the Pygments team, see ``AUTHORS``.\nLicensed under the BSD, see ``LICENSE`` for details.\n",
+        "description_content_type": "text/x-rst",
+        "keywords": [
+          "syntax",
+          "highlighting"
+        ],
+        "author_email": "Georg Brandl <georg@python.org>",
+        "maintainer": "Matthäus G. Chajdas",
+        "maintainer_email": "Georg Brandl <georg@python.org>, Jean Abou Samra <jean@abou-samra.fr>",
+        "license_expression": "BSD-2-Clause",
+        "license_file": [
+          "AUTHORS",
+          "LICENSE"
+        ],
+        "classifier": [
+          "Development Status :: 6 - Mature",
+          "Intended Audience :: Developers",
+          "Intended Audience :: End Users/Desktop",
+          "Intended Audience :: System Administrators",
+          "Operating System :: OS Independent",
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3",
+          "Programming Language :: Python :: 3.9",
+          "Programming Language :: Python :: 3.10",
+          "Programming Language :: Python :: 3.11",
+          "Programming Language :: Python :: 3.12",
+          "Programming Language :: Python :: 3.13",
+          "Programming Language :: Python :: 3.14",
+          "Programming Language :: Python :: 3.15",
+          "Programming Language :: Python :: Implementation :: CPython",
+          "Programming Language :: Python :: Implementation :: PyPy",
+          "Topic :: Text Processing :: Filters",
+          "Topic :: Utilities"
+        ],
+        "requires_dist": [
+          "colorama>=0.4.6; extra == 'windows-terminal'"
+        ],
+        "requires_python": ">=3.9",
+        "project_url": [
+          "Homepage, https://pygments.org",
+          "Documentation, https://pygments.org/docs",
+          "Source, https://github.com/pygments/pygments",
+          "Bug Tracker, https://github.com/pygments/pygments/issues",
+          "Changelog, https://github.com/pygments/pygments/blob/master/CHANGES"
+        ],
+        "provides_extra": [
+          "plugins",
+          "windows-terminal"
+        ]
+      }
+    }
+  ],
+  "environment": {
+    "implementation_name": "cpython",
+    "implementation_version": "3.12.12",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+    "platform_release": "7.0.0-42-generic",
+    "platform_system": "Linux",
+    "platform_version": "#42-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 15 08:06:44 UTC 2026",
+    "python_full_version": "3.12.12",
+    "platform_python_implementation": "CPython",
+    "python_version": "3.12",
+    "sys_platform": "linux"
+  }
+}

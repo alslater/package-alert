@@ -31,6 +31,27 @@ WOULD_ADD = "would add advisories"
 COULD_NOT_VERIFY = "could not verify"
 YANKED = "would install a yanked version"
 
+# The JSON ``status`` of a held entry for each reason (``pa fix --tools``): what pa decided not to
+# do ("held") against what it could not tell ("could_not_verify"). Every reason above is a key.
+STATUS_OF_REASON = {
+    MALICIOUS: "held",
+    WORKSPACE_MEMBER: "held",
+    NO_FIX: "held",
+    NOT_COMPARABLE: "held",
+    NON_REGISTRY: "held",
+    LOCAL_SOURCE: "held",
+    ALIASED: "held",
+    MULTIPLE_VERSIONS: "held",
+    MAJOR: "held",
+    UNVERIFIED: "could_not_verify",
+    COOLDOWN: "held",
+    BLOCKED: "held",
+    WOULD_DOWNGRADE: "held",
+    WOULD_ADD: "held",
+    COULD_NOT_VERIFY: "could_not_verify",
+    YANKED: "held",
+}
+
 
 @dataclass(frozen=True)
 class PlannedFix:
@@ -80,6 +101,9 @@ class HeldFix:
     detail: str = ""
     needs_major: tuple[str, ...] = ()
     """Packages whose --allow-major entry would lift a ``major upgrade`` hold."""
+    by_adapter: bool = False
+    """Held because the adapter names a reason no command can apply the fix (a tool's own
+    ``held_reason()``, or a verified plan it cannot turn into a command), not by the planner."""
 
 
 @dataclass
