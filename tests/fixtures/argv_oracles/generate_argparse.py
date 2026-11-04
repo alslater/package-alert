@@ -89,6 +89,11 @@ def _truth(tool, ns):
         return {"cmd": cmd,
                 "packages": sorted([*(getattr(ns, "packages", None) or []), *(getattr(ns, "editables", None) or [])]),
                 "req_files": sorted(r for r in [getattr(ns, "requirementstxt", None)] if r)}
+    if cmd == "runpip":
+        # Everything after APP is pip's (argparse REMAINDER); a lone quoted string is split.
+        from pipx.main import get_runpip_args
+        return {"cmd": cmd, "packages": [], "req_files": [], "target": ns.package,
+                "pipargs": get_runpip_args(ns.pipargs)}
     packages = {"install": getattr(ns, "package_spec", None), "upgrade": getattr(ns, "packages", None),
                 "inject": getattr(ns, "dependencies", None),
                 "reinstall": [ns.package] if getattr(ns, "package", None) and cmd == "reinstall" else None}.get(str(cmd)) or []
@@ -116,9 +121,10 @@ def _corpus(tool):
         from pipx.main import get_command_parser
         root = get_command_parser()[0]
         subs = {k: v for k, v in _subparsers(root).items()
-                if k in ("install", "inject", "upgrade", "reinstall", "install-all", "upgrade-all", "reinstall-all")}
+                if k in ("install", "inject", "upgrade", "reinstall", "install-all", "upgrade-all", "reinstall-all", "runpip")}
         tails = {"install": ["evilpkg"], "inject": ["target", "evilpkg"], "upgrade": ["evilpkg"],
-                 "reinstall": ["evilpkg"], "install-all": ["spec.json"], "upgrade-all": [], "reinstall-all": []}
+                 "reinstall": ["evilpkg"], "install-all": ["spec.json"], "upgrade-all": [], "reinstall-all": [],
+                 "runpip": ["app", "install", "evilpkg"]}
     out = []
     root_longs = [s for a in _options(root) for s in a.option_strings if s.startswith("--")]
     for action in _options(root):
@@ -142,6 +148,13 @@ def _corpus(tool):
         for spec in ("evilpkg==1.0", "evilpkg[extra]>=1", "git+https://example.com/evilpkg",
                      "./evilpkg", "evilpkg-1.0-py3-none-any.whl", "https://example.com/evilpkg-1.0.tar.gz"):
             out.append(["install", spec, "--lock", "pylock.toml"])
+        # runpip: pip's own arguments after APP, and the quoted-string form.
+        for tail in (["list"], ["show", "x"], ["freeze"], ["install", "--dry-run", "evilpkg"],
+                     ["install", "-r", "r.txt", "evilpkg"], ["install --dry-run evilpkg"],
+                     ["install", "--glo", "x", "evilpkg"], [], ["install", "--", "-evil"]):
+            out.append(["runpip", "app", *tail])
+            out.append(["runpip", "-q", "-v", "app", *tail])
+            out.append(["runpip", "--", "app", *tail])
     return out
 
 

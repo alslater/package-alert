@@ -629,13 +629,13 @@ _DEEP = "x = " + "[" * 1500 + "]" * 1500 + "\n"   # tomllib recurses once per le
 
 def test_a_receipt_nested_too_deeply_is_a_receipt_error():
     """tomllib raises RecursionError for it: a build can leave such a receipt behind."""
-    from packagealert.cli import fix_tools
+    from packagealert.languages.python_fix import uv_tool as fix_tools
 
     text = f'[tool]\nrequirements = [{{ name = "a" }}]\n{_DEEP}'
     with pytest.raises(uv_tool.ReceiptError, match="nested too deeply"):
         read_receipt(text)
-    assert fix_tools._readable_receipt(text.encode()) is False
-    assert fix_tools._entrypoint_paths(text.encode()) == set()
+    assert fix_tools.readable_receipt(text.encode()) is False
+    assert fix_tools.entrypoint_paths(text.encode()) == set()
 
 
 def test_configuration_nested_too_deeply_counts_as_configuration(tmp_path):
@@ -649,7 +649,7 @@ def test_configuration_nested_too_deeply_counts_as_configuration(tmp_path):
 def test_a_receipt_that_still_trips_the_parser_is_a_receipt_error(monkeypatch):
     """Whatever slips past the shape checks is reported as an unusable receipt, never another
     exception: --apply re-reads the new receipt between the reinstall and its rollback."""
-    from packagealert.cli import fix_tools
+    from packagealert.languages.python_fix import uv_tool as fix_tools
 
     def unhashable(*_):
         raise TypeError("cannot use 'list' as a set element")
@@ -657,7 +657,7 @@ def test_a_receipt_that_still_trips_the_parser_is_a_receipt_error(monkeypatch):
     monkeypatch.setattr(uv_tool, "_providers", unhashable)
     with pytest.raises(uv_tool.ReceiptError):
         read_receipt('[tool]\nrequirements = [{ name = "a" }]\nentrypoints = []\n')
-    assert fix_tools._readable_receipt(b'[tool]\nrequirements = [{ name = "a" }]\nentrypoints = []\n') is False
+    assert fix_tools.readable_receipt(b'[tool]\nrequirements = [{ name = "a" }]\nentrypoints = []\n') is False
 
 
 def test_a_pin_only_a_conditional_requirement_names_is_also_added_unconditionally():

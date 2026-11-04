@@ -1,0 +1,21 @@
+Processing /SCRATCH/src/cappedapp
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting urllib3==1.26.19
+  Using cached urllib3-1.26.19-py2.py3-none-any.whl.metadata (49 kB)
+
+The conflict is caused by:
+    The user requested urllib3==1.26.19
+    cappedapp 1.0 depends on urllib3<1.26.17
+
+Additionally, some packages in these conflicts have no matching distributions available for your environment:
+    urllib3
+
+To fix this you could try to:
+1. loosen the range of package versions you've specified
+2. remove package versions to allow pip to attempt to solve the dependency conflict
+

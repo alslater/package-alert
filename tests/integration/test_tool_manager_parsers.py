@@ -471,9 +471,11 @@ class TestResolvePipxInstall:
         expected_venv = pipx_venvs / "httpie"  # does not exist
 
         from packagealert.parsers.process_args import ParsedInstall
+        # As parse_pipx_args(["pipx", "install", "httpie"]) builds it: pipx_venvs names the venv
+        # the install writes (an empty list would back up the whole venvs directory instead).
         parsed = ParsedInstall(
             manager="pipx", packages=["httpie"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \
              patch("packagealert.languages.python._pipx_venvs_dir", return_value=pipx_venvs):
@@ -490,7 +492,7 @@ class TestResolvePipxInstall:
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(
             manager="pipx", packages=["httpie"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \
              patch("packagealert.languages.python._pipx_venvs_dir", return_value=pipx_venvs):
@@ -508,7 +510,7 @@ class TestResolvePipxInstall:
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(
             manager="pipx", packages=["httpie"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \
              patch("packagealert.languages.python._pipx_venvs_dir", return_value=pipx_venvs):
@@ -527,7 +529,7 @@ class TestResolvePipxInstall:
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(
             manager="pipx", packages=["httpx"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
             target_env_name="httpie",
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \
@@ -590,7 +592,7 @@ class TestPostRunScanTargets:
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(
             manager="pipx", packages=["httpie"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \
              patch("packagealert.languages.python._pipx_venvs_dir", return_value=pipx_venvs):
@@ -609,7 +611,7 @@ class TestPostRunScanTargets:
         from packagealert.parsers.process_args import ParsedInstall
         parsed = ParsedInstall(
             manager="pipx", packages=["httpx"], ecosystem="pypi",
-            extra_write_home_dirs=[pipx_venvs, local_bin],
+            extra_write_home_dirs=[pipx_venvs, local_bin], pipx_venvs=["httpie"],
             target_env_name="httpie",
         )
         with patch("packagealert.languages.python.Path.home", return_value=tmp_path), \

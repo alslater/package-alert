@@ -98,6 +98,26 @@ class SandboxTargets:
     # User-visible warnings to print to the console (bold yellow). Use for
     # conditions that degrade scan coverage or rollback completeness.
     warnings: list[str] = field(default_factory=list)
+    # Paths inside a writable directory that stay read-only (bound read-only over it): a
+    # tool home's shared libraries, say. Only narrows what is writable.
+    read_only_over_write: list[Path] = field(default_factory=list)
+    # Directories the command deletes and rebuilds (a pipx reinstall's venv): copied whole before
+    # the run, large files included, and put back in place of what the run left on rollback.
+    backup_dirs: list[Path] = field(default_factory=list)
+    # Directories the command must leave the same real directory (not replaced, by a link say):
+    # checked after the run, which fails and is rolled back when one changed.
+    stable_dirs: list[Path] = field(default_factory=list)
+    # Directories the run may create environments in that no target names before it (pipx's venvs
+    # directory): after the run, the language's post_run_new_env_targets() says what to scan in
+    # each entry created there.
+    env_parents: list[Path] = field(default_factory=list)
+    # Environments the command may change that cannot be scanned (a link, one with no
+    # site-packages): the post-install summary names them instead of reporting a clean result.
+    unscanned: list[Path] = field(default_factory=list)
+    # Single existing or new regular files bound writable in place, where the directory holding
+    # them stays read-only (pipx's lock beside the venvs it does not write). Each must be a plain
+    # file of the user's with no other hard link, or the run is refused.
+    write_files: list[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -246,6 +266,14 @@ class ProcessInstall:
     # The directories depend on which version of the manager runs; see
     # ParsedInstall.ambiguous_dirs. The sandbox refuses such a command.
     ambiguous_dirs: bool = False
+    # A tool manager's home bound writable whole, and whether the command rebuilds recorded
+    # tool environments; see ParsedInstall.writable_tool_home / rebuilds_recorded_envs.
+    writable_tool_home: Path | None = None
+    rebuilds_recorded_envs: bool = False
+    # The pipx venvs the command names; see ParsedInstall.pipx_venvs.
+    pipx_venvs: list[str] | None = field(default_factory=list)
+    # See ParsedInstall.writes_only_named_envs.
+    writes_only_named_envs: bool = False
 
 
 @runtime_checkable
@@ -322,6 +350,13 @@ class LanguageBase(Protocol):
     # budget the same way cache_paths() itself is scoped to avoid.
     # classify_cache_file() and cache_file_globs() are reused for these
     # roots; only the detection mechanism differs.
+    #
+    # post_run_new_env_targets(parsed, parent, names) -> list[tuple[Path, Path | None]] is
+    # another optional capability, not a Protocol member (same reasoning): what to scan in the
+    # entries a run created under one of the SandboxTargets.env_parents directories, as
+    # (environment, scan target), the target None for one that cannot be scanned safely.
+    # SandboxRunner finds it with getattr + callable; without it a directory where the run
+    # created entries is reported as not scanned.
     #
     # sandbox_hidden_home_paths() -> list[Path] is another optional capability, not a
     # Protocol member (same reasoning as poll_only_cache_paths above): paths under $HOME
@@ -476,7 +511,8 @@ class LanguageBase(Protocol):
 
         Called with the prepared argv (after prepare_sandbox_argv) and cwd. Use this
         to expose paths that the install process must write to (e.g. editable install
-        source directories where egg-info or build artifacts are written).
+        source directories where egg-info or build artifacts are written). The runner
+        keeps each returned path's ``.git`` read-only.
         Default returns an empty list.
         """
         return []

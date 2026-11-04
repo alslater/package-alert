@@ -1,0 +1,2 @@
+WARNING: The candidate selected for download or install is a yanked version: 'certifi' candidate (version 2022.5.18 at https://files.pythonhosted.org/packages/0d/e0/481445ea9f9a8ede3f6f373566c7fb20de435203e4828f3738906013ecfa/certifi-2022.5.18-py3-none-any.whl (from https://pypi.org/simple/certifi/) (requires-python:>=3.5))
+Reason for being yanked: Incorrectly claims to support Python 3.5.

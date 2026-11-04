@@ -9077,3 +9077,20 @@ class TestTheRunningCommandsArgv:
         monkeypatch.setattr(runner, "_preflight", _preflight)
         asyncio.run(runner.run(["npm", "install", "-g", "x"]))
         assert seen == [(True, tmp_path / "cfg" / "npmrc")]
+
+
+def test_write_files_are_bound_writable_in_place(tmp_path):
+    """A single file (a pipx app's lock, for its trial) is bound writable after the write dirs;
+    a symlink or a missing file is refused, since bwrap would mount whatever it names."""
+    from packagealert.sandbox.bwrap import build_cmd
+
+    lock = tmp_path / ".app.lock"
+    lock.write_text("")
+    cmd = build_cmd(["true"], [], write_files=[lock])
+    binds = [cmd[i + 1:i + 3] for i, a in enumerate(cmd) if a == "--bind"]
+    assert [str(lock), str(lock)] in binds
+    link = tmp_path / ".link.lock"
+    link.symlink_to(lock)
+    for bad in (link, tmp_path / ".missing.lock"):
+        with pytest.raises(ValueError, match="regular file"):
+            build_cmd(["true"], [], write_files=[bad])

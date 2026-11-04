@@ -171,9 +171,10 @@ async def run_scan_tools(cfg, managers: tuple[str, ...], fmt: str, show_details:
             console.print("  [dim]not found[/dim]")
             continue
         for directory in scan.unchecked or []:
-            console.print(f"  [yellow]⚠ not checked (unreadable, its interpreter could not be told, or it also "
-                          f"uses its base interpreter's packages): "
-                          f"{directory}[/yellow]", highlight=False, markup=True)
+            # A path is not markup: a directory name can hold "[".
+            console.print(f"  ⚠ not checked (unreadable, its interpreter could not be told, or it also "
+                          f"uses its base interpreter's packages): {directory}",
+                          style="yellow", highlight=False, markup=False)
         if not per_tool:
             if not scan.unchecked:
                 console.print("  [dim]no tools[/dim]")

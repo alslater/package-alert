@@ -219,7 +219,12 @@ def _pipx_shared_env(root: ToolRoot) -> tuple[list[ToolEnv], list[str]]:
 
 
 def _tool_env(root: ToolRoot, name: str, venv: Path) -> ToolEnv:
-    from packagealert.languages.python import _contained_in, _distinfo_to_metadata
+    from packagealert.languages.python import (
+        _contained_in,
+        _distinfo_to_metadata,
+        lib64_site_packages,
+        separate_lib64,
+    )
 
     python = _pyvenv_python(venv)
     record = _pipx_provenance(venv) if root.manager == "pipx" else _uv_provenance(venv)
@@ -237,8 +242,26 @@ def _tool_env(root: ToolRoot, name: str, venv: Path) -> ToolEnv:
         if _dir_state(lib) is not False and not _contained_in(lib, venv):
             env.unchecked.append(str(lib))
             return env
-        site, orphaned = _site_packages(venv, python)
+        lib64 = venv / "lib64"
+        if _dir_state(lib64) is not False and not _contained_in(lib64, venv):
+            env.unchecked.append(str(lib64))
+            return env
+        site, orphaned, others = _site_packages(venv, python)
+        # One leading out of the tool is never called safe to delete, but still counts below.
         env.orphaned = [o for o in orphaned if _contained_in(venv / o, venv)]
+        # pyvenv.cfg names the interpreter, but an install can rewrite it while Python keeps using
+        # its own directory: another of this tool's directories that holds packages (stale or not:
+        # the one in use can link into it) may be the one in use, so neither is scanned as the
+        # tool's whole inventory. A lib64 that is not lib
+        # (normally a link to it) is one too: a Python whose platlibdir is lib64 imports it.
+        # A site-packages that is the one in use under another name is not a second one.
+        in_use = _resolved(site) if site is not None else None
+        if any(_holds_packages(s) for o in others if _resolved(s := venv / o / "site-packages") != in_use) or (
+                separate_lib64(venv) and any(_holds_packages(s) for s in lib64_site_packages(venv)
+                                             if _resolved(s) != in_use)):
+            env.orphaned = []
+            env.unchecked.append(str(lib))
+            return env
         if site is None:
             return env
         if not _contained_in(site, venv):
@@ -267,7 +290,10 @@ def _tool_env(root: ToolRoot, name: str, venv: Path) -> ToolEnv:
             env.unchecked.append(str(dist_info))
             continue
         meta = _distinfo_to_metadata(dist_info)
-        if meta is None or not meta.version:
+        # A name or version that is not a plain one (control characters, spaces) is no
+        # distribution pip installed: reported, never read as a package or silently skipped.
+        if meta is None or not meta.version or not _PLAIN_DIST_RE.match(f"{meta.name} {meta.version}"):
+            env.unchecked.append(str(dist_info))
             continue
         recorded = _direct_url_provenance(dist_info)
         direct = recorded["kind"] if recorded and recorded["kind"] != "pypi" else None
@@ -279,6 +305,10 @@ def _tool_env(root: ToolRoot, name: str, venv: Path) -> ToolEnv:
         env.packages.append(ToolPackage(meta.name, meta.version,
                                         public=direct is None and not index_private and not own))
     return env
+
+
+# A distribution's name and version as pip writes them into a .dist-info directory's name.
+_PLAIN_DIST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]* [A-Za-z0-9][A-Za-z0-9.+!_-]*\Z")
 
 
 def _reconcile_provenance(env: ToolEnv, direct: dict) -> None:
@@ -324,8 +354,9 @@ def _pyvenv_python(venv: Path) -> str | None:
 _INTERPRETER_DIR_RE = re.compile(r"(?:python\d+\.\d+t?|pypy\d+\.\d+)\Z")
 
 
-def _site_packages(venv: Path, python: str | None) -> tuple[Path | None, list[str]]:
-    """(the site-packages of the interpreter in use, the other lib/pythonX.Y directories).
+def _site_packages(venv: Path, python: str | None) -> tuple[Path | None, list[str], list[str]]:
+    """(the site-packages of the interpreter in use, the other lib/pythonX.Y directories that are
+    stale, every other lib/pythonX.Y directory whether stale or not).
 
     A free-threaded interpreter uses lib/pythonX.Yt, PyPy lib/pypyX.Y (its pyvenv.cfg gives
     the language version). Raises _AmbiguousInterpreter when the one in use cannot be told
@@ -335,7 +366,7 @@ def _site_packages(venv: Path, python: str | None) -> tuple[Path | None, list[st
     try:
         entries = [d for d in lib.iterdir() if _INTERPRETER_DIR_RE.match(d.name)]
     except FileNotFoundError:
-        return None, []
+        return None, [], []
     versions = sorted(d.name for d in entries if _searchable_dir(d))
     if python:
         candidates = [v for v in (f"python{python}", f"python{python}t", f"pypy{python}") if v in versions]
@@ -346,7 +377,7 @@ def _site_packages(venv: Path, python: str | None) -> tuple[Path | None, list[st
     if len(candidates) > 1:
         raise _AmbiguousInterpreter
     if not candidates:          # the interpreter in use has no lib directory: any other is stale
-        return None, [f"lib/{v}" for v in versions]
+        return None, [f"lib/{v}" for v in versions], [f"lib/{v}" for v in versions]
     site = lib / candidates[0] / "site-packages"
     # A directory that is the one in use under another name (a link either way), or that holds
     # the site-packages in use (site-packages itself a link into it), is not stale.
@@ -354,7 +385,19 @@ def _site_packages(venv: Path, python: str | None) -> tuple[Path | None, list[st
     in_use_site = _resolved(lib / candidates[0] / "site-packages")
     orphaned = [f"lib/{v}" for v in versions if v != candidates[0] and _resolved(lib / v) != in_use
                 and not in_use_site.is_relative_to(_resolved(lib / v))]
-    return (site if _searchable_dir(site) else None), orphaned
+    others = [f"lib/{v}" for v in versions if v != candidates[0]]
+    return (site if _searchable_dir(site) else None), orphaned, others
+
+
+def _holds_packages(site: Path) -> bool:
+    """Whether the site-packages *site* holds anything; one that cannot be read counts as holding."""
+    try:
+        with os.scandir(site) as it:
+            return next(it, None) is not None
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
 
 
 def _searchable_dir(path: Path) -> bool:

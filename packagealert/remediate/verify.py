@@ -127,6 +127,13 @@ def _introduced_yanks(changes: tuple[Change, ...], yanked: tuple[Yank, ...], eco
     ]
 
 
+def _side_effect_hold(item: PlannedFix, bad: tuple[str, str], result: TrialResult, context: str = "") -> HeldFix:
+    """The hold for *bad*, a ``_side_effects()`` finding on *result*; a drift major names the
+    drifting package as the one --allow-major must allow."""
+    needs = result.drift_needs_major if bad == result.drift_problem else ()
+    return _held(item, bad[0], f"{context}{bad[1]}", needs_major=needs)
+
+
 async def _side_effects(
     changes: tuple[Change, ...], ecosystem: str, advisories: AdvisoryFn, *, yanked: tuple[Yank, ...] = (),
     declined: tuple[Change, ...] = (), drift_problem: tuple[str, str] | None = None,
@@ -315,7 +322,7 @@ async def _forced(
                      f"{context}{result.detail or 'the forced trial did not resolve'}")
     if bad := await _side_effects(result.changes, ecosystem, advisories, yanked=result.yanked,
                                     declined=result.declined, drift_problem=result.drift_problem):
-        return _held(item, bad[0], f"{context}{bad[1]}")
+        return _side_effect_hold(item, bad, result, context)
     if major := _major_hold(item, result.changes, allow_major, context, ecosystem=ecosystem, only=major_only):
         return major
     if young := await too_young((*result.changes, *_relock_change(item, result.changes, ecosystem, drift)), context):
@@ -382,7 +389,7 @@ async def _judge_parent(
     """
     if bad := await _side_effects(exact.changes, ecosystem, advisories, yanked=exact.yanked,
                                     declined=exact.declined, drift_problem=exact.drift_problem):
-        return _held(item, bad[0], f"{context}{bad[1]}")
+        return _side_effect_hold(item, bad, exact, context)
     only = None if major_only is None else major_only | {parent[0], *also_pinned}
     if major := _major_hold(item, exact.changes, allow_major, context, ecosystem=ecosystem, only=only):
         return major
@@ -540,7 +547,7 @@ async def _verify_one(
         blocker = result.blocker
         if blocker is None:
             return _held(item, planner.BLOCKED, result.detail or "the package manager found no resolution")
-        why = f"{blocker.parent} requires {blocker.constraint}"
+        why = blocker.describe()
         route = await _parent_route(
             item, why, blocker, trial=trial, ecosystem=ecosystem, advisories=advisories,
             allow_major=allow_major, too_young=too_young, cooldown_checked=checked,
@@ -572,7 +579,7 @@ async def _verify_one(
         return _held(item, planner.COULD_NOT_VERIFY, result.detail or "trial was not conclusive")
     if (bad := await _side_effects(result.changes, ecosystem, advisories, yanked=result.yanked,
                                     declined=result.declined, drift_problem=result.drift_problem)) is not None:
-        return _held(item, *bad)
+        return _side_effect_hold(item, bad, result)
     if major := _major_hold(item, result.changes, allow_major, ecosystem=ecosystem, only=major_only):
         return major
     relock = _relock_change(item, result.changes, ecosystem, drift)
@@ -650,6 +657,7 @@ async def verify_plan(
     drift: Sequence[Change] = (), drift_yanked: Sequence[Yank] = (),
     can_force: bool = False, pins_every_copy: bool = False, major_only: frozenset[str] | None = None,
     parallel: int = 1, parent_upgrade: ParentUpgradeFn | None = None,
+    drift_pinned_by: str | None = None,
 ) -> FixPlan:
     """Trial each planned pin alone, then all survivors together; see the spec.
 
@@ -680,6 +688,11 @@ async def verify_plan(
     judged against the baseline, so drift is not blamed on any pin.
     *drift_yanked* are the yanked versions in the baseline's resolution.
 
+    *drift_pinned_by* names what makes the drift when the printed command pins it rather than
+    making it anyway (a pipx app's own requirements): a major or too-young version in the drift
+    then holds every item whose trial leaves it in place, like a yanked one, and every drift
+    hold is described as that source's.
+
     *locked_yanks* are locked versions the registry reports as yanked. They are
     listed on the plan with the yanks trials observed, except those the printed
     command moves off.
@@ -697,9 +710,32 @@ async def verify_plan(
     # a new advisory), each with its hold. A fix is held for one only when its
     # trial leaves that version in place: one that moves off it avoids it.
     bad_drift: list[tuple[Change, tuple[str, str]]] = []
+    unknown_age: list[tuple[str, str]] = []  # pinned drift versions whose age is unknown
     for c in drift:
         if bad := await _side_effects((c,), ecosystem, advisories, yanked=tuple(drift_yanked)):
             bad_drift.append((c, bad))
+    if drift_pinned_by is not None:
+        for c in _major_bumps(drift, allow_major, frozenset(), ecosystem):
+            bad_drift.append((c, (planner.MAJOR, f"would also upgrade {c.package} {c.old} → {c.new} (major)")))
+        cache: dict = {}
+        for c in drift:
+            young, unknown = await _cooldown_check((c,), lambda _c: False, age=age, cache=cache,
+                                                    cooldown_days=cooldown_days, allow_cooldown=allow_cooldown)
+            if young:
+                bad_drift.append((c, (planner.COOLDOWN, young)))
+            if unknown and c.new is not None:
+                unknown_age.append((_name(ecosystem, c.package), c.new))
+
+    def keeps_unknown_age(after: Mapping[str, frozenset[str]] | None) -> bool:
+        """Whether a command ending in *after* keeps pinned drift of unknown age (it pins the
+        drift); an end state not known is taken to keep it."""
+        if not unknown_age:
+            return False
+        if after is None:
+            return True
+        have = {_name(ecosystem, k): v for k, v in after.items()}
+        return any(_same_version(ecosystem, v, ver) for n, ver in unknown_age for v in have.get(n, ()))
+    drift_source = drift_pinned_by or "re-locking the project as it stands"
     # Every trial reports the yanked versions in its whole resolution; the ones
     # it did not introduce are already locked and are reported on the plan.
     seen: list[TrialResult] = []
@@ -719,11 +755,14 @@ async def verify_plan(
         seen.append(result)
         if result.status == "resolved" and bad_drift:
             problem = await _drift_problem(result, bad_drift, ecosystem=ecosystem, advisories=advisories,
-                                           yanked=(*tuple(drift_yanked), *result.yanked))
+                                           yanked=(*tuple(drift_yanked), *result.yanked),
+                                           majors_hold=drift_pinned_by is not None, allow_major=allow_major)
             if problem is not None:
-                reason, detail = problem
+                reason, detail, package = problem
                 result = dataclasses.replace(
-                    result, drift_problem=(reason, f"re-locking the project as it stands {reason}: {detail}"))
+                    result, drift_problem=(reason, f"{drift_source} ({reason}): {detail}" if drift_pinned_by is not None
+                                       else f"{drift_source} {reason}: {detail}"),
+                    drift_needs_major=(package,) if reason == planner.MAJOR else ())
         return result
 
     planned: list[PlannedFix] = []
@@ -773,9 +812,13 @@ async def verify_plan(
         done += 1
         return out
 
+    # Each planned fix's cooldown result for its own changes, before drift is judged: the drift
+    # that counts is the printed command's, which is the combined trial when there is one.
+    own_cooldown: list[bool] = []
     for out in await asyncio.gather(*(verify_item(item) for item in plan.planned)):
         if isinstance(out, PlannedFix):
-            planned.append(out)
+            own_cooldown.append(out.cooldown_checked)
+            planned.append(dataclasses.replace(out, cooldown_checked=False) if keeps_unknown_age(out.after) else out)
         else:
             held.append(out)
     separate = False
@@ -831,10 +874,13 @@ async def verify_plan(
                     age=age, cache={}, cooldown_days=cooldown_days, allow_cooldown=allow_cooldown)
                 if young:
                     separate_reason = f"together they {young}"
-                elif unknown:
+                elif unknown or keeps_unknown_age(combined.after):
                     # The printed command introduces a version of unknown age,
                     # so no item in it can claim a checked cooldown.
                     planned = [dataclasses.replace(p, cooldown_checked=False) for p in planned]
+                else:
+                    # It keeps no drift of unknown age, whatever each fix's own trial kept.
+                    planned = [dataclasses.replace(p, cooldown_checked=own_cooldown[i]) for i, p in enumerate(planned)]
         except Exception as exc:
             log.warning("Combined trial failed", exc_info=True)
             separate_reason = f"the combined trial failed ({exc})"
@@ -880,19 +926,23 @@ async def verify_plan(
 
 async def _drift_problem(
     result: TrialResult, bad_drift: list[tuple[Change, tuple[str, str]]], *, ecosystem: str,
-    advisories: AdvisoryFn, yanked: tuple[Yank, ...],
-) -> tuple[str, str] | None:
-    """The hold for bad lock drift *result* leaves in place, or None.
+    advisories: AdvisoryFn, yanked: tuple[Yank, ...], majors_hold: bool = False,
+    allow_major: frozenset[str] = frozenset(),
+) -> tuple[str, str, str] | None:
+    """The hold for bad lock drift *result* leaves in place, as (reason, detail, the drifting
+    package), or None.
 
     A drift change the trial does not move off keeps its own hold. One it
     does move off is judged again from the project's own version to where the
     trial leaves the package (re-locking downgrades q 1.0.0 to 0.9.0 and the
-    fix moves it to 0.9.5: still a downgrade of the project).
+    fix moves it to 0.9.5: still a downgrade of the project). With
+    *majors_hold* (the printed command pins the drift), a major from the
+    project's version not in *allow_major* holds too.
     """
     moved = (*result.changes, *result.declined)
     for drifted, bad in bad_drift:
         if not _moves_off(drifted, moved, ecosystem):
-            return bad
+            return (*bad, drifted.package)
         own = _name(ecosystem, drifted.package)
         for c in moved:
             if (_name(ecosystem, c.package) != own or c.action not in ("update", "remove") or c.new is None
@@ -901,7 +951,10 @@ async def _drift_problem(
             from_project = (Change("update", drifted.package, drifted.old, c.new) if drifted.old is not None
                             else Change("add", drifted.package, None, c.new))
             if again := await _side_effects((from_project,), ecosystem, advisories, yanked=yanked):
-                return again
+                return (*again, drifted.package)
+            if majors_hold and _major_bumps((from_project,), allow_major, frozenset(), ecosystem):
+                return (planner.MAJOR, f"would also upgrade {drifted.package} {drifted.old} → {c.new} (major)",
+                        drifted.package)
     return None
 
 

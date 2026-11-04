@@ -1,0 +1,3 @@
+ERROR: Cannot install localapp 1.1 (from /SCRATCH/src/localapp) because these package versions have conflicting dependencies.
+ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts
+'/SCRATCH/pipx_home/venvs/localapp/bin/python -m pip install --dry-run --report /SCRATCH/work/local_main_bumped/report.json --quiet -r /SCRATCH/work/local_main_bumped/reqs.txt -c /SCRATCH/work/local_main_bumped/cons.txt' failed

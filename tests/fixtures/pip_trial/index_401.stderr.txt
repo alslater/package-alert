@@ -1,0 +1,3 @@
+ERROR: Could not find a version that satisfies the requirement urllib3==1.26.20 (from versions: none)
+ERROR: No matching distribution found for urllib3==1.26.20
+'/SCRATCH/pipx_home/venvs/httpie/bin/python -m pip install --dry-run --report /SCRATCH/work/index_401/report.json --quiet -r /SCRATCH/work/index_401/reqs.txt -c /SCRATCH/work/index_401/cons.txt --no-input --index-url http://127.0.0.1:8401/simple/ urllib3==1.26.20' failed

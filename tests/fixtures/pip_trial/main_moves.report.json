@@ -1,0 +1,179 @@
+{
+  "version": "1",
+  "pip_version": "26.2.2",
+  "install": [
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/03/b6/39bcf01e1185882f34bc9fb77d1fb4a27911a55f60ab407de34abc8a2347/httpie-3.2.4-py3-none-any.whl",
+        "archive_info": {
+          "hashes": {
+            "sha256": "4bd0435cc4b9bca59501bc65089de96f3e93b393803f32a81951db62050ebf0b"
+          },
+          "hash": "sha256=4bd0435cc4b9bca59501bc65089de96f3e93b393803f32a81951db62050ebf0b"
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": true,
+      "metadata": {
+        "metadata_version": "2.1",
+        "name": "httpie",
+        "version": "3.2.4",
+        "summary": "HTTPie: modern, user-friendly command-line HTTP client for the API era.",
+        "description": "<h2 align=\"center\">\n    <a href=\"https://httpie.io\" target=\"blank_\">\n        <img height=\"100\" alt=\"HTTPie\" src=\"https://raw.githubusercontent.com/httpie/cli/master/docs/httpie-logo.svg\" />\n    </a>\n    <br>\n    HTTPie CLI: human-friendly HTTP client for the API era\n</h2>\n\n<div align=\"center\">\n\n[![HTTPie for Desktop](https://img.shields.io/static/v1?label=HTTPie&message=Desktop&color=4B78E6)](https://httpie.io/product)\n[![](https://img.shields.io/static/v1?label=HTTPie&message=Web%20%26%20Mobile&color=73DC8C)](https://httpie.io/app)\n[![](https://img.shields.io/static/v1?label=HTTPie&message=CLI&color=FA9BFA)](https://httpie.io/cli)\n[![Twitter](https://img.shields.io/twitter/follow/httpie?style=flat&color=%234B78E6&logoColor=%234B78E6)](https://twitter.com/httpie)\n[![Chat](https://img.shields.io/discord/725351238698270761?style=flat&label=Chat%20on%20Discord&color=%23FA9BFA)](https://httpie.io/discord)\n\n</div>\n\n\n<div align=\"center\">\n\n[![Docs](https://img.shields.io/badge/stable%20docs-httpie.io%2Fdocs%2Fcli-brightgreen?style=flat&color=%2373DC8C&label=Docs)](https://httpie.org/docs/cli)\n[![Latest version](https://img.shields.io/pypi/v/httpie.svg?style=flat&label=Latest&color=%234B78E6&logo=&logoColor=white)](https://pypi.python.org/pypi/httpie)\n[![Build](https://img.shields.io/github/actions/workflow/status/httpie/cli/tests.yml?branch=master&color=%23FA9BFA&label=Build)](https://github.com/httpie/cli/actions)\n[![Coverage](https://img.shields.io/codecov/c/github/httpie/cli?style=flat&label=Coverage&color=%2373DC8C)](https://codecov.io/gh/httpie/cli)\n[![PyPi downloads](https://img.shields.io/pepy/dt/httpie?style=flat&label=Downloads%20from%20PyPi%20only&color=4B78E6)](https://www.pepy.tech/projects/httpie)\n\n</div>\n\nHTTPie (pronounced _aitch-tee-tee-pie_) is a command-line HTTP client.\nIts goal is to make CLI interaction with web services as human-friendly as possible.\nHTTPie is designed for testing, debugging, and generally interacting with APIs & HTTP servers.\nThe `http` & `https` commands allow for creating and sending arbitrary HTTP requests.\nThey use simple and natural syntax and provide formatted and colorized output.\n\n<div align=\"center\">\n\n<img src=\"https://raw.githubusercontent.com/httpie/cli/master/docs/httpie-animation.gif\" alt=\"HTTPie in action\" width=\"100%\"/>\n\n\n</div>\n\n\n\n\n## We lost 54k GitHub stars\n\nPlease note we recently accidentally made this repo private for a moment, and GitHub deleted our community that took a decade to build. Read the full story here: https://httpie.io/blog/stardust\n\n![](docs/stardust.png)\n\n\n## Getting started\n\n- [Installation instructions →](https://httpie.io/docs#installation)\n- [Full documentation →](https://httpie.io/docs)\n\n## Features\n\n- Expressive and intuitive syntax\n- Formatted and colorized terminal output\n- Built-in JSON support\n- Forms and file uploads\n- HTTPS, proxies, and authentication\n- Arbitrary request data\n- Custom headers\n- Persistent sessions\n- `wget`-like downloads\n\n[See all features →](https://httpie.io/docs)\n\n## Examples\n\nHello World:\n\n```bash\nhttps httpie.io/hello\n```\n\nCustom [HTTP method](https://httpie.io/docs#http-method), [HTTP headers](https://httpie.io/docs#http-headers) and [JSON](https://httpie.io/docs#json) data:\n\n```bash\nhttp PUT pie.dev/put X-API-Token:123 name=John\n```\n\nBuild and print a request without sending it using [offline mode](https://httpie.io/docs/cli/offline-mode):\n\n```bash\nhttp --offline pie.dev/post hello=offline\n```\n\nUse [GitHub API](https://developer.github.com/v3/issues/comments/#create-a-comment) to post a comment on an [Issue](https://github.com/httpie/cli/issues/83) with [authentication](https://httpie.io/docs#authentication):\n\n```bash\nhttp -a USERNAME POST https://api.github.com/repos/httpie/cli/issues/83/comments body='HTTPie is awesome! :heart:'\n```\n\n[See more examples →](https://httpie.io/docs#examples)\n\n## Community & support\n\n- Visit the [HTTPie website](https://httpie.io) for full documentation and useful links.\n- Join our [Discord server](https://httpie.io/discord) is to ask questions, discuss features, and for general API chat.\n- Tweet at [@httpie](https://twitter.com/httpie) on Twitter.\n- Use [StackOverflow](https://stackoverflow.com/questions/tagged/httpie) to ask questions and include a `httpie` tag.\n- Create [GitHub Issues](https://github.com/httpie/cli/issues) for bug reports and feature requests.\n- Subscribe to the [HTTPie newsletter](https://httpie.io) for occasional updates.\n\n## Contributing\n\nHave a look through existing [Issues](https://github.com/httpie/cli/issues) and [Pull Requests](https://github.com/httpie/cli/pulls) that you could help with. If you'd like to request a feature or report a bug, please [create a GitHub Issue](https://github.com/httpie/cli/issues) using one of the templates provided.\n\n[See contribution guide →](https://github.com/httpie/cli/blob/master/CONTRIBUTING.md)\n",
+        "description_content_type": "text/markdown",
+        "home_page": "https://httpie.io/",
+        "author": "Jakub Roztocil",
+        "author_email": "jakub@roztocil.co",
+        "license": "BSD",
+        "license_file": [
+          "LICENSE",
+          "AUTHORS.md"
+        ],
+        "classifier": [
+          "Development Status :: 5 - Production/Stable",
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3 :: Only",
+          "Environment :: Console",
+          "Intended Audience :: Developers",
+          "Intended Audience :: System Administrators",
+          "License :: OSI Approved :: BSD License",
+          "Topic :: Internet :: WWW/HTTP",
+          "Topic :: Software Development",
+          "Topic :: System :: Networking",
+          "Topic :: Terminals",
+          "Topic :: Text Processing",
+          "Topic :: Utilities"
+        ],
+        "requires_dist": [
+          "pip",
+          "charset-normalizer >=2.0.0",
+          "defusedxml >=0.6.0",
+          "requests[socks] >=2.22.0",
+          "Pygments >=2.5.2",
+          "requests-toolbelt >=0.9.1",
+          "multidict >=4.7.0",
+          "setuptools",
+          "rich >=9.10.0",
+          "importlib-metadata >=1.4.0 ; python_version < \"3.8\"",
+          "colorama >=0.2.4 ; sys_platform == \"win32\"",
+          "pytest ; extra == 'dev'",
+          "pytest-httpbin >=0.0.6 ; extra == 'dev'",
+          "responses ; extra == 'dev'",
+          "pytest-mock ; extra == 'dev'",
+          "werkzeug <2.1.0 ; extra == 'dev'",
+          "flake8 ; extra == 'dev'",
+          "flake8-comprehensions ; extra == 'dev'",
+          "flake8-deprecated ; extra == 'dev'",
+          "flake8-mutable ; extra == 'dev'",
+          "flake8-tuple ; extra == 'dev'",
+          "pyopenssl ; extra == 'dev'",
+          "pytest-cov ; extra == 'dev'",
+          "pyyaml ; extra == 'dev'",
+          "twine ; extra == 'dev'",
+          "wheel ; extra == 'dev'",
+          "Jinja2 ; extra == 'dev'",
+          "pytest ; extra == 'test'",
+          "pytest-httpbin >=0.0.6 ; extra == 'test'",
+          "responses ; extra == 'test'",
+          "pytest-mock ; extra == 'test'",
+          "werkzeug <2.1.0 ; extra == 'test'"
+        ],
+        "requires_python": ">=3.7",
+        "project_url": [
+          "GitHub, https://github.com/httpie/cli",
+          "Twitter, https://twitter.com/httpie",
+          "Discord, https://httpie.io/discord",
+          "Documentation, https://httpie.io/docs",
+          "Online Demo, https://httpie.io/run"
+        ],
+        "provides_extra": [
+          "dev",
+          "test"
+        ]
+      }
+    },
+    {
+      "download_info": {
+        "url": "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl",
+        "archive_info": {
+          "hashes": {
+            "sha256": "2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+          },
+          "hash": "sha256=2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9"
+        }
+      },
+      "is_direct": false,
+      "is_yanked": false,
+      "requested": false,
+      "metadata": {
+        "metadata_version": "2.5",
+        "name": "Pygments",
+        "version": "2.21.0",
+        "summary": "Pygments is a syntax highlighting package written in Python.",
+        "description": "Pygments\n~~~~~~~~\n\nPygments is a syntax highlighting package written in Python.\n\nIt is a generic syntax highlighter suitable for use in code hosting, forums,\nwikis or other applications that need to prettify source code.  Highlights\nare:\n\n* a wide range of over 500 languages and other text formats is supported\n* special attention is paid to details, increasing quality by a fair amount\n* support for new languages and formats are added easily\n* a number of output formats, presently HTML, LaTeX, RTF, SVG, all image\n  formats that PIL supports and ANSI sequences\n* it is usable as a command-line tool and as a library\n\nCopyright 2006-present by the Pygments team, see ``AUTHORS``.\nLicensed under the BSD, see ``LICENSE`` for details.\n",
+        "description_content_type": "text/x-rst",
+        "keywords": [
+          "syntax",
+          "highlighting"
+        ],
+        "author_email": "Georg Brandl <georg@python.org>",
+        "maintainer": "Matthäus G. Chajdas",
+        "maintainer_email": "Georg Brandl <georg@python.org>, Jean Abou Samra <jean@abou-samra.fr>",
+        "license_expression": "BSD-2-Clause",
+        "license_file": [
+          "AUTHORS",
+          "LICENSE"
+        ],
+        "classifier": [
+          "Development Status :: 6 - Mature",
+          "Intended Audience :: Developers",
+          "Intended Audience :: End Users/Desktop",
+          "Intended Audience :: System Administrators",
+          "Operating System :: OS Independent",
+          "Programming Language :: Python",
+          "Programming Language :: Python :: 3",
+          "Programming Language :: Python :: 3.9",
+          "Programming Language :: Python :: 3.10",
+          "Programming Language :: Python :: 3.11",
+          "Programming Language :: Python :: 3.12",
+          "Programming Language :: Python :: 3.13",
+          "Programming Language :: Python :: 3.14",
+          "Programming Language :: Python :: 3.15",
+          "Programming Language :: Python :: Implementation :: CPython",
+          "Programming Language :: Python :: Implementation :: PyPy",
+          "Topic :: Text Processing :: Filters",
+          "Topic :: Utilities"
+        ],
+        "requires_dist": [
+          "colorama>=0.4.6; extra == 'windows-terminal'"
+        ],
+        "requires_python": ">=3.9",
+        "project_url": [
+          "Homepage, https://pygments.org",
+          "Documentation, https://pygments.org/docs",
+          "Source, https://github.com/pygments/pygments",
+          "Bug Tracker, https://github.com/pygments/pygments/issues",
+          "Changelog, https://github.com/pygments/pygments/blob/master/CHANGES"
+        ],
+        "provides_extra": [
+          "plugins",
+          "windows-terminal"
+        ]
+      }
+    }
+  ],
+  "environment": {
+    "implementation_name": "cpython",
+    "implementation_version": "3.12.12",
+    "os_name": "posix",
+    "platform_machine": "x86_64",
+    "platform_release": "7.0.0-42-generic",
+    "platform_system": "Linux",
+    "platform_version": "#42-Ubuntu SMP PREEMPT_DYNAMIC Thu Oct 15 08:06:44 UTC 2026",
+    "python_full_version": "3.12.12",
+    "platform_python_implementation": "CPython",
+    "python_version": "3.12",
+    "sys_platform": "linux"
+  }
+}

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import textwrap
 from pathlib import Path
 from unittest.mock import patch
@@ -3392,3 +3393,128 @@ def test_uv_lock_virtual_root_is_the_project_not_a_dependency(lang: PythonLangua
     result = {p.name: p.is_dev for p in lang.parse_lockfile(uv_lock)}
     assert "requests" not in result
     assert result["idna"] is False and result["six"] is True and "member" in result
+
+
+def test_python_plugin_approves_pipx_trial_as_scratch():
+    """pa fix's pipx trial runs in a scratch copy (run_captured(scratch=True)); a pip install that
+    is not exactly a trial is not approved."""
+    import json
+
+    from packagealert.languages.python import PythonLanguage
+    from packagealert.languages.python_fix import pipx_app
+
+    meta = pipx_app.read_metadata(json.dumps({
+        "pipx_metadata_version": "0.6", "backend": "pip", "injected_packages": {},
+        "main_package": {"package": "httpie", "package_or_url": "httpie", "pip_args": []}}))
+    from packagealert.sandbox.runner import SCRATCH_ROOT
+
+    lang = PythonLanguage()
+    work = SCRATCH_ROOT / "trial-x"
+    assert lang.is_scratch_command(pipx_app.trial_argv("httpie", meta, [("urllib3", "1.26.20")], workdir=work))
+    assert not lang.is_read_only_command(pipx_app.trial_argv("httpie", meta, [], workdir=work))
+    assert not lang.is_scratch_command(["pipx", "runpip", "a", "install", "x"])
+    assert not lang.is_scratch_command(pipx_app.apply_argv("httpie", meta, [("urllib3", "1.26.20")]))
+
+
+def test_venv_site_packages_is_not_steered_to_a_decoy_by_pyvenv_cfg(tmp_path: Path) -> None:
+    """An install can rewrite pyvenv.cfg's version and leave an empty lib/python3.12 while Python
+    keeps importing from lib/python3.13: the directory holding packages is the one scanned."""
+    from packagealert.languages.python import venv_site_packages
+
+    real = tmp_path / "lib" / "python3.13" / "site-packages"
+    (real / "urllib3-1.26.5.dist-info").mkdir(parents=True)
+    (tmp_path / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    assert venv_site_packages(tmp_path) == real
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion_info = 3.12.4\n")
+    assert venv_site_packages(tmp_path) == real
+
+
+def test_venv_site_packages_with_packages_under_two_interpreters_is_ambiguous(tmp_path: Path) -> None:
+    from packagealert.languages.python import venv_site_packages
+
+    for v in ("3.12", "3.13"):
+        (tmp_path / "lib" / f"python{v}" / "site-packages" / "x-1.0.dist-info").mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    with pytest.raises(ValueError, match="more than one interpreter"):
+        venv_site_packages(tmp_path)
+
+
+def test_venv_site_packages_of_an_empty_venv_follows_pyvenv_cfg(tmp_path: Path) -> None:
+    from packagealert.languages.python import venv_site_packages
+
+    for v in ("3.12", "3.13"):
+        (tmp_path / "lib" / f"python{v}" / "site-packages").mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.13.1\n")
+    assert venv_site_packages(tmp_path) == tmp_path / "lib" / "python3.13" / "site-packages"
+
+
+def test_derive_site_packages_is_not_steered_to_a_decoy(tmp_path: Path) -> None:
+    """`pa run .venv/bin/pip install …`: a decoy lib/python3.10/site-packages an earlier install
+    left sorts first, but it is neither the scan target nor the post-run one."""
+    from packagealert.languages.python import PythonLanguage
+    from packagealert.parsers.process_args import derive_site_packages, parse_pip_args
+
+    venv = tmp_path / "proj" / ".venv"
+    real = venv / "lib" / "python3.12" / "site-packages"
+    (real / "urllib3-1.26.5.dist-info").mkdir(parents=True)
+    (venv / "bin").mkdir()
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    decoy = venv / "lib" / "python3.10" / "site-packages"
+    decoy.mkdir(parents=True)
+    assert derive_site_packages(str(venv / "bin" / "pip")) == real
+    (decoy / "README").write_text("x")
+    with pytest.raises(ValueError, match="more than one interpreter"):
+        derive_site_packages(str(venv / "bin" / "pip"))
+    parsed = parse_pip_args([str(venv / "bin" / "pip"), "install", "requests"])
+    assert PythonLanguage().post_run_scan_targets(parsed, tmp_path / "proj") == [venv]
+
+
+def test_venv_site_packages_counts_a_real_lib64(tmp_path: Path) -> None:
+    """A Python whose platlibdir is lib64 imports lib64/pythonX.Y/site-packages: a venv's lib64 is
+    normally a link to lib, and a real one holding packages is a candidate of its own."""
+    from packagealert.languages.python import venv_site_packages
+
+    lib = tmp_path / "lib" / "python3.12" / "site-packages"
+    lib.mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    (tmp_path / "lib64").symlink_to("lib")
+    (lib / "urllib3-1.26.5.dist-info").mkdir()
+    assert venv_site_packages(tmp_path) == lib
+    (tmp_path / "lib64").unlink()
+    only64 = tmp_path / "lib64" / "python3.12" / "site-packages"
+    (only64 / "evil-1.0.dist-info").mkdir(parents=True)
+    with pytest.raises(ValueError, match="more than one interpreter"):
+        venv_site_packages(tmp_path)
+    for p in lib.iterdir():
+        p.rmdir()
+    assert venv_site_packages(tmp_path) == only64
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_venv_site_packages_refuses_an_unreadable_lib64(tmp_path: Path) -> None:
+    from packagealert.languages.python import venv_site_packages
+
+    lib = tmp_path / "lib" / "python3.12" / "site-packages"
+    (lib / "urllib3-1.26.5.dist-info").mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    lib64 = tmp_path / "lib64"
+    (lib64 / "python3.12" / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    lib64.chmod(0)
+    try:
+        with pytest.raises(ValueError, match="cannot be listed"):
+            venv_site_packages(tmp_path)
+    finally:
+        lib64.chmod(0o755)
+
+
+def test_venv_site_packages_counts_a_lib64_link_to_another_directory(tmp_path: Path) -> None:
+    from packagealert.languages.python import venv_site_packages
+
+    lib = tmp_path / "lib" / "python3.12" / "site-packages"
+    (lib / "urllib3-1.26.5.dist-info").mkdir(parents=True)
+    (tmp_path / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.12.4\n")
+    (tmp_path / "other" / "python3.12" / "site-packages" / "evil-1.0.dist-info").mkdir(parents=True)
+    (tmp_path / "lib64").symlink_to("other")
+    with pytest.raises(ValueError, match="more than one interpreter"):
+        venv_site_packages(tmp_path)

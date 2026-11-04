@@ -23,6 +23,8 @@ def build_cmd(
     post_ro_tmpfs: list[Path] | None = None,
     writable_binds: list[tuple[Path, Path]] | None = None,
     hidden_paths: list[Path] | None = None,
+    write_files: list[Path] | None = None,
+    ro_over_write: list[Path] | None = None,
 ) -> list[str]:
     """Return a bwrap command list that runs *argv* with *write_dirs* writable.
 
@@ -35,6 +37,9 @@ def build_cmd(
       runtimes, package manager configs, pyenv/nvm installations, etc.).
     - *write_dirs* (project dir, site-packages, caches) are bound writable on
       top of the above, overriding the tmpfs where necessary.
+    - *write_files* are single existing regular files bound writable in place
+      after *write_dirs* (a pipx app's lock file for its trial); a symlink or a
+      missing file raises ValueError.
     - *extra_tmpfs* and *post_ro_tmpfs* entries that are not an existing,
       non-symlink directory are silently skipped — bwrap cannot create a missing
       mount point under the read-only root bind, and mounting a tmpfs over a
@@ -67,13 +72,24 @@ def build_cmd(
       into a hidden directory is left out with a warning, since its separate bind would show
       that content under its own name. A writable
       bind whose dest is a hidden directory is mounted at each of those names too.
+
+    - *ro_over_write* are bound read-only over the writable mounts: each existing path is
+      bound at every name a bound *write_dirs* entry or *writable_binds* destination shows it
+      under (that entry's own name joined with the path's place in its target). A path no
+      writable mount shows is left alone, so this only ever makes writable paths read-only and
+      never exposes anything (a checkout's ``.git``, a tool home's shared libraries). Those
+      over *write_dirs* come before the hidden directories' tmpfs and the *writable_binds*, so
+      neither is undone by an overlay on an ancestor; those inside a writable bind's source
+      come after that bind.
     """
     for _param, _paths in (
         ("write_dirs", write_dirs),
+        ("write_files", write_files or []),
         ("home_ro_dirs", home_ro_dirs or []),
         ("extra_tmpfs", extra_tmpfs or []),
         ("post_ro_tmpfs", post_ro_tmpfs or []),
         ("hidden_paths", hidden_paths or []),
+        ("ro_over_write", ro_over_write or []),
     ):
         for _p in _paths:
             if not _p.is_absolute():
@@ -154,9 +170,24 @@ def build_cmd(
             continue
         bound_write_dirs.append(d)
         cmd += ["--bind", str(d), str(d)]
+    # Single files bound writable in place (a pipx app's lock, for its trial): each must already
+    # exist as a regular file, not a symlink, since bwrap would otherwise mount whatever it names.
+    for f in (write_files or []):
+        if f.is_symlink() or not f.is_file():
+            raise ValueError(f"a writable file must be an existing regular file: {f}")
+        if not _inside_hidden(f, hidden_real):
+            cmd += ["--bind", str(f), str(f)]
+    # Never one inside a hidden directory: binding it would show what the tmpfs below hides.
+    ro_paths = [p for p in (ro_over_write or []) if not _inside_hidden(p, hidden_real)]
+    # Read-only over the writable directories before the hiding tmpfs and the writable binds, so
+    # an overlay on a hidden directory's ancestor cannot show it again, and a credential snapshot
+    # bound over a hidden directory stays in place.
+    for src, dest in _ro_over_write_locations(ro_paths, [(d, d) for d in bound_write_dirs]):
+        cmd += ["--ro-bind", str(src), str(dest)]
     hide_at = _hide_locations(hidden_real, [*(home_ro_dirs or []), *bound_write_dirs])
     for p in hide_at:
         cmd += ["--tmpfs", str(p)]
+    bound_binds: list[tuple[Path, Path]] = []  # (name, source) of each writable bind emitted
     for src, dest in (writable_binds or []):
         # Resolve src so bwrap receives the real filesystem path, not a symlink
         # that could silently redirect what is mounted.  dest is the mount point
@@ -219,6 +250,7 @@ def build_cmd(
             )
             continue
         cmd += ["--bind", str(src), str(dest)]
+        bound_binds.append((dest, src))
         try:
             dest_real = dest.resolve(strict=True)
         except (OSError, RuntimeError):
@@ -226,6 +258,11 @@ def build_cmd(
         for alias in hide_at:
             if alias != dest and alias.resolve(strict=False) == dest_real:
                 cmd += ["--bind", str(src), str(alias)]
+                bound_binds.append((alias, src))
+    # Read-only inside each writable bind's source, after it; only the binds really made, since
+    # a bind skipped above shows nothing to keep read-only.
+    for src, dest in _ro_over_write_locations(ro_paths, bound_binds):
+        cmd += ["--ro-bind", str(src), str(dest)]
     if not allow_network:
         cmd += ["--unshare-net"]
     if env is not None:
@@ -235,6 +272,34 @@ def build_cmd(
     cmd += ["--"]
     cmd += argv
     return cmd
+
+
+def _ro_over_write_locations(paths: list[Path], writable: list[tuple[Path, Path]]) -> list[tuple[Path, Path]]:
+    """(source, name) for each existing path in *paths* at every name a writable mount shows it
+    under. *writable* holds (name, source) per mount: the path's place in the source's resolved
+    target, joined onto the mount's name. A mount whose source lies inside the path instead (the
+    working directory a repository's ``hooks``, say) is made read-only whole, at its name; one
+    only named there writes its source, not the path."""
+    out: list[tuple[Path, Path]] = []
+    for p in paths:
+        try:
+            real = p.resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue  # missing, or a symlink loop: nothing to keep read-only
+        for name, source in writable:
+            try:
+                source_real = source.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if real.is_relative_to(source_real):
+                pair = (real, name / real.relative_to(source_real))
+            elif source_real.is_relative_to(real):
+                pair = (source_real, name)
+            else:
+                continue
+            if pair not in out:
+                out.append(pair)
+    return out
 
 
 def _hidden_dirs(hidden: list[Path]) -> list[Path]:

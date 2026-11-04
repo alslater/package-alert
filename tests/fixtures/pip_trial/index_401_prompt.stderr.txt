@@ -1,0 +1,87 @@
+ERROR: Exception:
+Traceback (most recent call last):
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 109, in _run_wrapper
+    status = _inner_run()
+             ^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/cli/base_command.py", line 102, in _inner_run
+    return self.run(options, args)
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/cli/req_command.py", line 106, in wrapper
+    return func(self, options, args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/commands/install.py", line 478, in run
+    requirement_set = resolver.resolve(
+                      ^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/resolution/resolvelib/resolver.py", line 103, in resolve
+    result = self._result = resolver.resolve(
+                            ^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/resolvelib/resolvers/resolution.py", line 601, in resolve
+    state = resolution.resolve(requirements, max_rounds=max_rounds)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/resolvelib/resolvers/resolution.py", line 434, in resolve
+    self._add_to_criteria(self.state.criteria, r, parent=None)
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/resolvelib/resolvers/resolution.py", line 150, in _add_to_criteria
+    if not criterion.candidates:
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/resolvelib/structs.py", line 194, in __bool__
+    return bool(self._sequence)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 165, in __bool__
+    self._bool = any(self)
+                 ^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 149, in <genexpr>
+    return (c for c in iterator if id(c) not in self._incompatible_ids)
+                       ^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/resolution/resolvelib/found_candidates.py", line 35, in _iter_built
+    for version, func in infos:
+                         ^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 312, in iter_index_candidate_infos
+    result = self._finder.find_best_candidate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/package_finder.py", line 988, in find_best_candidate
+    candidates = self.find_all_candidates(project_name)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/package_finder.py", line 925, in find_all_candidates
+    page_candidates = list(page_candidates_it)
+                      ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/sources.py", line 195, in page_candidates
+    yield from self._candidates_from_page(self._link)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/package_finder.py", line 863, in process_project_url
+    index_response = self._link_collector.fetch_response(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/collector.py", line 460, in fetch_response
+    return _get_index_content(
+           ^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/collector.py", line 353, in _get_index_content
+    resp = _get_simple_response(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/index/collector.py", line 153, in _get_simple_response
+    resp = session.get(url, headers=headers)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/requests/sessions.py", line 671, in get
+    return self.request("GET", url, params=params, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/network/session.py", line 522, in request
+    return super().request(method, url, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/requests/sessions.py", line 651, in request
+    resp = self.send(prep, **send_kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/requests/sessions.py", line 791, in send
+    r = dispatch_hook("response", hooks, r, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_vendor/requests/hooks.py", line 45, in dispatch_hook
+    _hook_data = hook(hook_data, **kwargs)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/network/auth.py", line 526, in handle_401
+    username, password, save = self._prompt_for_password(parsed.netloc)
+                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/network/auth.py", line 479, in _prompt_for_password
+    username = ask_input(f"User for {netloc}: ") if self.prompting else None
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/SCRATCH/pipx_home/shared/lib/python3.12/site-packages/pip/_internal/utils/misc.py", line 271, in ask_input
+    return input(message)
+           ^^^^^^^^^^^^^^
+EOFError: EOF when reading a line
+'/SCRATCH/pipx_home/venvs/httpie/bin/python -m pip install --dry-run --report /SCRATCH/work/index_401_prompt/report.json --quiet -r /SCRATCH/work/index_401_prompt/reqs.txt -c /SCRATCH/work/index_401_prompt/cons.txt --index-url http://127.0.0.1:8401/simple/ urllib3==1.26.20' failed

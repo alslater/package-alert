@@ -12,6 +12,7 @@ script beside it whenever the tool changes (see CLAUDE.md).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -51,7 +52,8 @@ def test_pip_fixture_covers_several_versions():
 # pipenv/pipx: which subcommands install, per each tool's own parser.
 _INSTALLING = {
     "pipenv": {"install", "sync", "update"},
-    "pipx": {"install", "inject", "upgrade", "reinstall", "install-all", "upgrade-all", "reinstall-all"},
+    "pipx": {"install", "inject", "upgrade", "reinstall", "install-all", "upgrade-all", "reinstall-all",
+             "runpip"},
 }
 
 
@@ -78,6 +80,29 @@ def test_argparse_tool_parser_matches_the_tool_itself(tool):
     mismatches = []
     for argv, truth in cases:
         if truth["cmd"] not in _INSTALLING[tool]:
+            continue
+        if tool == "pipx" and truth["cmd"] == "runpip":
+            # runpip installs only when pip is run to `install`; its packages are pip's own.
+            from packagealert.parsers.process_args import parse_pip_args
+
+            pip = parse_pip_args(["pip", *truth["pipargs"]])
+            if pip is None:
+                if _ours_argparse(tool, argv) is not None:
+                    mismatches.append(f"{tool} {' '.join(argv)}\n    pip runs no install, but ours gates it")
+                continue
+            # pipx runs pip in the app's venv (run_raw_pip's run_dir=venv_root), so a relative
+            # requirements file is that directory's.
+            from packaging.utils import canonicalize_name
+
+            from packagealert.parsers.process_args import _pipx_home
+
+            venv = _pipx_home() / "venvs" / canonicalize_name(truth["target"])
+            expected_runpip: dict[str, object] = {
+                "packages": sorted(pip.packages), "target": truth["target"],
+                "req_files": sorted(rf if os.path.isabs(rf) else str(venv / rf) for rf in pip.req_files),
+            }
+            if (ours := _ours_argparse(tool, argv)) != expected_runpip:
+                mismatches.append(f"{tool} {' '.join(argv)}\n    {tool}: {expected_runpip}\n    ours: {ours}")
             continue
         expected: dict[str, object] = {k: v for k, v in truth.items() if k != "cmd"}
         if tool == "pipx" and truth["cmd"] != "inject":

@@ -1688,6 +1688,30 @@ async def test_in_copy_runs_edits_between_commands_in_order(tmp_path, monkeypatc
     assert len(out.results) == 2 and out.files == {"package.json": b"second"}
 
 
+async def test_in_copy_runs_a_command_built_from_the_copys_path(tmp_path, monkeypatch):
+    """A step that returns an argv is a command naming the copy (the pipx trial names its files by
+    absolute path, since pipx runs pip in the app's venv directory); an edit's return value is not."""
+    from packagealert.cli import fix_cmd
+    from packagealert.cli.run_settings import ProjectRunSettings
+    from packagealert.sandbox.runner import CapturedRun
+
+    monkeypatch.setattr("packagealert.sandbox.runner.SCRATCH_ROOT", tmp_path / "scratch")
+    project = tmp_path / "p"
+    project.mkdir()
+    seen = []
+
+    class Runner:
+        async def run_captured(self, argv, *, cwd, scratch=False, **kw):
+            seen.append((argv, cwd))
+            return CapturedRun(0, "", "")
+
+    run = fix_cmd._FixTrialRunner(Runner(), project, ProjectRunSettings(None, {}, [], False, False, False, False))
+    out = await run.in_copy([], [lambda d: (d / "f").write_text("x"), lambda d: ["tool", str(d / "f")]])
+    [(argv, cwd)] = seen
+    assert argv == ["tool", str(cwd / "f")]
+    assert len(out.results) == 1
+
+
 def test_without_trials_a_transitive_fix_an_adapter_applies_by_trial_is_held():
     """npm moves a transitive package only with the override or parent upgrade its trials choose:
     unverified, such an item would print a plain npm install that keeps the vulnerable version."""
@@ -2667,3 +2691,37 @@ async def test_an_adapter_hold_applies_without_verification(tmp_path, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["planned"] == [] and out["commands"] == []
     assert {(h["package"], h["detail"]) for h in out["held"]} == {("django", reason), ("urllib3", reason)}
+
+
+async def test_a_verified_plan_the_adapter_cannot_turn_into_a_command_is_held(tmp_path, capsys):
+    """Planning shows what --apply would refuse: the adapter's pin_problem() holds each item."""
+    problem = "urllib3 has several versions in the verified end state"
+    with patch("packagealert.languages.python_fix.uv.UvFixAdapter.pin_problem", lambda _self, _plan: problem,
+               create=True):
+        assert await _run(tmp_path, LOCK) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["planned"] == []
+    assert {(h["package"], h["detail"]) for h in out["held"]} == {("django", problem), ("urllib3", problem)}
+
+
+async def test_an_adapters_command_note_is_printed_once_under_the_commands(tmp_path, capsys):
+    from packagealert.languages.python_fix.uv import UvFixAdapter
+
+    with patch.object(UvFixAdapter, "command_note", "a later upgrade can undo these pins", create=True):
+        await _run(tmp_path, LOCK, fmt="text")
+    out = capsys.readouterr().out
+    assert out.count("a later upgrade can undo these pins") == 1
+    assert out.index("Commands:") < out.index("a later upgrade can undo these pins")
+
+
+def test_a_command_note_is_not_printed_without_a_command():
+    from io import StringIO
+
+    from rich.console import Console
+
+    from packagealert.cli.fix_cmd import _print_plan
+    from packagealert.remediate.planner import FixPlan
+
+    buf = StringIO()
+    _print_plan(Console(file=buf, width=200), Path("uv.lock"), FixPlan(), [], 0, checked=3, command_note="NOTE")
+    assert "NOTE" not in buf.getvalue()
