@@ -85,6 +85,52 @@ def _fast_backfill_dedup_grace():
         yield
 
 
+def _inotify_masks_for(paths: list[Path]) -> dict[Path, int]:
+    """The inotify mask this process holds on each of *paths*, read from /proc/self/fdinfo."""
+    by_inode = {(p.stat().st_dev, p.stat().st_ino): p for p in paths}
+    masks: dict[Path, int] = {}
+    for fd in os.listdir("/proc/self/fdinfo"):
+        try:
+            text = Path(f"/proc/self/fdinfo/{fd}").read_text()
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.startswith("inotify "):
+                continue
+            fields = dict(f.split(":", 1) for f in line.split()[1:])
+            dev = int(fields["sdev"], 16)
+            key = (os.makedev(dev >> 20, dev & 0xFFFFF), int(fields["ino"], 16))
+            if key in by_inode:
+                masks[by_inode[key]] = int(fields["mask"], 16)
+    return masks
+
+
+@requires_inotify_headroom
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_watches_never_ask_for_open_or_close_nowrite_events(tmp_path):
+    """#137: without an event filter watchdog registers IN_OPEN and IN_CLOSE_NOWRITE, so merely
+    listing a watched directory queues events. Walking a large cache root (the monitor's own scans,
+    or watchdog 7.1's re-walk of every recursive watch after an overflow) then overflows the kernel
+    queue again, and the overflow recovery re-triggers itself indefinitely. Every watch, root and
+    descendants, must ask only for what _Handler handles."""
+    root = tmp_path / "wheels-v7"
+    dirs = [root, *(root / "pypi" / f"pkg{i}" for i in range(5))]
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+    dirs.append(root / "pypi")
+    monitor = CacheMonitor(WatchConfig(enable_cache_monitoring=True))
+    with patch("packagealert.languages.registry.all_languages", return_value=[_python_only_lang(root)]):
+        await monitor.start()
+        try:
+            masks = _inotify_masks_for(dirs)
+        finally:
+            await monitor.stop()
+    assert set(masks) == set(dirs), "every directory under the root is watched"
+    in_access, in_close_nowrite, in_open = 0x1, 0x10, 0x20
+    assert {p: hex(m) for p, m in masks.items() if m & (in_access | in_close_nowrite | in_open)} == {}
+
+
 @requires_inotify_headroom
 @pytest.mark.asyncio
 @pytest.mark.integration
