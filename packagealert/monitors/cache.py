@@ -15,11 +15,13 @@ from typing import cast
 
 import psutil
 from watchdog.events import (
+    DirCreatedEvent,
     DirDeletedEvent,
     DirMovedEvent,
     FileCreatedEvent,
     FileDeletedEvent,
     FileMovedEvent,
+    FileSystemEvent,
     FileSystemEventHandler,
 )
 from watchdog.observers import Observer
@@ -827,6 +829,17 @@ def _classify_cache_path(path: Path) -> PackageEvent | None:
             )
             continue
     return None
+
+
+# The only events _Handler reacts to (on_created, on_moved, on_deleted), passed to every
+# schedule() as its event_filter. Without one watchdog registers its whole inotify mask, which
+# includes IN_OPEN and IN_CLOSE_NOWRITE: merely listing a watched directory then queues events
+# (on its own watch and its parent's), so a walk of a large cache root (our own scans, or
+# watchdog 7.1's re-walk of every recursive watch after a queue overflow) overflows the kernel
+# queue again, and the overflow recovery triggers itself indefinitely (#137).
+_WATCH_EVENTS: list[type[FileSystemEvent]] = [
+    FileCreatedEvent, DirCreatedEvent, FileMovedEvent, DirMovedEvent, FileDeletedEvent, DirDeletedEvent,
+]
 
 
 class _Handler(FileSystemEventHandler):
@@ -1862,7 +1875,7 @@ class CacheMonitor(AbstractMonitor):
             backfill_dedup,
         )
         try:
-            watch = self._observer.schedule(handler, str(path), recursive=recursive)
+            watch = self._observer.schedule(handler, str(path), recursive=recursive, event_filter=_WATCH_EVENTS)
         except Exception:
             log.warning("Failed to schedule watch for %s", path, exc_info=True)
             # BaseObserver.schedule() registers the handler against its
@@ -1879,7 +1892,7 @@ class CacheMonitor(AbstractMonitor):
             # targets the one schedule() just added, even though the failure
             # means we never got the actual watch object back to reference
             # directly.
-            failed_watch = ObservedWatch(str(path), recursive=recursive)
+            failed_watch = ObservedWatch(str(path), recursive=recursive, event_filter=_WATCH_EVENTS)
             with suppress(KeyError):
                 self._observer.remove_handler_for_watch(handler, failed_watch)
             return None
