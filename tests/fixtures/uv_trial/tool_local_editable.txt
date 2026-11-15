@@ -1,5 +1,6 @@
-# uv 0.13.5 rc=0
-Resolved 3 packages in 125ms
+# uv 0.13.8 rc=0
+Using Python 3.12.13 environment at: /home/user/.local/share/uv/tools/requests-toolbelt
+Resolved 3 packages in 140ms
 Would download 1 package
 Would uninstall 1 package
 Would install 1 package

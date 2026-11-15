@@ -19,7 +19,7 @@ _PIP_NAME_RE = re.compile(r"^([A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?)")
 # and not another. Hand-maintained sets missed global options (`--log-file`,
 # `--keyring-provider`, `--use-feature`) and hidden aliases (`--source`,
 # `--pypi-url`), which a differential test against pip's parser found; see
-# CLAUDE.md for regenerating. Generated against: pip 24.0, 25.3, 26.1.2, 26.2.2.
+# CLAUDE.md for regenerating. Generated against: pip 24.0, 25.3, 26.1.2, 26.2.2, 26.3.
 _PIP_VALUE_FLAGS = frozenset({
     "--abi", "--all-releases", "--build-constraint", "--cache-dir",
     "--cert", "--client-cert", "--config-settings", "--constraint",
@@ -77,6 +77,17 @@ _PIP_GENERAL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
         "--require-virtualenv", "--resume-retries", "--retries",
         "--timeout", "--trusted-host", "--use-deprecated", "--use-feature",
         "--verbose", "--version",
+    }),
+    frozenset({
+        "--cache-dir", "--cert", "--client-cert", "--debug",
+        "--default-timeout", "--disable-pip-version-check",
+        "--exists-action", "--help", "--isolated", "--keyring-provider",
+        "--local-log", "--log", "--log-file", "--no-cache-dir",
+        "--no-color", "--no-input", "--no-proxy-env",
+        "--no-python-version-warning", "--proxy", "--python", "--quiet",
+        "--require-venv", "--require-virtualenv", "--resume-retries",
+        "--retries", "--timeout", "--trusted-host", "--use-deprecated",
+        "--use-feature", "--verbose", "--version",
     }),
     frozenset({
         "--cache-dir", "--cert", "--client-cert", "--debug",
@@ -195,9 +206,37 @@ _PIP_INSTALL_LONG_OPTIONS_BY_VERSION: tuple[frozenset[str], ...] = (
         "--uploaded-prior-to", "--use-deprecated", "--use-feature",
         "--use-pep517", "--user", "--verbose", "--version",
     }),
+    frozenset({
+        "--abi", "--all-releases", "--break-system-packages",
+        "--build-constraint", "--cache-dir", "--cert",
+        "--check-build-dependencies", "--client-cert", "--compile",
+        "--config-settings", "--constraint", "--debug", "--default-timeout",
+        "--disable-pip-version-check", "--dry-run", "--editable",
+        "--exists-action", "--extra-index-url", "--find-links",
+        "--force-reinstall", "--group", "--help", "--ignore-installed",
+        "--ignore-requires-python", "--implementation", "--index-url",
+        "--isolated", "--keyring-provider", "--local-log", "--log",
+        "--log-file", "--no-binary", "--no-build-isolation",
+        "--no-cache-dir", "--no-clean", "--no-color", "--no-compile",
+        "--no-dependencies", "--no-deps", "--no-index", "--no-input",
+        "--no-proxy-env", "--no-python-version-warning",
+        "--no-require-hashes", "--no-user", "--no-warn-conflicts",
+        "--no-warn-script-location", "--only-binary", "--only-dependencies",
+        "--only-deps", "--only-final", "--platform", "--pre",
+        "--prefer-binary", "--prefix", "--progress-bar", "--proxy",
+        "--pypi-url", "--python", "--python-version", "--quiet",
+        "--refresh-package", "--report", "--require-hashes",
+        "--require-venv", "--require-virtualenv", "--requirement",
+        "--requirements-from-script", "--resume-retries", "--retries",
+        "--root", "--root-user-action", "--source", "--source-dir",
+        "--source-directory", "--src", "--target", "--timeout",
+        "--trusted-host", "--upgrade", "--upgrade-strategy",
+        "--uploaded-prior-to", "--use-deprecated", "--use-feature",
+        "--use-pep517", "--user", "--verbose",
+    }),
 )
 # Flags that consume the next argument as their value for `uv add` / `uv remove`.
-# Audited against: uv 0.13.5 `uv add --help` / `uv remove --help`, plus the
+# Audited against: uv 0.13.8 `uv add --help` / `uv remove --help`, plus the
 # hidden names probed from uv's CLI source.
 _UV_PROJECT_VALUE_FLAGS = frozenset({
     # Python selector
@@ -245,7 +284,7 @@ _UV_PROJECT_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `uv tool install/upgrade`.
-# Audited against: uv 0.13.5 `uv tool install --help` / `uv tool upgrade --help`,
+# Audited against: uv 0.13.8 `uv tool install --help` / `uv tool upgrade --help`,
 # plus the hidden names probed from uv's CLI source.
 _UV_TOOL_VALUE_FLAGS = frozenset({
     # Python selector
@@ -292,7 +331,7 @@ _UV_TOOL_VALUE_FLAGS = frozenset({
 })
 
 # Flags that consume the next argument as their value for `pipx install/inject/etc`.
-# Audited against: pipx 1.18.4 `pipx install --help` / `pipx inject --help`.
+# Audited against: pipx 1.18.16 `pipx install --help` / `pipx inject --help`.
 _PIPX_VALUE_FLAGS = frozenset({
     "--python",
     "--suffix",
@@ -491,6 +530,11 @@ class ParsedInstall:
     ecosystem: str = "pypi"
     venv_exe: str | None = None  # path used to derive site-packages
     req_files: list[str] = field(default_factory=list)  # -r / --requirement file paths
+    # Alternative readings of req_files, when which files the tool reads depends on its version
+    # (pipx runpip's working directory): each is pre-flighted on its own and the queries are
+    # combined, so one reading's include chain cannot hide a file another reading installs from.
+    # Empty: req_files are all read together.
+    req_file_readings: list[list[str]] = field(default_factory=list)
     lockfile_hint: str | None = None  # preferred lockfile to scan (relative path)
     global_install: bool = False
     suggested_env: dict[str, str] = field(default_factory=dict)
@@ -980,7 +1024,7 @@ def _uv_targets_system_python(rest: list[str]) -> bool:
 # Options that consume the next argument for `uv pip install` — uv's own set,
 # not pip's: `_PIP_VALUE_FLAGS` lacked 35 of these (`--resolution`,
 # `--torch-backend`, the global `--directory`/`--color`, …), so their values
-# were read as package names. Audited against: uv 0.13.5
+# were read as package names. Audited against: uv 0.13.8
 # `uv pip install --help`.
 _UV_PIP_INSTALL_VALUE_FLAGS = frozenset({
     "--allow-insecure-host", "--build-constraints", "--cache-dir", "--cert",
@@ -1006,7 +1050,7 @@ _UV_PIP_INSTALL_VALUE_FLAGS = frozenset({
 # any other (`--index-u` is pip's prefix of --index-url, not a uv option). The
 # names in its --help, plus every long name in uv's CLI source (crates/uv-cli/src)
 # that `uv pip install --<name> --help` does not report as an unexpected
-# argument. Audited against: uv 0.13.5.
+# argument. Audited against: uv 0.13.8.
 _UV_PIP_INSTALL_LONG_OPTIONS = frozenset({
     "--all-extras", "--allow-insecure-host", "--allow-python-downloads",
     "--break-system-packages", "--build", "--build-constraint",
@@ -1042,8 +1086,9 @@ _UV_PIP_INSTALL_LONG_OPTIONS = frozenset({
     "--verify-hashes",
 })
 # The short options each installer accepts; any other is refused. pip's come from each
-# supported version's install parser (identical in pip 24.0, 25.3, 26.1.2, 26.2.2); uv's
-# from probing every letter as `uv pip install -<letter> --help` (uv 0.13.5).
+# supported version's install parser, merged (identical in pip 24.0, 25.3, 26.1.2, 26.2.2;
+# 26.3 drops -V, which the older ones still accept); uv's
+# from probing every letter as `uv pip install -<letter> --help` (uv 0.13.8).
 _PIP_INSTALL_SHORT_OPTIONS = frozenset({
     "-C", "-I", "-U", "-V", "-c", "-e", "-f", "-h", "-i", "-q", "-r", "-t", "-v"})
 _UV_PIP_INSTALL_SHORT_OPTIONS = frozenset({
@@ -1055,7 +1100,7 @@ _UV_PIP_REQUIREMENT_FLAGS = frozenset({"-r", "--requirement", "--requirements"})
 # uv's global options that consume the next argument. uv accepts global options
 # BEFORE the subcommand (`uv -q add requests`, `uv --directory backend sync`),
 # so the subcommand is the first argument that is neither one of these, nor its
-# value, nor a boolean flag. Audited against: uv 0.13.5 `uv --help`.
+# value, nor a boolean flag. Audited against: uv 0.13.8 `uv --help`.
 _UV_GLOBAL_VALUE_FLAGS = frozenset({
     "--cache-dir",
     "--color",
@@ -1215,7 +1260,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
         rest = args[2:]
         req_files: list[str] = []
         skip_value_for: str | None = None
-        # Audited against: uv 0.13.5 `uv pip sync --help`.
+        # Audited against: uv 0.13.8 `uv pip sync --help`.
         _UV_PIP_SYNC_VALUE_FLAGS = frozenset({
             "-c", "--constraints", "-b", "--build-constraints",
             "--extra", "--group", "--cert", "--target", "-t",
@@ -1356,7 +1401,7 @@ def _parse_uv_subcommand(venv_exe: str, args: list[str]) -> ParsedInstall | None
 # judged against all of them. An ambiguous prefix is left alone — both parsers
 # reject it (`pip install --requirem`: "ambiguous option"). uv, composer, pnpm
 # and yarn reject unknown prefixes outright. Audited against: pip 25.3,
-# pipenv 2026.10.2, pipx 1.18.4 (option columns of each `--help`).
+# pipenv 2026.11.0, pipx 1.18.16 (option columns of each `--help`).
 _PIPENV_GLOBAL_LONG_OPTIONS = frozenset({
     "--bare", "--clear", "--envs", "--help", "--man", "--no-site-packages",
     "--py", "--pypi-mirror", "--python", "--quiet", "--rm",
@@ -1577,7 +1622,7 @@ def _xdg_dir(env: Mapping[str, str], name: str) -> Path | None:
 def _uv_tool_dir_chosen(env: Mapping[str, str] | None = None, cwd: Path | None = None,
                         ) -> tuple[Path, str | None]:
     """(uv's tool directory, the variable that chose it, None for the default), exactly as uv
-    resolves it (uv-tool's InstalledTools::from_settings at 0.13.5): $UV_TOOL_DIR, made
+    resolves it (uv-tool's InstalledTools::from_settings at 0.13.8): $UV_TOOL_DIR, made
     absolute against uv's working directory (*cwd*, default this process's; ``uv --directory``
     moves it, ``--project`` does not) with ``~`` and ``..`` left as written; else
     $XDG_DATA_HOME/uv/tools; else ~/.local/share/uv/tools."""
@@ -1604,7 +1649,7 @@ def _uv_tool_dir(env: Mapping[str, str] | None = None, cwd: Path | None = None) 
 
 def _uv_tool_bin_dir(env: Mapping[str, str] | None = None, cwd: Path | None = None) -> Path:
     """The directory uv links tool executables into, as uv resolves it (uv-dirs'
-    user_executable_directory at 0.13.5): $UV_TOOL_BIN_DIR (relative to uv's working
+    user_executable_directory at 0.13.8): $UV_TOOL_BIN_DIR (relative to uv's working
     directory, *cwd*, as for _uv_tool_dir_chosen()); else $XDG_BIN_HOME; else
     $XDG_DATA_HOME/../bin; else ~/.local/bin. Bounded by _home_tool_dir()."""
     env = os.environ if env is None else env
@@ -1620,7 +1665,7 @@ def _uv_tool_bin_dir(env: Mapping[str, str] | None = None, cwd: Path | None = No
 
 def _uv_state_dir(env: Mapping[str, str] | None = None) -> Path:
     """uv's state directory (its managed Pythons, tools and credentials by default), as uv
-    resolves it (uv-dirs' user_state_dir at 0.13.5): $XDG_DATA_HOME/uv, else
+    resolves it (uv-dirs' user_state_dir at 0.13.8): $XDG_DATA_HOME/uv, else
     ~/.local/share/uv. Bounded by _home_tool_dir(); read-only, its credential store is
     hidden by the Python plugin."""
     env = os.environ if env is None else env
@@ -1643,7 +1688,7 @@ def _uv_python_dir(env: Mapping[str, str] | None = None) -> Path | None:
 
 def _pipx_bin_dir(env: Mapping[str, str] | None = None) -> Path:
     """The directory pipx links app executables into, as pipx resolves it (pipx.paths at
-    1.18.4): $PIPX_BIN_DIR with ``~`` expanded, made absolute; else ~/.local/bin. Bounded by
+    1.18.4 and 1.18.16): $PIPX_BIN_DIR with ``~`` expanded, made absolute; else ~/.local/bin. Bounded by
     _home_tool_dir()."""
     env = os.environ if env is None else env
     default = Path.home() / ".local" / "bin"
@@ -1653,7 +1698,7 @@ def _pipx_bin_dir(env: Mapping[str, str] | None = None) -> Path:
 
 
 def _pipx_home_exact(env: Mapping[str, str] | None = None) -> Path:
-    """pipx's home wherever it is, exactly as pipx resolves it (pipx.paths at 1.18.4), for
+    """pipx's home wherever it is, exactly as pipx resolves it (pipx.paths at 1.18.4 and 1.18.16), for
     reading it: $PIPX_HOME with ``~`` expanded, made absolute; else the legacy ~/.local/pipx
     when it exists; else $XDG_DATA_HOME/pipx when absolute (platformdirs' user_data_path); else
     ~/.local/share/pipx. Linux only, as the sandbox is. _pipx_home() is the bounded form a
@@ -1691,7 +1736,7 @@ def _pipx_home() -> Path:
 
 def _pipx_man_dir() -> Path:
     """The directory pipx links app manual pages into, as pipx resolves it (pipx.paths at
-    1.18.4): $PIPX_MAN_DIR with ``~`` expanded, made absolute; else ~/.local/share/man. Bounded
+    1.18.4 and 1.18.16): $PIPX_MAN_DIR with ``~`` expanded, made absolute; else ~/.local/share/man. Bounded
     by _home_tool_dir()."""
     default = Path.home() / ".local" / "share" / "man"
     if value := os.environ.get("PIPX_MAN_DIR"):
@@ -1700,7 +1745,7 @@ def _pipx_man_dir() -> Path:
 
 
 def _pipx_shared_libs() -> Path:
-    """pipx's shared libraries (pipx.paths at 1.18.4): $PIPX_SHARED_LIBS with ``~`` expanded,
+    """pipx's shared libraries (pipx.paths at 1.18.4 and 1.18.16): $PIPX_SHARED_LIBS with ``~`` expanded,
     made absolute; else ``<home>/shared``. Bounded by _home_tool_dir()."""
     default = _pipx_home() / "shared"
     if value := os.environ.get("PIPX_SHARED_LIBS"):
@@ -1708,33 +1753,54 @@ def _pipx_shared_libs() -> Path:
     return default
 
 
-def _pipx_pypi_name(spec: str) -> str | None:
-    """pipx's ``valid_pypi_name()`` (1.18.4): the canonical name of a PEP 508 requirement with no
-    URL whose name is not an archive (ARCHIVE_EXTENSIONS), else None."""
+# The names pipx's valid_pypi_name() treats as archives (it then takes the name from the built
+# package): pipx 1.18.4's ARCHIVE_EXTENSIONS, matched case-sensitively, and pipx 1.18.16's
+# _is_archive_name(), pip's archive suffixes matched case-insensitively.
+_PIPX_ARCHIVE_SUFFIXES_1_18_4 = (".whl", ".tar.gz", ".zip")
+_PIPX_ARCHIVE_SUFFIXES = (".whl", ".zip", ".tar.bz2", ".tbz", ".tar.gz", ".tgz", ".tar", ".tar.xz",
+                          ".txz", ".tlz", ".tar.lz", ".tar.lzma")
+
+
+def _pipx_pypi_names(spec: str) -> tuple[str | None, str | None]:
+    """pipx's ``valid_pypi_name()`` as (pipx 1.18.4, pipx 1.18.16) read it: the canonical name of
+    a PEP 508 requirement with no URL whose name is not an archive's, else None. Which pipx
+    runs is not known, so callers take whichever reading is safe."""
     from packaging.requirements import InvalidRequirement, Requirement
     from packaging.utils import canonicalize_name
 
     try:
         req = Requirement(spec)
     except InvalidRequirement:
-        return None
-    if req.url or req.name.endswith((".whl", ".tar.gz", ".zip")):
-        return None
-    return canonicalize_name(req.name)
+        return None, None
+    if req.url:
+        return None, None
+    name = canonicalize_name(req.name)
+    old = None if req.name.endswith(_PIPX_ARCHIVE_SUFFIXES_1_18_4) else name
+    new = None if req.name.lower().endswith(_PIPX_ARCHIVE_SUFFIXES) else name
+    return old, new
+
+
+def _pipx_pypi_name(spec: str) -> str | None:
+    """The name every supported pipx's ``valid_pypi_name()`` gives *spec*, or None when any of
+    them rejects it (a URL, or a name some version takes for an archive)."""
+    old, new = _pipx_pypi_names(spec)
+    return old if old is not None and new is not None else None
 
 
 def _pipx_spec_comes_from_lock(spec: str) -> bool:
-    """Whether `pipx install <spec> --lock F` takes *spec* from the lock file:
-    pipx's `valid_pypi_name()` accepts it."""
+    """Whether `pipx install <spec> --lock F` takes *spec* from the lock file under every
+    supported pipx: ``valid_pypi_name()`` accepts it. When one rejects it, that pipx installs
+    it separately, so it is checked as a package."""
     return _pipx_pypi_name(spec) is not None
 
 
-def _pipx_venv_name(arg: str) -> str:
-    """The venv directory pipx 1.18.4 uses for a command naming an installed app (upgrade,
-    reinstall, inject, runpip): ``get_venv_dir(valid_pypi_name(arg) or arg)``, canonicalised."""
+def _pipx_venv_names(arg: str) -> list[str]:
+    """The venv directory a command naming an installed app (upgrade, reinstall, inject, runpip)
+    uses: ``get_venv_dir(valid_pypi_name(arg) or arg)``, canonicalised, under each supported
+    pipx (one entry when they agree)."""
     from packaging.utils import canonicalize_name
 
-    return canonicalize_name(_pipx_pypi_name(arg) or arg)
+    return list(dict.fromkeys(canonicalize_name(name or arg) for name in _pipx_pypi_names(arg)))
 
 
 def _is_file(p: Path) -> bool:
@@ -1745,7 +1811,7 @@ def _is_file(p: Path) -> bool:
 
 
 def _pipx_install_venvs(specs: list[str], suffix: str) -> list[str] | None:
-    """The venv directories `pipx install SPEC... --suffix S` writes, as pipx 1.18.4 names them:
+    """The venv directories `pipx install SPEC... --suffix S` writes, as pipx 1.18.4 and 1.18.16 name them:
     the requirement's canonical name plus the suffix, canonicalised together. None when a spec's
     name is known only after building it (a URL, archive, local path) or may be a script's (a
     file, or a spec ending in .py; an unreadable path counts as a file)."""
@@ -1791,12 +1857,16 @@ def _parse_pipx_runpip(argv: list[str]) -> ParsedInstall | None:
     pip = parse_pip_args(["pip", *pip_args])
     if pip is None:
         return None
-    # pipx runs pip in the app's venv (run_raw_pip's run_dir), so a relative requirements file
-    # is that directory's, not the caller's: pre-flight reads the file pip installs from.
+    # pipx up to 1.18.4 runs pip in the app's venv (run_raw_pip's run_dir), pipx 1.18.16 in the
+    # caller's working directory (in_working_dir), so a relative requirements file is either
+    # one. Pre-flight reads both, skipping whichever does not exist: the one pip installs from
+    # is among them, whichever pipx runs.
     venv = _pipx_home() / "venvs" / canonicalize_name(app)
-    req_files = [rf if os.path.isabs(rf) else str(venv / rf) for rf in pip.req_files]
+    in_venv = [rf if os.path.isabs(rf) else str(venv / rf) for rf in pip.req_files]
+    req_files = [p for rf in pip.req_files for p in ([rf] if os.path.isabs(rf) else [str(venv / rf), rf])]
+    readings = [in_venv, list(pip.req_files)] if in_venv != pip.req_files else []
     return ParsedInstall(
-        manager="pipx", packages=pip.packages, req_files=req_files, ecosystem="pypi",
+        manager="pipx", packages=pip.packages, req_files=req_files, req_file_readings=readings, ecosystem="pypi",
         venv_exe=argv[0],
         # The venvs directory, not venvs/APP: PythonLanguage reads the FIRST entry as the
         # venvs parent and joins target_env_name onto it, so naming venvs/APP here would
@@ -1804,7 +1874,7 @@ def _parse_pipx_runpip(argv: list[str]) -> ParsedInstall | None:
         # into venvs/APP/bin, so PIPX_BIN_DIR is not writable, nor is the shared directory.
         extra_write_home_dirs=[_pipx_home() / "venvs"],
         target_env_name=app,
-        pipx_venvs=[_pipx_venv_name(app)],
+        pipx_venvs=_pipx_venv_names(app),
         writes_only_named_envs=True,
     )
 
@@ -1837,7 +1907,7 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
         packages = _positionals(args[1:], _PIPX_VALUE_FLAGS)
         suffix = (_value_flag_args(args[1:], frozenset({"--suffix"})) or [""])[-1]
         venvs = (_pipx_install_venvs(packages, suffix) if subcmd == "install"
-                 else [_pipx_venv_name(p) for p in packages])
+                 else [v for p in packages for v in _pipx_venv_names(p)])
         # `install --lock pylock.toml` installs EVERY package in the lock file
         # (pipx's backend.install_lock()); collect_requirements_packages()
         # reads it as PEP 751. A named spec pipx then satisfies FROM the lock
@@ -1864,7 +1934,7 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
             extra_write_home_dirs=[_pipx_home() / "venvs", _pipx_bin_dir()],
             target_env_name=venv_name,
             req_files=req_files,
-            pipx_venvs=[_pipx_venv_name(venv_name)] if venv_name else [],
+            pipx_venvs=_pipx_venv_names(venv_name) if venv_name else [],
         )
     if subcmd in ("upgrade-all", "reinstall-all", "install-all"):
         # Packages are unknown but the command installs/upgrades tool venvs —
@@ -1883,7 +1953,7 @@ def parse_pipx_args(argv: list[str]) -> ParsedInstall | None:
 # Composer options that consume the next argument when given as `--opt VALUE`
 # (they are shown as `--opt=VALUE`; Symfony Console accepts both, and also an
 # attached short value such as `-dsub`). `-d`/`--working-dir` is the only one
-# composer accepts before the subcommand. Audited against: Composer 2.10.3
+# composer accepts before the subcommand. Audited against: Composer 2.11.2
 # `composer --help` / `composer require --help` / `install --help` /
 # `update --help`.
 _COMPOSER_VALUE_FLAGS = frozenset({
@@ -1895,7 +1965,7 @@ _COMPOSER_VALUE_FLAGS = frozenset({
 
 # Options with an OPTIONAL value (`--opt[=VALUE]` in composer's help): Symfony
 # Console consumes the next argument for these when it does not start with `-`
-# (the composer oracle confirms it). Audited against: Composer 2.10.3.
+# (the composer oracle confirms it). Audited against: Composer 2.11.2.
 _COMPOSER_OPTIONAL_VALUE_FLAGS = frozenset({"--bump-after-update"})
 
 
@@ -1925,7 +1995,7 @@ def parse_composer_args(argv: list[str]) -> ParsedInstall | None:
 
 # Every spelling composer resolves to an install-family command (names, aliases,
 # unique abbreviations), from Symfony's Application::find(). GENERATED against
-# Composer 2.10.3 by tests/fixtures/argv_oracles/generate_composer_commands.php.
+# Composer 2.11.2 by tests/fixtures/argv_oracles/generate_composer_commands.php.
 _COMPOSER_COMMANDS: dict[str, str] = {
     "g": "global",
     "gl": "global",
@@ -2014,7 +2084,7 @@ def _parse_composer_subcommand(args: list[str]) -> ParsedInstall | None:
 # (`--pypi-mirror`, `--python`) or after it. `-e`/`--editable` and
 # `-r`/`--requirements` are listed too, so their values are never mistaken for
 # package names — parse_pipenv_args() then reads both back explicitly, since
-# each names something that IS installed. Audited against: pipenv 2026.10.2
+# each names something that IS installed. Audited against: pipenv 2026.11.0
 # `pipenv --help` / `pipenv install --help` / `sync --help` / `update --help`.
 _PIPENV_VALUE_FLAGS = frozenset({
     "--pypi-mirror", "--python",

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "package-alert"
-version = "0.10.1"
+version = "0.10.2"
 description = "Real-time security monitor for Python, Node.js, and PHP package installations"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -51,6 +51,7 @@ pa-central = "packagealert.plugins.central:CentralPlugin"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 markers = [
     "integration: marks tests that exercise real OS resources (filesystem, processes, network)",

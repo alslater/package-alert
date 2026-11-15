@@ -1,5 +1,5 @@
-# uv 0.13.5 rc=0
+# uv 0.13.8 rc=0
 Using Python 3.13.13 environment at: .
-Resolved 2 packages in 142ms
+Resolved 2 packages in 286ms
 Checked 2 packages in 0.04ms
 Would make no changes

@@ -154,6 +154,25 @@ def test_unsupported_pip_args_are_recorded(arg: list[str]) -> None:
     assert arg[0] in injected.unsupported
 
 
+@pytest.mark.parametrize("args", [["--find-links", "wheels"], ["--find-links=./wheels"],
+                                  ["--index-url", "file:simple"], ["--extra-index-url", "../idx"]])
+def test_a_relative_location_is_unsupported(args: list[str]) -> None:
+    """pipx up to 1.18.4 runs runpip's pip in the app's venv, pipx 1.18.16 in the caller's
+    directory: a relative location names a different directory for each, so it is held."""
+    meta = _read(_meta(_pkg("a", "a", args)))
+    flag = args[0].partition("=")[0]
+    assert meta.unsupported == (f"{flag} (a relative path)",)
+    assert meta.main.pip_args == ()
+
+
+@pytest.mark.parametrize("args", [["--find-links", "/srv/wheels"], ["--index-url", "https://x/simple"],
+                                  ["--find-links", "file:///srv/w"], ["--trusted-host", "x"]])
+def test_an_absolute_location_is_carried_over(args: list[str]) -> None:
+    meta = _read(_meta(_pkg("a", "a", args)))
+    assert meta.unsupported == ()
+    assert meta.main.pip_args == tuple(args)
+
+
 def test_editable_is_unsupported_on_an_injected_package() -> None:
     meta = _read(_meta(_pkg("a", "a"), {"b": _pkg("b", "/work/b", ["--editable"])}))
     assert meta.unsupported == ("--editable (injected)",)
@@ -610,6 +629,21 @@ def test_the_oldest_verified_pip_reads_the_same():
     conflict = _case("pip2621_conflict", installed=now, pinned={"urllib3": "2.2.2"})
     assert conflict.status == "blocked"
     assert conflict.detail.startswith("Cannot install requests==2.25.1 and urllib3==2.2.2 because")
+
+
+def test_pip_263_under_pipx_1_18_16_reads_the_same() -> None:
+    """pip 26.3 run by pipx 1.18.16's runpip (pip in the caller's directory, the trial's files by
+    absolute path) reports and fails as 26.2.x does."""
+    now = {**_HTTPIE, "urllib3": frozenset({"1.26.20"}), "certifi": frozenset({"2026.10.23"}),
+           "pygments": frozenset({"2.21.0"})}
+    assert _case("pip263_baseline", installed=now).changes == ()
+    assert _case("pip263_upgrade", installed=now, pinned={"urllib3": "1.26.19"}).changes == (
+        Change("update", "urllib3", "1.26.20", "1.26.19"),)
+    # Recorded without --quiet, as the trial runs: the cause on stdout names the blocking parent.
+    conflict = _case("pip263_conflict", installed=now, pinned={"urllib3": "2.2.2"})
+    assert conflict.status == "blocked"
+    assert conflict.blocker == Blocker("requests", "urllib3<1.27 and >=1.21.1", "2.25.1")
+    assert conflict.detail == "requests 2.25.1 requires urllib3<1.27 and >=1.21.1"
 
 
 # ---- the adapter -----------------------------------------------------------------------------
@@ -1253,6 +1287,120 @@ def test_a_pip_setting_only_the_fix_passes_is_a_configuration_problem(monkeypatc
     assert config_problem([], ["PIP_CONFIG_FILE"]) == (
         "the fix would run with different pip settings from its trial (PIP_CONFIG_FILE); plan again with the "
         "same --env")
+
+
+@pytest.mark.parametrize(("name", "value"), [("PIP_CONSTRAINT", "c.txt"), ("PIP_FIND_LINKS", "/srv/w ./w"),
+                                             ("PIP_CONFIG_FILE", "pip.conf"), ("PIP_GROUP", "dev"),
+                                             ("PIP_REQUIREMENTS_FROM_SCRIPT", "../deps/script.py"),
+                                             ("PIP_EDITABLE", "../localpkg"), ("PIP_PYTHON", ".venv/bin/python")])
+def test_a_relative_path_in_a_pip_setting_is_a_configuration_problem(
+        monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    """pipx 1.18.16 runs pip in the caller's directory: the trial's scratch copy, then the app's
+    directory for the fix, so a relative path names a different file in each."""
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv(name, value)
+    assert config_problem([name], [name]) == (
+        f"the pip settings {name} hold a relative path, which pipx resolves against a different directory "
+        "for the trial and the fix; give an absolute one")
+
+
+def test_an_absolute_path_in_a_pip_setting_is_not_a_problem(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("PIP_FIND_LINKS", "/srv/w file:///srv/x https://h/simple")
+    monkeypatch.setenv("PIP_NO_INPUT", "1")
+    # A scalar setting's value is one path, spaces included.
+    monkeypatch.setenv("PIP_CERT", "/srv/Company CA/ca.pem")
+    names = ["PIP_FIND_LINKS", "PIP_NO_INPUT", "PIP_CERT"]
+    assert config_problem(names, names) is None
+
+
+@pytest.mark.parametrize(("text", "relative"), [
+    ("[global]\nfind-links = .\n", True),
+    ("[install]\nconstraint = /srv/c.txt\n    cons/more.txt\n", True),
+    ("[global]\nindex_url = simple\n", True),
+    ("[global]\npypi-url = file:simple\n", True),
+    ("[install]\nsource-dir = build\n", True),
+    ("[install]\ngroup = ../deps/pyproject.toml:dev\n", True),
+    ("[install]\ngroup = dev\n", True),
+    ("[install]\ngroup = /srv/deps/pyproject.toml:dev\n", False),
+    ("[install]\nrequirements-from-script = ../deps/script.py\n", True),
+    ("[install]\neditable = ../localpkg\n", True),
+    ("[install]\ntarget = vendor\n", True),
+    ("[global]\npython = .venv/bin/python\n", True),
+    ("[install]\neditable = /srv/localpkg\ntarget = /srv/vendor\n", False),
+    ("[global]\nfind-links = /srv/w\n    https://h/w\ncert = /srv/Company CA/ca.pem\ntimeout = 30\n", False),
+])
+def test_a_relative_path_in_pip_configuration_is_a_configuration_problem(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path, text: str, relative: bool) -> None:
+    """The user's pip.conf is read by both runs, which pipx 1.18.16 runs in different directories."""
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    conf = tmp_path / ".config" / "pip" / "pip.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text(text)
+    problem = config_problem([], [])
+    if relative:
+        assert problem is not None and problem.startswith("pip configuration holds a relative path")
+        assert str(conf) in problem
+    else:
+        assert problem is None
+
+
+def test_the_default_user_config_is_checked_even_with_xdg_config_home_set(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The sandbox may not pass XDG_CONFIG_HOME on, so pip can read ~/.config/pip/pip.conf."""
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    conf = tmp_path / ".config" / "pip" / "pip.conf"
+    conf.parent.mkdir(parents=True)
+    conf.write_text("[global]\nfind-links = .\n")
+    problem = config_problem([], [])
+    assert problem is not None and str(conf) in problem
+
+
+def test_a_relative_pypi_url_alias_in_the_environment_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("PIP_PYPI_URL", "file:simple")
+    problem = config_problem(["PIP_PYPI_URL"], ["PIP_PYPI_URL"])
+    assert problem is not None and "PIP_PYPI_URL" in problem
+
+
+def test_relative_paths_in_the_app_venvs_and_the_named_config_file_count(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    venv = tmp_path / "venvs" / "app"
+    venv.mkdir(parents=True)
+    (venv / "pip.conf").write_text("[global]\nfind-links = wheels\n")
+    assert config_problem([], [], venv) is not None
+    named = tmp_path / "named.conf"
+    named.write_text("[global]\nsrc = ./src\n")
+    monkeypatch.setenv("PIP_CONFIG_FILE", str(named))
+    problem = config_problem(["PIP_CONFIG_FILE"], ["PIP_CONFIG_FILE"])
+    assert problem is not None and str(named) in problem
+
+
+def test_an_unreadable_pip_configuration_file_is_a_configuration_problem(
+        monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from packagealert.languages.python_fix.pipx_app import config_problem
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    conf = tmp_path / ".pip" / "pip.conf"
+    conf.parent.mkdir()
+    conf.write_text("no section header\n")
+    assert config_problem([], []) == "a pip configuration file could not be read, so its settings cannot be checked"
 
 
 # ---- fix round 1 -----------------------------------------------------------------------------

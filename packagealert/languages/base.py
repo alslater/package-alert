@@ -192,6 +192,9 @@ class ProcessInstall:
     venv_exe: str | None = None
     lockfile_hint: str | None = None
     req_files: list[str] = field(default_factory=list)
+    # Alternative readings of req_files (each a list of files read together), when which files the
+    # tool reads depends on its version: each is checked on its own. Empty: one reading, req_files.
+    req_file_readings: list[list[str]] = field(default_factory=list)
     global_install: bool = False
     suggested_env: dict[str, str] = field(default_factory=dict)
     # Extra home-directory paths this install will write to (e.g. tool venv dirs,

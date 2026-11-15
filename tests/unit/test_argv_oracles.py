@@ -90,8 +90,9 @@ def test_argparse_tool_parser_matches_the_tool_itself(tool):
                 if _ours_argparse(tool, argv) is not None:
                     mismatches.append(f"{tool} {' '.join(argv)}\n    pip runs no install, but ours gates it")
                 continue
-            # pipx runs pip in the app's venv (run_raw_pip's run_dir=venv_root), so a relative
-            # requirements file is that directory's.
+            # pipx up to 1.18.4 runs pip in the app's venv (run_dir=venv_root), pipx 1.18.16 in the
+            # caller's working directory (in_working_dir), so a relative requirements file is
+            # either one: both are expected (pipx's source, backends/pip.py run_dir).
             from packaging.utils import canonicalize_name
 
             from packagealert.parsers.process_args import _pipx_home
@@ -99,7 +100,7 @@ def test_argparse_tool_parser_matches_the_tool_itself(tool):
             venv = _pipx_home() / "venvs" / canonicalize_name(truth["target"])
             expected_runpip: dict[str, object] = {
                 "packages": sorted(pip.packages), "target": truth["target"],
-                "req_files": sorted(rf if os.path.isabs(rf) else str(venv / rf) for rf in pip.req_files),
+                "req_files": sorted(p for rf in pip.req_files for p in ([rf] if os.path.isabs(rf) else [str(venv / rf), rf])),
             }
             if (ours := _ours_argparse(tool, argv)) != expected_runpip:
                 mismatches.append(f"{tool} {' '.join(argv)}\n    {tool}: {expected_runpip}\n    ours: {ours}")

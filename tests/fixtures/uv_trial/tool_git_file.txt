@@ -1,9 +1,9 @@
-# uv 0.13.5 rc=0
-Using Python 3.12.13 environment at: .
+# uv 0.13.8 rc=0
+Using Python 3.12.13 environment at: gtool-empty
    Updating file:///home/user/src/gtool (main)
-    Updated file:///home/user/src/gtool (4d8a69ca971fb513da4a632ba322d961d8f94a38)
-Resolved 2 packages in 346ms
+    Updated file:///home/user/src/gtool (83b1b0a75ae25d2a3472d18e09beeae66e48834d)
+Resolved 2 packages in 172ms
 Would download 2 packages
 Would install 2 packages
- + gtool @ git+file:///home/user/src/gtool@4d8a69ca971fb513da4a632ba322d961d8f94a38
+ + gtool @ git+file:///home/user/src/gtool@83b1b0a75ae25d2a3472d18e09beeae66e48834d
  + six==1.17.0

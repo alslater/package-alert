@@ -48,6 +48,14 @@ def _spellings(action, all_longs):
     return out
 
 
+def _pipx_parser():
+    """pipx's root parser: get_command_parser() returns it alone from pipx 1.18.16, and as the
+    first item of a tuple before that."""
+    from pipx.main import get_command_parser
+    parser = get_command_parser()
+    return parser[0] if isinstance(parser, tuple) else parser
+
+
 def _parse(tool, argv):
     """argparse's verdict, or None if it rejects the command line."""
     try:
@@ -58,8 +66,7 @@ def _parse(tool, argv):
                 if remaining and ns.command != "run":
                     return None
             else:
-                from pipx.main import get_command_parser
-                ns = get_command_parser()[0].parse_args(list(argv))
+                ns = _pipx_parser().parse_args(list(argv))
     except (SystemExit, Exception):  # noqa: BLE001 — rejected
         return None
     return ns
@@ -91,9 +98,11 @@ def _truth(tool, ns):
                 "req_files": sorted(r for r in [getattr(ns, "requirementstxt", None)] if r)}
     if cmd == "runpip":
         # Everything after APP is pip's (argparse REMAINDER); a lone quoted string is split.
-        from pipx.main import get_runpip_args
+        import pipx.main
+        # pipx's own splitter: _split_runpip_args() from pipx 1.18.16, get_runpip_args() before.
+        split = getattr(pipx.main, "_split_runpip_args", None) or pipx.main.get_runpip_args
         return {"cmd": cmd, "packages": [], "req_files": [], "target": ns.package,
-                "pipargs": get_runpip_args(ns.pipargs)}
+                "pipargs": split(ns.pipargs)}
     packages = {"install": getattr(ns, "package_spec", None), "upgrade": getattr(ns, "packages", None),
                 "inject": getattr(ns, "dependencies", None),
                 "reinstall": [ns.package] if getattr(ns, "package", None) and cmd == "reinstall" else None}.get(str(cmd)) or []
@@ -118,8 +127,7 @@ def _corpus(tool):
         subs = {k: v for k, v in _subparsers(root).items() if k in ("install", "sync", "update")}
         tails = {"install": ["evilpkg"], "sync": [], "update": ["evilpkg"]}
     else:
-        from pipx.main import get_command_parser
-        root = get_command_parser()[0]
+        root = _pipx_parser()
         subs = {k: v for k, v in _subparsers(root).items()
                 if k in ("install", "inject", "upgrade", "reinstall", "install-all", "upgrade-all", "reinstall-all", "runpip")}
         tails = {"install": ["evilpkg"], "inject": ["target", "evilpkg"], "upgrade": ["evilpkg"],

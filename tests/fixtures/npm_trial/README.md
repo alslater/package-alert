@@ -2,6 +2,10 @@
 
 Recorded with npm 11.21.1 on node v24.13.1 (2026-10-17), in a fresh
 `mktemp -d` scratch directory, with `F="--package-lock-only --ignore-scripts --no-audit --no-fund"`.
+Re-recorded with npm 11.21.2 on node v26.13.0 (2026-11-15): the two stderr files are
+from that run, and every lock file came out byte-identical when `F` also had
+`--before=2026-10-17T00:00:00Z` (which keeps the registry at the first recording's
+state; it is left out of the stderr runs because it changes the ETARGET wording).
 
 `package.json` is the fixture project's manifest:
 

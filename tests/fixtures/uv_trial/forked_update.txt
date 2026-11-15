@@ -1,5 +1,5 @@
-# uv 0.13.5 rc=0
-Resolved 271 packages in 5.56s
+# uv 0.13.8 rc=0
+Resolved 271 packages in 2.59s
 warning: `pypdfium2==5.12.0` is yanked (reason: "Setup blunder breaking some bindgen codepaths (system-search / fallback). Wheels are valid and effectively identical to 5.12.1")
 Update aiohttp v3.14.1 -> v3.14.1, v3.14.5
 Update litellm v1.88.1 -> v1.88.6
