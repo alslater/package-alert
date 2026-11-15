@@ -1878,10 +1878,11 @@ class CacheMonitor(AbstractMonitor):
             watch = self._observer.schedule(handler, str(path), recursive=recursive, event_filter=_WATCH_EVENTS)
         except Exception:
             log.warning("Failed to schedule watch for %s", path, exc_info=True)
-            # BaseObserver.schedule() registers the handler against its
-            # ObservedWatch *before* starting that watch's emitter, so a
-            # failure here (raised from starting the emitter — see this
-            # method's docstring) still leaves `handler` registered. Left
+            # Before watchdog 7.1, BaseObserver.schedule() registers the handler
+            # against its ObservedWatch *before* starting that watch's emitter,
+            # so a failure here (raised from starting the emitter — see this
+            # method's docstring) still leaves `handler` registered (7.1 starts
+            # the emitter first, and the removal below finds nothing). Left
             # alone, every failed retry for the same path adds one more
             # handler that's never removed; once a later retry succeeds,
             # watchdog dispatches each filesystem event to every handler still

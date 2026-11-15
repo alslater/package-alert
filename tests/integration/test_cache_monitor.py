@@ -4788,8 +4788,7 @@ async def test_start_survives_inotify_add_watch_failure_for_one_root(tmp_path):
     """Regression: BaseObserver.schedule() only allocates the real inotify
     watch descriptor synchronously when the observer is already running —
     the actual inotify_add_watch() call (where ENOSPC surfaces) happens
-    inside InotifyBuffer's constructor, called from the emitter's
-    on_thread_start(). If the observer isn't alive yet when schedule() is
+    in the emitter's on_thread_start(). If the observer isn't alive yet when schedule() is
     called, it just registers a dormant emitter and defers starting it (and
     therefore the real add_watch() and any failure from it) to the
     observer's own start() call — which runs entirely outside
@@ -4800,11 +4799,11 @@ async def test_start_survives_inotify_add_watch_failure_for_one_root(tmp_path):
     regression where start() schedules all watches before starting the
     observer, letting a real add_watch() failure escape from
     self._observer.start() instead of from _schedule_watch(). This test
-    patches InotifyBuffer.__init__ — the actual failure point — to make sure
+    patches InotifyEmitter.on_thread_start — the actual failure point — to make sure
     a bad root still can't prevent a good one from being watched, or abort
     daemon startup.
     """
-    from watchdog.observers.inotify_buffer import InotifyBuffer
+    from watchdog.observers.inotify import InotifyEmitter
 
     good_dir = tmp_path / "wheels-v7"
     bad_dir = tmp_path / "sdists-v9"
@@ -4820,16 +4819,16 @@ async def test_start_survives_inotify_add_watch_failure_for_one_root(tmp_path):
     cfg = WatchConfig(enable_cache_monitoring=True)
     monitor = CacheMonitor(cfg)
 
-    real_init = InotifyBuffer.__init__
+    real_start = InotifyEmitter.on_thread_start
 
-    def flaky_init(self, path, **kwargs):
-        if path == str(bad_dir).encode():
+    def flaky_start(self):
+        if self.watch.path == str(bad_dir):
             raise OSError(28, "No space left on device")
-        return real_init(self, path, **kwargs)
+        return real_start(self)
 
     with (
         patch("packagealert.languages.registry.all_languages", return_value=[lang]),
-        patch.object(InotifyBuffer, "__init__", flaky_init),
+        patch.object(InotifyEmitter, "on_thread_start", flaky_start),
     ):
         await monitor.start()  # must not raise
 
@@ -4844,9 +4843,11 @@ async def test_start_survives_inotify_add_watch_failure_for_one_root(tmp_path):
 
 @pytest.mark.asyncio
 async def test_failed_schedule_does_not_leak_handler_registration(tmp_path):
-    """Regression: BaseObserver.schedule() registers the event handler
-    against its ObservedWatch *before* starting that watch's emitter —
-    see BaseObserver.schedule() in watchdog/observers/api.py. So when
+    """Regression: before watchdog 7.1, BaseObserver.schedule() registers the
+    event handler against its ObservedWatch *before* starting that watch's
+    emitter — see BaseObserver.schedule() in watchdog/observers/api.py. 7.1
+    starts the emitter first, so only an older watchdog (pyproject allows
+    watchdog>=4) can leak, and only it shows a missing cleanup. So when
     starting the emitter fails (e.g. ENOSPC), the handler this call just
     registered is left behind even though _schedule_watch() reports the
     registration as failed and returns None.
@@ -4864,7 +4865,7 @@ async def test_failed_schedule_does_not_leak_handler_registration(tmp_path):
     one handler registered and emit exactly one PackageEvent for one
     classified file written afterward.
     """
-    from watchdog.observers.inotify_buffer import InotifyBuffer
+    from watchdog.observers.inotify import InotifyEmitter
 
     from packagealert.languages.base import PackageMetadata
 
@@ -4889,18 +4890,19 @@ async def test_failed_schedule_does_not_leak_handler_registration(tmp_path):
         with patch.object(monitor, "_discover_cache_dirs", return_value=([], {})):
             await monitor.start()
 
-        real_init = InotifyBuffer.__init__
+        real_start = InotifyEmitter.on_thread_start
         fail_count = {"n": 0}
 
-        def flaky_init(self, path, **kwargs):
-            if path == str(root).encode() and fail_count["n"] < 2:
+        def flaky_start(self):
+            if self.watch.path == str(root) and fail_count["n"] < 2:
                 fail_count["n"] += 1
                 raise OSError(28, "No space left on device")
-            return real_init(self, path, **kwargs)
+            return real_start(self)
 
-        with patch.object(InotifyBuffer, "__init__", flaky_init):
+        with patch.object(InotifyEmitter, "on_thread_start", flaky_start):
             await monitor._rescan_cache_paths()  # attempt 1: fails
             await monitor._rescan_cache_paths()  # attempt 2: fails
+        assert fail_count["n"] == 2, "both failed attempts must reach the emitter's start"
         await monitor._rescan_cache_paths()  # attempt 3: succeeds
 
         assert root in monitor._cache_root_watches
@@ -6028,7 +6030,7 @@ async def test_on_deleted_ignores_descendant_deletions(tmp_path):
         # start() returns once BaseObserver.schedule() returns, which starts
         # the emitter thread but does not wait for it to reach
         # on_thread_start() and actually install the kernel inotify watch
-        # (InotifyEmitter creates its InotifyBuffer, i.e. the real
+        # (InotifyEmitter makes the real
         # inotify_add_watch(), only once its own thread starts running).
         # Deleting the tree before that watch is genuinely live means the
         # kernel never generates any inotify event for this deletion at

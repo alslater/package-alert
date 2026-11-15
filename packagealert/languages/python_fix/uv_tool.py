@@ -16,7 +16,7 @@ preference for installed versions, so it resolves as the reinstall does,
 and its changes are relative to what the tool has installed. Its output is
 uv's dry-run report on stderr (``Resolved N packages``, then `` - name==old``
 and `` + name==new`` lines, or ``Would make no changes``), not a documented
-interface (audited against uv 0.13.5 — see the uv audit in .claude/CLAUDE.md),
+interface (audited against uv 0.13.8 — see the uv audit in .claude/CLAUDE.md),
 so anything unrecognised makes the trial inconclusive. A receipt option this
 module cannot carry over makes every fix held, since a command without it
 would install from somewhere else.

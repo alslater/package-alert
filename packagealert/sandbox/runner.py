@@ -2567,25 +2567,33 @@ class SandboxRunner:
         if parsed.req_files:
             # -r / --requirement files — parse each one recursively (follows includes)
             from packagealert.parsers.lockfiles import collect_requirements_packages
-            visited: set[Path] = set()
             file_sources: list[str] = []
             before = len(queries)
-            # Relative to where the command effectively runs, which uv's
-            # `--directory` can move away from cwd — resolving against cwd
-            # scanned a different file from the one actually installed.
-            for rf in parsed.req_files:
-                req_path = ctx.work_dir / rf
-                if req_path.exists():
-                    pinned, unpinned = collect_requirements_packages(
-                        req_path, visited, ctx.work_dir,
-                        is_system_python_target=parsed.is_system_python_target,
-                    )
-                    # A private index, VCS or local path is not the public package of
-                    # that name: it is not looked up publicly (it would leak the
-                    # name, and judge it by an unrelated package).
-                    queries.extend((p.ecosystem, p.name, p.version) for p in pinned if p.from_public_registry)
-                    queries.extend((p.ecosystem, p.name, None) for p in unpinned if p.from_public_registry)
-                    file_sources.append(rf)
+            # Each alternative reading (pipx runpip's working directory depends on its
+            # version) is traversed with its own visited set, so one reading's include
+            # chain, under its own index options, cannot mark a file the other reading
+            # installs from as already seen.
+            for reading in parsed.req_file_readings or [parsed.req_files]:
+                visited: set[Path] = set()
+                # Relative to where the command effectively runs, which uv's
+                # `--directory` can move away from cwd — resolving against cwd
+                # scanned a different file from the one actually installed.
+                for rf in reading:
+                    req_path = ctx.work_dir / rf
+                    if req_path.exists():
+                        pinned, unpinned = collect_requirements_packages(
+                            req_path, visited, ctx.work_dir,
+                            is_system_python_target=parsed.is_system_python_target,
+                        )
+                        # A private index, VCS or local path is not the public package of
+                        # that name: it is not looked up publicly (it would leak the
+                        # name, and judge it by an unrelated package).
+                        queries.extend((p.ecosystem, p.name, p.version) for p in pinned if p.from_public_registry)
+                        queries.extend((p.ecosystem, p.name, None) for p in unpinned if p.from_public_registry)
+                        if rf not in file_sources:
+                            file_sources.append(rf)
+            # A file both readings name (an absolute -r) is queried once.
+            queries[before:] = list(dict.fromkeys(queries[before:]))
             added = len(queries) - before
             source_parts.append(
                 f"{added} packages ({', '.join(file_sources) or 'no packages found'})"
@@ -3857,6 +3865,7 @@ def _try_parse(argv: list[str]) -> ParsedInstall | None:
         ecosystem=ecosystem,
         venv_exe=pi.venv_exe,
         req_files=pi.req_files,
+        req_file_readings=list(getattr(pi, "req_file_readings", [])),
         lockfile_hint=pi.lockfile_hint,
         global_install=pi.global_install,
         suggested_env=pi.suggested_env,

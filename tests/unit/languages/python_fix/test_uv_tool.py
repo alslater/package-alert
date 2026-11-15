@@ -188,7 +188,7 @@ def test_the_trial_binds_its_local_sources():
     assert local_sources(["uv", "pip", "install", "/src/x"]) == []
 
 
-# ── the trial's output (recorded with uv 0.13.5 through the sandbox) ─────────
+# ── the trial's output (recorded with uv 0.13.8 through the sandbox) ─────────
 
 def test_an_upgrade_is_read_relative_to_what_the_tool_has_installed():
     r = parse_trial(*_load("tool_upgrade"), pinned={"urllib3": "1.26.19"})

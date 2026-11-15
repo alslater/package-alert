@@ -64,6 +64,7 @@ class ProcessInstall:
     venv_exe: str | None = None   # absolute path to interpreter, for site-packages discovery
     lockfile_hint: str | None = None  # preferred lock file basename (e.g. "Cargo.lock")
     req_files: list[str] = field(default_factory=list)  # requirement files to scan (-r FILE)
+    req_file_readings: list[list[str]] = field(default_factory=list)  # alternative readings of req_files, each scanned on its own (empty: one reading)
     global_install: bool = False  # installs outside any project (npm -g): pre-flight only, not sandboxed
     suggested_env: dict[str, str] = field(default_factory=dict)
     extra_write_home_dirs: list[Path] = field(default_factory=list)

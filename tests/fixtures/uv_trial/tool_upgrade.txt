@@ -1,6 +1,6 @@
-# uv 0.13.5 rc=0
+# uv 0.13.8 rc=0
 Using Python 3.12.13 environment at: .
-Resolved 17 packages in 516ms
+Resolved 17 packages in 324ms
 Would download 3 packages
 Would uninstall 3 packages
 Would install 3 packages

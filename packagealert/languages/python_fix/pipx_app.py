@@ -62,7 +62,7 @@ _BOOL_FLAGS = frozenset({"--pre"})
 _EDITABLE_FLAGS = frozenset({"--editable", "-e"})
 # Changes how pip installs, not which versions it resolves.
 _IGNORED_FLAGS = frozenset({"--force-reinstall"})
-# pipx_metadata_version values pipx 1.18.4 reads (its current one and the legacy ones it converts).
+# pipx_metadata_version values pipx 1.18.4 and 1.18.16 read (its current one and the legacy ones it converts).
 _METADATA_VERSIONS = frozenset({f"0.{n}" for n in range(1, 13)})
 
 
@@ -119,6 +119,22 @@ def _is_local(spec: str) -> bool:
     return os.path.isabs(spec) or spec.startswith("file:")
 
 
+def _is_relative_location(value: str) -> bool:
+    """Whether *value*, a recorded index or find-links location, is a relative local path. pipx up
+    to 1.18.4 runs ``runpip``'s pip in the app's venv directory and pipx 1.18.16 in the caller's
+    working directory, so which directory such a path names depends on the pipx that runs."""
+    if value.startswith("file:"):
+        return not value.startswith("file:/")
+    return "://" not in value and not os.path.isabs(value)
+
+
+def _keep_value(kept: list[str], unsupported: list[str], flag: str, value: str) -> None:
+    if flag != "--trusted-host" and _is_relative_location(value):
+        unsupported.append(f"{flag} (a relative path)")
+    else:
+        kept += [flag, value]
+
+
 def _split_args(args: list[str], *, main: bool) -> tuple[list[str], bool, list[str]]:
     """(supported tokens, editable, unsupported option names) of a package's ``pip_args``."""
     kept: list[str] = []
@@ -129,9 +145,9 @@ def _split_args(args: list[str], *, main: bool) -> tuple[list[str], bool, list[s
         arg = args[i]
         flag, eq, value = arg.partition("=")
         if flag in _VALUE_FLAGS and eq and value:
-            kept += [flag, value]
+            _keep_value(kept, unsupported, flag, value)
         elif arg in _VALUE_FLAGS and i + 1 < len(args) and args[i + 1] and not args[i + 1].startswith("-"):
-            kept += [arg, args[i + 1]]
+            _keep_value(kept, unsupported, arg, args[i + 1])
             i += 1
         elif arg in _BOOL_FLAGS:
             kept.append(arg)
@@ -257,7 +273,7 @@ def _trial_files_args(workdir: Path) -> list[str]:
 def trial_argv(app: str, meta: PipxMetadata, pins: Sequence[tuple[str, str]], *, workdir: Path) -> list[str]:
     """The dry run resolving as ``apply_argv`` would. The app's own requirements come from
     ``reqs.txt`` and ``cons.txt`` in *workdir* (the trial's scratch copy), and the report goes
-    there: named by absolute path, since pipx runs pip in the app's venv directory.
+    there: named by absolute path, since pipx runs pip in the app's venv (up to 1.18.4) or the caller's directory (1.18.16).
     ``--no-input`` makes a 401 or a keyring prompt a plain failure instead of a wait."""
     return ["pipx", "runpip", app, *_TRIAL_HEAD, *option_args(meta), *_trial_files_args(workdir),
             *_pin_args(meta, pins)]
@@ -658,7 +674,7 @@ def _checkouts(meta: PipxMetadata) -> list[Path]:
             and not (os.path.lexists(where) and not where.is_dir())]
 
 
-# What pipx 1.18.4 keeps directly in its home (pipx.paths: venvs, shared, py, logs, .cache, .trash,
+# What pipx 1.18.4 and 1.18.16 keep directly in its home (pipx.paths: venvs, shared, py, logs, .cache, .trash,
 # and the legacy-default trash; shared_libs.py: .shared.lock beside shared).
 HOME_ENTRIES = frozenset({"venvs", "shared", "py", "logs", ".cache", ".trash", "trash", ".shared.lock"})
 # The ones the sandbox binds read-only over a writable home, so each must be a real directory.
@@ -810,20 +826,99 @@ def _pip_environment(extra_env: Sequence[str]) -> dict[str, str]:
     return {k: v for k, v in env.items() if k.startswith("PIP_") or k in _PIP_CONFIG_VARS}
 
 
-def config_problem(trial_env: Sequence[str], apply_env: Sequence[str]) -> str | None:
+# pip settings whose value names a file, a directory or an index location, as pip's option names.
+# A relative one is resolved against pip's working directory. The list options take several values
+# separated by whitespace; a scalar's value is one path, which may contain spaces.
+_PIP_PATH_LIST_OPTIONS = frozenset({"build-constraint", "constraint", "editable", "extra-index-url", "find-links",
+                                    "requirement"})
+# Hidden aliases count too (pip's --pypi-url, --source, --source-dir, --source-directory, --local-log).
+_PIP_PATH_SCALAR_OPTIONS = frozenset({"cache-dir", "cert", "client-cert", "config-file", "index-url", "local-log",
+                                      "log", "log-file", "prefix", "pypi-url", "python", "report",
+                                      "requirements-from-script", "root", "source", "source-dir",
+                                      "source-directory", "src", "target"})
+
+
+def _relative_path_values(option: str, value: str) -> bool:
+    """Whether the pip setting *option* (an option name, ``find-links``) set to *value* names a
+    relative path."""
+    if option == "group":
+        # `[path:]group`, the path defaulting to ./pyproject.toml.
+        return any(not sep or _is_relative_location(path)
+                   for path, sep, _ in (word.rpartition(":") for word in value.split()))
+    if option in _PIP_PATH_LIST_OPTIONS:
+        return any(_is_relative_location(word) for word in value.split())
+    return option in _PIP_PATH_SCALAR_OPTIONS and bool(value.strip()) and _is_relative_location(value.strip())
+
+
+def _pip_config_files(pip_env: dict[str, str], venv: Path | None) -> list[Path]:
+    """Every pip configuration file the trial or the fix can read: $PIP_CONFIG_FILE, the system's
+    (each $XDG_CONFIG_DIRS entry, /etc/xdg, /etc), the user's (~/.pip, ~/.config and the host's
+    $XDG_CONFIG_HOME) and the app venv's. More than pip reads in any one run, which only adds checks."""
+    home = Path.home()
+    files = [Path(pip_env["PIP_CONFIG_FILE"])] if pip_env.get("PIP_CONFIG_FILE", os.devnull) != os.devnull else []
+    xdg_dirs = os.environ.get("XDG_CONFIG_DIRS", "")
+    files += [Path(d) / "pip" / "pip.conf" for d in xdg_dirs.split(":") if d]
+    files += [Path("/etc/xdg/pip/pip.conf"), Path("/etc/pip.conf"), home / ".pip" / "pip.conf",
+              home / ".config" / "pip" / "pip.conf"]
+    # The sandbox may not pass the host's XDG_CONFIG_HOME on, so pip can read either location.
+    if xdg_home := os.environ.get("XDG_CONFIG_HOME"):
+        files.append(Path(xdg_home) / "pip" / "pip.conf")
+    if venv is not None:
+        files.append(venv / "pip.conf")
+    return list(dict.fromkeys(files))
+
+
+def _relative_config_settings(files: Sequence[Path]) -> list[str] | None:
+    """``file: section.option`` for each relative path setting in *files*; None when one of them
+    exists but cannot be read as pip reads it (so it cannot be judged)."""
+    import configparser
+
+    found: list[str] = []
+    for path in files:
+        try:
+            if not path.is_file():
+                continue
+            parser = configparser.RawConfigParser(strict=False)
+            parser.read_string(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, configparser.Error):
+            return None
+        for section in parser.sections():
+            for key, value in parser.items(section):
+                option = key.strip().removeprefix("--").replace("_", "-").lower()
+                if _relative_path_values(option, value):
+                    found.append(f"{path}: {section}.{key}")
+    return found
+
+
+def config_problem(trial_env: Sequence[str], apply_env: Sequence[str], venv: Path | None = None) -> str | None:
     """Why the trial and the fix could read different pip configuration, or None.
 
     Both run pip through ``pipx runpip`` in the sandbox, which shows them the same configuration
-    files (the system's, the user's, the app venv's), and pipx runs pip in the app's venv
-    directory for both, so a relative path in a setting names the same file. What can differ
-    is the environment: each passes the sandbox's allowlist plus its own extra variables
-    (*trial_env*, *apply_env*, as ``--env`` names them)."""
+    files (the system's, the user's, and up to pipx 1.18.4 the app venv's: pipx 1.18.16 deletes
+    the venv's pip.conf before running pip, which the trial's read-only venv refuses, so such an
+    app's trial fails rather than resolving differently from its fix). pipx up to 1.18.4 runs pip
+    in the app's venv (*venv*) directory for both; pipx 1.18.16 runs it in the caller's, which is
+    the trial's scratch copy for the trial and the app's directory for the fix, so a relative
+    path in a pip setting, from the environment or a configuration file, is refused. What else
+    can differ is the environment: each passes the sandbox's allowlist plus its own extra
+    variables (*trial_env*, *apply_env*, as ``--env`` names them)."""
     trial, apply = _pip_environment(trial_env), _pip_environment(apply_env)
     differ = sorted(k for k in trial.keys() | apply.keys() if trial.get(k) != apply.get(k))
-    if not differ:
-        return None
-    return (f"the fix would run with different pip settings from its trial ({', '.join(differ)}); "
-            "plan again with the same --env")
+    if differ:
+        return (f"the fix would run with different pip settings from its trial ({', '.join(differ)}); "
+                "plan again with the same --env")
+    relative = sorted(k for k, v in trial.items()
+                      if k.startswith("PIP_") and _relative_path_values(k[4:].replace("_", "-").lower(), v))
+    if relative:
+        return (f"the pip settings {', '.join(relative)} hold a relative path, which pipx resolves against "
+                "a different directory for the trial and the fix; give an absolute one")
+    in_files = _relative_config_settings(_pip_config_files(trial, venv))
+    if in_files is None:
+        return "a pip configuration file could not be read, so its settings cannot be checked"
+    if in_files:
+        return (f"pip configuration holds a relative path ({'; '.join(in_files)}), which pipx resolves "
+                "against a different directory for the trial and the fix; give an absolute one")
+    return None
 
 
 # ---- the shared pip -------------------------------------------------------------------------
@@ -1265,7 +1360,7 @@ class PipxAppFixAdapter:
         settings from its trial; also when no trial recorded its own."""
         if self.trial_env is None:
             return "no trial recorded the pip settings the fix was verified with; plan again"
-        return config_problem(self.trial_env, extra_env)
+        return config_problem(self.trial_env, extra_env, self.env.venv_root)
 
     def executables(self, metadata: bytes | None) -> set[Path]:
         """None outside the venv: runpip's console scripts are in the app's ``bin``."""

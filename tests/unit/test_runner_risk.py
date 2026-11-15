@@ -40,6 +40,7 @@ def _ctx(packages, ecosystem="pypi", req_files=(), lockfile_hint=None):
     # and not iterable — every existing caller that only cares about explicit
     # packages needs these to behave like ParsedInstall's real "none" defaults.
     parsed.req_files = list(req_files)
+    parsed.req_file_readings = []
     parsed.lockfile_hint = lockfile_hint
     return _Context(argv=["pip", "install", *packages], parsed=parsed, cwd=Path("/tmp"))
 
@@ -1742,6 +1743,26 @@ def test_pipx_install_lock_preflights_every_locked_package(tmp_path, argv):
     queries, blocked_reason, _source = _runner()._resolve_query_packages(_any_ctx(argv, tmp_path))
     assert blocked_reason is None
     assert sorted(queries) == [("pypi", "black", "26.1.0"), ("pypi", "evilpkg", "1.0.0")]
+
+
+def test_pipx_runpip_readings_are_preflighted_independently(tmp_path, monkeypatch):
+    """pipx up to 1.18.4 reads a relative -r in the app's venv, pipx 1.18.16 in the caller's
+    directory. A venv file that sets a private index and includes the caller's file must not
+    make the caller's file look already scanned (and private): under pipx 1.18.16 pip reads only
+    the caller's file and installs its packages from public PyPI, so they must be queried."""
+    # Run from pipx's home, so the venv's file can include the caller's (an include outside the
+    # working directory is not followed).
+    pipx_home = cwd = tmp_path / "pipx"
+    venv = pipx_home / "venvs" / "app"
+    venv.mkdir(parents=True)
+    (cwd / "reqs.txt").write_text("evilpkg==1.0\n")
+    (venv / "reqs.txt").write_text("--index-url https://private.example/simple\n-r ../../reqs.txt\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(pipx_home))
+    argv = ["pipx", "runpip", "app", "install", "-r", "reqs.txt"]
+    queries, blocked_reason, _source = _runner()._resolve_query_packages(_any_ctx(argv, cwd))
+    assert blocked_reason is None
+    assert queries == [("pypi", "evilpkg", "1.0")]
 
 
 def test_pip_install_requirements_toml_is_not_misrouted_to_pylock_parser(tmp_path):

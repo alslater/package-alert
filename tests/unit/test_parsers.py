@@ -4363,15 +4363,16 @@ def test_pipx_runpip_install_is_gated(monkeypatch, tmp_path):
     )
     assert result is not None
     assert result.packages == ["urllib3==2.2.2"]
-    assert result.req_files == [str(tmp_path / "pipx" / "venvs" / "httpie" / "r.txt")]
+    assert result.req_files == [str(tmp_path / "pipx" / "venvs" / "httpie" / "r.txt"), "r.txt"]
     assert result.target_env_name == "httpie"
     assert result.ecosystem == "pypi"
     assert result.extra_write_home_dirs == [tmp_path / "pipx" / "venvs"]
 
 
-def test_pipx_runpip_requirement_files_are_the_venvs(monkeypatch, tmp_path):
-    """pipx runs pip with the app's venv as its working directory, so a relative -r names a file
-    there, not in the caller's directory: pre-flight must read the file pip installs from."""
+def test_pipx_runpip_requirement_files_are_the_venvs_and_the_callers(monkeypatch, tmp_path):
+    """pipx up to 1.18.4 runs pip with the app's venv as its working directory, and pipx 1.18.16
+    in the caller's, so a relative -r names a file in either: pre-flight must read the file pip
+    installs from, whichever pipx runs (a missing one is skipped)."""
     from packagealert.parsers.process_args import parse_pipx_args
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -4380,7 +4381,51 @@ def test_pipx_runpip_requirement_files_are_the_venvs(monkeypatch, tmp_path):
                               "--requirement=sub/more.txt", "-r", "/abs/reqs.txt"])
     assert result is not None
     venv = tmp_path / "pipx" / "venvs" / "my-app"
-    assert result.req_files == [str(venv / "reqs.txt"), str(venv / "sub" / "more.txt"), "/abs/reqs.txt"]
+    assert result.req_files == [str(venv / "reqs.txt"), "reqs.txt", str(venv / "sub" / "more.txt"),
+                                "sub/more.txt", "/abs/reqs.txt"]
+    # Each pipx version's reading, pre-flighted on its own.
+    assert result.req_file_readings == [
+        [str(venv / "reqs.txt"), str(venv / "sub" / "more.txt"), "/abs/reqs.txt"],
+        ["reqs.txt", "sub/more.txt", "/abs/reqs.txt"],
+    ]
+    absolute = parse_pipx_args(["pipx", "runpip", "app", "install", "-r", "/abs/reqs.txt"])
+    assert absolute is not None and absolute.req_file_readings == []
+
+
+@pytest.mark.parametrize("spec", ["foo.tgz", "foo.tar.xz", "Foo.WHL", "foo.whl", "foo.tar.gz"])
+def test_pipx_install_lock_still_checks_a_spec_any_pipx_takes_for_an_archive(monkeypatch, tmp_path, spec):
+    """pipx installs a spec its valid_pypi_name() rejects separately from `--lock`: pipx 1.18.4
+    rejects .whl/.tar.gz/.zip names, pipx 1.18.16 every pip archive suffix in any case. A spec
+    either rejects stays a package to check, and its venv name is not taken as known."""
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(tmp_path / "pipx"))
+    result = parse_pipx_args(["pipx", "install", spec, "--lock", "pylock.toml"])
+    assert result is not None
+    assert result.packages == [spec]
+    assert result.req_files == ["pylock.toml"]
+    assert result.pipx_venvs is None or result.pipx_venvs == []
+
+
+def test_pipx_install_lock_takes_a_plain_name_from_the_lock(monkeypatch, tmp_path):
+    from packagealert.parsers.process_args import parse_pipx_args
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PIPX_HOME", str(tmp_path / "pipx"))
+    result = parse_pipx_args(["pipx", "install", "black", "--lock", "pylock.toml"])
+    assert result is not None
+    assert result.packages == []
+
+
+def test_pipx_upgrade_names_the_venv_each_pipx_would():
+    """`pipx upgrade foo.tgz==1`: pipx 1.18.4 takes the name (venv foo-tgz), pipx 1.18.16 takes
+    the whole argument for an archive's (venv foo-tgz==1: canonicalize_name collapses only
+    -_. runs); both are named."""
+    from packagealert.parsers.process_args import _pipx_venv_names
+
+    assert _pipx_venv_names("foo.tgz==1") == ["foo-tgz", "foo-tgz==1"]
+    assert _pipx_venv_names("Black") == ["black"]
 
 
 @pytest.mark.parametrize(
